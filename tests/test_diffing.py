@@ -83,6 +83,17 @@ def test_load_filtered_roster_missing_returns_none(tmp_path):
     assert diffing.load_filtered_roster(tmp_path / "nope.json", {"nous"}) is None
 
 
+def test_load_filtered_roster_non_dict_providers_returns_none(tmp_path):
+    """F4: JSON-valid but structurally-empty rosters must bootstrap clean —
+    loading them as an existing baseline emits the universe as 'added'."""
+    import json
+    for body in ('{}', 'null', '{"tick_epoch": 1}',
+                 '{"providers": ["nous"]}', '{"providers": null}'):
+        p = tmp_path / "roster.json"
+        p.write_text(body, encoding="utf-8")
+        assert diffing.load_filtered_roster(p, {"nous"}) is None, body
+
+
 def test_compute_events_ignores_zombie_provider_in_prev():
     prev = {"providers": {"nous": ["a"], "zen": ["zombie"]}}
     events, _ = diffing.compute_events(prev, {"nous": ["a"]}, registry={"nous"})

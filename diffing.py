@@ -66,15 +66,18 @@ def apply_sticky(prev_providers_map, fetched_results):
 
 def load_filtered_roster(roster_path, registry_keys):
     """Load roster.json via state layer, dropping providers evicted from
-    PROVIDERS (a zombie entry must never diff forever). None if absent/corrupt."""
+    PROVIDERS (a zombie entry must never diff forever). None if absent/corrupt
+    OR structurally empty (F4: `providers` must be a dict — anything else
+    bootstraps clean instead of emitting the universe as added)."""
     roster = state.load_roster(roster_path)
     if roster is None:
         return None
     providers_map = roster.get("providers")
-    if isinstance(providers_map, dict):
-        roster["providers"] = {
-            k: v for k, v in providers_map.items() if k in registry_keys
-        }
+    if not isinstance(providers_map, dict):
+        return None
+    roster["providers"] = {
+        k: v for k, v in providers_map.items() if k in registry_keys
+    }
     return roster
 
 

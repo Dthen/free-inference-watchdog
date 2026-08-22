@@ -90,6 +90,19 @@ def test_cli_init_branch_passes_init_flag(monkeypatch):
     assert captured.get("webhook_url") is None
 
 
+def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
+    """F4: a JSON-valid roster lacking a dict-shaped providers key must
+    bootstrap clean (first_run), never emit the universe as ➕."""
+    (tmp_path / "roster.json").write_text("{}", encoding="utf-8")
+    code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "➕" not in out
+    assert "initialized, no diff" in out
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"]["nous"] == ["a"]
+
+
 def test_confirmed_removal_alerts_once_then_cooldowns(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a", "b"]}])                       # baseline
     code, _ = _run(tmp_path, [{"nous": ["a"]}],                  # b disappears
