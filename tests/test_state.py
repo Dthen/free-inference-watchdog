@@ -101,6 +101,48 @@ def test_alive_missing_is_empty_dict(tmp_path):
     assert state.load_alive(tmp_path / "nope.json") == {}
 
 
+# ---------- S5-2: numeric fields validated/coerced at the boundary ----------
+
+def test_alive_numeric_fields_coerced_or_dropped(tmp_path):
+    """S5-2: last_tick_epoch / last_output_epoch / dropped_alerts_total feed
+    raw arithmetic in alive.py and inference_monitor.py — a hand-edited
+    string or null raised TypeError => FATAL exit 2 on every normal tick.
+    At load: int/float coerce via int(), anything else (str, None, missing)
+    drops the field (treated absent; callers already handle absent fields)."""
+    p = tmp_path / "alive.json"
+    p.write_text(json.dumps({
+        "last_tick_epoch": "999",
+        "dropped_alerts_total": None,
+    }), encoding="utf-8")
+    assert state.load_alive(p) == {}
+
+    # float coerces (json may carry 1000.0); str/null/bool-free junk drops
+    p.write_text(json.dumps({
+        "last_tick_epoch": 1755.0,
+        "last_output_epoch": "nope",
+        "dropped_alerts_total": 7,
+    }), encoding="utf-8")
+    assert state.load_alive(p) == {
+        "last_tick_epoch": 1755,
+        "dropped_alerts_total": 7,
+    }
+
+
+def test_alive_wellformed_file_unchanged(tmp_path):
+    state.save_alive(tmp_path / "a.json", last_tick_epoch=1000,
+                     last_output_epoch=900, dropped_alerts_total=2)
+    assert state.load_alive(tmp_path / "a.json") == {
+        "last_tick_epoch": 1000, "last_output_epoch": 900,
+        "dropped_alerts_total": 2}
+    # a hand-written but well-formed file passes through untouched
+    p = tmp_path / "b.json"
+    p.write_text(json.dumps({"last_tick_epoch": 5, "last_output_epoch": 4,
+                             "dropped_alerts_total": 0}), encoding="utf-8")
+    assert state.load_alive(p) == {
+        "last_tick_epoch": 5, "last_output_epoch": 4,
+        "dropped_alerts_total": 0}
+
+
 # ---------- lockfile ----------
 
 def test_lock_acquire_and_release(tmp_path):

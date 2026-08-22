@@ -84,8 +84,24 @@ def save_pending(path, items):
 # ---------- alive (two clocks + dropped counter) ----------
 
 def load_alive(path):
+    """Loaded alive dict, numeric fields validated at the boundary (S5-2).
+
+    last_tick_epoch / last_output_epoch / dropped_alerts_total feed raw
+    arithmetic downstream — int/float coerce via int(), anything else
+    (str, None, missing) DROPS the field so it reads as absent (callers
+    already default absent fields). Other keys pass through untouched."""
     data = _load_json_or_default(path, {})
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    clean = dict(data)
+    for field in ("last_tick_epoch", "last_output_epoch",
+                  "dropped_alerts_total"):
+        if field in clean and not isinstance(clean[field], bool) \
+                and isinstance(clean[field], (int, float)):
+            clean[field] = int(clean[field])
+        else:
+            clean.pop(field, None)
+    return clean
 
 
 def save_alive(path, last_tick_epoch, last_output_epoch, dropped_alerts_total=0):
