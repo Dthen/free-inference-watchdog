@@ -63,11 +63,11 @@ def load_pending(path):
     return data if isinstance(data, list) else []
 
 
-def append_pending(path, payload, now=None):
+def append_pending(path, payload, now=None, attempts=0):
     items = load_pending(path)
     items.append({
         "payload": payload,
-        "attempts": 0,
+        "attempts": attempts,
         "first_queued_epoch": now if now is not None else time.time(),
     })
     _atomic_write_json(path, items)
