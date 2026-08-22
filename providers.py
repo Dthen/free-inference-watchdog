@@ -109,7 +109,7 @@ def _fetch_nous(getter=_default_getter, auth=None):
     )
     _require_ok(status, url)
     ids = sorted(
-        it["id"] for it in _parse_model_list(body)
+        str(it["id"]) for it in _parse_model_list(body)
         if isinstance(it, dict) and it.get("id") and is_free(it.get("pricing"))
     )
     ratelimit = {k: v for k, v in (hdrs or {}).items() if "ratelimit" in k.lower()}
@@ -123,7 +123,7 @@ def _fetch_openrouter(getter=_default_getter):
     status, body, _hdrs = getter(url, headers=_headers(), timeout=TIMEOUT_S)
     _require_ok(status, url)
     ids = sorted(
-        it["id"] for it in _parse_model_list(body)
+        str(it["id"]) for it in _parse_model_list(body)
         if isinstance(it, dict) and it.get("id") and is_free(it.get("pricing"))
     )
     return ids, {}
@@ -162,7 +162,7 @@ def _fetch_kilo(getter=_default_getter, key=None):
     status, body, _hdrs = getter(KILO_URL, headers=_headers(extra), timeout=TIMEOUT_S)
     _require_ok(status, KILO_URL)
     ids = sorted(
-        it["id"] for it in _parse_model_list(body)
+        str(it["id"]) for it in _parse_model_list(body)
         if isinstance(it, dict) and it.get("id") and is_free(it.get("pricing"))
     )
     return ids, {}

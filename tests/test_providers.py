@@ -203,6 +203,32 @@ def test_fetch_ollama_passthrough():
     assert ids == ["gpt-oss:20b", "llama3"]
 
 
+# ---------- S5-1: mixed str/int ids must coerce to str, never FATAL ----------
+
+S5_MIXED_IDS = {
+    "data": [
+        {"id": 1, "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "a-model", "pricing": {"prompt": "0", "completion": "0"}},
+    ]
+}
+
+
+@pytest.mark.parametrize("name,url_frag,kw", [
+    ("nous", "/v1/models", {"auth": {"token": "t", "base": "https://x/v1"}}),
+    ("openrouter", "openrouter.ai", {}),
+    ("kilo", "api.kilo.ai", {"key": "k"}),
+])
+def test_fetch_mixed_int_and_str_ids_coerced(name, url_frag, kw):
+    """S5-1: a provider drifting to MIXED str/int model ids must yield
+    coerced, sorted STRINGS — sorting raw values raises TypeError, which
+    escapes build_fetch_all's FetchError-only catch (inference_monitor.py)
+    and FATALs the whole tick, repeating every tick. Mirrors ollama's
+    existing str(it["id"]) wrap."""
+    g = fake_getter({url_frag: ok(json.dumps(S5_MIXED_IDS))})
+    ids, _ = providers.PROVIDERS[name](getter=g, **kw)
+    assert ids == ["1", "a-model"]
+
+
 # ---------- cline (docs change-detector) ----------
 
 CLINE_PAGE_A = (
