@@ -68,7 +68,12 @@ def load_filtered_roster(roster_path, registry_keys):
     """Load roster.json via state layer, dropping providers evicted from
     PROVIDERS (a zombie entry must never diff forever). None if absent/corrupt
     OR structurally empty (F4: `providers` must be a dict — anything else
-    bootstraps clean instead of emitting the universe as added)."""
+    bootstraps clean instead of emitting the universe as added).
+
+    Fix-round-5 #2: coercion is closed on BOTH sides at this boundary — a
+    non-list VALUE loads as [], and a list VALUE has its NON-STRING ELEMENTS
+    filtered out (e.g. whole API model objects pasted into a hand-edited
+    roster), so nothing can reach _sorted_list's str() and ship as a bogus id."""
     roster = state.load_roster(roster_path)
     if roster is None:
         return None
@@ -76,7 +81,8 @@ def load_filtered_roster(roster_path, registry_keys):
     if not isinstance(providers_map, dict):
         return None
     roster["providers"] = {
-        k: (v if isinstance(v, list) else [])
+        k: ([i for i in v if isinstance(i, str)]
+            if isinstance(v, list) else [])
         for k, v in providers_map.items() if k in registry_keys
     }
     return roster

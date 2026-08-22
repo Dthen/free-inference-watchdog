@@ -109,6 +109,46 @@ def test_load_filtered_roster_coerces_non_list_values_to_empty(tmp_path):
     assert roster["providers"] == {"nous": [], "kilo": [], "cline": ["real/id"]}
 
 
+def test_load_filtered_roster_coerces_non_string_list_elements(tmp_path):
+    """Fix-round-5 #2 (sweep-4 P5): coercion is closed on BOTH sides — a list
+    value whose ELEMENTS are non-strings (whole API model objects pasted in is
+    exactly the plausible-mistake class) must not flow to _sorted_list, where
+    str() would format them into bogus ids. String elements survive."""
+    import json
+    p = tmp_path / "roster.json"
+    p.write_text(json.dumps(
+        {"providers": {"nous": [{"id": "x-model"}],
+                       "kilo": [42, None, "ok/id"],
+                       "cline": ["real/id"]}}), encoding="utf-8")
+    roster = diffing.load_filtered_roster(p, {"nous", "kilo", "cline"})
+    assert roster is not None
+    assert roster["providers"] == {"nous": [], "kilo": ["ok/id"],
+                                   "cline": ["real/id"]}
+
+
+def test_dict_element_prev_value_no_bogus_repr_alert_downstream(tmp_path):
+    """Fix-round-5 P5 end-to-end shape: a hand-edited prev value containing a
+    whole model object must ship NO ➖ repr bullet like "{'id': 'x-model'}"
+    and no phantom ➕/➕ pair — boundary-coerced [] makes the next tick a
+    truthful added-only candidate whose confirm recheck removes nothing."""
+    import json
+    p = tmp_path / "roster.json"
+    p.write_text('{"providers": {"nous": [{"id": "x-model"}]}}', encoding="utf-8")
+    roster = diffing.load_filtered_roster(p, {"nous"})
+    assert roster is not None
+    assert roster["providers"]["nous"] == []
+    events, _first_run = diffing.compute_events(roster, {"nous": ["x-model"]})
+    assert events["nous"] == {"added": ["x-model"], "removed": []}
+
+    def fetch_one(name):
+        return ["x-model"], {}
+
+    conf = diffing.confirm_diffs(events, roster["providers"],
+                                 fetch_one=fetch_one,
+                                 sleep=lambda s: None, delay=0)
+    assert conf["confirmed"]["nous"]["removed"] == []
+
+
 def test_string_prev_value_no_bogus_removal_alerts_downstream(tmp_path):
     """Fix-round-4 #2 end-to-end shape: a seeded string prev value, once
     boundary-coerced to [], produces an added-only candidate and the confirm
