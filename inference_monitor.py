@@ -116,7 +116,8 @@ def _emit(message, webhook_url, pending_path, dry_run):
     """Delivery topology: stdout ALWAYS, webhook best-effort (never blocks)."""
     print(message)
     if dry_run:
-        print("[dry-run] would POST to webhook")
+        if webhook_url:
+            print("[dry-run] would POST to webhook")
     elif webhook_url:
         notify.send_webhook(webhook_url, message, pending_path)
 

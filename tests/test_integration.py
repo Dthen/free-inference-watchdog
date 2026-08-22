@@ -212,6 +212,18 @@ def test_dry_run_writes_nothing(tmp_path, capsys):
     assert not (tmp_path / "alive.json").exists()
 
 
+def test_emit_dry_run_webhook_line_only_when_webhook_configured(capsys):
+    """Fix-round-4 #4: "[dry-run] would POST to webhook" only makes sense when
+    a webhook_url exists — with none configured the line is pure noise."""
+    im._emit("msg", None, None, dry_run=True)
+    out_none = capsys.readouterr().out
+    assert out_none == "msg\n"          # no would-POST line
+
+    im._emit("msg", "https://example/hook", None, dry_run=True)
+    out_hook = capsys.readouterr().out
+    assert out_hook == "msg\n[dry-run] would POST to webhook\n"
+
+
 def test_registry_filter_kills_zombies(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a"], "zen": ["zombie"]}])
     # registry shrinks to nous only: zombie zen must vanish silently

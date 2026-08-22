@@ -59,8 +59,14 @@ def get(url, headers=None, timeout=15):
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
         snippet = re.sub(r"\s+", " ", body)[:160]
-        redacted = snippet.replace(ENV.get("OPENCODE_ZEN_API_KEY",""), "***").replace(
-            ENV.get("KILOCODE_API_KEY",""), "***").replace(ENV.get("OLLAMA_API_KEY",""), "***")
+        # Skip .replace when a key value is empty: "".replace would interleave
+        # '***' between every character of the error body.
+        redacted = snippet
+        for secret in (ENV.get("OPENCODE_ZEN_API_KEY", ""),
+                       ENV.get("KILOCODE_API_KEY", ""),
+                       ENV.get("OLLAMA_API_KEY", "")):
+            if secret:
+                redacted = redacted.replace(secret, "***")
         return e.code, f"err-body: {redacted}"
     except Exception as e:
         return None, f"{type(e).__name__}"
