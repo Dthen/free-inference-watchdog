@@ -136,10 +136,17 @@ def merge_corrected(new_map, confirmation, prev_providers):
     overrides the pre-recheck map; UNCONFIRMED providers (absent from
     `corrected` by contract) keep their STICKY-OLD previous-roster entry so a
     real change resurfaces and alerts on the next good tick.
+
+    F-R2-3: an unconfirmed provider with NO previous-roster entry (post-
+    eviction re-add, hand-seeded state) has no sticky-old to restore — it is
+    merged as sticky-EMPTY ([]) rather than keeping the pre-recheck snapshot,
+    so a first-ever addition resurfaces and alerts on the next good tick.
     """
     merged = dict(new_map)
     merged.update(confirmation.get("corrected") or {})
     for name in (confirmation.get("unconfirmed") or {}):
         if name in prev_providers:
             merged[name] = _sorted_list(prev_providers[name])
+        else:
+            merged[name] = []
     return merged

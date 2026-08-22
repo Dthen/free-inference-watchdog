@@ -166,13 +166,16 @@ def test_merge_corrected_unconfirmed_keeps_sticky_old():
     assert merged["zen"] == ["z1", "z2"]      # sticky-old wins
 
 
-def test_merge_corrected_unconfirmed_no_prev_entry_starts_from_snapshot():
-    # Provider never seen before (no prev entry): sticky-old has nothing to
-    # restore, so the pre-recheck fetch result stands.
+def test_merge_corrected_unconfirmed_no_prev_entry_sticky_empty():
+    """F-R2-3: provider never seen before (no prev entry — post-eviction
+    re-add, hand-seeded state) has NO sticky-old to restore, so the merged
+    entry must be sticky-EMPTY ([]), NOT the pre-recheck snapshot. Persisting
+    the snapshot would make a first-ever addition invisible forever (next
+    tick sees no diff); [] lets it resurface and alert on the next good tick."""
     new_map = {"kilo": ["k9"]}
     confirmation = {"corrected": {}, "unconfirmed": {"kilo": {"added": ["k9"], "removed": []}}}
     merged = diffing.merge_corrected(new_map, confirmation, prev_providers={})
-    assert merged["kilo"] == ["k9"]
+    assert merged["kilo"] == []
 
 
 def test_merge_corrected_does_not_mutate_input():
