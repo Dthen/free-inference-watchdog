@@ -94,6 +94,42 @@ def test_load_filtered_roster_non_dict_providers_returns_none(tmp_path):
         assert diffing.load_filtered_roster(p, {"nous"}) is None, body
 
 
+def test_load_filtered_roster_coerces_non_list_values_to_empty(tmp_path):
+    """Fix-round-4 #2: hand-edited rosters are plausible input (F4/F8f class).
+    A non-list provider VALUE (e.g. string) must load as [] at this boundary —
+    downstream confirm_diffs/merge_corrected call _sorted_list() unguarded, so
+    the string 'model-a' would char-split into bogus single-char ➖ removals."""
+    import json
+    p = tmp_path / "roster.json"
+    p.write_text(json.dumps(
+        {"providers": {"nous": "model-a", "kilo": {"oops": 1},
+                       "cline": ["real/id"]}}), encoding="utf-8")
+    roster = diffing.load_filtered_roster(p, {"nous", "kilo", "cline"})
+    assert roster is not None
+    assert roster["providers"] == {"nous": [], "kilo": [], "cline": ["real/id"]}
+
+
+def test_string_prev_value_no_bogus_removal_alerts_downstream(tmp_path):
+    """Fix-round-4 #2 end-to-end shape: a seeded string prev value, once
+    boundary-coerced to [], produces an added-only candidate and the confirm
+    recheck confirms ZERO removal ids — no char-split ➖ bullets ship."""
+    import json
+    p = tmp_path / "roster.json"
+    p.write_text('{"providers": {"nous": "model-a"}}', encoding="utf-8")
+    roster = diffing.load_filtered_roster(p, {"nous"})
+    assert roster is not None
+    events, _first_run = diffing.compute_events(roster, {"nous": ["model-a"]})
+    assert events["nous"]["removed"] == []
+
+    def fetch_one(name):
+        return ["model-a"], {}
+
+    conf = diffing.confirm_diffs(events, roster["providers"],
+                                 fetch_one=fetch_one,
+                                 sleep=lambda s: None, delay=0)
+    assert conf["confirmed"]["nous"]["removed"] == []
+
+
 def test_compute_events_ignores_zombie_provider_in_prev():
     prev = {"providers": {"nous": ["a"], "zen": ["zombie"]}}
     events, _ = diffing.compute_events(prev, {"nous": ["a"]}, registry={"nous"})

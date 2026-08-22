@@ -76,7 +76,8 @@ def load_filtered_roster(roster_path, registry_keys):
     if not isinstance(providers_map, dict):
         return None
     roster["providers"] = {
-        k: v for k, v in providers_map.items() if k in registry_keys
+        k: (v if isinstance(v, list) else [])
+        for k, v in providers_map.items() if k in registry_keys
     }
     return roster
 
