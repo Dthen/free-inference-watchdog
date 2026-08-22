@@ -56,3 +56,12 @@ def test_readme_wrapper_block_is_wellformed_shell():
     tokens = shlex.split(cmd)          # raises ValueError if not valid shell
     assert any("inference_monitor.py" in t for t in tokens)
     assert any("FAILED" in t for t in tokens)
+
+
+def test_readme_init_documents_bak_overwrite():
+    """Fix-round-5 #5 (cosmetic): the --init section must state that each
+    successful init OVERWRITES a prior roster.json.bak — the archive-site code
+    comment says '(documented in README)', so the README must actually say it."""
+    text = README.read_text(encoding="utf-8")
+    assert "roster.json.bak" in text, "--init section lost the .bak mention"
+    assert "overwrit" in text.lower(), ".bak overwrite behavior not documented"

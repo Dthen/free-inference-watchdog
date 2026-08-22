@@ -136,7 +136,8 @@ Stale locks (>30 min old) are automatically broken on the next invocation.
 
 Running `--init` archives any existing `roster.json` to `roster.json.bak`
 before clean-rebaselining. It always prints "initialized, no diff" and never
-alerts. Safe to re-run at any time.
+alerts. A prior `roster.json.bak` is overwritten by each successful init.
+Safe to re-run at any time.
 
 ## Cline docs-watcher blind spot
 
