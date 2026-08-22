@@ -36,13 +36,16 @@ Register as a Hermes cron job (`no_agent=True` mode — stdout IS the delivery):
 hermes cron register \
   --schedule "17 */6 * * *" \
   --no_agent \
-  --command "cd /home/kimbo/projects/free-inference-monitor && python3 inference_monitor.py || echo 'inference-monitor FAILED (exit \$?)'" \
+  --command "cd /home/kimbo/projects/free-inference-monitor && python3 inference_monitor.py || { c=\$?; [ \$c -eq 1 ] || echo \"inference-monitor FAILED (exit \$c)\"; }" \
   --deliver discord-home
 ```
 
-The `|| echo ...` fail-wrapper is **mandatory**: exit-2 crashes emit no stdout,
-and without it a deterministically crashing monitor would be indistinguishable
-from healthy silence forever.
+The fail-wrapper is **mandatory**: exit-2 crashes emit no stdout, and without
+it a deterministically crashing monitor would be indistinguishable from
+healthy silence forever. A bare exit 1 is a routine partial outage — the
+carried-forward "fetch failed" line in that tick's alert already says which
+provider flaked — so the wrapper stays silent on it; anything else still
+pages.
 
 ## Environment variables
 
