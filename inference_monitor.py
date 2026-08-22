@@ -177,7 +177,9 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
             state.save_alive(paths["alive"], last_tick_epoch=int(now),
                              last_output_epoch=int(now),
                              dropped_alerts_total=0)
-        return 0
+        # F7: a PARTIAL failure on first-run/init exits 1, aligned with the
+        # normal-tick partial-failure code (stale non-empty ⇒ 1).
+        return 1 if stale else 0
 
     if events:
         confirmation = diffing.confirm_diffs(

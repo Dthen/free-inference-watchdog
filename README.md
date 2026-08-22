@@ -143,7 +143,7 @@ accepted blind spot, not a bug.
 | Code | Meaning |
 |---|---|
 | 0 | Normal (incl. alerts sent, no diffs, alive ping) |
-| 1 | Partial provider failures (still completes) or bootstrap refused |
+| 1 | Partial provider failures — any mode, incl. `--init` / first-run (still completes) — or bootstrap refused |
 | 2 | Fatal/unhandled exception — check stderr |
 
 ## Testing

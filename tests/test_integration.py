@@ -286,10 +286,22 @@ def test_bootstrap_guard_zero_providers(tmp_path, capsys):
 
 
 def test_bootstrap_guard_allows_partial_success(tmp_path):
-    """Item 8: if at least one provider succeeds, init proceeds."""
+    """Item 8: if at least one provider succeeds, init proceeds...
+    F7: ...but a PARTIAL failure must exit 1 like any normal tick."""
     code, _ = _run(tmp_path, [{"nous": ["a"], "openrouter": None}])
-    assert code == 0
+    assert code == 1
     assert (tmp_path / "roster.json").exists()
+
+
+def test_first_run_partial_failure_exits_one_but_initializes(tmp_path, capsys):
+    """F7: init/first-run with SOME providers failed aligns its exit code
+    with the normal-tick partial-failure code (1), still initializing."""
+    code, _ = _run(tmp_path, [{"nous": ["a"], "zen": None}])
+    assert code == 1
+    assert "initialized, no diff" in capsys.readouterr().out
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"]["nous"] == ["a"]
+    assert roster["stale_providers"] == ["zen"]
 
 
 def test_unconfirmed_then_confirmed_alerts_once(tmp_path, capsys):
