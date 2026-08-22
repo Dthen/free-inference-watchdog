@@ -26,6 +26,25 @@ def test_cron_wrapper_exempts_routine_exit_1():
     assert "exit 1" in text and "routine" in text.lower()
 
 
+def test_cron_wrapper_guards_cd_before_python():
+    """Fix-round-4 #1: a failed `cd` must PAGE, never fall into the exit-1
+    exemption — under bash a failed `cd` IS exit 1, so the old
+    `cd ... && python3 ... || {c=$?; [ $c -eq 1 ] || ...}` chain went
+    permanently silent the moment the project dir moved/renamed (exactly the
+    dead-monitor-indistinguishable-from-silence scenario). The wrapper must
+    split into a separate cd-guard followed by the python stage."""
+    text = _unescaped(README.read_text(encoding="utf-8"))
+    assert ('cd /home/kimbo/projects/free-inference-monitor || '
+            '{ echo "inference-monitor FAILED (cannot cd)"; exit 1; }') in text, \
+        "README cron wrapper lost the separate cannot-cd guard"
+    # On the wrapper's own command line the cd-guard must precede the python
+    # stage (a bare-text index would false-trip on the Quick-start mention).
+    line = next(l for l in _unescaped(README.read_text(encoding="utf-8"))
+                .splitlines() if "[ $c -eq 1 ]" in l)
+    assert line.index("cannot cd") < line.index("python3 inference_monitor.py"), \
+        "cd-guard must run BEFORE the python invocation"
+
+
 def test_readme_wrapper_block_is_wellformed_shell():
     """The documented --command value (unescaped) must parse as valid shell —
     guards against quoting drift in the README example."""

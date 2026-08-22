@@ -36,16 +36,19 @@ Register as a Hermes cron job (`no_agent=True` mode — stdout IS the delivery):
 hermes cron register \
   --schedule "17 */6 * * *" \
   --no_agent \
-  --command "cd /home/kimbo/projects/free-inference-monitor && python3 inference_monitor.py || { c=\$?; [ \$c -eq 1 ] || echo \"inference-monitor FAILED (exit \$c)\"; }" \
+  --command "cd /home/kimbo/projects/free-inference-monitor || { echo \"inference-monitor FAILED (cannot cd)\"; exit 1; }; python3 inference_monitor.py || { c=\$?; [ \$c -eq 1 ] || echo \"inference-monitor FAILED (exit \$c)\"; }" \
   --deliver discord-home
 ```
 
 The fail-wrapper is **mandatory**: exit-2 crashes emit no stdout, and without
 it a deterministically crashing monitor would be indistinguishable from
-healthy silence forever. A bare exit 1 is a routine partial outage — the
-carried-forward "fetch failed" line in that tick's alert already says which
-provider flaked — so the wrapper stays silent on it; anything else still
-pages.
+healthy silence forever. The two stages are deliberately split — under bash a
+failed `cd` IS exit 1, so chaining `cd && python3` into one exemption clause
+would silence a moved/renamed install dir forever; here a missing project dir
+pages immediately (`cannot cd`). A bare exit 1 from the monitor itself is a
+routine partial outage — the carried-forward "fetch failed" line in that
+tick's alert already says which provider flaked — so the wrapper stays silent
+on it; anything else still pages.
 
 ## Environment variables
 
