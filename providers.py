@@ -189,19 +189,34 @@ _CODE_SPAN = re.compile(r"`([^`\n]+)`")
 _MODEL_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+$")  # R2-3: case-insensitive both sides
 _DOC_SUFFIX = re.compile(r"\.(md|html|pdf)$", re.IGNORECASE)   # F5: doc links, not IDs
 
+# F-R2-1: placeholder spans docs pages use in examples (provider/model-name
+# verified live on docs.cline.bot/api/models.md). They match the ID shape but
+# are not models — ingesting them poisons the roster and later fires a false
+# ➖ removal when Cline edits the example.
+_PLACEHOLDER_PROVIDERS = {"provider", "example", "your"}
+_PLACEHOLDER_SPANS = {"provider/model-name", "provider/name"}
+
 
 def _extract_cline_ids(markdown_text):
     """Backticked inline-code spans that look like provider/model IDs.
 
     F5: spans ending .md/.html/.pdf are documentation file paths that happen
-    to match the ID shape — rejected so docs edits can't churn the roster."""
+    to match the ID shape — rejected so docs edits can't churn the roster.
+    F-R2-1: placeholder/example spans (`provider/model-name` & friends) are
+    rejected the same way."""
     found = set()
     for span in _CODE_SPAN.findall(markdown_text):
         candidate = span.strip()
         if _DOC_SUFFIX.search(candidate):
             continue
-        if _MODEL_ID.match(candidate):
-            found.add(candidate)
+        if not _MODEL_ID.match(candidate):
+            continue
+        lowered = candidate.lower()
+        if lowered in _PLACEHOLDER_SPANS:
+            continue
+        if lowered.split("/", 1)[0] in _PLACEHOLDER_PROVIDERS:
+            continue
+        found.add(candidate)
     return sorted(found)
 
 

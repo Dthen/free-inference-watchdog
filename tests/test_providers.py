@@ -202,8 +202,20 @@ def test_extract_cline_ids_accepts_mixed_case_ids():
 
 
 def test_extract_cline_ids_backticked_only():
+    # F-R2-1: `provider/name` is a docs EXAMPLE span, not a model — rejected.
     ids = providers._extract_cline_ids(CLINE_PAGE_A)
-    assert ids == ["minimax/minimax-m2.5", "provider/name"]
+    assert ids == ["minimax/minimax-m2.5"]
+
+
+def test_extract_cline_ids_rejects_placeholder_spans():
+    """F-R2-1: docs pages carry placeholder/example spans that match the ID
+    shape (`provider/model-name` verified live on docs.cline.bot/api/models.md).
+    Ingesting them poisons the roster and later fires a false ➖ removal."""
+    md = ("Real: `minimax/minimax-m2.5`. Placeholders: `provider/model-name`, "
+          "`provider/name`, `example/model`, `your/api-key`, "
+          "case-variant `Provider/Model-Name`.\n")
+    ids = providers._extract_cline_ids(md)
+    assert ids == ["minimax/minimax-m2.5"]
 
 
 def test_extract_cline_ids_rejects_doc_file_spans():
@@ -225,8 +237,33 @@ def test_fetch_cline_union_dedupe_sorted():
     assert ids == [
         "anthropic/claude-sonnet-4-6",
         "minimax/minimax-m2.5",
-        "provider/name",
     ]
+
+
+def test_fetch_cline_live_page_placeholder_span_rejected():
+    """F-R2-1 regression: the LIVE docs.cline.bot/api/models.md page carries
+    the example span `provider/model-name` (verified HTTP 200 on 2026-08-22,
+    where it had already leaked into state/roster.json). A page shaped like
+    that must yield only real IDs — never the placeholder."""
+    live_page = (
+        "# Models\n\n"
+        "Configure your provider:\n\n"
+        "```json\n"
+        '{"apiModelId": "provider/model-name"}\n'
+        "```\n\n"
+        "For example: `provider/model-name` or `provider/name`.\n\n"
+        "| Model | ID |\n|---|---|\n"
+        "| Claude Sonnet | `anthropic/claude-sonnet-4-6` |\n"
+        "| MiniMax M2.5 | `minimax/minimax-m2.5` |\n"
+    )
+
+    def g(url, headers=None, timeout=15):
+        return ok(live_page)
+
+    ids, _ = providers._fetch_cline(getter=g)
+    assert ids == ["anthropic/claude-sonnet-4-6", "minimax/minimax-m2.5"]
+    assert "provider/model-name" not in ids
+    assert not any(i.lower().startswith("provider/") for i in ids)
 
 
 def test_fetch_cline_empty_parse_raises():
