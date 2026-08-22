@@ -206,6 +206,15 @@ def test_extract_cline_ids_backticked_only():
     assert ids == ["minimax/minimax-m2.5", "provider/name"]
 
 
+def test_extract_cline_ids_rejects_doc_file_spans():
+    """F5: backticked doc-file paths (`.md`/`.html`/`.pdf`) match the ID
+    shape but are links, not model IDs — they must never be ingested."""
+    md = ("See `getting-started/free-models.md`, `api/models.md`, "
+          "`guide/page.html`, `whitepaper.pdf`, but real: `Qwen/Qwen3-32B`.\n")
+    ids = providers._extract_cline_ids(md)
+    assert ids == ["Qwen/Qwen3-32B"]
+
+
 def test_fetch_cline_union_dedupe_sorted():
     def g(url, headers=None, timeout=15):
         if "free-models" in url:

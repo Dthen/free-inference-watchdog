@@ -187,13 +187,19 @@ CLINE_PAGES = (
 
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
 _MODEL_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+$")  # R2-3: case-insensitive both sides
+_DOC_SUFFIX = re.compile(r"\.(md|html|pdf)$", re.IGNORECASE)   # F5: doc links, not IDs
 
 
 def _extract_cline_ids(markdown_text):
-    """Backticked inline-code spans that look like provider/model IDs."""
+    """Backticked inline-code spans that look like provider/model IDs.
+
+    F5: spans ending .md/.html/.pdf are documentation file paths that happen
+    to match the ID shape — rejected so docs edits can't churn the roster."""
     found = set()
     for span in _CODE_SPAN.findall(markdown_text):
         candidate = span.strip()
+        if _DOC_SUFFIX.search(candidate):
+            continue
         if _MODEL_ID.match(candidate):
             found.add(candidate)
     return sorted(found)
