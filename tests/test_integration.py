@@ -137,6 +137,23 @@ def test_cli_cadence_hours_default_and_override(monkeypatch):
     assert captured["cadence_s"] == 12 * 3600         # override
 
 
+def test_cli_cooldown_hours_default_and_override(monkeypatch):
+    """Fix-round-5 #4: --cooldown-hours is plumbed through main() to run_tick
+    (default 12h). Mirrors test_cli_cadence_hours_default_and_override — a
+    regression dropping cooldown_hours=args.cooldown_hours must go red."""
+    captured = {}
+
+    def fake_tick(state_dir, registry, fetch_all, fetch_one, **kw):
+        captured.update(kw)
+        return 0
+
+    monkeypatch.setattr(im, "run_tick", fake_tick)
+    im.main([])
+    assert captured["cooldown_hours"] == 12           # default
+    im.main(["--cooldown-hours", "24"])
+    assert captured["cooldown_hours"] == 24           # override
+
+
 def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
     """F4: a JSON-valid roster lacking a dict-shaped providers key must
     bootstrap clean (first_run), never emit the universe as ➕."""
@@ -248,14 +265,23 @@ def test_roster_persists_transients_and_unconfirmed_every_tick(tmp_path):
     assert roster["unconfirmed"] == {}
 
 
-def test_roster_persists_transients_from_flap(tmp_path):
-    """Item 4: transient flap is recorded in roster under transients."""
-    _run(tmp_path, [{"nous": ["a"]}])
-    # z2 disappears then comes back in recheck -> transient
-    _run(tmp_path, [{"nous": ["a"]}, {"nous": ["a"]}],
-          now=1_000_000_000 + 6 * 3600)
+def test_roster_persists_transients_from_flap(tmp_path, capsys):
+    """Item 4: a REAL transient flap is recorded in roster under transients.
+    Fix-round-5 #3: the previous body used identical scenarios (["a"],["a"]) —
+    no candidate diff ever arose, so transients == {} passed vacuously. This
+    shape is an honest flap: baseline [a,b] -> candidate tick sees [a] ->
+    recheck sees [a,b] again => b's removal recorded as transient, silent."""
+    _run(tmp_path, [{"zen": ["a", "b"]}])                       # baseline
+    capsys.readouterr()
+    # candidate tick: b gone; recheck: b back => transient flap
+    code, _ = _run(tmp_path, [{"zen": ["a"]}, {"zen": ["a", "b"]}],
+                   now=1_000_000_000 + 6 * 3600)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "➖" not in out                        # transient never alerts
     roster = json.loads((tmp_path / "roster.json").read_text())
-    assert roster["transients"] == {}
+    assert roster["transients"] == {"zen": {"added": [], "removed": ["b"]}}
+    assert roster["providers"]["zen"] == ["a", "b"]   # recheck truth persisted
 
 
 def test_nous_ratelimit_persisted_from_meta(tmp_path):
