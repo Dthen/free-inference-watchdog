@@ -5,6 +5,8 @@ Pure logic — no I/O except load_filtered_roster's single file read.
 
 import state
 
+from providers import FetchError  # re-exported for confirm_diffs callers/tests
+
 
 def _sorted_list(items):
     return sorted(set(str(i) for i in items))
@@ -74,3 +76,41 @@ def load_filtered_roster(roster_path, registry_keys):
             k: v for k, v in providers_map.items() if k in registry_keys
         }
     return roster
+
+
+def confirm_diffs(candidates, prev_providers, fetch_one, sleep, delay):
+    """In-run confirmation of candidate diffs (decision #1: no multi-tick lag).
+
+    One nap total (delay seconds), then re-fetch ONLY affected providers and
+    re-diff against the same prev state:
+      confirmed   — diff survived the recheck  -> will be alerted
+      transients  — diff vanished              -> recorded, never alerted
+      unconfirmed — recheck itself FAILED      -> silent, sticky-old roster
+                     entry kept, signal resurfaces next good tick
+
+    Exactly one recheck per provider — no third looks.
+    """
+    confirmed, transients, unconfirmed = {}, {}, {}
+    if not candidates:
+        return {"confirmed": confirmed, "transients": transients,
+                "unconfirmed": unconfirmed}
+
+    sleep(delay)  # one nap covers every affected provider
+    for name, event in candidates.items():
+        try:
+            fresh_ids = fetch_one(name)
+        except FetchError:
+            unconfirmed[name] = event
+            continue
+        old_set = set(_sorted_list(prev_providers.get(name, [])))
+        new_set = set(_sorted_list(fresh_ids))
+        recheck = {
+            "added": sorted(new_set - old_set),
+            "removed": sorted(old_set - new_set),
+        }
+        if recheck["added"] or recheck["removed"]:
+            confirmed[name] = recheck
+        else:
+            transients[name] = event
+    return {"confirmed": confirmed, "transients": transients,
+            "unconfirmed": unconfirmed}
