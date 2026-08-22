@@ -175,7 +175,7 @@ CLINE_PAGES = (
 )
 
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
-_MODEL_ID = re.compile(r"^[a-z0-9_.-]+/[a-z0-9_.:-]+$")
+_MODEL_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+$")  # R2-3: case-insensitive both sides
 
 
 def _extract_cline_ids(markdown_text):

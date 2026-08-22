@@ -51,6 +51,17 @@ def test_cooldowns_missing_is_empty(tmp_path):
     assert state.load_cooldowns(tmp_path / "nope.json") == {}
 
 
+def test_cooldowns_prune_uses_injected_now(tmp_path):
+    # Tick-clock pruning: a stamp from the (fake) tick epoch survives/fails
+    # relative to the INJECTED now, not the real wall clock.
+    p = tmp_path / "cooldowns.json"
+    fake_now = 1_000_000_000
+    data = {"nous|a|added": fake_now - 100, "nous|b|added": fake_now - 999_999}
+    state.save_cooldowns(p, data, ttl_s=43200, now=fake_now)
+    loaded = state.load_cooldowns(p)
+    assert loaded == {"nous|a|added": fake_now - 100}
+
+
 # ---------- pending alerts queue ----------
 
 def test_pending_roundtrip(tmp_path):

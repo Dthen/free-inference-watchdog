@@ -155,6 +155,14 @@ CLINE_PAGE_A = (
 CLINE_PAGE_B = "Examples:\n\n* `anthropic/claude-sonnet-4-6` - Claude\n* `minimax/minimax-m2.5` - dup\n"
 
 
+def test_extract_cline_ids_accepts_mixed_case_ids():
+    # R2-3: real-world IDs arrive mixed-case (Qwen/Qwen3-32B) — accept
+    # uppercase on BOTH sides of '/', keep lowercase behaviour unchanged.
+    md = "Try `Qwen/Qwen3-32B` or `Meta-Llama/Llama-3.1:70B`; skip `Not_An/ID!`.\n"
+    ids = providers._extract_cline_ids(md)
+    assert ids == ["Meta-Llama/Llama-3.1:70B", "Qwen/Qwen3-32B"]
+
+
 def test_extract_cline_ids_backticked_only():
     ids = providers._extract_cline_ids(CLINE_PAGE_A)
     assert ids == ["minimax/minimax-m2.5", "provider/name"]

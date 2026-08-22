@@ -48,9 +48,13 @@ def load_cooldowns(path):
     return data if isinstance(data, dict) else {}
 
 
-def save_cooldowns(path, cooldowns, ttl_s=43200):
-    """Prune entries older than TTL before writing (map never grows forever)."""
-    now = time.time()
+def save_cooldowns(path, cooldowns, ttl_s=43200, now=None):
+    """Prune entries older than TTL before writing (map never grows forever).
+
+    `now` is injectable so ticks (and tests) prune against the tick clock,
+    never against a mismatched wall clock.
+    """
+    now = time.time() if now is None else now
     pruned = {k: v for k, v in cooldowns.items()
               if isinstance(v, (int, float)) and now - v < ttl_s}
     _atomic_write_json(path, pruned)

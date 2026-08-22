@@ -88,29 +88,55 @@ def confirm_diffs(candidates, prev_providers, fetch_one, sleep, delay):
       unconfirmed — recheck itself FAILED      -> silent, sticky-old roster
                      entry kept, signal resurfaces next good tick
 
+    R2-2 RECHECK OUTCOMES PERSIST: the result also carries `corrected`, the
+    CORRECTED id-map for every rechecked provider built from its REFETCH:
+        transient   -> prev ids (flap leaves NO trace in persisted state)
+        confirmed   -> refetch ids (the new truth)
+        unconfirmed -> provider ABSENT (caller keeps the sticky-old entry)
+    The caller must merge `corrected` over its pre-recheck map BEFORE persisting
+    the roster — a transient flap must never leave a phantom reversal behind.
+
     Exactly one recheck per provider — no third looks.
     """
-    confirmed, transients, unconfirmed = {}, {}, {}
+    confirmed, transients, unconfirmed, corrected = {}, {}, {}, {}
     if not candidates:
         return {"confirmed": confirmed, "transients": transients,
-                "unconfirmed": unconfirmed}
+                "unconfirmed": unconfirmed, "corrected": corrected}
 
     sleep(delay)  # one nap covers every affected provider
     for name, event in candidates.items():
         try:
-            fresh_ids = fetch_one(name)
+            fresh_ids, _meta = fetch_one(name)
         except FetchError:
             unconfirmed[name] = event
-            continue
-        old_set = set(_sorted_list(prev_providers.get(name, [])))
-        new_set = set(_sorted_list(fresh_ids))
+            continue                 # ABSENT from corrected => sticky-old wins
+        old_set = set(_sorted_list(prev_providers.get(name) or []))
+        fresh_sorted = _sorted_list(fresh_ids)
+        new_set = set(fresh_sorted)
         recheck = {
             "added": sorted(new_set - old_set),
             "removed": sorted(old_set - new_set),
         }
         if recheck["added"] or recheck["removed"]:
             confirmed[name] = recheck
+            corrected[name] = fresh_sorted       # refetch truth becomes state
         else:
             transients[name] = event
+            corrected[name] = _sorted_list(prev_providers.get(name) or [])
     return {"confirmed": confirmed, "transients": transients,
-            "unconfirmed": unconfirmed}
+            "unconfirmed": unconfirmed, "corrected": corrected}
+
+
+def merge_corrected(new_map, confirmation, prev_providers):
+    """R2-2 caller-side merge — the persisted roster NEVER holds a pre-recheck
+    snapshot. `corrected` (transient -> prev ids, confirmed -> refetch ids)
+    overrides the pre-recheck map; UNCONFIRMED providers (absent from
+    `corrected` by contract) keep their STICKY-OLD previous-roster entry so a
+    real change resurfaces and alerts on the next good tick.
+    """
+    merged = dict(new_map)
+    merged.update(confirmation.get("corrected") or {})
+    for name in (confirmation.get("unconfirmed") or {}):
+        if name in prev_providers:
+            merged[name] = _sorted_list(prev_providers[name])
+    return merged
