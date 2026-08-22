@@ -256,6 +256,9 @@ def main(argv=None):
                         help="fetch + diff + print, write nothing, POST nothing")
     parser.add_argument("--recheck-delay", type=int, default=180,
                         help="seconds before confirm re-fetch (0 in tests)")
+    parser.add_argument("--cadence-hours", type=int, default=6,
+                        help="tick cadence in hours — drives missed-tick "
+                             "warning; keep in step with the cron schedule")
     parser.add_argument("--cooldown-hours", type=int, default=12)
     parser.add_argument("--state-dir", default=None,
                         help="default: <this project>/state")
@@ -275,7 +278,8 @@ def main(argv=None):
     return run_tick(state_dir, providers.PROVIDERS, fetch_all, fetch_one,
                     webhook_url=webhook, sleep=time.sleep, now=time.time(),
                     recheck_delay=args.recheck_delay,
-                    cooldown_hours=args.cooldown_hours, dry_run=args.dry_run)
+                    cooldown_hours=args.cooldown_hours,
+                    cadence_s=args.cadence_hours * 3600, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

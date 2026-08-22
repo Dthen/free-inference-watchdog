@@ -100,10 +100,16 @@ tick — no manual state surgery needed.
 
 ## Cadence change
 
-Edit the cron schedule (`hermes cron update ...`) or pass `--cadence-s` when
-running manually. The alive ping fires on output-age ≥ 20h and the missed-tick
-warning fires on tick-age > cadence + 2h slack. Both are derived from
-`alive.json` — no restart needed.
+The tick cadence defaults to 6 hours. To change it:
+
+1. Update the cron schedule to match (`hermes cron update ...`).
+2. Pass `--cadence-hours N` (default 6) on the invocation — it drives the
+   ⚠️ missed-tick warning, which fires when the last tick is older than
+   cadence + 2h slack. Keep the flag in step with the cron schedule or the
+   warning will cry wolf.
+
+The 💚 alive ping fires on output-age ≥ 20h regardless of cadence. Both
+derive from `alive.json` — no restart needed.
 
 ## Manual lockfile recovery
 

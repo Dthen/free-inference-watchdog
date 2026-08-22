@@ -90,6 +90,22 @@ def test_cli_init_branch_passes_init_flag(monkeypatch):
     assert captured.get("webhook_url") is None
 
 
+def test_cli_cadence_hours_default_and_override(monkeypatch):
+    """F2: --cadence-hours exists (default 6h) and is plumbed to run_tick as
+    cadence_s seconds."""
+    captured = {}
+
+    def fake_tick(state_dir, registry, fetch_all, fetch_one, **kw):
+        captured.update(kw)
+        return 0
+
+    monkeypatch.setattr(im, "run_tick", fake_tick)
+    im.main([])
+    assert captured["cadence_s"] == 6 * 3600          # default
+    im.main(["--cadence-hours", "12"])
+    assert captured["cadence_s"] == 12 * 3600         # override
+
+
 def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
     """F4: a JSON-valid roster lacking a dict-shaped providers key must
     bootstrap clean (first_run), never emit the universe as ➕."""
