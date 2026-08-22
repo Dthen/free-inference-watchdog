@@ -75,7 +75,12 @@ def _require_ok(status, url):
 # ---------- nous ----------
 
 def _load_nous_auth(auth_path="~/.hermes/auth.json"):
-    """Named owner of auth.json parsing (plan round-1 finding #8)."""
+    """Named owner of auth.json parsing (plan round-1 finding #8).
+
+    F3: a malformed VALUE (null/empty/non-string token or base) must surface
+    as FetchError — same contract as every other fetch failure — never as an
+    AttributeError escaping to a whole-tick FATAL.
+    """
     import os
     path = os.path.expanduser(auth_path)
     try:
@@ -84,6 +89,12 @@ def _load_nous_auth(auth_path="~/.hermes/auth.json"):
         token, base = nous["access_token"], nous["inference_base_url"]
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise FetchError(f"cannot load nous auth from {path}") from exc
+    if not isinstance(token, str) or not token:
+        raise FetchError(
+            f"cannot load nous auth from {path}: access_token null/malformed")
+    if not isinstance(base, str) or not base:
+        raise FetchError(
+            f"cannot load nous auth from {path}: inference_base_url null/malformed")
     return {"token": token, "base": base.rstrip("/")}
 
 

@@ -28,6 +28,44 @@ def fake_getter(resps):
     return get
 
 
+# ---------- _load_nous_auth (F3: malformed shape => FetchError, never AttributeError) ----------
+
+def _write_auth(tmp_path, nous_value):
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"providers": {"nous": nous_value}}),
+                    encoding="utf-8")
+    return str(auth)
+
+
+def test_load_nous_auth_happy_path_strips_trailing_slash(tmp_path):
+    path = _write_auth(tmp_path, {"access_token": "tok",
+                                  "inference_base_url": "https://x.y/v1/"})
+    auth = providers._load_nous_auth(path)
+    assert auth == {"token": "tok", "base": "https://x.y/v1"}
+
+
+def test_load_nous_auth_null_base_is_fetch_error(tmp_path):
+    path = _write_auth(tmp_path, {"access_token": "tok",
+                                  "inference_base_url": None})
+    with pytest.raises(FetchError, match="cannot load nous auth"):
+        providers._load_nous_auth(path)
+
+
+def test_load_nous_auth_null_token_is_fetch_error(tmp_path):
+    path = _write_auth(tmp_path, {"access_token": None,
+                                  "inference_base_url": "https://x.y/v1"})
+    with pytest.raises(FetchError, match="cannot load nous auth"):
+        providers._load_nous_auth(path)
+
+
+def test_load_nous_auth_empty_or_nonstring_base_is_fetch_error(tmp_path):
+    for bad in ("", 42):
+        path = _write_auth(tmp_path, {"access_token": "tok",
+                                      "inference_base_url": bad})
+        with pytest.raises(FetchError, match="cannot load nous auth"):
+            providers._load_nous_auth(path)
+
+
 # ---------- is_free ----------
 
 def test_is_free_string_zero():
