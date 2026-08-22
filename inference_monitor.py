@@ -7,6 +7,7 @@ goes to $DISCORD_WEBHOOK_INFERENCE_MONITOR (kennel channel) when configured.
 """
 
 import argparse
+import os
 import sys
 import time
 from datetime import datetime
@@ -83,7 +84,8 @@ def build_fetch_one(env):
 
 def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
              sleep=time.sleep, now=None, recheck_delay=180,
-             cooldown_hours=12, cadence_s=DEFAULT_CADENCE_S, dry_run=False):
+             cooldown_hours=12, cadence_s=DEFAULT_CADENCE_S, dry_run=False,
+             init=False):
     """Execute one monitor tick. Returns process exit code (0/1/2)."""
     now = now if now is not None else time.time()
     state_dir = Path(state_dir)
@@ -99,6 +101,12 @@ def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
         print("inference-monitor: already running", file=sys.stderr)
         return 0
     try:
+        if init and paths["roster"].exists():
+            # F1: archive FIRST — the rename removes the original, so the
+            # first_run path below engages naturally (no diff, no alerts,
+            # no cooldown writes). Webhook stays suppressed by the caller.
+            os.replace(paths["roster"],
+                       paths["roster"].with_name(paths["roster"].name + ".bak"))
         return _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url,
                             sleep, now, recheck_delay, cooldown_hours,
                             cadence_s, dry_run)
@@ -263,7 +271,7 @@ def main(argv=None):
     if args.init:
         return run_tick(state_dir, providers.PROVIDERS, fetch_all, fetch_one,
                         webhook_url=None, sleep=lambda s: None, now=time.time(),
-                        recheck_delay=0, dry_run=False)  # first run = init path
+                        recheck_delay=0, dry_run=False, init=True)
     return run_tick(state_dir, providers.PROVIDERS, fetch_all, fetch_one,
                     webhook_url=webhook, sleep=time.sleep, now=time.time(),
                     recheck_delay=args.recheck_delay,

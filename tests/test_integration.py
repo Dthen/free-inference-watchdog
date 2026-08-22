@@ -53,6 +53,43 @@ def test_first_run_initializes_silently(tmp_path, capsys):
     assert alive_d["last_tick_epoch"] == 1_000_000_000
 
 
+def test_init_over_existing_roster_archives_and_stays_silent(tmp_path, capsys):
+    """F1: --init over an existing roster archives it to roster.json.bak,
+    rebaselines cleanly, prints EXACTLY 'initialized, no diff' — never an
+    alert, never a cooldown write."""
+    _run(tmp_path, [{"nous": ["old-1", "old-2"]}])            # baseline
+    capsys.readouterr()                            # drain baseline's own line
+    # pre-existing roster with DIFFERENT ids + --init
+    fetch_all, fetch_one, _ = _fetcher([{"nous": ["new-1"]}])
+    code = im.run_tick(
+        tmp_path, REGISTRY, fetch_all, fetch_one, webhook_url=None,
+        sleep=lambda s: None, now=1_000_000_000 + 6 * 3600,
+        recheck_delay=0, init=True)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out == "initialized, no diff\n"        # EXACTLY that line, zero alerts
+    bak = json.loads((tmp_path / "roster.json.bak").read_text())
+    assert bak["providers"]["nous"] == ["old-1", "old-2"]     # archive intact
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"]["nous"] == ["new-1"]           # fresh baseline
+    assert not (tmp_path / "cooldowns.json").exists()         # no cooldown writes
+
+
+def test_cli_init_branch_passes_init_flag(monkeypatch):
+    """F1 wiring: the --init CLI branch must request the init path and keep
+    the webhook suppressed."""
+    captured = {}
+
+    def fake_tick(state_dir, registry, fetch_all, fetch_one, **kw):
+        captured.update(kw)
+        return 0
+
+    monkeypatch.setattr(im, "run_tick", fake_tick)
+    im.main(["--init"])
+    assert captured.get("init") is True
+    assert captured.get("webhook_url") is None
+
+
 def test_confirmed_removal_alerts_once_then_cooldowns(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a", "b"]}])                       # baseline
     code, _ = _run(tmp_path, [{"nous": ["a"]}],                  # b disappears
