@@ -155,6 +155,26 @@ def test_fetch_zen_bare_ids_verbatim():
     assert ids == ["aa-model", "zz-model"]  # sorted for stable diffs, values untouched
 
 
+def test_fetch_zen_model_dict_objects_extract_id():
+    """Item 5 (live bug): zen's /v1/models returns MODEL OBJECTS
+    ({'id': ..., 'object': 'model', ...}), NOT bare strings — verified live
+    (64 items). The old isinstance((str, int)) filter dropped all of them,
+    pinning zen=[] forever. Dicts yield their id; strings/ints stay verbatim;
+    missing/empty/null id => skipped. Still bare-ID diffing (decision #3) —
+    we extract the id field, no alias mapping."""
+    body = json.dumps([
+        {"id": "claude-fable-5", "object": "model", "owned_by": "opencode"},
+        "bare-string-model",
+        {"object": "model"},             # missing id -> skipped
+        {"id": "", "object": "model"},   # empty id -> skipped
+        {"id": None},                    # null id -> skipped
+        42,                              # int stays verbatim (str'd, sorted)
+    ])
+    g = fake_getter({"/zen/v1/models": ok(body)})
+    ids, _ = providers._fetch_zen(getter=g)
+    assert ids == ["42", "bare-string-model", "claude-fable-5"]
+
+
 # ---------- kilo ----------
 
 KILO_MODELS = {

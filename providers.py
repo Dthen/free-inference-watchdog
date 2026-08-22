@@ -135,12 +135,19 @@ ZEN_URL = "https://opencode.ai/zen/v1/models"
 
 
 def _fetch_zen(getter=_default_getter, key=None):
-    """Bare ID strings, zero metadata — diffed verbatim (decision #3)."""
+    """Model ids only, zero metadata kept — diffed verbatim (decision #3).
+    The endpoint returns MODEL OBJECTS ({'id': ..., 'object': 'model', ...});
+    dicts yield their id field, bare strings/ints are kept verbatim, and
+    items with a missing/empty/null id are skipped."""
     extra = {"Authorization": f"Bearer {key}"} if key else {}
     status, body, _hdrs = getter(ZEN_URL, headers=_headers(extra), timeout=TIMEOUT_S)
     _require_ok(status, ZEN_URL)
     items = _parse_model_list(body)
-    ids = sorted(str(it) for it in items if isinstance(it, (str, int)))
+    ids = sorted(
+        str(it.get("id")) if isinstance(it, dict) else str(it)
+        for it in items
+        if (it.get("id") if isinstance(it, dict) else it)
+    )
     return ids, {}
 
 
