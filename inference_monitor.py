@@ -102,10 +102,15 @@ def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
     # remount, ENOSPC) must map to the FATAL exit-2 path the cron wrapper
     # pages on, never escape as CPython exit 1 (which the wrapper treats as
     # silent routine outage: monitor dead forever, zero pages).
+    # F7-1: ownership gate — release ONLY a lock this process acquired.
+    # A contended tick (acquire returned False, exit 0 "already running")
+    # must never unlink the LIVE lock owned by the other process.
+    acquired = False
     try:
         if not state.acquire_lock(paths["lock"]):
             print("inference-monitor: already running", file=sys.stderr)
             return 0
+        acquired = True
         return _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url,
                             sleep, now, recheck_delay, cooldown_hours,
                             cadence_s, dry_run, init=init)
@@ -114,7 +119,8 @@ def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
               file=sys.stderr)
         return 2
     finally:
-        state.release_lock(paths["lock"])
+        if acquired:
+            state.release_lock(paths["lock"])
 
 
 def _emit(message, webhook_url, pending_path, dry_run):

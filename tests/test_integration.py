@@ -225,6 +225,28 @@ def test_lock_contention_exits_zero(tmp_path):
     assert code == 0       # instant exit, no crash
 
 
+def test_lock_contention_preserves_live_lockfile(tmp_path):
+    """F7-1 regression: a contended tick must NEVER delete the LIVE lockfile
+    owned by the other running process. F6-1 moved the contention return
+    inside run_tick's try/finally, whose release_lock then unconditionally
+    unlinked the OTHER process's lock -> mutual exclusion silently died ->
+    next invocation acquired and ran concurrent full ticks (duplicate alerts,
+    lost cooldown stamps). Contract: contended run exits 0 AND leaves the
+    lock byte-and-mtime UNCHANGED; the tick body never executes."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("123", encoding="utf-8")
+    old = time.time() - 60  # fresh live lock (1 min old)
+    os.utime(lock, (old, old))
+    before_bytes = lock.read_bytes()
+    before_mtime = os.stat(lock).st_mtime
+    code, calls = _run(tmp_path, [{"nous": ["a"]}])
+    assert code == 0                            # contention policy unchanged
+    assert lock.exists(), "live lockfile was DELETED by contended tick"
+    assert lock.read_bytes() == before_bytes    # byte-identical
+    assert os.stat(lock).st_mtime == before_mtime  # untouched mtime
+    assert calls["n"] == 0                      # tick body never ran
+
+
 def test_readonly_state_dir_lock_create_fails_exits_two(tmp_path, capsys):
     """F6-1 (primary path): acquire_lock must sit INSIDE run_tick's fatal
     handler. A read-only state dir (EACCES / EROFS / ENOSPC class) makes
