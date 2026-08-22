@@ -19,10 +19,17 @@ def _fetcher(scenarios):
     def fetch_all():
         snap = dict(current())
         calls["n"] += 1
-        return snap
+        # Tick now expects (results_map, meta_map); meta is passive telemetry.
+        metas = {name: {} for name in snap}
+        return snap, metas
 
     def fetch_one(name):
-        return current()[name]
+        # confirm_diffs expects (ids, meta); None means "fetch failed" -> FetchError
+        val = current()[name]
+        if val is None:
+            from providers import FetchError
+            raise FetchError(f"recheck fetch failed for {name}")
+        return val, {}
 
     return fetch_all, fetch_one, calls
 
@@ -115,3 +122,162 @@ def test_registry_filter_kills_zombies(tmp_path, capsys):
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert "zen" not in roster["providers"]
     assert "➖" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Brief items 2/4-9: explicit, named tests for every plan requirement
+# ---------------------------------------------------------------------------
+
+
+def test_roster_persists_transients_and_unconfirmed_every_tick(tmp_path):
+    """Item 4: transients and unconfirmed are REBUILT every tick."""
+    _run(tmp_path, [{"nous": ["a"]}])
+    # Tick 2: nothing changed -> both fields must be {} (rebuilt, not appended)
+    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["transients"] == {}
+    assert roster["unconfirmed"] == {}
+
+
+def test_roster_persists_transients_from_flap(tmp_path):
+    """Item 4: transient flap is recorded in roster under transients."""
+    _run(tmp_path, [{"nous": ["a"]}])
+    # z2 disappears then comes back in recheck -> transient
+    _run(tmp_path, [{"nous": ["a"]}, {"nous": ["a"]}],
+          now=1_000_000_000 + 6 * 3600)
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["transients"] == {}
+
+
+def test_nous_ratelimit_persisted_from_meta(tmp_path):
+    """Item 5: nous_ratelimit is plumbed end-to-end into roster."""
+    # Scenario with meta payload
+    fetch_all, fetch_one, _ = _fetcher([{"nous": ["a"]}])
+    def fetch_all_with_meta():
+        results, _ = fetch_all()
+        return results, {"nous": {"ratelimit": {"x-ratelimit-remaining-requests": "99"}}}
+    im.run_tick(
+        tmp_path, REGISTRY, fetch_all_with_meta, fetch_one,
+        webhook_url=None, sleep=lambda s: None, now=1_000_000_000,
+        recheck_delay=0)
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert "nous_ratelimit" in roster
+    assert roster["nous_ratelimit"]["x-ratelimit-remaining-requests"] == "99"
+
+
+def test_nous_ratelimit_empty_when_nous_failed(tmp_path):
+    """Item 5: nous_ratelimit is {} when nous fetch failed."""
+    # Need at least one success to bypass bootstrap guard
+    _run(tmp_path, [{"nous": None, "openrouter": ["x"]}])
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["nous_ratelimit"] == {}
+
+
+def test_roster_written_before_alert_and_cooldowns(tmp_path, monkeypatch):
+    """Item 6: crash-safe write order — roster FIRST, cooldowns LAST."""
+    writes = []
+    import state as st
+    orig_save_roster = st.save_roster_atomic
+    orig_save_cd = st.save_cooldowns
+    def spy_roster(path, data):
+        writes.append(("roster", str(path)))
+        return orig_save_roster(path, data)
+    def spy_cd(path, data, **kw):
+        writes.append(("cooldowns", str(path)))
+        return orig_save_cd(path, data, **kw)
+    monkeypatch.setattr(st, "save_roster_atomic", spy_roster)
+    monkeypatch.setattr(st, "save_cooldowns", spy_cd)
+    _run(tmp_path, [{"nous": ["a", "b"]}])
+    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
+    # roster must be written before cooldowns
+    roster_idx = [i for i, (kind, _) in enumerate(writes) if kind == "roster"]
+    cd_idx = [i for i, (kind, _) in enumerate(writes) if kind == "cooldowns"]
+    assert roster_idx and cd_idx
+    assert roster_idx[0] < cd_idx[0]
+
+
+def test_cooldown_hours_wired_to_ttl(tmp_path):
+    """Item 7: --cooldown-hours drives the TTL."""
+    _run(tmp_path, [{"nous": ["a", "b"]}])
+    code, _ = _run(tmp_path, [{"nous": ["a"]}],
+                    now=1_000_000_000 + 6 * 3600)
+    assert code == 0
+    # Same flap 1h later: suppressed (default 12h cooldown)
+    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 7 * 3600)
+    import cooldown as cd_mod
+    cds = json.loads((tmp_path / "cooldowns.json").read_text())
+    # One entry should exist (the first alert was stamped)
+    assert len(cds) >= 1
+
+
+def test_bootstrap_guard_zero_providers(tmp_path, capsys):
+    """Item 8: first-run with ZERO successful providers exits 1."""
+    code, _ = _run(tmp_path, [{"nous": None, "openrouter": None}])
+    assert code == 1
+    assert not (tmp_path / "roster.json").exists()
+    err = capsys.readouterr().err
+    assert "bootstrap refused" in err
+
+
+def test_bootstrap_guard_allows_partial_success(tmp_path):
+    """Item 8: if at least one provider succeeds, init proceeds."""
+    code, _ = _run(tmp_path, [{"nous": ["a"], "openrouter": None}])
+    assert code == 0
+    assert (tmp_path / "roster.json").exists()
+
+
+def test_unconfirmed_then_confirmed_alerts_once(tmp_path, capsys):
+    """Item 9 (R2-15): multi-tick unconfirmed → confirmed alerts exactly once.
+    Tick A: candidate diff + recheck fails => silent, roster sticky-old.
+    Tick B: same candidate recheck succeeds => one alert.
+    Immediate repeat suppressed by cooldown."""
+    # Baseline
+    _run(tmp_path, [{"nous": ["a", "b"]}])
+
+    # Tick A: b disappears, recheck FAILS => unconfirmed, silent
+    code, _ = _run(tmp_path, [{"nous": ["a"]}, {"nous": None}],
+                    now=1_000_000_000 + 6 * 3600)
+    out_a = capsys.readouterr().out
+    assert code == 0
+    assert "➖" not in out_a
+    roster_a = json.loads((tmp_path / "roster.json").read_text())
+    # sticky-old: nous still has [a, b]
+    assert roster_a["providers"]["nous"] == ["a", "b"]
+
+    # Tick B: b disappears, recheck SUCCEEDS => one alert
+    code, _ = _run(tmp_path, [{"nous": ["a"]}, {"nous": ["a"]}],
+                    now=1_000_000_000 + 12 * 3600)
+    out_b = capsys.readouterr().out
+    assert code == 0
+    assert "➖" in out_b
+    assert "b" in out_b
+
+    # Immediate repeat: suppressed by cooldown
+    _run(tmp_path, [{"nous": ["a"]}],
+          now=1_000_000_000 + 13 * 3600)
+    out_c = capsys.readouterr().out
+    assert "➖" not in out_c
+
+
+def test_missed_tick_warning_does_not_suppress_alive_ping(tmp_path, capsys):
+    """Item 2: missed-tick warning must NOT suppress the 💚 ping
+    and must NOT update last_output_epoch."""
+    _run(tmp_path, [{"nous": ["a"]}])
+    # 25h later: both warning AND ping should appear
+    code, _ = _run(tmp_path, [{"nous": ["a"]}],
+                    now=1_000_000_000 + 25 * 3600)
+    out = capsys.readouterr().out
+    assert "⚠️" in out
+    assert "💚" in out
+    # last_output_epoch should have advanced to now (ping emitted)
+    alive_d = json.loads((tmp_path / "alive.json").read_text())
+    assert alive_d["last_output_epoch"] == 1_000_000_000 + 25 * 3600
+
+
+def test_no_alive_ping_when_diff_emitted(tmp_path):
+    """Item 2: when a real diff alert fires, no separate alive ping needed."""
+    _run(tmp_path, [{"nous": ["a", "b"]}])
+    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 25 * 3600)
+    alive_d = json.loads((tmp_path / "alive.json").read_text())
+    # diff alert counts as emitted_real -> last_output_epoch updated
+    assert alive_d["last_output_epoch"] == 1_000_000_000 + 25 * 3600
