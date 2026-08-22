@@ -226,11 +226,15 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
               f"(last tick {int((now - prev_alive.get('last_tick_epoch', now))//3600)}h ago)",
               webhook_url, paths["pending"], dry_run)
 
-    ping_due = alive.should_ping(prev_alive.get("last_tick_epoch"),
+    ping_due = alive.should_ping(prev_alive.get("last_tick_epoch", now),
                                  prev_alive.get("last_output_epoch"), now)
     if ping_due and not emitted_real:
+        # F6: report prev total + THIS tick's drops so a drop is visible on
+        # the very next ping instead of lagging a full cadence.
+        dropped_now = (prev_alive.get("dropped_alerts_total", 0)
+                       + notify.get_dropped_total())
         _emit(alive.format_alive(len(registry), stale, transients,
-                                 prev_alive.get("dropped_alerts_total", 0)),
+                                 dropped_now),
               webhook_url, paths["pending"], dry_run)
         emitted_real = True
 

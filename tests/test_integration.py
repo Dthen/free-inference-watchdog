@@ -340,6 +340,23 @@ def test_missed_tick_warning_does_not_suppress_alive_ping(tmp_path, capsys):
     assert alive_d["last_output_epoch"] == 1_000_000_000 + 25 * 3600
 
 
+def test_alive_ping_reports_prev_plus_this_tick_drops(tmp_path, capsys,
+                                                      monkeypatch):
+    """F6: the 💚 ping must include THIS tick's webhook drops immediately,
+    not lag them by one tick."""
+    import notify
+    _run(tmp_path, [{"nous": ["a"]}])
+    alive_d = json.loads((tmp_path / "alive.json").read_text())
+    alive_d["dropped_alerts_total"] = 3                  # history
+    (tmp_path / "alive.json").write_text(json.dumps(alive_d))
+    monkeypatch.setattr(notify, "_dropped_total", 1)     # one drop THIS tick
+    code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 25 * 3600)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "💚" in out
+    assert "dropped undeliverable alerts total: 4" in out   # 3 prev + 1 now
+
+
 def test_no_alive_ping_when_diff_emitted(tmp_path):
     """Item 2: when a real diff alert fires, no separate alive ping needed."""
     _run(tmp_path, [{"nous": ["a", "b"]}])
