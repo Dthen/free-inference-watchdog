@@ -9,9 +9,10 @@ OUTPUT_STALE_S = 20 * 3600   # 💚 ping when nothing user-visible for 20h+
 TICK_SLACK_S = 2 * 3600      # ⚠️ warning when last tick older than cadence+slack
 
 
-def should_ping(last_tick, last_output, now):
+def should_ping(last_output, now):
     """Alive ping fires on OUTPUT age alone — ticks updating timestamps must
-    not suppress it (that was the original bug)."""
+    not suppress it (that was the original bug). F8c: the old `last_tick`
+    param was dead and is removed."""
     if last_output is None:
         return True
     return now - last_output >= OUTPUT_STALE_S

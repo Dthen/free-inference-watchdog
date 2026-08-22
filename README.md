@@ -51,11 +51,12 @@ All secrets live in `~/.hermes/.env`:
 | Variable | Required | Purpose |
 |---|---|---|
 | `DISCORD_WEBHOOK_INFERENCE_MONITOR` | no | Kennel/alerts channel webhook. Alerts also go to stdout (Discord home). |
-| `OPENROUTER_API_KEY` | yes | OpenRouter fetcher |
 | `OPENCODE_ZEN_API_KEY` | yes | OpenCode Zen fetcher |
 | `KILOCODE_API_KEY` | yes | Kilo fetcher |
 | `OLLAMA_API_KEY` | yes | Ollama Cloud fetcher |
-| `CLINE_API_KEY` | yes | Cline fetcher (unused — docs-watcher only) |
+
+OpenRouter needs no key — its models endpoint is public. Cline is watched as
+a public docs change-detector; no key is read for it either (F8a).
 
 ### Webhook rotation
 
@@ -152,5 +153,5 @@ accepted blind spot, not a bug.
 python3 -m pytest tests/ -v
 ```
 
-91+ tests across envfile, providers, state, diffing, cooldown, notify, confirm,
+Tests across envfile, providers, state, diffing, cooldown, notify, confirm,
 and full integration (stubbed providers through the complete tick loop).

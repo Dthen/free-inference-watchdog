@@ -228,8 +228,7 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
               f"(last tick {int((now - prev_alive.get('last_tick_epoch', now))//3600)}h ago)",
               webhook_url, paths["pending"], dry_run)
 
-    ping_due = alive.should_ping(prev_alive.get("last_tick_epoch", now),
-                                 prev_alive.get("last_output_epoch"), now)
+    ping_due = alive.should_ping(prev_alive.get("last_output_epoch"), now)
     if ping_due and not emitted_real:
         # F6: report prev total + THIS tick's drops so a drop is visible on
         # the very next ping instead of lagging a full cadence.
@@ -269,6 +268,9 @@ def main(argv=None):
     parser.add_argument("--state-dir", default=None,
                         help="default: <this project>/state")
     args = parser.parse_args(argv)
+    if args.init and args.dry_run:
+        parser.error("--init and --dry-run are mutually exclusive "
+                     "(--init writes a fresh baseline; --dry-run writes nothing)")
 
     state_dir = Path(args.state_dir) if args.state_dir else (
         Path(__file__).resolve().parent / "state")

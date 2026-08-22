@@ -9,25 +9,25 @@ SIX_H = 6 * 3600
 
 def test_fresh_output_never_pings():
     assert not alive.should_ping(
-        NOW - SIX_H, NOW - SIX_H, NOW)          # last tick+output 6h ago
-    assert not alive.should_ping(NOW, NOW - 100, NOW)   # output 100s ago
+        NOW - SIX_H, NOW)                          # output 6h ago (F8c: no last_tick param)
+    assert not alive.should_ping(NOW - 100, NOW)   # output 100s ago
 
 
 def test_ping_after_twenty_hours_of_silence():
-    # Ticks kept happening (last_tick fresh) but NOTHING was emitted for 25h.
-    assert alive.should_ping(NOW, NOW - 25 * 3600, NOW)
+    # Ticks kept happening but NOTHING was emitted for 25h.
+    assert alive.should_ping(NOW - 25 * 3600, NOW)
 
 
 def test_original_bug_regression_guard():
     # The dead-code bug: ticks refreshing the tested timestamp suppressed pings.
     for hours in (6, 12, 18):
-        assert not alive.should_ping(NOW, NOW - hours * 3600, NOW)
+        assert not alive.should_ping(NOW - hours * 3600, NOW)
     # But once output age crosses the threshold it fires EVEN with fresh tick.
-    assert alive.should_ping(NOW, NOW - 20 * 3600 - 1, NOW)
+    assert alive.should_ping(NOW - 20 * 3600 - 1, NOW)
 
 
 def test_first_run_no_output_yet_pings():
-    assert alive.should_ping(None, None, NOW)
+    assert alive.should_ping(None, NOW)
 
 
 def test_missed_ticks_detection():

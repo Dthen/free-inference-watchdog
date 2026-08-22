@@ -26,8 +26,16 @@ def test_first_alert_passes_and_records():
 def test_repeat_within_ttl_suppressed():
     cd = {"nous|m1|added": NOW - 3600}  # 1h ago, TTL 12h
     survivors, out = cooldown.filter_cooldown(_events(("nous", "added", "m1")), cd, NOW)
-    assert survivors == {"nous": {"added": [], "removed": []}}
     assert out["nous|m1|added"] == NOW - 3600  # original timestamp preserved
+
+
+def test_fully_suppressed_provider_omitted_from_survivors():
+    """F8d: the dead 'provider not in survivors' clause used to insert
+    empty-section providers; callers must see them OMITTED instead."""
+    cd = {"nous|m1|added": NOW - 3600}
+    survivors, _ = cooldown.filter_cooldown(
+        _events(("nous", "added", "m1")), cd, NOW)
+    assert survivors == {}
 
 
 def test_different_model_still_passes():

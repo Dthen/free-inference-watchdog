@@ -112,3 +112,47 @@ def test_drain_drops_after_five_attempts(tmp_path, monkeypatch):
     assert dropped == 0
     remaining = notify.load_pending(q)
     assert remaining == []          # dropped after 5th attempt — never infinite
+
+
+# ---------- F8f: hand-edited queues with non-dict rows never crash ----------
+
+def _write_queue(path, items):
+    path.write_text(json.dumps(items), encoding="utf-8")
+
+
+def _boom(req, timeout=10):
+    raise OSError("network down")
+
+
+def test_send_webhook_purges_non_dict_items_as_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(notify, "_urlopen", _boom)
+    qpath = tmp_path / "pending.json"
+    _write_queue(qpath, ["junk-string", 42,
+                         {"payload": {"content": "valid"}, "attempts": 1}])
+    before = notify.get_dropped_total()
+    assert notify.send_webhook("https://hook", "hello", qpath) is False
+    assert notify.get_dropped_total() == before + 2      # junk counted dropped
+    items = notify.load_pending(qpath)
+    contents = sorted(it["payload"]["content"] for it in items)
+    assert contents == ["hello", "valid"]
+
+
+def test_drain_tolerates_non_dict_queue_items(tmp_path, monkeypatch):
+    monkeypatch.setattr(notify, "_urlopen", _urlopen_ok)
+    qpath = tmp_path / "pending.json"
+    _write_queue(qpath, [{"payload": {"content": "good"}}, None, ["nested"]])
+    before = notify.get_dropped_total()
+    sent = notify.drain_pending("https://hook", qpath)
+    assert sent == 1                                     # valid item delivered
+    assert notify.get_dropped_total() == before + 2      # junk counted dropped
+    assert notify.load_pending(qpath) == []
+
+
+def test_drain_item_with_non_int_attempts_does_not_crash(tmp_path, monkeypatch):
+    monkeypatch.setattr(notify, "_urlopen", _boom)
+    qpath = tmp_path / "pending.json"
+    _write_queue(qpath, [{"payload": {"content": "x"}, "attempts": "two"}])
+    sent = notify.drain_pending("https://hook", qpath)
+    assert sent == 0
+    items = notify.load_pending(qpath)
+    assert items and items[0]["attempts"] == 1           # normalized, retained

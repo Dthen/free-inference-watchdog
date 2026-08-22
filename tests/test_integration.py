@@ -90,6 +90,17 @@ def test_cli_init_branch_passes_init_flag(monkeypatch):
     assert captured.get("webhook_url") is None
 
 
+def test_cli_init_and_dry_run_rejected(capsys):
+    """F8e: --init together with --dry-run is an operator error — argparse
+    must error out with a usage message, never silently ignore one flag."""
+    import pytest
+    with pytest.raises(SystemExit) as ei:
+        im.main(["--init", "--dry-run"])
+    assert ei.value.code == 2
+    err = capsys.readouterr().err          # read once: readouterr drains
+    assert "--dry-run" in err and "--init" in err
+
+
 def test_cli_cadence_hours_default_and_override(monkeypatch):
     """F2: --cadence-hours exists (default 6h) and is plumbed to run_tick as
     cadence_s seconds."""

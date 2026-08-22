@@ -83,6 +83,21 @@ def _urlopen(req, timeout=10):  # indirection so tests can monkeypatch
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def _split_valid_items(items):
+    """F8f: hand-edited queues can hold non-dict rows. Purge them, counting
+    each as a dropped alert — never crash the tick on a malformed shape."""
+    valid = [it for it in items if isinstance(it, dict)]
+    for _ in range(len(items) - len(valid)):
+        _bump_drop_counter()
+    return valid
+
+
+def _bump_attempts(item):
+    """Normalize a possibly hand-edited attempts field, then increment."""
+    attempts = item.get("attempts")
+    item["attempts"] = attempts + 1 if isinstance(attempts, int) else 1
+
+
 def send_webhook(webhook_url, content, queue_path, max_attempts=MAX_ATTEMPTS):
     """POST text to the webhook. On failure: enqueue/attempt-bump, return False.
     A payload is DROPPED after max_attempts failures (queue can't poison)."""
@@ -97,11 +112,13 @@ def send_webhook(webhook_url, content, queue_path, max_attempts=MAX_ATTEMPTS):
                 return True
             raise OSError(f"webhook HTTP {resp.status}")
     except Exception:
-        items = load_pending(queue_path)
+        items = _split_valid_items(load_pending(queue_path))
+        save_pending(queue_path, items)          # purge malformed immediately
         existing = next((it for it in items
-                         if it.get("payload", {}).get("content") == content), None)
+                         if isinstance(it.get("payload"), dict)
+                         and it["payload"].get("content") == content), None)
         if existing is not None:
-            existing["attempts"] += 1
+            _bump_attempts(existing)
             if existing["attempts"] >= max_attempts:
                 items.remove(existing)   # drop — surfaced via alive counter
                 _bump_drop_counter()
@@ -125,11 +142,13 @@ def get_dropped_total():
 
 
 def drain_pending(webhook_url, queue_path):
-    """Retry queued payloads oldest-first. Returns number actually delivered."""
-    items = load_pending(queue_path)
+    """Retry queued payloads oldest-first. Returns number actually delivered.
+    F8f: non-dict / malformed rows are purged and counted dropped, never crash."""
+    items = _split_valid_items(load_pending(queue_path))
     remaining, sent = [], 0
     for item in items:
-        content = item.get("payload", {}).get("content", "")
+        payload = item.get("payload")
+        content = payload.get("content", "") if isinstance(payload, dict) else ""
         data = json.dumps({"content": content}).encode("utf-8")
         req = urllib.request.Request(
             webhook_url, data=data,
@@ -143,7 +162,7 @@ def drain_pending(webhook_url, queue_path):
         if ok:
             sent += 1
         else:
-            item["attempts"] += 1
+            _bump_attempts(item)
             if item["attempts"] >= MAX_ATTEMPTS:
                 _bump_drop_counter()
                 continue

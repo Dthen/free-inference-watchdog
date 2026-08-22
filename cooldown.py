@@ -23,6 +23,6 @@ def filter_cooldown(events, cooldowns, now, ttl_s=COOLDOWN_TTL_S):
                     continue  # suppressed — keep original timestamp
                 out_cd[key] = now
                 kept[kind].append(model)
-        if any(kept.values()) or provider not in survivors:
+        if any(kept.values()):
             survivors[provider] = kept
     return survivors, out_cd
