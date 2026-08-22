@@ -1,6 +1,9 @@
 """Integration tests — the full tick loop against stubbed providers."""
 
 import json
+import os
+import stat
+import time
 
 import inference_monitor as im
 
@@ -220,6 +223,47 @@ def test_lock_contention_exits_zero(tmp_path):
     os.utime(lock, (old, old))
     code, _ = _run(tmp_path, [{"nous": ["a"]}])
     assert code == 0       # instant exit, no crash
+
+
+def test_readonly_state_dir_lock_create_fails_exits_two(tmp_path, capsys):
+    """F6-1 (primary path): acquire_lock must sit INSIDE run_tick's fatal
+    handler. A read-only state dir (EACCES / EROFS / ENOSPC class) makes
+    lockfile creation raise OSError — previously that escaped uncaught
+    (CPython exit 1), which the README wrapper deliberately treats as silent
+    routine-outage: monitor dead forever with zero pages. Contract: run_tick
+    RETURNS 2 (the paged FATAL code), never raises, never exits 1."""
+    orig_mode = stat.S_IMODE(os.stat(tmp_path).st_mode)
+    os.chmod(tmp_path, 0o555)                     # read-only dir
+    try:
+        code, _ = _run(tmp_path, [{"nous": ["a"]}])
+        captured = capsys.readouterr()            # drain ONCE (drains both)
+    finally:
+        os.chmod(tmp_path, orig_mode)             # so tmp cleanup works
+    assert code == 2                              # FATAL, paged — not 1, not raise
+    assert "FATAL PermissionError" in captured.err
+    assert captured.out == ""                     # no user-visible output
+
+
+def test_readonly_state_dir_stale_lock_break_fails_exits_two(tmp_path, capsys):
+    """F6-1 (second trigger path): STALE lock (>30 min) in a read-only dir —
+    acquire_lock's unlink raises. Must map to FATAL exit 2 like the primary
+    path AND the finally-block release_lock must stay best-effort (the failed
+    break left the lockfile behind; re-raising there would discard the exit-2
+    return and crash with exit 1 all over again)."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("999999", encoding="utf-8")
+    old = time.time() - 31 * 60                   # > LOCK_STALE_S
+    os.utime(lock, (old, old))
+    orig_mode = stat.S_IMODE(os.stat(tmp_path).st_mode)
+    os.chmod(tmp_path, 0o555)
+    try:
+        code, _ = _run(tmp_path, [{"nous": ["a"]}])
+        captured = capsys.readouterr()
+    finally:
+        os.chmod(tmp_path, orig_mode)
+    assert code == 2
+    assert "FATAL PermissionError" in captured.err
+    assert captured.out == ""
 
 
 def test_dry_run_writes_nothing(tmp_path, capsys):

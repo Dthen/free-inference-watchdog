@@ -97,10 +97,15 @@ def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
         "lock": state_dir / "monitor.lock",
     }
 
-    if not state.acquire_lock(paths["lock"]):
-        print("inference-monitor: already running", file=sys.stderr)
-        return 0
+    # F6-1: acquire_lock runs INSIDE the fatal handler — an OSError creating
+    # or breaking the lockfile (EACCES permission drift, EROFS read-only
+    # remount, ENOSPC) must map to the FATAL exit-2 path the cron wrapper
+    # pages on, never escape as CPython exit 1 (which the wrapper treats as
+    # silent routine outage: monitor dead forever, zero pages).
     try:
+        if not state.acquire_lock(paths["lock"]):
+            print("inference-monitor: already running", file=sys.stderr)
+            return 0
         return _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url,
                             sleep, now, recheck_delay, cooldown_hours,
                             cadence_s, dry_run, init=init)

@@ -133,7 +133,11 @@ def acquire_lock(lock_path, now=None):
 
 
 def release_lock(lock_path):
+    """Best-effort removal. Swallows every OSError, not just FileNotFoundError
+    (F6-1): a failed stale-break leaves the lockfile behind, so unlink can
+    raise PermissionError in run_tick's finally block — re-raising there would
+    discard the FATAL exit-2 return and crash as exit 1 again."""
     try:
         lock_path.unlink()
-    except FileNotFoundError:
+    except OSError:
         pass
