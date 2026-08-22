@@ -75,6 +75,26 @@ def test_init_over_existing_roster_archives_and_stays_silent(tmp_path, capsys):
     assert not (tmp_path / "cooldowns.json").exists()         # no cooldown writes
 
 
+def test_init_refused_by_guard_preserves_roster_exactly(tmp_path, capsys):
+    """F-R2-2 regression: a refused --init (bootstrap guard: zero providers
+    fetched) must leave the previous baseline UNTOUCHED — byte-for-byte — and
+    create no .bak. The old archive-before-guard ordering silently destroyed
+    the baseline on any mid-outage --init."""
+    _run(tmp_path, [{"nous": ["old-1", "old-2"]}])            # good baseline
+    capsys.readouterr()
+    original = (tmp_path / "roster.json").read_bytes()
+    fetch_all, fetch_one, _ = _fetcher([{"nous": None}])      # hard outage
+    code = im.run_tick(
+        tmp_path, REGISTRY, fetch_all, fetch_one, webhook_url=None,
+        sleep=lambda s: None, now=1_000_000_000 + 6 * 3600,
+        recheck_delay=0, init=True)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "bootstrap refused" in err
+    assert not (tmp_path / "roster.json.bak").exists()        # nothing archived
+    assert (tmp_path / "roster.json").read_bytes() == original  # preserved EXACTLY
+
+
 def test_cli_init_branch_passes_init_flag(monkeypatch):
     """F1 wiring: the --init CLI branch must request the init path and keep
     the webhook suppressed."""

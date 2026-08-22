@@ -101,15 +101,9 @@ def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
         print("inference-monitor: already running", file=sys.stderr)
         return 0
     try:
-        if init and paths["roster"].exists():
-            # F1: archive FIRST — the rename removes the original, so the
-            # first_run path below engages naturally (no diff, no alerts,
-            # no cooldown writes). Webhook stays suppressed by the caller.
-            os.replace(paths["roster"],
-                       paths["roster"].with_name(paths["roster"].name + ".bak"))
         return _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url,
                             sleep, now, recheck_delay, cooldown_hours,
-                            cadence_s, dry_run)
+                            cadence_s, dry_run, init=init)
     except Exception as exc:  # fatal — cron captures stderr
         print(f"inference-monitor: FATAL {type(exc).__name__}: {exc}",
               file=sys.stderr)
@@ -128,7 +122,8 @@ def _emit(message, webhook_url, pending_path, dry_run):
 
 
 def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
-                 now, recheck_delay, cooldown_hours, cadence_s, dry_run):
+                 now, recheck_delay, cooldown_hours, cadence_s, dry_run,
+                 init=False):
     prev_roster = diffing.load_filtered_roster(paths["roster"], set(registry))
     prev_providers = (prev_roster or {}).get("providers") or {}
 
@@ -136,6 +131,11 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
     new_map, stale = diffing.apply_sticky(prev_providers, results)
     events, first_run = diffing.compute_events(prev_roster, new_map,
                                                registry=set(registry))
+    if init:
+        # F-R2-2: --init REBASELINES — it never diffs against the old roster
+        # (F1 semantics: exactly "initialized, no diff", zero alerts). The
+        # old baseline is archived only later, AFTER the bootstrap guard.
+        events, first_run = {}, True
 
     # Passive x-ratelimit telemetry (R2-6): {} whenever nous did not succeed.
     nous_ratelimit = {}
@@ -172,6 +172,14 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
                   f"fetched successfully (failed: {failed})", file=sys.stderr)
             return 1
         print("initialized, no diff")
+        if init and not dry_run and paths["roster"].exists():
+            # F-R2-2: the F1 archive now happens HERE — only on an --init run
+            # whose bootstrap guard has PASSED. A refused init (guard above)
+            # returns before this line, so the old baseline is never moved
+            # aside for a rebaseline that never happens. Overwriting a prior
+            # .bak is accepted (documented in README).
+            os.replace(paths["roster"],
+                       paths["roster"].with_name(paths["roster"].name + ".bak"))
         persist_roster()
         if not dry_run:
             state.save_alive(paths["alive"], last_tick_epoch=int(now),
