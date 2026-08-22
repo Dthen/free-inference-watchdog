@@ -41,6 +41,20 @@ def format_bullet_list(models, bullet):
     return "\n".join(lines)
 
 
+def format_transient_counts(transients):
+    """Single rendering of the transients field: `name(count), name(count)`.
+
+    Shared by notify.format_alert and alive.format_alive (F-R2 cosmetic:
+    one field, one rendering). `count` is the int itself when the value is
+    already a number, else added+removed with a floor of 1."""
+    bits = []
+    for name, val in sorted((transients or {}).items()):
+        n = val if isinstance(val, int) else max(
+            1, len(val.get("added", [])) + len(val.get("removed", [])))
+        bits.append(f"{name}({n})")
+    return ", ".join(bits)
+
+
 def format_alert(events, tick_iso, providers_polled, transients, stale,
                  dropped_total):
     """Human-readable alert body. ALWAYS < HARD_CAP_CHARS (footer survives)."""
@@ -57,12 +71,8 @@ def format_alert(events, tick_iso, providers_polled, transients, stale,
             parts.append(f"**{name}**\n" + "\n".join(body))
     notes = []
     if transients:
-        bits = []
-        for name, val in sorted(transients.items()):
-            n = val if isinstance(val, int) else max(
-                1, len(val.get("added", [])) + len(val.get("removed", [])))
-            bits.append(f"{name}({n})")
-        notes.append("transient flaps ignored: " + ", ".join(bits))
+        notes.append("transient flaps ignored: "
+                     + format_transient_counts(transients))
     if stale:
         notes.append(f"fetch failed (carried forward): {', '.join(sorted(stale))}")
     if dropped_total:

@@ -41,5 +41,11 @@ def test_missed_ticks_detection():
 def test_format_alive_variants():
     plain = alive.format_alive(6, [], {}, 0)
     assert "6 providers" in plain and "💚" in plain
-    busy = alive.format_alive(5, ["nous"], {"zen": {"added": [], "removed": []}}, 2)
-    assert "nous" in busy and "zen" in busy and "2" in busy
+    # F-R2-cosmetic: transients render as counts (name(n)) — same single
+    # rendering notify.format_alert uses, not bare names.
+    busy = alive.format_alive(
+        5, ["nous"],
+        {"zen": {"added": [], "removed": ["z2"]}, "kilo": 2}, 2)
+    assert "nous" in busy and "2" in busy
+    assert "zen(1)" in busy          # dict event -> added+removed count
+    assert "kilo(2)" in busy         # pre-counted int passes through

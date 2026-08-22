@@ -26,12 +26,14 @@ def missed_ticks(last_tick, cadence_s, now):
 
 
 def format_alive(providers_polled, stale, transients, dropped_total):
+    import notify  # deferred: single rendering of transients (F-R2 cosmetic)
+
     bits = [f"💚 monitor alive — {providers_polled} providers polled"]
     if stale:
         bits.append("fetch failed (carried forward): " + ", ".join(sorted(stale)))
     if transients:
-        names = ", ".join(sorted(transients))
-        bits.append(f"transient flaps ignored: {names}")
+        bits.append("transient flaps ignored: "
+                    + notify.format_transient_counts(transients))
     if dropped_total:
         bits.append(f"dropped undeliverable alerts total: {dropped_total}")
     return " · ".join(bits)

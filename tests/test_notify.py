@@ -60,14 +60,6 @@ def _urlopen_ok(req, timeout=10):
     return FakeResp()
 
 
-def _urlopen_500(req, timeout=10):
-    raise notify.UrllibError500()
-
-
-class UrllibError500(Exception):
-    pass
-
-
 def test_post_success_no_queue(tmp_path, monkeypatch):
     monkeypatch.setattr(notify, "_urlopen", _urlopen_ok)
     q = tmp_path / "pending.json"

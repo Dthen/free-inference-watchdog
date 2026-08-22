@@ -90,7 +90,7 @@ nous_base = (nous.get("inference_base_url") or "").rstrip("/")
 nous_tok = nous.get("access_token") or ""
 
 CANDIDATES = [
-    ("nous", f"{nous_base}/v1/models",
+    ("nous", f"{nous_base}/models",   # base already ends /v1 (probe fact); {base}/v1/models 404s
      {"Authorization": f"Bearer {nous_tok}"} if nous_tok else {}),
     ("openrouter", "https://openrouter.ai/api/v1/models", {}),
     ("zen[guess]", "https://opencode.ai/zen/v1/models",
