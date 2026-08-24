@@ -325,8 +325,118 @@ def test_fetch_cline_empty_parse_raises():
 
 
 def test_fetch_cline_endpoint_free_ids_extracted():
-    """CHANGE 3 (RED stub — implemented in this round's cline change)."""
-    raise NotImplementedError
+    """CHANGE 3: the NEW primary source is GET
+    https://api.cline.bot/api/v1/ai/cline/recommended-models (public, NO auth
+    header). Response JSON:
+      {"recommended":[{id,name,description,tags[]}], "free":[...],
+       "clinePass":[...], "clineCloud":[]}
+    Extract ids from free[] ONLY (that's the free-roster we track) — items are
+    dicts with an id field; recommended/clinePass/clineCloud NEVER leak in."""
+    body = json.dumps({
+        "recommended": [
+            {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet",
+             "description": "flagship", "tags": ["paid"]},
+            {"id": "minimax/minimax-m2.5", "name": "MiniMax M2.5",
+             "description": "", "tags": ["recommended"]},
+        ],
+        "free": [
+            {"id": "qwen/qwen3-coder", "name": "Qwen3 Coder",
+             "description": "free tier", "tags": ["free"]},
+            {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat",
+             "description": "free tier", "tags": ["free"]},
+        ],
+        "clinePass": [{"id": "pass/only-model", "name": "Pass",
+                       "description": "", "tags": []}],
+        "clineCloud": [],
+    })
+    seen = {}
+
+    def g(url, headers=None, timeout=15):
+        seen.update(url=url, headers=headers or {})
+        return ok(body)
+
+    ids, _ = providers._fetch_cline(getter=g)
+    assert ids == ["deepseek/deepseek-chat", "qwen/qwen3-coder"]
+    assert seen["url"] == providers.CLINE_ENDPOINT
+    assert "Authorization" not in seen["headers"]          # public, NO auth
+    assert "User-Agent" in seen["headers"]                 # UA always sent
+
+
+def test_fetch_cline_endpoint_empty_free_list_is_real_data_not_error():
+    """CHANGE 2+3 together: a healthy endpoint 200 with an EMPTY free[] is
+    real data (all free tiers deleted) — returns [] honestly, never raises,
+    never falls back to docs."""
+    body = json.dumps({"recommended": [], "free": [], "clinePass": [],
+                       "clineCloud": []})
+    g = fake_getter({"/api/v1/ai/cline/recommended-models": ok(body)})
+    ids, _ = providers._fetch_cline(getter=g)
+    assert ids == []
+
+
+def test_fetch_cline_docs_fallback_when_endpoint_fails():
+    """CHANGE 3: when the endpoint RAISES FetchError / HTTP-fails, the two
+    docs pages (free-models.md + api/models.md) become the SECONDARY fallback;
+    their extracted IDs merge as the fallback roster that ticks."""
+    def g(url, headers=None, timeout=15):
+        if "api.cline.bot" in url:
+            raise FetchError("HTTP 503 from " + url)
+        if "free-models" in url:
+            return ok(CLINE_PAGE_A)
+        return ok(CLINE_PAGE_B)
+
+    ids, _ = providers._fetch_cline(getter=g)
+    assert ids == [
+        "anthropic/claude-sonnet-4-6",
+        "minimax/minimax-m2.5",
+    ]
+
+
+def test_fetch_cline_http_error_endpoint_uses_docs_fallback():
+    """CHANGE 3: an endpoint non-200 (not just a transport raise) must also
+    fall back to the docs pages."""
+    def g(url, headers=None, timeout=15):
+        if "api.cline.bot" in url:
+            return (500, "server error", {})
+        return ok(CLINE_PAGE_A + CLINE_PAGE_B)
+
+    ids, _ = providers._fetch_cline(getter=g)
+    assert ids == [
+        "anthropic/claude-sonnet-4-6",
+        "minimax/minimax-m2.5",
+    ]
+
+
+def test_fetch_cline_both_sources_fail_is_loud_fetcherror():
+    """CHANGE 3: endpoint AND docs both failing is an honest loud failure —
+    sticky FetchError (carry-forward), never a silent empty roster that would
+    fire a mass ➖ removal alert."""
+    def g(url, headers=None, timeout=15):
+        raise FetchError(f"dead: {url}")
+
+    with pytest.raises(FetchError):
+        providers._fetch_cline(getter=g)
+
+
+def test_fetch_cline_both_sources_fail_non_200_is_loud_fetcherror():
+    def g(url, headers=None, timeout=15):
+        return (404, "not found", {})
+
+    with pytest.raises(FetchError):
+        providers._fetch_cline(getter=g)
+
+
+def test_fetch_cline_endpoint_ok_docs_never_polled():
+    """CHANGE 3: docs pages are FALLBACK ONLY — a healthy endpoint means the
+    docs watcher is not consulted at all."""
+    calls = []
+
+    def g(url, headers=None, timeout=15):
+        calls.append(url)
+        return ok(json.dumps({"free": [{"id": "only/free-model"}]}))
+
+    ids, _ = providers._fetch_cline(getter=g)
+    assert ids == ["only/free-model"]
+    assert len(calls) == 1 and "api.cline.bot" in calls[0]
 
 
 # ---------- CHANGE 1 (fix-round-9): shape-tolerant parsers ----------

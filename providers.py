@@ -191,8 +191,12 @@ def _fetch_ollama(getter=_default_getter, key=None):
     return ids, {}
 
 
-# ---------- cline (docs change-detector) ----------
+# ---------- cline (endpoint-primary, docs-fallback) ----------
 
+# CHANGE 3 (fix-round-9): Cline DOES expose a public roster endpoint (probed
+# live, no auth header required) — it is now the PRIMARY source. The two docs
+# pages stay as a SECONDARY FALLBACK used only when the endpoint fails.
+CLINE_ENDPOINT = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
 CLINE_PAGES = (
     "https://docs.cline.bot/getting-started/free-models.md",
     "https://docs.cline.bot/api/models.md",
@@ -233,10 +237,32 @@ def _extract_cline_ids(markdown_text):
     return sorted(found)
 
 
-def _fetch_cline(getter=_default_getter):
-    """DOCS CHANGE-DETECTOR: no Cline API exists (probed 404s); we watch the
-    two docs pages' backticked IDs. Known blind spot (documented in plan +
-    README): promo rotations that never touch these pages are invisible."""
+def _fetch_cline_endpoint(getter):
+    """PRIMARY: GET recommended-models, extract ids from free[] ONLY.
+
+    Response shape: {recommended:[{id,...}], free:[...], clinePass:[...],
+    clineCloud:[]} — free[] is the free-roster we track; recommended/
+    clinePass/clineCloud are PAID tiers and must never leak into the roster.
+    An empty free[] on a healthy 200 is REAL data (CHANGE 2): returned as [],
+    never an error, never a fallback trigger. Any transport/HTTP failure
+    raises FetchError so the caller can fall back."""
+    status, body, _hdrs = getter(CLINE_ENDPOINT, headers=_headers(),
+                                 timeout=TIMEOUT_S)
+    _require_ok(status, CLINE_ENDPOINT)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise FetchError("cline endpoint response was not valid JSON") from exc
+    free = payload.get("free") if isinstance(payload, dict) else None
+    if not isinstance(free, list):
+        raise FetchError("unexpected cline endpoint payload shape")
+    ids = sorted(_extract_ids(free, keep=lambda it: it.get("id")))
+    return ids
+
+
+def _fetch_cline_docs_fallback(getter):
+    """SECONDARY FALLBACK (docs change-detector): watch the two docs pages'
+    backticked IDs. Used ONLY when the primary endpoint fails."""
     collected = set()
     got_any_page = False
     for page in CLINE_PAGES:
@@ -252,7 +278,23 @@ def _fetch_cline(getter=_default_getter):
         # Moved/renamed/error pages read as OUTAGE (sticky carry-forward),
         # never as mass removal — plan's empty-parse rule.
         raise FetchError("empty parse: no cline docs pages yielded model ids")
-    return sorted(collected), {}
+    return sorted(collected)
+
+
+def _fetch_cline(getter=_default_getter):
+    """Endpoint-primary with docs fallback (CHANGE 3).
+
+    Primary source GET api.cline.bot/api/v1/ai/cline/recommended-models
+    (public, NO auth header): diff free[].id like every other provider.
+    Docs pages (free-models.md + api/models.md + placeholder denylist regex)
+    remain SECONDARY fallback only — merged in when the endpoint raises
+    FetchError / HTTP-fails. Both failing is an honest loud FetchError
+    (sticky carry-forward), never a silent empty roster."""
+    try:
+        return _fetch_cline_endpoint(getter), {}
+    except FetchError:
+        pass  # fall through to the docs change-detector
+    return _fetch_cline_docs_fallback(getter), {}
 
 
 # ---------- registry (order = display order) ----------
