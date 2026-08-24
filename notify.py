@@ -115,7 +115,7 @@ def send_webhook(webhook_url, content, queue_path, max_attempts=MAX_ATTEMPTS):
     req = urllib.request.Request(
         webhook_url, data=data,
         headers={"Content-Type": "application/json",
-                 "User-Agent": "free-inference-monitor/1.0"})
+                 "User-Agent": "free-inference-watchdog/1.0"})
     try:
         with _urlopen(req, timeout=10) as resp:
             if 200 <= getattr(resp, "status", 200) < 300:
@@ -163,7 +163,7 @@ def drain_pending(webhook_url, queue_path):
         req = urllib.request.Request(
             webhook_url, data=data,
             headers={"Content-Type": "application/json",
-                     "User-Agent": "free-inference-monitor/1.0"})
+                     "User-Agent": "free-inference-watchdog/1.0"})
         try:
             with _urlopen(req, timeout=10) as resp:
                 ok = 200 <= getattr(resp, "status", 200) < 300

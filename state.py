@@ -1,4 +1,4 @@
-"""Atomic state persistence for the Free Inference Monitor. Stdlib only.
+"""Atomic state persistence for the Free Inference Watchdog. Stdlib only.
 
 Crash-safe write ORDER (plan mandate): roster.json FIRST, then pending
 alerts, THEN cooldowns — a crash between stages can lose a cooldown but

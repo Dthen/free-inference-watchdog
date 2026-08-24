@@ -15,7 +15,7 @@ TOK = nous.get("access_token") or ""
 
 def get(url, headers=None, timeout=15):
     req = urllib.request.Request(
-        url, headers={"User-Agent": "free-inference-monitor-probe/1.0", **(headers or {})})
+        url, headers={"User-Agent": "free-inference-watchdog-probe/1.0", **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)

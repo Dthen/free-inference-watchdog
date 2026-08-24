@@ -221,7 +221,7 @@ S5_MIXED_IDS = {
 def test_fetch_mixed_int_and_str_ids_coerced(name, url_frag, kw):
     """S5-1: a provider drifting to MIXED str/int model ids must yield
     coerced, sorted STRINGS — sorting raw values raises TypeError, which
-    escapes build_fetch_all's FetchError-only catch (inference_monitor.py)
+    escapes build_fetch_all's FetchError-only catch (inference_watchdog.py)
     and FATALs the whole tick, repeating every tick. Mirrors ollama's
     existing str(it["id"]) wrap."""
     g = fake_getter({url_frag: ok(json.dumps(S5_MIXED_IDS))})

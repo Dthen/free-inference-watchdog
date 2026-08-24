@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live endpoint probe for Free Inference Monitor (plan Task 2).
+# Live endpoint probe for Free Inference Watchdog (plan Task 2).
 # Prints ONLY: provider name, HTTP status, id count, sample pricing SHAPE (type/truncated).
 # NEVER prints tokens or full response bodies.
 set -euo pipefail
@@ -51,7 +51,7 @@ def get(url, headers=None, timeout=15):
     if not url:
         return None, "(no url)"
     req = urllib.request.Request(
-        url, headers={"User-Agent": "free-inference-monitor-probe/1.0", **(headers or {})}
+        url, headers={"User-Agent": "free-inference-watchdog-probe/1.0", **(headers or {})}
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -114,7 +114,7 @@ CANDIDATES = [
     ("cline-docs-index", "https://docs.cline.bot/llms.txt", {}),
 ]
 
-print("== free-inference-monitor endpoint probe ==")
+print("== free-inference-watchdog endpoint probe ==")
 print(f"(config urls discovered: {len(CFG_URLS)}; secrets never printed)")
 for name, url, hdrs in CANDIDATES:
     status, body = get(url, hdrs)

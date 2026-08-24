@@ -1,4 +1,4 @@
-# free-inference-monitor
+# free-inference-watchdog
 
 Zero-token cron watchdog for 6 free-tier LLM gateways. Alerts Discord when a
 free model appears or disappears. Stdlib-only Python, one tick per invocation,
@@ -22,10 +22,10 @@ Every 6 hours (`--recheck-delay` determines the recheck nap), the monitor:
 ## Quick start
 
 ```bash
-cd ~/projects/free-inference-monitor
-python3 inference_monitor.py --dry-run          # see what would happen
-python3 inference_monitor.py --init             # bootstrap roster.json
-python3 inference_monitor.py                    # one tick (cron does this)
+cd ~/projects/free-inference-watchdog
+python3 inference_watchdog.py --dry-run          # see what would happen
+python3 inference_watchdog.py --init             # bootstrap roster.json
+python3 inference_watchdog.py                    # one tick (cron does this)
 ```
 
 ## Cron registration
@@ -36,7 +36,7 @@ Register as a Hermes cron job (`no_agent=True` mode — stdout IS the delivery):
 hermes cron register \
   --schedule "17 */6 * * *" \
   --no_agent \
-  --command "cd /home/kimbo/projects/free-inference-monitor || { echo \"inference-monitor FAILED (cannot cd)\"; exit 1; }; python3 inference_monitor.py || { c=\$?; [ \$c -eq 1 ] || echo \"inference-monitor FAILED (exit \$c)\"; }" \
+  --command "cd /home/kimbo/projects/free-inference-watchdog || { echo \"inference-watchdog FAILED (cannot cd)\"; exit 1; }; python3 inference_watchdog.py || { c=\$?; [ \$c -eq 1 ] || echo \"inference-watchdog FAILED (exit \$c)\"; }" \
   --deliver discord-home
 ```
 
@@ -56,7 +56,7 @@ All secrets live in `~/.hermes/.env`:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DISCORD_WEBHOOK_INFERENCE_MONITOR` | no | Kennel/alerts channel webhook. Alerts also go to stdout (Discord home). |
+| `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | no | Kennel/alerts channel webhook. Alerts also go to stdout (Discord home). |
 | `OPENCODE_ZEN_API_KEY` | yes | OpenCode Zen fetcher |
 | `KILOCODE_API_KEY` | yes | Kilo fetcher |
 | `OLLAMA_API_KEY` | yes | Ollama Cloud fetcher |
@@ -66,7 +66,7 @@ a public docs change-detector; no key is read for it either (F8a).
 
 ### Webhook rotation
 
-1. Update `DISCORD_WEBHOOK_INFERENCE_MONITOR` in `~/.hermes/.env`.
+1. Update `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in `~/.hermes/.env`.
 2. Undelivered alerts queue in `state/pending_alerts.json` — drain manually:
 
 ```bash
@@ -124,7 +124,7 @@ If the monitor crashes without releasing its PID lock:
 
 ```bash
 # Verify no monitor is actually running:
-pgrep -f inference_monitor.py
+pgrep -f inference_watchdog.py
 
 # If nothing holds it:
 rm state/monitor.lock

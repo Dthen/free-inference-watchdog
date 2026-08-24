@@ -34,14 +34,14 @@ def test_cron_wrapper_guards_cd_before_python():
     dead-monitor-indistinguishable-from-silence scenario). The wrapper must
     split into a separate cd-guard followed by the python stage."""
     text = _unescaped(README.read_text(encoding="utf-8"))
-    assert ('cd /home/kimbo/projects/free-inference-monitor || '
-            '{ echo "inference-monitor FAILED (cannot cd)"; exit 1; }') in text, \
+    assert ('cd /home/kimbo/projects/free-inference-watchdog || '
+            '{ echo "inference-watchdog FAILED (cannot cd)"; exit 1; }') in text, \
         "README cron wrapper lost the separate cannot-cd guard"
     # On the wrapper's own command line the cd-guard must precede the python
     # stage (a bare-text index would false-trip on the Quick-start mention).
     line = next(l for l in _unescaped(README.read_text(encoding="utf-8"))
                 .splitlines() if "[ $c -eq 1 ]" in l)
-    assert line.index("cannot cd") < line.index("python3 inference_monitor.py"), \
+    assert line.index("cannot cd") < line.index("python3 inference_watchdog.py"), \
         "cd-guard must run BEFORE the python invocation"
 
 
@@ -54,7 +54,7 @@ def test_readme_wrapper_block_is_wellformed_shell():
     cmd = line.strip().rstrip("\\").strip()
     cmd = cmd.split("--command ", 1)[1].strip().strip('"')
     tokens = shlex.split(cmd)          # raises ValueError if not valid shell
-    assert any("inference_monitor.py" in t for t in tokens)
+    assert any("inference_watchdog.py" in t for t in tokens)
     assert any("FAILED" in t for t in tokens)
 
 

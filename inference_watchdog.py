@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Free Inference Monitor — one tick per invocation. Stdlib only, zero tokens.
+"""Free Inference Watchdog — one tick per invocation. Stdlib only, zero tokens.
 
 Hermes cron (no_agent mode): non-empty stdout is delivered verbatim to the
 Discord home channel; empty stdout = silent. Every user-visible message also
-goes to $DISCORD_WEBHOOK_INFERENCE_MONITOR (kennel channel) when configured.
+goes to $DISCORD_WEBHOOK_INFERENCE_WATCHDOG (kennel channel) when configured.
 """
 
 import argparse
@@ -108,14 +108,14 @@ def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
     acquired = False
     try:
         if not state.acquire_lock(paths["lock"]):
-            print("inference-monitor: already running", file=sys.stderr)
+            print("inference-watchdog: already running", file=sys.stderr)
             return 0
         acquired = True
         return _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url,
                             sleep, now, recheck_delay, cooldown_hours,
                             cadence_s, dry_run, init=init)
     except Exception as exc:  # fatal — cron captures stderr
-        print(f"inference-monitor: FATAL {type(exc).__name__}: {exc}",
+        print(f"inference-watchdog: FATAL {type(exc).__name__}: {exc}",
               file=sys.stderr)
         return 2
     finally:
@@ -180,7 +180,7 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         # an empty baseline (it would emit the universe as "added" next tick).
         if results and all(v is None for v in results.values()):
             failed = ", ".join(sorted(results))
-            print(f"inference-monitor: bootstrap refused — zero providers "
+            print(f"inference-watchdog: bootstrap refused — zero providers "
                   f"fetched successfully (failed: {failed})", file=sys.stderr)
             return 1
         print("initialized, no diff")
@@ -244,7 +244,7 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
     # The ⚠️ missed-tick warning is NOT a real emission: it must NOT suppress
     # the 💚 ping and must NOT refresh last_output_epoch.
     if alive.missed_ticks(prev_alive.get("last_tick_epoch"), cadence_s, now):
-        _emit("⚠️ inference-monitor: missed ticks detected "
+        _emit("⚠️ inference-watchdog: missed ticks detected "
               f"(last tick {int((now - prev_alive.get('last_tick_epoch', now))//3600)}h ago)",
               webhook_url, paths["pending"], dry_run)
 
@@ -274,7 +274,7 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
 # ---------- CLI ----------
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Free Inference Monitor tick")
+    parser = argparse.ArgumentParser(description="Free Inference Watchdog tick")
     parser.add_argument("--init", action="store_true",
                         help="bootstrap roster, no diffing, no alerts")
     parser.add_argument("--dry-run", action="store_true",
@@ -295,7 +295,7 @@ def main(argv=None):
     state_dir = Path(args.state_dir) if args.state_dir else (
         Path(__file__).resolve().parent / "state")
     env = parse_envfile(HERMES_ENV)
-    webhook = env.get("DISCORD_WEBHOOK_INFERENCE_MONITOR") or None
+    webhook = env.get("DISCORD_WEBHOOK_INFERENCE_WATCHDOG") or None
     fetch_all = build_fetch_all(env)
     fetch_one = build_fetch_one(env)
 

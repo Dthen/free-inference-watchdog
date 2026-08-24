@@ -5,7 +5,7 @@ import os
 import stat
 import time
 
-import inference_monitor as im
+import inference_watchdog as im
 
 
 REGISTRY = {"nous", "openrouter", "zen", "kilo", "ollama", "cline"}

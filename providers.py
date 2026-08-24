@@ -1,4 +1,4 @@
-"""Six provider fetchers for the Free Inference Monitor. Stdlib only.
+"""Six provider fetchers for the Free Inference Watchdog. Stdlib only.
 
 Contract: each fetcher returns (ids: list[str], meta: dict) with ids SORTED,
 or raises FetchError. Transport is injectable via `getter(url, headers, timeout)
@@ -11,7 +11,7 @@ import re
 import urllib.error
 import urllib.request
 
-USER_AGENT = "free-inference-monitor/1.0"
+USER_AGENT = "free-inference-watchdog/1.0"
 TIMEOUT_S = 15
 
 

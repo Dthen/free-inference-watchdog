@@ -105,7 +105,7 @@ def test_alive_missing_is_empty_dict(tmp_path):
 
 def test_alive_numeric_fields_coerced_or_dropped(tmp_path):
     """S5-2: last_tick_epoch / last_output_epoch / dropped_alerts_total feed
-    raw arithmetic in alive.py and inference_monitor.py — a hand-edited
+    raw arithmetic in alive.py and inference_watchdog.py — a hand-edited
     string or null raised TypeError => FATAL exit 2 on every normal tick.
     At load: int/float coerce via int(), anything else (str, None, missing)
     drops the field (treated absent; callers already handle absent fields)."""
