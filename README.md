@@ -9,7 +9,7 @@ no LLM calls ever.
 Every 6 hours (`--recheck-delay` determines the recheck nap), the monitor:
 
 1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**,
-   **Kilo**, **Ollama Cloud**, and **Cline** (docs-watcher — see blind spot).
+   **Kilo**, **Ollama Cloud**, and **Cline** (endpoint-primary, docs fallback).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
    an outage never looks like a mass removal).
 3. Set-diffs against the previous `roster.json`.
@@ -61,8 +61,8 @@ All secrets live in `~/.hermes/.env`:
 | `KILOCODE_API_KEY` | yes | Kilo fetcher |
 | `OLLAMA_API_KEY` | yes | Ollama Cloud fetcher |
 
-OpenRouter needs no key — its models endpoint is public. Cline is watched as
-a public docs change-detector; no key is read for it either (F8a).
+OpenRouter needs no key — its models endpoint is public. Cline's roster
+endpoint is also public (no auth header); no key is read for it either.
 
 ### Webhook rotation
 
@@ -139,12 +139,14 @@ before clean-rebaselining. It always prints "initialized, no diff" and never
 alerts. A prior `roster.json.bak` is overwritten by each successful init.
 Safe to re-run at any time.
 
-## Cline docs-watcher blind spot
+## Cline endpoint-primary with docs fallback
 
-Cline has no public models API (all probed endpoints 404). The monitor watches
-two docs pages for backticked model IDs. **Promo rotations that don't touch
-these pages are invisible** — no API, no ID list exists publicly. This is an
-accepted blind spot, not a bug.
+Cline's primary source is the public roster endpoint
+`GET https://api.cline.bot/api/v1/ai/cline/recommended-models` (no auth
+header); the free-roster tracked is the endpoint's `free[]` id list. The two
+docs pages (`free-models.md`, `api/models.md`) remain a SECONDARY fallback
+used only when the endpoint fails; if both sources fail the tick reports a
+loud fetch failure (sticky carry-forward), never a mass removal.
 
 ## Exit codes
 
