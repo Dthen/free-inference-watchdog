@@ -1,16 +1,21 @@
-"""Discord delivery: pretty alerts, poison-pill caps, bounded retry queue.
+"""Discord delivery: pretty alerts, message splitting, bounded retry queue.
 
 Delivery topology (plan round 2): every user-visible message goes to BOTH
 stdout (cron -> Discord home) AND the webhook (kennel channel). Webhook
 failure never blocks the stdout copy.
+
+CHANGE 4 (fix-round-9): alerts are NEVER capped or truncated — format_alert
+lists EVERY added/removed model by name. Discord's 2000-char hard limit is
+handled by SPLITTING: assembled text >1900 chars is split at section/bullet
+boundaries into sequential messages delivered in order; the retry queue
+holds failed chunks individually (per-chunk semantics).
 """
 
 import json
 import time
 import urllib.request
 
-MAX_BULLETS_PER_SECTION = 15
-HARD_CAP_CHARS = 1900           # Discord limit is 2000; footer must survive
+SAFE_CHUNK_CHARS = 1900         # Discord hard limit is 2000
 MAX_ATTEMPTS = 5                # pending payload dropped after this many POSTs
 
 
@@ -30,15 +35,41 @@ def save_pending(queue_path, items):
 
 
 def format_bullet_list(models, bullet):
-    """Capped bullet list: '…+N more' beyond the cap."""
-    lines = []
-    shown = models[:MAX_BULLETS_PER_SECTION]
-    for m in shown:
-        lines.append(f"{bullet} `{m}`")
-    rest = len(models) - len(shown)
-    if rest > 0:
-        lines.append(f"…+{rest} more")
-    return "\n".join(lines)
+    """UNCAPPED bullet list (CHANGE 4): every model by name, every time."""
+    return "\n".join(f"{bullet} `{m}`" for m in models)
+
+
+def split_message(text, max_chars=SAFE_CHUNK_CHARS):
+    """Split assembled text into chunks each <= max_chars at LINE boundaries
+    (sections/bullets are whole lines — an id is never cut mid-name).
+
+    Joining the chunks reproduces the input exactly (fuzz-pinned, incl.
+    trailing empty lines); a single line longer than max_chars becomes its
+    own oversized chunk rather than being dropped. Empty/short input yields
+    a single-element list."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks, cur_lines, cur_len = [], [], 0
+
+    def flush():
+        chunks.append("\n".join(cur_lines))
+
+    for line in text.split("\n"):
+        extra = len(line) + 1 if cur_lines else len(line)
+        if cur_len + extra <= max_chars:
+            cur_lines.append(line)
+            cur_len += extra
+            continue
+        if cur_lines:
+            flush()
+        if len(line) <= max_chars:
+            cur_lines, cur_len = [line], len(line)   # starts the next chunk
+        else:
+            chunks.append(line)                      # oversize line: OWN chunk
+            cur_lines, cur_len = [], 0
+    if cur_lines or not chunks:
+        chunks.append("\n".join(cur_lines))
+    return chunks
 
 
 def format_transient_counts(transients):
@@ -57,7 +88,11 @@ def format_transient_counts(transients):
 
 def format_alert(events, tick_iso, providers_polled, transients, stale,
                  dropped_total):
-    """Human-readable alert body. ALWAYS < HARD_CAP_CHARS (footer survives)."""
+    """Human-readable alert body — UNCAPPED (CHANGE 4).
+
+    Lists EVERY added/removed model by name under its provider heading.
+    Text larger than Discord's limit is handled downstream by
+    split_message(); nothing is ever truncated or elided here."""
     parts = ["**🔔 Free-tier roster change**"]
     for name in sorted(events):
         added = events[name].get("added") or []
@@ -80,11 +115,7 @@ def format_alert(events, tick_iso, providers_polled, transients, stale,
     tail = f"\n\n— {tick_iso} · {providers_polled} providers polled"
     if notes:
         tail += " · " + " · ".join(notes)
-    body_text = "\n\n".join(parts)
-    if len(body_text) + len(tail) >= HARD_CAP_CHARS:
-        keep = HARD_CAP_CHARS - len(tail) - 20
-        body_text = body_text[:keep].rsplit("\n", 1)[0] + "\n…(truncated)"
-    return body_text + tail
+    return "\n\n".join(parts) + tail
 
 
 # ---------- webhook plumbing ----------
@@ -109,8 +140,23 @@ def _bump_attempts(item):
 
 
 def send_webhook(webhook_url, content, queue_path, max_attempts=MAX_ATTEMPTS):
-    """POST text to the webhook. On failure: enqueue/attempt-bump, return False.
-    A payload is DROPPED after max_attempts failures (queue can't poison)."""
+    """POST text to the webhook, SPLIT into <=1900-char chunks (CHANGE 4).
+
+    Oversized alerts are delivered as sequential chunks IN ORDER; each chunk
+    is retried individually — a failed chunk is enqueued/attempt-bumped on
+    its own (per-chunk retry-queue semantics) and DROPPED after max_attempts
+    failures (queue can't poison). Returns True only if EVERY chunk posted."""
+    all_ok = True
+    for chunk in split_message(content):
+        if not _send_webhook_chunk(webhook_url, chunk, queue_path,
+                                   max_attempts=max_attempts):
+            all_ok = False
+    return all_ok
+
+
+def _send_webhook_chunk(webhook_url, content, queue_path,
+                        max_attempts=MAX_ATTEMPTS):
+    """Single-chunk POST with the bounded retry-queue semantics."""
     data = json.dumps({"content": content}).encode("utf-8")
     req = urllib.request.Request(
         webhook_url, data=data,
