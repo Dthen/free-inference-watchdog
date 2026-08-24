@@ -195,6 +195,21 @@ def test_transient_removal_never_alerts(tmp_path, capsys):
     assert roster["providers"]["zen"] == ["z1", "z2"]  # recheck state wins
 
 
+def test_empty_roster_diffs_honestly_into_alert(tmp_path, capsys):
+    """CHANGE 2: an empty result from a healthy fetch is REAL data (all free
+    tiers deleted) — it must flow through the tick as a confirmed mass ➖
+    alert, never be swallowed as outage/sticky. End-to-end: baseline [a,b] ->
+    next tick fetches [] (recheck agrees) -> one honest removal alert."""
+    _run(tmp_path, [{"nous": ["a", "b"]}])
+    code, _ = _run(tmp_path, [{"nous": []}, {"nous": []}],
+                   now=1_000_000_000 + 6 * 3600)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "➖ `a`" in out and "➖ `b`" in out
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"]["nous"] == []          # empty truth persisted
+
+
 def test_fetch_failure_sticky_no_alert(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a", "b"]}])
     code, _ = _run(tmp_path, [{"nous": None}], now=1_000_000_000 + 6 * 3600)
