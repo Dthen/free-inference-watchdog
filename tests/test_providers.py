@@ -320,6 +320,60 @@ def test_fetch_cline_empty_parse_raises():
         providers._fetch_cline(getter=g)
 
 
+# ---------- CHANGE 1 (fix-round-9): shape-tolerant parsers ----------
+# Real captured payload shapes: nous/openrouter/kilo ship DICT items
+# {"id": ...}; zen ships MIXED bare strings + dicts. A provider drifting
+# between shapes must never blank its own roster (zen's original live bug).
+SHAPE_MIXED_ITEMS = {
+    "data": [
+        {"id": "dict-only/model", "pricing": {"prompt": "0", "completion": "0"}},
+        "bare/string-model",
+        {"id": "mixed/second", "pricing": {"prompt": "0", "completion": "0"}},
+    ]
+}
+
+
+@pytest.mark.parametrize("name,url_frag,kw,expected_extra", [
+    # dict-only real shape (nous/openrouter/kilo): strings now ALSO extracted
+    ("nous", "/v1/models", {"auth": {"token": "t", "base": "https://x/v1"}},
+     ["bare/string-model"]),
+    ("openrouter", "openrouter.ai", {}, ["bare/string-model"]),
+    ("kilo", "api.kilo.ai", {"key": "k"}, ["bare/string-model"]),
+])
+def test_fetch_accepts_string_and_dict_items(name, url_frag, kw, expected_extra):
+    """CHANGE 1: every API roster fetcher extracts ids from BOTH plain string
+    items AND dict items via it.get('id'). No behavior change for well-formed
+    dict input — the free/pricing filter still applies to dicts."""
+    g = fake_getter({url_frag: ok(json.dumps(SHAPE_MIXED_ITEMS))})
+    ids, _ = providers.PROVIDERS[name](getter=g, **kw)
+    assert ids == sorted(["dict-only/model", "mixed/second"] + expected_extra)
+
+
+def test_fetch_ollama_accepts_string_and_dict_items():
+    """CHANGE 1: ollama (no pricing field) tolerates string items too."""
+    g = fake_getter({"ollama.com": ok(json.dumps(SHAPE_MIXED_ITEMS))})
+    ids, _ = providers._fetch_ollama(getter=g, key="k")
+    assert ids == ["bare/string-model", "dict-only/model", "mixed/second"]
+
+
+@pytest.mark.parametrize("name,url_frag,kw", [
+    ("nous", "/v1/models", {"auth": {"token": "t", "base": "https://x/v1"}}),
+    ("openrouter", "openrouter.ai", {}),
+    ("kilo", "api.kilo.ai", {"key": "k"}),
+])
+def test_fetch_wellformed_dict_input_unchanged(name, url_frag, kw):
+    """CHANGE 1 no-regression pin: well-formed dict payloads yield exactly the
+    same ids as before (free-filtered, sorted) — shape tolerance adds string
+    extraction without touching dict behavior."""
+    g = fake_getter({url_frag: ok(json.dumps(OR_MODELS if name == "openrouter"
+                                             else KILO_MODELS))})
+    ids, _ = providers.PROVIDERS[name](getter=g, **kw)
+    if name == "openrouter":
+        assert ids == ["a/free:free"]
+    else:
+        assert ids == ["kilo-auto/free", "stepfun/free:free"]
+
+
 def test_registry_has_six_providers():
     assert set(providers.PROVIDERS) == {
         "nous", "openrouter", "zen", "kilo", "ollama", "cline"

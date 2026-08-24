@@ -67,6 +67,22 @@ def _parse_model_list(body):
     return items
 
 
+def _extract_ids(items, keep):
+    """Shape-tolerant id extraction (fix-round-9 CHANGE 1).
+
+    Real captured roster shapes: nous/openrouter/kilo ship dict items
+    {"id": ...}; zen ships MIXED bare strings + dicts. Every API fetcher must
+    accept BOTH: dicts yield their `id` field, plain strings/ints are kept
+    verbatim (str'd), and only missing/empty/null ids are skipped.
+    `keep(dict)` is the per-provider dict predicate (pricing/free filter);
+    non-dict items bypass it entirely. Mirrors zen's proven extraction."""
+    return [
+        str(it.get("id")) if isinstance(it, dict) else str(it)
+        for it in items
+        if (keep(it) if isinstance(it, dict) else it)
+    ]
+
+
 def _require_ok(status, url):
     if status != 200:
         raise FetchError(f"HTTP {status} from {url}")
@@ -108,10 +124,9 @@ def _fetch_nous(getter=_default_getter, auth=None):
         timeout=TIMEOUT_S,
     )
     _require_ok(status, url)
-    ids = sorted(
-        str(it["id"]) for it in _parse_model_list(body)
-        if isinstance(it, dict) and it.get("id") and is_free(it.get("pricing"))
-    )
+    ids = sorted(_extract_ids(
+        _parse_model_list(body),
+        keep=lambda it: it.get("id") and is_free(it.get("pricing"))))
     ratelimit = {k: v for k, v in (hdrs or {}).items() if "ratelimit" in k.lower()}
     return ids, {"ratelimit": ratelimit}
 
@@ -122,10 +137,9 @@ def _fetch_openrouter(getter=_default_getter):
     url = "https://openrouter.ai/api/v1/models"  # public, no auth
     status, body, _hdrs = getter(url, headers=_headers(), timeout=TIMEOUT_S)
     _require_ok(status, url)
-    ids = sorted(
-        str(it["id"]) for it in _parse_model_list(body)
-        if isinstance(it, dict) and it.get("id") and is_free(it.get("pricing"))
-    )
+    ids = sorted(_extract_ids(
+        _parse_model_list(body),
+        keep=lambda it: it.get("id") and is_free(it.get("pricing"))))
     return ids, {}
 
 
@@ -143,11 +157,7 @@ def _fetch_zen(getter=_default_getter, key=None):
     status, body, _hdrs = getter(ZEN_URL, headers=_headers(extra), timeout=TIMEOUT_S)
     _require_ok(status, ZEN_URL)
     items = _parse_model_list(body)
-    ids = sorted(
-        str(it.get("id")) if isinstance(it, dict) else str(it)
-        for it in items
-        if (it.get("id") if isinstance(it, dict) else it)
-    )
+    ids = sorted(_extract_ids(items, keep=lambda it: it.get("id")))
     return ids, {}
 
 
@@ -161,10 +171,9 @@ def _fetch_kilo(getter=_default_getter, key=None):
     extra = {"Authorization": f"Bearer {key}"} if key else {}
     status, body, _hdrs = getter(KILO_URL, headers=_headers(extra), timeout=TIMEOUT_S)
     _require_ok(status, KILO_URL)
-    ids = sorted(
-        str(it["id"]) for it in _parse_model_list(body)
-        if isinstance(it, dict) and it.get("id") and is_free(it.get("pricing"))
-    )
+    ids = sorted(_extract_ids(
+        _parse_model_list(body),
+        keep=lambda it: it.get("id") and is_free(it.get("pricing"))))
     return ids, {}
 
 
@@ -178,10 +187,7 @@ def _fetch_ollama(getter=_default_getter, key=None):
     extra = {"Authorization": f"Bearer {key}"} if key else {}
     status, body, _hdrs = getter(OLLAMA_URL, headers=_headers(extra), timeout=TIMEOUT_S)
     _require_ok(status, OLLAMA_URL)
-    ids = sorted(
-        str(it["id"]) for it in _parse_model_list(body)
-        if isinstance(it, dict) and it.get("id")
-    )
+    ids = sorted(_extract_ids(_parse_model_list(body), keep=lambda it: it.get("id")))
     return ids, {}
 
 
