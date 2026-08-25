@@ -288,8 +288,10 @@ def test_fetch_mixed_int_and_str_ids_coerced(name, url_frag, kw):
     escapes build_fetch_all's FetchError-only catch (inference_watchdog.py)
     and FATALs the whole tick, repeating every tick. Mirrors the str(id)
     coercion nous/openrouter/kilo have applied since fix-round S5-1 (which
-    unified the then-mixed wrapping); cline's ids arrive pre-stringified
-    from regex extraction and need none."""
+    unified the then-mixed wrapping). Cline is excluded because its primary
+    endpoint path shares this helper's coercion by construction, and its
+    docs-fallback path yields strings directly from backtick-span extraction
+    — neither fits this fixture's {"data": [...]} shape."""
     g = fake_getter({url_frag: ok(json.dumps(S5_MIXED_IDS))})
     ids, _ = providers.PROVIDERS[name](getter=g, **kw)
     assert ids == ["1", "a-model"]
