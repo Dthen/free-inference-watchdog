@@ -225,8 +225,8 @@ def test_fetch_zen_case_insensitive_and_position_independent_marker():
 
 def test_fetch_zen_dedupes_and_rejects_non_string_ids():
     """Dedupe is intentional (duplicate ids must not double-fire alerts) and
-    the keep predicate type-gates: non-str dict ids are rejected outright,
-    never repr-coerced into the roster."""
+    the single-point gate covers BOTH item shapes: non-str ids AND non-str
+    bare items are rejected outright, never repr-coerced into the roster."""
     g = fake_getter({"/zen/v1/models": ok(json.dumps({"data": [
         {"id": "dup-free-model"},
         {"id": "dup-free-model"},            # duplicate -> appears ONCE
@@ -236,6 +236,8 @@ def test_fetch_zen_dedupes_and_rejects_non_string_ids():
         {"id": True},                        # bool id -> OUT
         {"id": None},                        # null id -> OUT
         {"id": ""},                          # empty str id -> OUT
+        ["free"],                            # bare ARRAY item -> OUT (no repr coercion)
+        {"note": "free tier"},               # bare dict item WITHOUT id -> OUT
         "bare-free-string",                  # bare string -> IN verbatim
     ]}))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
