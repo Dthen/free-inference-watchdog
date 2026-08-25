@@ -150,9 +150,12 @@ def test_fetch_openrouter():
 # ---------- zen ----------
 
 def test_fetch_zen_bare_ids_verbatim():
-    g = fake_getter({"/zen/v1/models": ok(json.dumps(["zz-model", "aa-model"]))})
+    # Free-only filter (decision 2026-08-25): fixture ids carry the 'free'
+    # marker; bare-string ITEMS are still extracted verbatim and sorted.
+    g = fake_getter({"/zen/v1/models": ok(json.dumps(
+        ["zz-free-model", "aa-free-model"]))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
-    assert ids == ["aa-model", "zz-model"]  # sorted for stable diffs, values untouched
+    assert ids == ["aa-free-model", "zz-free-model"]  # sorted for stable diffs, values untouched
 
 
 def test_fetch_zen_model_dict_objects_extract_id():
@@ -161,18 +164,48 @@ def test_fetch_zen_model_dict_objects_extract_id():
     (64 items). The old isinstance((str, int)) filter dropped all of them,
     pinning zen=[] forever. Dicts yield their id; strings/ints stay verbatim;
     missing/empty/null id => skipped. Still bare-ID diffing (decision #3) —
-    we extract the id field, no alias mapping."""
+    we extract the id field, no alias mapping.
+    Free-only filter (decision 2026-08-25): extracted ids must ALSO carry the
+    'free' marker — the unmarked int 42 still exercises str-coercion through
+    _extract_ids but is correctly filtered out of the roster."""
     body = json.dumps([
-        {"id": "claude-fable-5", "object": "model", "owned_by": "opencode"},
-        "bare-string-model",
+        {"id": "claude-fable-5-free", "object": "model", "owned_by": "opencode"},
+        "bare-string-model-free",
         {"object": "model"},             # missing id -> skipped
         {"id": "", "object": "model"},   # empty id -> skipped
         {"id": None},                    # null id -> skipped
-        42,                              # int stays verbatim (str'd, sorted)
+        42,                              # int coerced, then filtered (no marker)
     ])
     g = fake_getter({"/zen/v1/models": ok(body)})
     ids, _ = providers._fetch_zen(getter=g)
-    assert ids == ["42", "bare-string-model", "claude-fable-5"]
+    assert ids == ["bare-string-model-free", "claude-fable-5-free"]
+
+
+# ---------- zen free-only filter ----------
+
+ZEN_PAID_AND_FREE = {
+    "data": [
+        {"id": "claude-opus-5"},                       # paid, no marker -> OUT
+        {"id": "gpt-5.4-pro"},                         # paid -> OUT
+        {"id": "deepseek-v4-flash-free"},              # marker -> IN
+        {"id": "x-preview-f-free"},                    # Ox Alpha -> IN
+        {"id": "big-pickle"},                          # stealth allowlist -> IN
+        {"id": "nemotron-3-ultra-free"},               # marker -> IN
+    ]
+}
+
+def test_fetch_zen_keeps_only_free_marked_and_allowlisted():
+    g = fake_getter({"opencode.ai": ok(json.dumps(ZEN_PAID_AND_FREE))})
+    ids, _ = providers._fetch_zen(getter=g, key="k")
+    assert ids == ["big-pickle", "deepseek-v4-flash-free",
+                   "nemotron-3-ultra-free", "x-preview-f-free"]
+
+def test_fetch_zen_empty_after_filter_is_real_data():
+    """Healthy 200 whose every model is paid -> [] roster (never an error)."""
+    g = fake_getter({"opencode.ai": ok(json.dumps(
+        {"data": [{"id": "claude-opus-5"}]}))})
+    ids, _ = providers._fetch_zen(getter=g, key="k")
+    assert ids == []
 
 
 # ---------- kilo ----------
