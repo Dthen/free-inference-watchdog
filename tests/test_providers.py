@@ -174,23 +174,28 @@ def test_fetch_zen_model_dict_objects_extract_id():
     """Item 5 (live bug): zen's /v1/models returns MODEL OBJECTS
     ({'id': ..., 'object': 'model', ...}), NOT bare strings — verified live
     (64 items). The old isinstance((str, int)) filter dropped all of them,
-    pinning zen=[] forever. Dicts yield their id; strings/ints stay verbatim;
-    missing/empty/null id => skipped. Still bare-ID diffing (decision #3) —
-    we extract the id field, no alias mapping.
-    Free-only filter (decision 2026-08-25): extracted ids must ALSO carry the
-    'free' marker — the unmarked int 42 still exercises str-coercion through
-    _extract_ids but is correctly filtered out of the roster."""
+    pinning zen=[] forever. Dicts yield their id; strings stay verbatim.
+    Free-only filter (decision 2026-08-25): surviving ids must ALSO carry
+    the 'free' marker or sit on the stealth allowlist. Non-str ids
+    (int/dict/list/None) are dropped outright by _fetch_zen's single-point
+    type gate — never coerced; _extract_ids remains other fetchers'
+    coerce-contract helper. Still bare-ID diffing (decision #3) — we extract
+    the id field, no alias mapping."""
     body = json.dumps([
         {"id": "claude-fable-5-free", "object": "model", "owned_by": "opencode"},
         "bare-string-model-free",
-        {"object": "model"},             # missing id -> skipped
-        {"id": "", "object": "model"},   # empty id -> skipped
-        {"id": None},                    # null id -> skipped
-        42,                              # int coerced, then filtered (no marker)
+        {"object": "model"},             # missing id (yields None) -> OUT: type gate drops non-str
+        {"id": "", "object": "model"},   # empty str id -> OUT: passes type gate, fails free-marker filter
+        {"id": None},                    # null id -> OUT: type gate drops non-str
+        42,                              # int item -> OUT: type gate drops non-str, never coerced
     ])
     g = fake_getter({"/zen/v1/models": ok(body)})
     ids, _ = providers._fetch_zen(getter=g)
     assert ids == ["bare-string-model-free", "claude-fable-5-free"]
+    # Each rejection mechanism independently visible:
+    assert "" not in ids            # empty str: fails the free-marker filter
+    assert "None" not in ids        # null/missing id: dropped by type gate, never repr-coerced
+    assert "42" not in ids          # int: dropped by type gate, never coerced
 
 
 def test_fetch_zen_keeps_only_free_marked_and_allowlisted():
@@ -238,7 +243,8 @@ def test_fetch_zen_dedupes_and_rejects_non_string_ids():
         {"id": ""},                          # empty str id -> OUT
         ["free"],                            # bare ARRAY item -> OUT (no repr coercion)
         {"note": "free tier"},               # bare dict item WITHOUT id -> OUT
-        "bare-free-string",                  # bare string -> IN verbatim
+        "bare-free-string",                  # bare string WITH marker -> IN verbatim
+        "plain-unmarked-id",                 # bare string WITHOUT marker -> OUT (same predicate as dicts)
     ]}))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
     assert ids == ["bare-free-string", "dup-free-model"]
