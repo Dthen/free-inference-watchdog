@@ -75,7 +75,8 @@ def _extract_ids(items, keep):
     accept BOTH: dicts yield their `id` field, plain strings/ints are kept
     verbatim (str'd), and only missing/empty/null ids are skipped.
     `keep(dict)` is the per-provider dict predicate (pricing/free filter);
-    non-dict items bypass it entirely. Mirrors zen's proven extraction."""
+    non-dict items bypass it entirely. Zen previously shared this helper but
+    now intentionally diverges — see _fetch_zen's own type-gated extraction."""
     return [
         str(it.get("id")) if isinstance(it, dict) else str(it)
         for it in items

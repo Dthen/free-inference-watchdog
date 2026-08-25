@@ -115,7 +115,7 @@ allowlist addition. Everything else on Zen is a paid tier and must never be
 tracked. (This also supersedes the fetch-time passthrough older zen tests
 pinned; their fixtures now carry marked ids.) Duplicate ids are deduplicated
 at fetch time (a repeated id must not double-fire alerts), and non-string ids
-are dropped outright rather than coerced — unlike the other API fetchers,
+are dropped outright rather than coerced — unlike nous, openrouter, and kilo,
 whose coerce-then-filter contract is pinned by
 test_fetch_mixed_int_and_str_ids_coerced.
 
