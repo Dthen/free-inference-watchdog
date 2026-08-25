@@ -1,6 +1,6 @@
 # free-inference-watchdog
 
-Zero-token cron watchdog for 6 free-tier LLM gateways. Alerts Discord when a
+Zero-token cron watchdog for five free-tier LLM gateways. Alerts Discord when a
 free model appears or disappears. Stdlib-only Python, one tick per invocation,
 no LLM calls ever.
 
@@ -9,7 +9,8 @@ no LLM calls ever.
 Every 6 hours (`--recheck-delay` determines the recheck nap), the monitor:
 
 1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**,
-   **Kilo**, **Ollama Cloud**, and **Cline** (endpoint-primary, docs fallback).
+   **Kilo**, and **Cline** (endpoint-primary, docs fallback) (Zen: free-marked
+   ids + stealth allowlist only).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
    an outage never looks like a mass removal).
 3. Set-diffs against the previous `roster.json`.
@@ -59,7 +60,6 @@ All secrets live in `~/.hermes/.env`:
 | `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | no | Kennel/alerts channel webhook. Alerts also go to stdout (Discord home). |
 | `OPENCODE_ZEN_API_KEY` | yes | OpenCode Zen fetcher |
 | `KILOCODE_API_KEY` | yes | Kilo fetcher |
-| `OLLAMA_API_KEY` | yes | Ollama Cloud fetcher |
 
 OpenRouter needs no key — its models endpoint is public. Cline's roster
 endpoint is also public (no auth header); no key is read for it either.
@@ -118,6 +118,15 @@ at fetch time (a repeated id must not double-fire alerts), and non-string ids
 are dropped outright rather than coerced — unlike nous, openrouter, and kilo,
 whose coerce-then-filter contract is pinned by
 test_fetch_mixed_int_and_str_ids_coerced.
+
+### Why no Ollama?
+
+Ollama Cloud has no free-model concept to track. Cloud usage is metered by
+GPU-time against account plans ($0 Free / $20 Pro / $100 Max) rather than
+per-model pricing — every cloud model burns the same quota currency, larger
+models are gated behind paid plans, and none of this is exposed via the API.
+A "free roster" is therefore undefinable for Ollama, so the provider was
+dropped entirely (2026-08-25).
 
 ## Cadence change
 
