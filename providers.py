@@ -155,11 +155,14 @@ ZEN_URL = "https://opencode.ai/zen/v1/models"
 ZEN_STEALTH_ALLOWLIST = frozenset({"big-pickle"})
 # Deploy note: a persisted roster.json written BEFORE this filter holds the
 # paid tiers; the first good tick without a manual `python3 inference_watchdog.py
-# --init` rebaseline computes ~55 removals and fires one mass-removal alert
+# --init` rebaseline computes removals for every persisted unmarked id (dozens
+# at time of writing) and fires one mass-removal alert
 # (by design — honesty over silence). See README "--init re-baseline".
 
 
-def _zen_is_free(model_id: str) -> bool:
+def _zen_is_free(model_id):
+    if not isinstance(model_id, str):
+        return False
     mid = model_id.lower()
     return "free" in mid or mid in ZEN_STEALTH_ALLOWLIST
 

@@ -215,12 +215,31 @@ def test_fetch_zen_case_insensitive_and_position_independent_marker():
         {"id": "Model-FREE"},            # suffix marker, uppercase -> IN
         {"id": "free-experiment-tier"},  # PREFIX marker -> IN
         {"id": "model-free-preview"},    # middle marker -> IN
-        {"id": "freetier"},              # substring but NOT the marker word boundary we track -> IN (rule is literal substring)
+        {"id": "freetier"},              # substring anywhere counts -> IN (rule is literal substring)
         {"id": "claude-opus-5"},         # no marker -> OUT
     ]}))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
     assert ids == ["BIG-PICKLE", "Model-FREE", "free-experiment-tier",
                    "freetier", "model-free-preview"]
+
+
+def test_fetch_zen_dedupes_and_rejects_non_string_ids():
+    """Dedupe is intentional (duplicate ids must not double-fire alerts) and
+    the keep predicate type-gates: non-str dict ids are rejected outright,
+    never repr-coerced into the roster."""
+    g = fake_getter({"/zen/v1/models": ok(json.dumps({"data": [
+        {"id": "dup-free-model"},
+        {"id": "dup-free-model"},            # duplicate -> appears ONCE
+        {"id": {"note": "free tier"}},       # dict id -> OUT (no repr coercion)
+        {"id": ["free"]},                    # list id -> OUT
+        {"id": 42},                          # int id -> OUT
+        {"id": True},                        # bool id -> OUT
+        {"id": None},                        # null id -> OUT
+        {"id": ""},                          # empty str id -> OUT
+        "bare-free-string",                  # bare string -> IN verbatim
+    ]}))})
+    ids, _ = providers._fetch_zen(getter=g, key="k")
+    assert ids == ["bare-free-string", "dup-free-model"]
 
 
 # ---------- kilo ----------
