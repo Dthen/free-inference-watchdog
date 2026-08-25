@@ -1,4 +1,4 @@
-"""Six provider fetchers for the Free Inference Watchdog. Stdlib only.
+"""Five provider fetchers for the Free Inference Watchdog. Stdlib only.
 
 Contract: each fetcher returns (ids: list[str], meta: dict) with ids SORTED,
 or raises FetchError. Transport is injectable via `getter(url, headers, timeout)

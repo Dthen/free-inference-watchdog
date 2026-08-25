@@ -1,4 +1,4 @@
-"""Tests for providers.py — six fetchers against canned responses.
+"""Tests for providers.py — five fetchers against canned responses.
 
 Fetchers take an injectable `getter` returning (status:int, body:str, headers:dict)
 and raising providers.FetchError on transport failure. No network in tests.
@@ -287,7 +287,9 @@ def test_fetch_mixed_int_and_str_ids_coerced(name, url_frag, kw):
     coerced, sorted STRINGS — sorting raw values raises TypeError, which
     escapes build_fetch_all's FetchError-only catch (inference_watchdog.py)
     and FATALs the whole tick, repeating every tick. Mirrors the str(id)
-    coercion every API roster fetcher has carried since fix-round S5-1."""
+    coercion nous/openrouter/kilo have applied since fix-round S5-1 (which
+    unified the then-mixed wrapping); cline's ids arrive pre-stringified
+    from regex extraction and need none."""
     g = fake_getter({url_frag: ok(json.dumps(S5_MIXED_IDS))})
     ids, _ = providers.PROVIDERS[name](getter=g, **kw)
     assert ids == ["1", "a-model"]
