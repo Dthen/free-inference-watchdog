@@ -99,9 +99,9 @@ def format_alert(events, tick_iso, providers_polled, transients, stale,
         removed = events[name].get("removed") or []
         body = []
         if added:
-            body.append(format_bullet_list(added, "➕"))
+            body.append(format_bullet_list(added, "🟢"))
         if removed:
-            body.append(format_bullet_list(removed, "➖"))
+            body.append(format_bullet_list(removed, "🔴"))
         if body:
             parts.append(f"**{name}**\n" + "\n".join(body))
     notes = []

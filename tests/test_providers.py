@@ -256,7 +256,7 @@ def test_extract_cline_ids_backticked_only():
 def test_extract_cline_ids_rejects_placeholder_spans():
     """F-R2-1: docs pages carry placeholder/example spans that match the ID
     shape (`provider/model-name` verified live on docs.cline.bot/api/models.md).
-    Ingesting them poisons the roster and later fires a false ➖ removal."""
+    Ingesting them poisons the roster and later fires a false 🔴 removal."""
     md = ("Real: `minimax/minimax-m2.5`. Placeholders: `provider/model-name`, "
           "`provider/name`, `example/model`, `your/api-key`, "
           "case-variant `Provider/Model-Name`.\n")
@@ -409,7 +409,7 @@ def test_fetch_cline_http_error_endpoint_uses_docs_fallback():
 def test_fetch_cline_both_sources_fail_is_loud_fetcherror():
     """CHANGE 3: endpoint AND docs both failing is an honest loud failure —
     sticky FetchError (carry-forward), never a silent empty roster that would
-    fire a mass ➖ removal alert."""
+    fire a mass 🔴 removal alert."""
     def g(url, headers=None, timeout=15):
         raise FetchError(f"dead: {url}")
 

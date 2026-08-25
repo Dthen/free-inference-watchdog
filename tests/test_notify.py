@@ -12,8 +12,8 @@ def test_format_basic_diff():
         {"nous": {"added": ["a/new-model"], "removed": ["old/gone"]}},
         tick_iso="2026-08-22 12:00", providers_polled=6,
         transients={}, stale=[], dropped_total=0)
-    assert "➕ `a/new-model`" in msg
-    assert "➖ `old/gone`" in msg
+    assert "🟢 `a/new-model`" in msg
+    assert "🔴 `old/gone`" in msg
     assert "2026-08-22 12:00" in msg
     assert len(msg) < 1900
 
@@ -27,7 +27,7 @@ def test_format_lists_every_model_no_cap():
     msg = notify.format_alert(events, tick_iso="t", providers_polled=1,
                               transients={}, stale=[], dropped_total=0)
     for m in many:
-        assert f"➕ `{m}`" in msg
+        assert f"🟢 `{m}`" in msg
     assert "…+" not in msg
 
 
@@ -88,7 +88,7 @@ def test_split_oversized_chunks_bounded_all_ids_survive_footer_last():
 def test_split_reconstructs_original_at_line_boundaries():
     """Splitting happens ONLY at line (section/bullet) boundaries — no mid-id
     cuts, no data loss: joining the chunks reproduces the input exactly."""
-    text = "\n".join(f"➕ `provider/model-{i:03d}` trailing detail" for i in range(200))
+    text = "\n".join(f"🟢 `provider/model-{i:03d}` trailing detail" for i in range(200))
     chunks = notify.split_message(text, max_chars=300)
     assert all(len(c) <= 300 for c in chunks)
     assert "\n".join(chunks) == text
@@ -265,7 +265,7 @@ def test_drain_retries_each_chunk_independently(tmp_path, monkeypatch):
         return R()
 
     monkeypatch.setattr(notify, "_urlopen", flaky)
-    msg = "\n".join(f"➕ `p/model-{i}`" for i in range(200))
+    msg = "\n".join(f"🟢 `p/model-{i}`" for i in range(200))
     chunks = notify.split_message(msg)
     assert len(chunks) > 1
     q = tmp_path / "pending.json"

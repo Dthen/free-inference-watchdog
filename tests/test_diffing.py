@@ -98,7 +98,7 @@ def test_load_filtered_roster_coerces_non_list_values_to_empty(tmp_path):
     """Fix-round-4 #2: hand-edited rosters are plausible input (F4/F8f class).
     A non-list provider VALUE (e.g. string) must load as [] at this boundary —
     downstream confirm_diffs/merge_corrected call _sorted_list() unguarded, so
-    the string 'model-a' would char-split into bogus single-char ➖ removals."""
+    the string 'model-a' would char-split into bogus single-char 🔴 removals."""
     import json
     p = tmp_path / "roster.json"
     p.write_text(json.dumps(
@@ -128,8 +128,8 @@ def test_load_filtered_roster_coerces_non_string_list_elements(tmp_path):
 
 def test_dict_element_prev_value_no_bogus_repr_alert_downstream(tmp_path):
     """Fix-round-5 P5 end-to-end shape: a hand-edited prev value containing a
-    whole model object must ship NO ➖ repr bullet like "{'id': 'x-model'}"
-    and no phantom ➕/➕ pair — boundary-coerced [] makes the next tick a
+    whole model object must ship NO 🔴 repr bullet like "{'id': 'x-model'}"
+    and no phantom 🟢/🔴 pair — boundary-coerced [] makes the next tick a
     truthful added-only candidate whose confirm recheck removes nothing."""
     import json
     p = tmp_path / "roster.json"
@@ -152,7 +152,7 @@ def test_dict_element_prev_value_no_bogus_repr_alert_downstream(tmp_path):
 def test_string_prev_value_no_bogus_removal_alerts_downstream(tmp_path):
     """Fix-round-4 #2 end-to-end shape: a seeded string prev value, once
     boundary-coerced to [], produces an added-only candidate and the confirm
-    recheck confirms ZERO removal ids — no char-split ➖ bullets ship."""
+    recheck confirms ZERO removal ids — no char-split 🔴 bullets ship."""
     import json
     p = tmp_path / "roster.json"
     p.write_text('{"providers": {"nous": "model-a"}}', encoding="utf-8")

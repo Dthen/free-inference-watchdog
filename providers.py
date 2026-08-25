@@ -209,7 +209,7 @@ _DOC_SUFFIX = re.compile(r"\.(md|html|pdf)$", re.IGNORECASE)   # F5: doc links, 
 # F-R2-1: placeholder spans docs pages use in examples (provider/model-name
 # verified live on docs.cline.bot/api/models.md). They match the ID shape but
 # are not models — ingesting them poisons the roster and later fires a false
-# ➖ removal when Cline edits the example.
+# 🔴 removal when Cline edits the example.
 _PLACEHOLDER_PROVIDERS = {"provider", "example", "your"}
 _PLACEHOLDER_SPANS = {"provider/model-name", "provider/name"}
 

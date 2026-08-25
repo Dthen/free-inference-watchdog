@@ -159,12 +159,12 @@ def test_cli_cooldown_hours_default_and_override(monkeypatch):
 
 def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
     """F4: a JSON-valid roster lacking a dict-shaped providers key must
-    bootstrap clean (first_run), never emit the universe as ➕."""
+    bootstrap clean (first_run), never emit the universe as 🟢."""
     (tmp_path / "roster.json").write_text("{}", encoding="utf-8")
     code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
     out = capsys.readouterr().out
     assert code == 0
-    assert "➕" not in out
+    assert "🟢" not in out
     assert "initialized, no diff" in out
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"]["nous"] == ["a"]
@@ -176,11 +176,11 @@ def test_confirmed_removal_alerts_once_then_cooldowns(tmp_path, capsys):
                    now=1_000_000_000 + 6 * 3600)
     out = capsys.readouterr().out
     assert code == 0
-    assert "➖ `b`" in out
+    assert "🔴 `b`" in out
     # same flap 1h later: suppressed by cooldown
     _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 7 * 3600)
     out2 = capsys.readouterr().out
-    assert "➖ `b`" not in out2
+    assert "🔴 `b`" not in out2
 
 
 def test_transient_removal_never_alerts(tmp_path, capsys):
@@ -190,14 +190,14 @@ def test_transient_removal_never_alerts(tmp_path, capsys):
                    now=1_000_000_000 + 6 * 3600)
     out = capsys.readouterr().out
     assert code == 0
-    assert "➖" not in out
+    assert "🔴" not in out
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"]["zen"] == ["z1", "z2"]  # recheck state wins
 
 
 def test_empty_roster_diffs_honestly_into_alert(tmp_path, capsys):
     """CHANGE 2: an empty result from a healthy fetch is REAL data (all free
-    tiers deleted) — it must flow through the tick as a confirmed mass ➖
+    tiers deleted) — it must flow through the tick as a confirmed mass 🔴
     alert, never be swallowed as outage/sticky. End-to-end: baseline [a,b] ->
     next tick fetches [] (recheck agrees) -> one honest removal alert."""
     _run(tmp_path, [{"nous": ["a", "b"]}])
@@ -205,7 +205,7 @@ def test_empty_roster_diffs_honestly_into_alert(tmp_path, capsys):
                    now=1_000_000_000 + 6 * 3600)
     out = capsys.readouterr().out
     assert code == 0
-    assert "➖ `a`" in out and "➖ `b`" in out
+    assert "🔴 `a`" in out and "🔴 `b`" in out
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"]["nous"] == []          # empty truth persisted
 
@@ -215,7 +215,7 @@ def test_fetch_failure_sticky_no_alert(tmp_path, capsys):
     code, _ = _run(tmp_path, [{"nous": None}], now=1_000_000_000 + 6 * 3600)
     out = capsys.readouterr().out
     assert code == 1                       # partial failure exit code
-    assert "➖" not in out                 # outage never looks like removal
+    assert "🔴" not in out                 # outage never looks like removal
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"]["nous"] == ["a", "b"]  # carried forward
     assert roster["stale_providers"] == ["nous"]
@@ -328,7 +328,7 @@ def test_registry_filter_kills_zombies(tmp_path, capsys):
     code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert "zen" not in roster["providers"]
-    assert "➖" not in capsys.readouterr().out
+    assert "🔴" not in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +359,7 @@ def test_roster_persists_transients_from_flap(tmp_path, capsys):
                    now=1_000_000_000 + 6 * 3600)
     out = capsys.readouterr().out
     assert code == 0
-    assert "➖" not in out                        # transient never alerts
+    assert "🔴" not in out                        # transient never alerts
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["transients"] == {"zen": {"added": [], "removed": ["b"]}}
     assert roster["providers"]["zen"] == ["a", "b"]   # recheck truth persisted
@@ -467,7 +467,7 @@ def test_unconfirmed_then_confirmed_alerts_once(tmp_path, capsys):
                     now=1_000_000_000 + 6 * 3600)
     out_a = capsys.readouterr().out
     assert code == 0
-    assert "➖" not in out_a
+    assert "🔴" not in out_a
     roster_a = json.loads((tmp_path / "roster.json").read_text())
     # sticky-old: nous still has [a, b]
     assert roster_a["providers"]["nous"] == ["a", "b"]
@@ -477,14 +477,14 @@ def test_unconfirmed_then_confirmed_alerts_once(tmp_path, capsys):
                     now=1_000_000_000 + 12 * 3600)
     out_b = capsys.readouterr().out
     assert code == 0
-    assert "➖" in out_b
+    assert "🔴" in out_b
     assert "b" in out_b
 
     # Immediate repeat: suppressed by cooldown
     _run(tmp_path, [{"nous": ["a"]}],
           now=1_000_000_000 + 13 * 3600)
     out_c = capsys.readouterr().out
-    assert "➖" not in out_c
+    assert "🔴" not in out_c
 
 
 def test_missed_tick_warning_does_not_suppress_alive_ping(tmp_path, capsys):
