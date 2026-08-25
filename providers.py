@@ -153,6 +153,10 @@ ZEN_URL = "https://opencode.ai/zen/v1/models"
 # ids). A NEW stealth arrival needs a one-line addition here — accepted cost,
 # documented in README.
 ZEN_STEALTH_ALLOWLIST = frozenset({"big-pickle"})
+# Deploy note: a persisted roster.json written BEFORE this filter holds the
+# paid tiers; the first good tick without a manual `python3 inference_watchdog.py
+# --init` rebaseline computes ~55 removals and fires one mass-removal alert
+# (by design — honesty over silence). See README "--init re-baseline".
 
 
 def _zen_is_free(model_id: str) -> bool:
@@ -163,13 +167,17 @@ def _zen_is_free(model_id: str) -> bool:
 def _fetch_zen(getter=_default_getter, key=None):
     """Model ids only, FREE-ONLY (decision 2026-08-25): keep ids carrying the
     'free' marker or on the stealth allowlist. Everything else on Zen is a
-    paid tier (claude/gpt/gemini/grok/kimi/...) and must never be tracked."""
+    paid tier (claude/gpt/gemini/grok/kimi/...) and must never be tracked.
+    Ids are DEDUPED via set comprehension — duplicate ids must not double-fire
+    alerts."""
     extra = {"Authorization": f"Bearer {key}"} if key else {}
     status, body, _hdrs = getter(ZEN_URL, headers=_headers(extra), timeout=TIMEOUT_S)
     _require_ok(status, ZEN_URL)
     items = _parse_model_list(body)
-    ids = sorted({str(i) for i in _extract_ids(items, keep=lambda it: it.get("id"))
-                  if _zen_is_free(str(i))})
+    ids = sorted({i for i in _extract_ids(
+        items,
+        keep=lambda it: isinstance(it.get("id"), str) and bool(it.get("id")))
+        if _zen_is_free(i)})
     return ids, {}
 
 

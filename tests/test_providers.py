@@ -149,6 +149,18 @@ def test_fetch_openrouter():
 
 # ---------- zen ----------
 
+ZEN_PAID_AND_FREE = {
+    "data": [
+        {"id": "claude-opus-5"},                       # paid, no marker -> OUT
+        {"id": "gpt-5.4-pro"},                         # paid -> OUT
+        {"id": "deepseek-v4-flash-free"},              # marker -> IN
+        {"id": "x-preview-f-free"},                    # Ox Alpha -> IN
+        {"id": "big-pickle"},                          # stealth allowlist -> IN
+        {"id": "nemotron-3-ultra-free"},               # marker -> IN
+    ]
+}
+
+
 def test_fetch_zen_bare_ids_verbatim():
     # Free-only filter (decision 2026-08-25): fixture ids carry the 'free'
     # marker; bare-string ITEMS are still extracted verbatim and sorted.
@@ -181,31 +193,34 @@ def test_fetch_zen_model_dict_objects_extract_id():
     assert ids == ["bare-string-model-free", "claude-fable-5-free"]
 
 
-# ---------- zen free-only filter ----------
-
-ZEN_PAID_AND_FREE = {
-    "data": [
-        {"id": "claude-opus-5"},                       # paid, no marker -> OUT
-        {"id": "gpt-5.4-pro"},                         # paid -> OUT
-        {"id": "deepseek-v4-flash-free"},              # marker -> IN
-        {"id": "x-preview-f-free"},                    # Ox Alpha -> IN
-        {"id": "big-pickle"},                          # stealth allowlist -> IN
-        {"id": "nemotron-3-ultra-free"},               # marker -> IN
-    ]
-}
-
 def test_fetch_zen_keeps_only_free_marked_and_allowlisted():
-    g = fake_getter({"opencode.ai": ok(json.dumps(ZEN_PAID_AND_FREE))})
+    g = fake_getter({"/zen/v1/models": ok(json.dumps(ZEN_PAID_AND_FREE))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
     assert ids == ["big-pickle", "deepseek-v4-flash-free",
                    "nemotron-3-ultra-free", "x-preview-f-free"]
 
+
 def test_fetch_zen_empty_after_filter_is_real_data():
     """Healthy 200 whose every model is paid -> [] roster (never an error)."""
-    g = fake_getter({"opencode.ai": ok(json.dumps(
+    g = fake_getter({"/zen/v1/models": ok(json.dumps(
         {"data": [{"id": "claude-opus-5"}]}))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
     assert ids == []
+
+
+def test_fetch_zen_case_insensitive_and_position_independent_marker():
+    """'free' may appear anywhere, any case; allowlist match is case-insensitive."""
+    g = fake_getter({"/zen/v1/models": ok(json.dumps({"data": [
+        {"id": "BIG-PICKLE"},            # allowlist, uppercase -> IN
+        {"id": "Model-FREE"},            # suffix marker, uppercase -> IN
+        {"id": "free-experiment-tier"},  # PREFIX marker -> IN
+        {"id": "model-free-preview"},    # middle marker -> IN
+        {"id": "freetier"},              # substring but NOT the marker word boundary we track -> IN (rule is literal substring)
+        {"id": "claude-opus-5"},         # no marker -> OUT
+    ]}))})
+    ids, _ = providers._fetch_zen(getter=g, key="k")
+    assert ids == ["BIG-PICKLE", "Model-FREE", "free-experiment-tier",
+                   "freetier", "model-free-preview"]
 
 
 # ---------- kilo ----------

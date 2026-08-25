@@ -105,6 +105,16 @@ provider (e.g. Zen emitting phantom pairs), remove its entry from
 `diffing.load_filtered_roster()` silently drops the zombie entry on the next
 tick — no manual state surgery needed.
 
+### Zen free-only rule
+
+Zen exposes no pricing metadata, so its roster is filtered at fetch time: an id
+is tracked iff it contains `free` (case-insensitive, anywhere in the id) OR is
+on `ZEN_STEALTH_ALLOWLIST` in `providers.py` (currently just `big-pickle`).
+Stealth models ship under opaque ids — a NEW stealth arrival needs a one-line
+allowlist addition. Everything else on Zen is a paid tier and must never be
+tracked. (This also supersedes the fetch-time passthrough older zen tests
+pinned; their fixtures now carry marked ids.)
+
 ## Cadence change
 
 The tick cadence defaults to 6 hours. To change it:
