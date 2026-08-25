@@ -63,8 +63,7 @@ def get(url, headers=None, timeout=15):
         # '***' between every character of the error body.
         redacted = snippet
         for secret in (ENV.get("OPENCODE_ZEN_API_KEY", ""),
-                       ENV.get("KILOCODE_API_KEY", ""),
-                       ENV.get("OLLAMA_API_KEY", "")):
+                       ENV.get("KILOCODE_API_KEY", "")):
             if secret:
                 redacted = redacted.replace(secret, "***")
         return e.code, f"err-body: {redacted}"
@@ -107,10 +106,6 @@ CANDIDATES = [
      {"Authorization": f"Bearer {ENV.get('KILOCODE_API_KEY','')}"}),
     *[("kilo[cfg]", u, {"Authorization": f"Bearer {ENV.get('KILOCODE_API_KEY','')}"})
       for u in discover("kilo")],
-    ("ollama-cloud[guess]", "https://ollama.com/v1/models",
-     {"Authorization": f"Bearer {ENV.get('OLLAMA_API_KEY','')}"}),
-    *[("ollama[cfg]", u, {"Authorization": f"Bearer {ENV.get('OLLAMA_API_KEY','')}"})
-      for u in discover("ollama")],
     ("cline-docs-index", "https://docs.cline.bot/llms.txt", {}),
 ]
 

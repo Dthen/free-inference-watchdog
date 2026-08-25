@@ -129,11 +129,11 @@ def test_corrected_unconfirmed_provider_absent():
         raise diffing.FetchError("timeout")
 
     result = diffing.confirm_diffs(
-        candidates={"ollama": {"added": ["o1"], "removed": []}},
-        prev_providers={"ollama": ["old1"]},
+        candidates={"zen": {"added": ["z1"], "removed": []}},
+        prev_providers={"zen": ["old1"]},
         fetch_one=failing, sleep=lambda s: None, delay=0)
-    assert result["unconfirmed"] == {"ollama": {"added": ["o1"], "removed": []}}
-    assert "ollama" not in result["corrected"]
+    assert result["unconfirmed"] == {"zen": {"added": ["z1"], "removed": []}}
+    assert "zen" not in result["corrected"]
 
 
 # ---------- R2-2 caller-side merge (merge_corrected) ----------

@@ -267,17 +267,6 @@ def test_fetch_kilo_sentinel_excluded():
     assert ids == ["kilo-auto/free", "stepfun/free:free"]
 
 
-# ---------- ollama ----------
-
-OLLAMA_MODELS = {"data": [{"id": "gpt-oss:20b"}, {"id": "llama3"}]}
-
-
-def test_fetch_ollama_passthrough():
-    g = fake_getter({"ollama.com": ok(json.dumps(OLLAMA_MODELS))})
-    ids, _ = providers._fetch_ollama(getter=g, key="k")
-    assert ids == ["gpt-oss:20b", "llama3"]
-
-
 # ---------- S5-1: mixed str/int ids must coerce to str, never FATAL ----------
 
 S5_MIXED_IDS = {
@@ -297,8 +286,8 @@ def test_fetch_mixed_int_and_str_ids_coerced(name, url_frag, kw):
     """S5-1: a provider drifting to MIXED str/int model ids must yield
     coerced, sorted STRINGS — sorting raw values raises TypeError, which
     escapes build_fetch_all's FetchError-only catch (inference_watchdog.py)
-    and FATALs the whole tick, repeating every tick. Mirrors ollama's
-    existing str(it["id"]) wrap."""
+    and FATALs the whole tick, repeating every tick. Mirrors the str(id)
+    coercion every API roster fetcher has carried since fix-round S5-1."""
     g = fake_getter({url_frag: ok(json.dumps(S5_MIXED_IDS))})
     ids, _ = providers.PROVIDERS[name](getter=g, **kw)
     assert ids == ["1", "a-model"]
@@ -543,13 +532,6 @@ def test_fetch_accepts_string_and_dict_items(name, url_frag, kw, expected_extra)
     assert ids == sorted(["dict-only/model", "mixed/second"] + expected_extra)
 
 
-def test_fetch_ollama_accepts_string_and_dict_items():
-    """CHANGE 1: ollama (no pricing field) tolerates string items too."""
-    g = fake_getter({"ollama.com": ok(json.dumps(SHAPE_MIXED_ITEMS))})
-    ids, _ = providers._fetch_ollama(getter=g, key="k")
-    assert ids == ["bare/string-model", "dict-only/model", "mixed/second"]
-
-
 @pytest.mark.parametrize("name,url_frag,kw", [
     ("nous", "/v1/models", {"auth": {"token": "t", "base": "https://x/v1"}}),
     ("openrouter", "openrouter.ai", {}),
@@ -577,7 +559,6 @@ EMPTY_CASES = [
     ("openrouter", "openrouter.ai", {}),
     ("zen", "/zen/v1/models", {"key": "k"}),
     ("kilo", "api.kilo.ai", {"key": "k"}),
-    ("ollama", "ollama.com", {"key": "k"}),
 ]
 
 
@@ -594,7 +575,7 @@ def test_fetch_empty_200_roster_is_real_data_not_error(name, url_frag, kw,
     assert ids == []
 
 
-def test_registry_has_six_providers():
+def test_registry_has_five_providers():
     assert set(providers.PROVIDERS) == {
-        "nous", "openrouter", "zen", "kilo", "ollama", "cline"
+        "nous", "openrouter", "zen", "kilo", "cline"
     }

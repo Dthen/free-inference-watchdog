@@ -46,7 +46,7 @@ def test_format_huge_event_uncapped_every_id_survives():
                       "removed": [f"z/w-{j}" for j in range(40)]}
             for i in range(6)}
     msg = notify.format_alert(huge, tick_iso="t", providers_polled=6,
-                              transients={}, stale=["ollama"], dropped_total=99)
+                              transients={}, stale=["zen"], dropped_total=99)
     assert len(msg) >= 1900                       # uncapped by design
     for i in range(6):
         for j in range(40):
@@ -70,7 +70,7 @@ def test_split_oversized_chunks_bounded_all_ids_survive_footer_last():
               for i in range(6)}
     msg = notify.format_alert(events, tick_iso="2026-08-24 12:00",
                               providers_polled=6, transients={"zen": 2},
-                              stale=["ollama"], dropped_total=7)
+                              stale=["kilo"], dropped_total=7)
     assert len(msg) > 1900
     chunks = notify.split_message(msg)
     assert len(chunks) > 1

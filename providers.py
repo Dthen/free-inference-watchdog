@@ -203,20 +203,6 @@ def _fetch_kilo(getter=_default_getter, key=None):
     return ids, {}
 
 
-# ---------- ollama cloud ----------
-
-OLLAMA_URL = "https://ollama.com/v1/models"
-
-
-def _fetch_ollama(getter=_default_getter, key=None):
-    """No pricing field (probed) — roster passed through as-is."""
-    extra = {"Authorization": f"Bearer {key}"} if key else {}
-    status, body, _hdrs = getter(OLLAMA_URL, headers=_headers(extra), timeout=TIMEOUT_S)
-    _require_ok(status, OLLAMA_URL)
-    ids = sorted(_extract_ids(_parse_model_list(body), keep=lambda it: it.get("id")))
-    return ids, {}
-
-
 # ---------- cline (endpoint-primary, docs-fallback) ----------
 
 # CHANGE 3 (fix-round-9): Cline DOES expose a public roster endpoint (probed
@@ -330,6 +316,5 @@ PROVIDERS = {
     "openrouter": _fetch_openrouter,
     "zen": _fetch_zen,
     "kilo": _fetch_kilo,
-    "ollama": _fetch_ollama,
     "cline": _fetch_cline,
 }

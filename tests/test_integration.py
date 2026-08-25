@@ -8,7 +8,7 @@ import time
 import inference_watchdog as im
 
 
-REGISTRY = {"nous", "openrouter", "zen", "kilo", "ollama", "cline"}
+REGISTRY = {"nous", "openrouter", "zen", "kilo", "cline"}
 
 
 def _fetcher(scenarios):

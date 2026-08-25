@@ -36,7 +36,6 @@ def build_fetch_all(env):
     keys = {
         "zen": env.get("OPENCODE_ZEN_API_KEY"),
         "kilo": env.get("KILOCODE_API_KEY"),
-        "ollama": env.get("OLLAMA_API_KEY"),
     }
 
     def fetch_all():
@@ -64,7 +63,6 @@ def build_fetch_one(env):
     keys = {
         "zen": env.get("OPENCODE_ZEN_API_KEY"),
         "kilo": env.get("KILOCODE_API_KEY"),
-        "ollama": env.get("OLLAMA_API_KEY"),
     }
 
     def fetch_one(name):
