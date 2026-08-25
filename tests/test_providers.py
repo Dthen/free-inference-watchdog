@@ -381,7 +381,7 @@ def test_fetch_cline_live_page_placeholder_span_rejected():
 def test_fetch_cline_empty_parse_raises():
     """CHANGE 2/3 contract: the DOCS fallback (and the endpoint) may only
     fail LOUD — an outage is a sticky FetchError, never a mass removal. The
-    five API fetchers have NO such empty-parse rule (empty 200 = real data,
+    four API fetchers have NO such empty-parse rule (empty 200 = real data,
     pinned by test_fetch_empty_200_roster_is_real_data_not_error)."""
     def g(url, headers=None, timeout=15):
         return ok("<html>error page</html>")
@@ -571,7 +571,7 @@ def test_fetch_empty_200_roster_is_real_data_not_error(name, url_frag, kw,
     """CHANGE 2: an empty result from a HEALTHY 200 is real data (all free
     tiers deleted) — every API fetcher must return ([], meta), NEVER raise,
     so it can diff honestly into alerts downstream. No special-casing may be
-    (re-)introduced on the five API fetchers."""
+    (re-)introduced on the four API fetchers."""
     g = fake_getter({url_frag: ok(payload)})
     ids, _meta = providers.PROVIDERS[name](getter=g, **kw)
     assert ids == []
