@@ -8,9 +8,10 @@ no LLM calls ever.
 
 Every 6 hours (`--recheck-delay` determines the recheck nap), the monitor:
 
-1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**,
-   **Kilo**, and **Cline** (endpoint-primary, docs fallback) (Zen: free-marked
-   ids + stealth allowlist only).
+1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**
+   (only ids containing "free", plus a small hand-maintained stealth
+   allowlist — see [Zen free-only rule](#zen-free-only-rule)), **Kilo**, and
+   **Cline** (endpoint-primary, docs fallback).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
    an outage never looks like a mass removal).
 3. Set-diffs against the previous `roster.json`.
@@ -19,6 +20,15 @@ Every 6 hours (`--recheck-delay` determines the recheck nap), the monitor:
 6. Alerts Discord via stdout (Hermes cron → Discord home channel) AND webhook
    (kennel channel). Both or either — webhook failure never suppresses stdout.
 7. Writes an alive ping to silence the "is it dead?" question.
+
+## Why no Ollama?
+
+Ollama Cloud has no free-model concept to track. Cloud usage is metered by
+GPU-time against account plans ($0 Free / $20 Pro / $100 Max) rather than
+per-model pricing — every cloud model burns the same quota currency, larger
+models are gated behind paid plans, and none of this is exposed via the API.
+A "free roster" is therefore undefinable for Ollama, so the provider was
+dropped entirely (2026-08-25).
 
 ## Quick start
 
@@ -118,15 +128,6 @@ at fetch time (a repeated id must not double-fire alerts), and non-string ids
 are dropped outright rather than coerced — unlike nous, openrouter, and kilo,
 whose coerce-then-filter contract is pinned by
 test_fetch_mixed_int_and_str_ids_coerced.
-
-### Why no Ollama?
-
-Ollama Cloud has no free-model concept to track. Cloud usage is metered by
-GPU-time against account plans ($0 Free / $20 Pro / $100 Max) rather than
-per-model pricing — every cloud model burns the same quota currency, larger
-models are gated behind paid plans, and none of this is exposed via the API.
-A "free roster" is therefore undefinable for Ollama, so the provider was
-dropped entirely (2026-08-25).
 
 ## Cadence change
 
