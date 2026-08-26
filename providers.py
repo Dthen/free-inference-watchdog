@@ -345,6 +345,40 @@ def _fetch_cline(getter=_default_getter):
     return _fetch_cline_docs_fallback(getter), {}
 
 
+# ---------- command code ----------
+
+COMMAND_CODE_URL = "https://api.commandcode.ai/provider/v1/models"
+
+
+def _command_code_is_free(model_id):
+    """Command Code ships NO pricing metadata (probed 2026-08-26: objects carry
+    only id/object/created/owned_by/name/context_length). Free-roster rule:
+    explicit "free" name marker only — no stealth allowlist yet (the free lane
+    is small and deal-structured: minimax-m3-free, minimax-m2.7-free,
+    laguna-s-2.1-free). A NEW free arrival needs its id to carry the "free"
+    marker; if Command Code ever ships a free model under an opaque id, add
+    a ZEN_STEALTH_ALLOWLIST-style allowlist here."""
+    if not isinstance(model_id, str):
+        return False
+    return "free" in model_id.lower()
+
+
+def _fetch_command_code(getter=_default_getter):
+    """Command Code free-only filter: endpoint serves the full catalog (60+
+    models, NO pricing field) — only ids carrying the "free" marker are
+    tracked. Paid tiers (claude/gpt/gemini/grok/...) must never leak into
+    the roster. Same type-gated extraction as zen: dict items contribute
+    their 'id', non-dicts are dropped, never repr-coerced."""
+    status, body, _hdrs = getter(COMMAND_CODE_URL, headers=_headers(),
+                                  timeout=TIMEOUT_S)
+    _require_ok(status, COMMAND_CODE_URL)
+    items = _parse_model_list(body)
+    candidates = (it.get("id") if isinstance(it, dict) else it for it in items)
+    ids = sorted({i for i in candidates
+                  if isinstance(i, str) and _command_code_is_free(i)})
+    return ids, {}
+
+
 # ---------- registry (order = display order) ----------
 
 PROVIDERS = {
@@ -353,4 +387,5 @@ PROVIDERS = {
     "zen": _fetch_zen,
     "kilo": _fetch_kilo,
     "cline": _fetch_cline,
+    "command_code": _fetch_command_code,
 }

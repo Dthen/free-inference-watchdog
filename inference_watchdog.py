@@ -22,7 +22,7 @@ import providers
 import state
 from envfile import parse_envfile
 
-DEFAULT_CADENCE_S = 6 * 3600
+DEFAULT_CADENCE_S = 1 * 3600
 HERMES_ENV = Path("~/.hermes/.env").expanduser()
 
 
@@ -280,7 +280,7 @@ def main(argv=None):
                         help="fetch + diff + print, write nothing, POST nothing")
     parser.add_argument("--recheck-delay", type=int, default=180,
                         help="seconds before confirm re-fetch (0 in tests)")
-    parser.add_argument("--cadence-hours", type=int, default=6,
+    parser.add_argument("--cadence-hours", type=int, default=1,
                         help="tick cadence in hours — drives missed-tick "
                              "warning; keep in step with the cron schedule")
     parser.add_argument("--cooldown-hours", type=int, default=12)

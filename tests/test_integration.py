@@ -66,7 +66,7 @@ def test_init_over_existing_roster_archives_and_stays_silent(tmp_path, capsys):
     fetch_all, fetch_one, _ = _fetcher([{"nous": ["new-1"]}])
     code = im.run_tick(
         tmp_path, REGISTRY, fetch_all, fetch_one, webhook_url=None,
-        sleep=lambda s: None, now=1_000_000_000 + 6 * 3600,
+        sleep=lambda s: None, now=1_000_000_000 + 1 * 3600,
         recheck_delay=0, init=True)
     out = capsys.readouterr().out
     assert code == 0
@@ -89,7 +89,7 @@ def test_init_refused_by_guard_preserves_roster_exactly(tmp_path, capsys):
     fetch_all, fetch_one, _ = _fetcher([{"nous": None}])      # hard outage
     code = im.run_tick(
         tmp_path, REGISTRY, fetch_all, fetch_one, webhook_url=None,
-        sleep=lambda s: None, now=1_000_000_000 + 6 * 3600,
+        sleep=lambda s: None, now=1_000_000_000 + 1 * 3600,
         recheck_delay=0, init=True)
     err = capsys.readouterr().err
     assert code == 1
@@ -135,7 +135,7 @@ def test_cli_cadence_hours_default_and_override(monkeypatch):
 
     monkeypatch.setattr(im, "run_tick", fake_tick)
     im.main([])
-    assert captured["cadence_s"] == 6 * 3600          # default
+    assert captured["cadence_s"] == 1 * 3600          # default
     im.main(["--cadence-hours", "12"])
     assert captured["cadence_s"] == 12 * 3600         # override
 
@@ -161,7 +161,7 @@ def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
     """F4: a JSON-valid roster lacking a dict-shaped providers key must
     bootstrap clean (first_run), never emit the universe as 🟢."""
     (tmp_path / "roster.json").write_text("{}", encoding="utf-8")
-    code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
+    code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 0
     assert "🟢" not in out
@@ -173,7 +173,7 @@ def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
 def test_confirmed_removal_alerts_once_then_cooldowns(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a", "b"]}])                       # baseline
     code, _ = _run(tmp_path, [{"nous": ["a"]}],                  # b disappears
-                   now=1_000_000_000 + 6 * 3600)
+                   now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 0
     assert "🔴 `b`" in out
@@ -187,7 +187,7 @@ def test_transient_removal_never_alerts(tmp_path, capsys):
     _run(tmp_path, [{"zen": ["z1", "z2"]}])
     # candidate removal, but recheck sees z2 back -> transient, silent
     code, _ = _run(tmp_path, [{"zen": ["z1"]}, {"zen": ["z1", "z2"]}],
-                   now=1_000_000_000 + 6 * 3600)
+                   now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 0
     assert "🔴" not in out
@@ -202,7 +202,7 @@ def test_empty_roster_diffs_honestly_into_alert(tmp_path, capsys):
     next tick fetches [] (recheck agrees) -> one honest removal alert."""
     _run(tmp_path, [{"nous": ["a", "b"]}])
     code, _ = _run(tmp_path, [{"nous": []}, {"nous": []}],
-                   now=1_000_000_000 + 6 * 3600)
+                   now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 0
     assert "🔴 `a`" in out and "🔴 `b`" in out
@@ -212,7 +212,7 @@ def test_empty_roster_diffs_honestly_into_alert(tmp_path, capsys):
 
 def test_fetch_failure_sticky_no_alert(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a", "b"]}])
-    code, _ = _run(tmp_path, [{"nous": None}], now=1_000_000_000 + 6 * 3600)
+    code, _ = _run(tmp_path, [{"nous": None}], now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 1                       # partial failure exit code
     assert "🔴" not in out                 # outage never looks like removal
@@ -325,7 +325,7 @@ def test_emit_dry_run_webhook_line_only_when_webhook_configured(capsys):
 def test_registry_filter_kills_zombies(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a"], "zen": ["zombie"]}])
     # registry shrinks to nous only: zombie zen must vanish silently
-    code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
+    code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 1 * 3600)
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert "zen" not in roster["providers"]
     assert "🔴" not in capsys.readouterr().out
@@ -340,7 +340,7 @@ def test_roster_persists_transients_and_unconfirmed_every_tick(tmp_path):
     """Item 4: transients and unconfirmed are REBUILT every tick."""
     _run(tmp_path, [{"nous": ["a"]}])
     # Tick 2: nothing changed -> both fields must be {} (rebuilt, not appended)
-    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
+    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 1 * 3600)
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["transients"] == {}
     assert roster["unconfirmed"] == {}
@@ -356,7 +356,7 @@ def test_roster_persists_transients_from_flap(tmp_path, capsys):
     capsys.readouterr()
     # candidate tick: b gone; recheck: b back => transient flap
     code, _ = _run(tmp_path, [{"zen": ["a"]}, {"zen": ["a", "b"]}],
-                   now=1_000_000_000 + 6 * 3600)
+                   now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 0
     assert "🔴" not in out                        # transient never alerts
@@ -404,7 +404,7 @@ def test_roster_written_before_alert_and_cooldowns(tmp_path, monkeypatch):
     monkeypatch.setattr(st, "save_roster_atomic", spy_roster)
     monkeypatch.setattr(st, "save_cooldowns", spy_cd)
     _run(tmp_path, [{"nous": ["a", "b"]}])
-    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 6 * 3600)
+    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 1 * 3600)
     # roster must be written before cooldowns
     roster_idx = [i for i, (kind, _) in enumerate(writes) if kind == "roster"]
     cd_idx = [i for i, (kind, _) in enumerate(writes) if kind == "cooldowns"]
@@ -416,7 +416,7 @@ def test_cooldown_hours_wired_to_ttl(tmp_path):
     """Item 7: --cooldown-hours drives the TTL."""
     _run(tmp_path, [{"nous": ["a", "b"]}])
     code, _ = _run(tmp_path, [{"nous": ["a"]}],
-                    now=1_000_000_000 + 6 * 3600)
+                    now=1_000_000_000 + 1 * 3600)
     assert code == 0
     # Same flap 1h later: suppressed (default 12h cooldown)
     _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 7 * 3600)
@@ -464,7 +464,7 @@ def test_unconfirmed_then_confirmed_alerts_once(tmp_path, capsys):
 
     # Tick A: b disappears, recheck FAILS => unconfirmed, silent
     code, _ = _run(tmp_path, [{"nous": ["a"]}, {"nous": None}],
-                    now=1_000_000_000 + 6 * 3600)
+                    now=1_000_000_000 + 1 * 3600)
     out_a = capsys.readouterr().out
     assert code == 0
     assert "🔴" not in out_a

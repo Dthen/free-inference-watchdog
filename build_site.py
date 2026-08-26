@@ -18,7 +18,7 @@ Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
     zen, kilo, cline), and must NOT be alphabetized, so it is hardcoded
     below as DISPLAY_ORDER.
   - Header copy is minimal: title + "last refreshed {ts} · rebuilt every
-    6h" + two chips ("N unique models", "5 gateways"). NO snapshot/alert/
+    1h" + two chips ("N unique models", "6 gateways"). NO snapshot/alert/
     stale wording anywhere.
   - Colors are Nord strictly: nord0 bg #2e3440, nord1 elevated/thead/chips
     #3b4252, nord2 hover #434c5e, nord6 text #eceff4, nord4 subtle
@@ -60,7 +60,7 @@ REPO = Path(__file__).resolve().parent
 # suck. Differs from providers.py registry order (nous, openrouter, zen,
 # kilo, cline) by design: display order is curation, not implementation
 # detail, so it is hardcoded rather than derived from the registry.
-DISPLAY_ORDER = ["nous", "zen", "kilo", "cline", "openrouter"]
+DISPLAY_ORDER = ["nous", "zen", "kilo", "cline", "openrouter", "command_code"]
 
 ROSTER_REL = Path("state/roster.json")
 SITE_REL = Path("site/index.html")
@@ -194,7 +194,7 @@ def render_page(roster, logo_b64):
         f'<span class="chip"><b>{len(ids)}</b> unique models</span>'
         f'<span class="chip"><b>{len(DISPLAY_ORDER)}</b> gateways</span>'
     )
-    meta = f"last refreshed {ts} · rebuilt every 6h"
+    meta = f"last refreshed {ts} · rebuilt every 1h"
     # sort_keys keeps the embedded JSON byte-stable across builds
     roster_json = json.dumps(roster, sort_keys=True).replace("</", "<\\/")
     roster_script = (

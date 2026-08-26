@@ -129,7 +129,7 @@ def test_display_order_constant():
     m = re.search(r'DISPLAY_ORDER\s*=\s*\[(.*?)\]', src, re.S)
     assert m, "DISPLAY_ORDER constant missing from build_site.py"
     order = [s.strip().strip('"\'') for s in m.group(1).split(",") if s.strip()]
-    assert order == ["nous", "zen", "kilo", "cline", "openrouter"]
+    assert order == ["nous", "zen", "kilo", "cline", "openrouter", "command_code"]
 
 
 def test_missing_roster_fails_without_writing_site():
@@ -178,7 +178,7 @@ def test_presence_matrix_structure():
         # header column order pins the display order end-to-end
         head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
         cols = re.findall(r"<th>([^<]*)</th>", head)
-        assert cols == ["model id", "#", "nous", "zen", "kilo", "cline", "openrouter"]
+        assert cols == ["model id", "#", "nous", "zen", "kilo", "cline", "openrouter", "command_code"]
         # unique ids: stealth/ox-alpha + stepfun + x-preview-f-free = 3 rows
         tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
         rows = re.findall(r"<tr><th>", tbody)
@@ -186,7 +186,7 @@ def test_presence_matrix_structure():
         # footer totals: nous=2 zen=2 kilo=1 cline=1 openrouter=1
         tfoot = html.split("<tfoot>", 1)[1].split("</tfoot>", 1)[0]
         nums = re.findall(r'class="n">(\d+)<', tfoot)
-        assert nums == ["2", "2", "1", "1", "1"]
+        assert nums == ["2", "2", "1", "1", "1", "0"]
         assert "position:sticky" in html
 
 

@@ -5,8 +5,8 @@ Three read-only tools, no enrichment (none exists anywhere in the repo):
 
   list_free_models(provider=None)   full roster, or one provider's id list
   get_model(model_id)               CROSS-GATEWAY PRESENCE LOOKUP: which of
-                                    the five gateways track this id right now
-  watchdog_status()                 tick freshness vs the 6h cadence, stale/
+                                    the six gateways track this id right now
+  watchdog_status()                 tick freshness vs the 1h cadence, stale/
                                     failing providers, per-provider counts,
                                     pending-alert queue depth, last site publish
 
@@ -65,14 +65,14 @@ import state
 
 # Gateway names in Dthen's DISPLAY_ORDER. DUPLICATED from build_site.py:63
 # (cross-reference) rather than imported: importing build_site would drag the
-# site builder's module surface along just for five strings, and display
+# site builder's module surface along just for six strings, and display
 # order is curation, not implementation detail — if the canonical tuple ever
 # moves, grep for this comment.
-PROVIDERS = ("nous", "zen", "kilo", "cline", "openrouter")
+PROVIDERS = ("nous", "zen", "kilo", "cline", "openrouter", "command_code")
 
 # Tick cadence, duplicated from inference_watchdog.DEFAULT_CADENCE_S
 # (cross-reference) for the same decoupling reason.
-CADENCE_S = 6 * 3600
+CADENCE_S = 1 * 3600
 
 # Heuristic tuning. Tokens shorter than 2 chars ('x', 'f', bare versions
 # '2', '0') are noise; 'free' is generic across EVERY gateway's roster and
@@ -346,18 +346,18 @@ def watchdog_status(now=None, root=None) -> dict:
 TOOL_DESCRIPTIONS = {
     "list_free_models":
         "List free-tier model ids across the watched gateways "
-        "(nous, zen, kilo, cline, openrouter). Pass provider=<name> for one "
+        "(nous, zen, kilo, cline, openrouter, command_code). Pass provider=<name> for one "
         "gateway's id list; omit it for the full roster with per-gateway "
         "counts. Read-only snapshot of the latest watchdog tick.",
     "get_model":
-        "Cross-gateway PRESENCE lookup: which of the five gateways track "
+        "Cross-gateway PRESENCE lookup: which of the six gateways track "
         "this exact model id right now. Returns exact_matches per gateway, "
         "plus a HEURISTIC possible_matches section (normalized-name "
         "similarity only — gateways rename inconsistently, so cross-gateway "
         "absence is unreliable and full rebrands evade the heuristic; see "
         "the caveats attached to every result).",
     "watchdog_status":
-        "Watchdog health: last tick age vs the 6h cadence, stale/failing "
+        "Watchdog health: last tick age vs the 1h cadence, stale/failing "
         "providers, per-gateway model counts, pending-alert queue depth, "
         "and the age of the last static-site publish.",
 }

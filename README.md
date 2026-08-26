@@ -1,18 +1,19 @@
 # free-inference-watchdog
 
-Zero-token cron watchdog for five free-tier LLM gateways. Alerts Discord when a
+Zero-token cron watchdog for six free-tier LLM gateways. Alerts Discord when a
 free model appears or disappears. Stdlib-only Python, one tick per invocation,
 no LLM calls ever.
 
 ## What it does
 
-Every 6 hours (cadence comes from the cron schedule; `--recheck-delay` only
+Every hour (cadence comes from the cron schedule; `--recheck-delay` only
 sets the ~3-minute confirm nap before a diff is believed), the monitor:
 
 1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**
    (only ids containing "free", plus a small hand-maintained stealth
-   allowlist — see [Zen free-only rule](#zen-free-only-rule)), **Kilo**, and
-   **Cline** (endpoint-primary, docs fallback).
+   allowlist — see [Zen free-only rule](#zen-free-only-rule)), **Kilo**,
+   **Cline** (endpoint-primary, docs fallback), and **Command Code** (only
+   ids containing "free" — the free lane is deal-structured).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
    an outage never looks like a mass removal).
 3. Set-diffs against the previous `roster.json`.
@@ -55,11 +56,11 @@ cd /home/kimbo/projects/free-inference-watchdog || { echo "inference-watchdog FA
 python3 inference_watchdog.py || { c=$?; [ "$c" -eq 1 ] || { echo "inference-watchdog FAILED (exit $c)" >&2; exit "$c"; }; }
 ```
 
-Then register it on the cadence (the schedule below is what sets the 6-hour
+Then register it on the cadence (the schedule below is what sets the 1-hour
 tick — there is no cadence flag on the job itself):
 
 ```bash
-hermes cron create "17 */6 * * *" \
+hermes cron create "17 */1 * * *" \
   --name inference-watchdog-tick \
   --script inference-watchdog-tick.sh \
   --no-agent \
@@ -146,10 +147,10 @@ test_fetch_mixed_int_and_str_ids_coerced.
 
 ## Cadence change
 
-The tick cadence defaults to 6 hours. To change it:
+The tick cadence defaults to 1 hour. To change it:
 
 1. Update the cron schedule to match (`hermes cron edit <job_id> --schedule "..."`).
-2. Pass `--cadence-hours N` (default 6) on the invocation — it drives the
+2. Pass `--cadence-hours N` (default 1) on the invocation — it drives the
    ⚠️ missed-tick warning, which fires when the last tick is older than
    cadence + 2h slack. Keep the flag in step with the cron schedule or the
    warning will cry wolf.

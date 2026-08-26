@@ -736,5 +736,5 @@ def test_fetch_empty_200_roster_is_real_data_not_error(name, url_frag, kw,
 
 def test_registry_has_five_providers():
     assert set(providers.PROVIDERS) == {
-        "nous", "openrouter", "zen", "kilo", "cline"
+        "nous", "openrouter", "zen", "kilo", "cline", "command_code"
     }

@@ -73,12 +73,12 @@ def test_list_full_roster(state_dir):
     assert set(provs) == set(mcp_server.PROVIDERS)
     assert provs["nous"] == ["stealth/ox-alpha", "tencent/hy3:free"]
     assert res["counts"]["nous"] == 2
-    assert res["n_gateways"] == len(mcp_server.PROVIDERS) == 5
+    assert res["n_gateways"] == len(mcp_server.PROVIDERS) == 6
     assert res["total_ids"] > 0
     assert isinstance(res["tick_epoch"], int)
 
 
-def test_list_partial_roster_canonical_five_shape(tmp_path):
+def test_list_partial_roster_canonical_six_shape(tmp_path):
     """One gateway-key semantic everywhere: a partial roster ({nous, zen}
     plus a junk key) STILL yields all five canonical gateways — kilo/cline/
     openrouter as empty lists, n_gateways==5 — and 'mysterygw' never leaks
@@ -99,8 +99,8 @@ def test_list_partial_roster_canonical_five_shape(tmp_path):
     for gw in ("zen", "kilo", "cline", "openrouter"):
         assert res["providers"][gw] == []
     assert res["counts"] == {"nous": 1, "zen": 0, "kilo": 0,
-                             "cline": 0, "openrouter": 0}
-    assert res["n_gateways"] == 5
+                             "cline": 0, "openrouter": 0, "command_code": 0}
+    assert res["n_gateways"] == 6
     assert "mysterygw" not in res["providers"]
     assert "mysterygw" not in res["counts"]
 
@@ -249,13 +249,13 @@ def test_status_fields_present(state_dir):
     now = 1_787_721_434 + 60  # one minute after the tick
     res = mcp_server.watchdog_status(now=now, root=state_dir)
     assert res["ok"] is True
-    assert res["cadence_s"] == mcp_server.CADENCE_S == 6 * 3600
+    assert res["cadence_s"] == mcp_server.CADENCE_S == 1 * 3600
     assert res["last_tick_age_s"] == 60
     assert res["tick_fresh"] is True
     assert res["stale_providers"] == []
     # All five DISPLAY_ORDER gateways always appear (stable shape), plus
     # any unknown roster keys.
-    for gw in ("nous", "zen", "kilo", "cline", "openrouter"):
+    for gw in ("nous", "zen", "kilo", "cline", "openrouter", "command_code"):
         assert gw in res["provider_counts"]
     assert res["provider_counts"]["kilo"] == 3
     assert res["provider_counts"]["nous"] == 2
@@ -279,7 +279,7 @@ def test_status_reports_stale_providers(tmp_path):
     }))
     res = mcp_server.watchdog_status(now=200, root=tmp_path)
     assert res["stale_providers"] == ["zen", "kilo"]
-    for gw in ("nous", "zen", "kilo", "cline", "openrouter"):
+    for gw in ("nous", "zen", "kilo", "cline", "openrouter", "command_code"):
         assert res["provider_counts"][gw] == 0
 
 
