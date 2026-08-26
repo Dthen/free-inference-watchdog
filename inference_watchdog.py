@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Free Inference Watchdog — one tick per invocation. Stdlib only, zero tokens.
 
-Hermes cron (no_agent mode): non-empty stdout is delivered verbatim to the
-Discord home channel; empty stdout = silent. Every user-visible message also
-goes to $DISCORD_WEBHOOK_INFERENCE_WATCHDOG (kennel channel) when configured.
+Delivery topology (fix-round-2 S4): the webhook in ~/.hermes/.env
+($DISCORD_WEBHOOK_INFERENCE_WATCHDOG) is the ONLY alert delivery channel.
+The Hermes cron job runs silent (--deliver local): stdout stays local and is
+not a delivery path; stderr carries fatal diagnostics for the operator.
 """
 
 import argparse

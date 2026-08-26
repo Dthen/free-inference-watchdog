@@ -6,7 +6,8 @@ no LLM calls ever.
 
 ## What it does
 
-Every 6 hours (`--recheck-delay` determines the recheck nap), the monitor:
+Every 6 hours (cadence comes from the cron schedule; `--recheck-delay` only
+sets the ~3-minute confirm nap before a diff is believed), the monitor:
 
 1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**
    (only ids containing "free", plus a small hand-maintained stealth
@@ -17,8 +18,10 @@ Every 6 hours (`--recheck-delay` determines the recheck nap), the monitor:
 3. Set-diffs against the previous `roster.json`.
 4. Re-fetches affected providers ~3 min later to confirm (kills transient flaps).
 5. Applies a 12h dedup cooldown per `(provider, model, event)`.
-6. Alerts Discord via stdout (Hermes cron → Discord home channel) AND webhook
-   (kennel channel). Both or either — webhook failure never suppresses stdout.
+6. Delivers the alert via the `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` webhook
+   (kennel channel). Failed POSTs queue in `state/pending_alerts.json` and
+   retry automatically on the next tick. Stdout stays local — the process is
+   silent unless something goes catastrophically wrong (stderr).
 7. Writes an alive ping to silence the "is it dead?" question.
 
 ## Why no Ollama?
@@ -41,25 +44,35 @@ python3 inference_watchdog.py                    # one tick (cron does this)
 
 ## Cron registration
 
-Register as a Hermes cron job (`no_agent=True` mode — stdout IS the delivery):
+The monitor runs as a silent Hermes cron script-mode job (`--no-agent`: no LLM
+is woken — the wrapper script IS the job). It is **not** a delivery channel:
+the webhook in `~/.hermes/.env` delivers alerts; cron stdout stays local.
+
+Create `~/.hermes/scripts/inference-watchdog-tick.sh`:
 
 ```bash
-hermes cron register \
-  --schedule "17 */6 * * *" \
-  --no_agent \
-  --command "cd /home/kimbo/projects/free-inference-watchdog || { echo \"inference-watchdog FAILED (cannot cd)\"; exit 1; }; python3 inference_watchdog.py || { c=\$?; [ \$c -eq 1 ] || echo \"inference-watchdog FAILED (exit \$c)\"; }" \
-  --deliver discord-home
+cd /home/kimbo/projects/free-inference-watchdog || { echo "inference-watchdog FAILED (cannot cd)" >&2; exit 1; }
+python3 inference_watchdog.py || { c=$?; [ "$c" -eq 1 ] || { echo "inference-watchdog FAILED (exit $c)" >&2; exit "$c"; }; }
 ```
 
-The fail-wrapper is **mandatory**: exit-2 crashes emit no stdout, and without
-it a deterministically crashing monitor would be indistinguishable from
-healthy silence forever. The two stages are deliberately split — under bash a
-failed `cd` IS exit 1, so chaining `cd && python3` into one exemption clause
-would silence a moved/renamed install dir forever; here a missing project dir
-pages immediately (`cannot cd`). A bare exit 1 from the monitor itself is a
-routine partial outage — the carried-forward "fetch failed" line in that
-tick's alert already says which provider flaked — so the wrapper stays silent
-on it; anything else still pages.
+Then register it on the cadence (the schedule below is what sets the 6-hour
+tick — there is no cadence flag on the job itself):
+
+```bash
+hermes cron create "17 */6 * * *" \
+  --name inference-watchdog-tick \
+  --script inference-watchdog-tick.sh \
+  --no-agent \
+  --deliver local
+```
+
+The wrapper's two stages exist to keep failure diagnosable without spamming
+Discord: under bash a failed `cd` IS exit 1, so chaining `cd && python3` into
+one exemption clause would hide a moved/renamed install dir forever — hence
+the split. A bare exit 1 from the monitor itself is a routine partial outage
+(the carried-forward "fetch failed" line in that tick's alert already says
+which provider flaked), so it stays silent; anything else exits non-zero and
+lands on stderr for the operator to find.
 
 ## Environment variables
 
@@ -67,12 +80,14 @@ All secrets live in `~/.hermes/.env`:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | no | Kennel/alerts channel webhook. Alerts also go to stdout (Discord home). |
-| `OPENCODE_ZEN_API_KEY` | yes | OpenCode Zen fetcher |
-| `KILOCODE_API_KEY` | yes | Kilo fetcher |
+| `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | yes (for alerts) | Kennel/alerts channel webhook — the only delivery path. |
+| `OPENCODE_ZEN_API_KEY` | no | OpenCode Zen fetcher — endpoint serves its roster keyless (verified HTTP 200); a key buys higher rate limits. |
+| `KILOCODE_API_KEY` | no | Kilo fetcher — endpoint also serves its roster keyless (verified HTTP 200); a key buys authenticated/higher-limit access. |
 
 OpenRouter needs no key — its models endpoint is public. Cline's roster
-endpoint is also public (no auth header); no key is read for it either.
+endpoint is also public (no auth header); no key is read for it either. The
+code treats the Zen/Kilo keys as optional too (missing key ⇒ fetch with no
+auth header), so both watchdog paths work with neither set.
 
 ### Webhook rotation
 
@@ -133,7 +148,7 @@ test_fetch_mixed_int_and_str_ids_coerced.
 
 The tick cadence defaults to 6 hours. To change it:
 
-1. Update the cron schedule to match (`hermes cron update ...`).
+1. Update the cron schedule to match (`hermes cron edit <job_id> --schedule "..."`).
 2. Pass `--cadence-hours N` (default 6) on the invocation — it drives the
    ⚠️ missed-tick warning, which fires when the last tick is older than
    cadence + 2h slack. Keep the flag in step with the cron schedule or the
@@ -167,10 +182,13 @@ Safe to re-run at any time.
 
 Cline's primary source is the public roster endpoint
 `GET https://api.cline.bot/api/v1/ai/cline/recommended-models` (no auth
-header); the free-roster tracked is the endpoint's `free[]` id list. The two
-docs pages (`free-models.md`, `api/models.md`) remain a SECONDARY fallback
-used only when the endpoint fails; if both sources fail the tick reports a
-loud fetch failure (sticky carry-forward), never a mass removal.
+header); the free-roster tracked is the endpoint's `free[]` id list. The
+free-models docs page (`getting-started/free-models.md`) remains a SECONDARY
+fallback used only when the endpoint fails; if both sources fail the tick
+reports a loud fetch failure (sticky carry-forward), never a mass removal.
+(The all-models catalog page is deliberately NOT a fallback: it documents
+paid tiers, and scraping it would swap paid ids into the roster on every
+endpoint outage.)
 
 ## Exit codes
 
