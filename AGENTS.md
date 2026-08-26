@@ -36,7 +36,7 @@
 - The cron job is silent (`--deliver local`); wrapper failures go to stderr, never stdout.
 
 ## Dashboard & MCP
-- site/index.html is a gitignored generated artifact rebuilt from state/roster.json by build_site.py each tick (invoked by the cron wrapper).
+- site/index.html is rebuilt from state/roster.json by build_site.py each tick and COMMITTED+PUSHED by the cron wrapper — GitHub Pages deploys it to models.dthen.xyz via .github/workflows/deploy-dashboard.yml. Other files under site/ stay gitignored.
 - mcp_server.py exposes list_free_models / get_model / watchdog_status read-only over state/.
 
 ## Update cadence
