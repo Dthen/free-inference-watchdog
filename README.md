@@ -10,8 +10,8 @@ Every hour (cadence comes from the cron schedule; `--recheck-delay` only
 sets the ~3-minute confirm nap before a diff is believed), the monitor:
 
 1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**
-   (only ids containing "free", plus a small hand-maintained stealth
-   allowlist — see [Zen free-only rule](#zen-free-only-rule)), **Kilo**,
+   (only ids containing "free" — see [Zen free-only rule](#zen-free-only-rule)),
+   **Kilo**,
    **Cline** (endpoint-primary, docs fallback), and **Command Code** (only
    ids containing "free" — the free lane is deal-structured).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
@@ -134,12 +134,12 @@ tick — no manual state surgery needed.
 ### Zen free-only rule
 
 Zen exposes no pricing metadata, so its roster is filtered at fetch time: an id
-is tracked iff it contains `free` (case-insensitive, anywhere in the id) OR is
-on `ZEN_STEALTH_ALLOWLIST` in `providers.py` (currently just `big-pickle`).
-Stealth models ship under opaque ids — a NEW stealth arrival needs a one-line
-allowlist addition. Everything else on Zen is a paid tier and must never be
-tracked. (This also supersedes the fetch-time passthrough older zen tests
-pinned; their fixtures now carry marked ids.) Duplicate ids are deduplicated
+is tracked iff it contains `free` (case-insensitive, anywhere in the id). No
+alias map, no allowlist, no normalized-name matching — exact ids only. A new
+stealth arrival ships under whatever id the gateway assigns; if that id doesn't
+contain `free`, it is not tracked. Everything else on Zen is a paid tier and
+must never be tracked. (This also supersedes the fetch-time passthrough older
+zen tests pinned; their fixtures now carry marked ids.) Duplicate ids are deduplicated
 at fetch time (a repeated id must not double-fire alerts), and non-string ids
 are dropped outright rather than coerced — unlike nous, openrouter, and kilo,
 whose coerce-then-filter contract is pinned by

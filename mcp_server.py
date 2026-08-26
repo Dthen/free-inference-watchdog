@@ -20,16 +20,10 @@ importable and directly testable under any Python, while build_server()/main()
 degrade with a clear error where the SDK is absent. Registration into
 ~/.hermes/config.yaml is deliberately OUT of scope (orchestrator step).
 
-HONESTY CONTRACT (Dthen, 2026-08-25): gateways rename inconsistently —
-Ox Alpha ships as `x-preview-f-free` on zen but `stealth/ox-alpha` on
-nous/kilo/cline. Therefore get_model reports (a) EXACT id matches per
-provider, (b) a clearly-labeled HEURISTIC "possible matches" section driven
-by normalized-name similarity ONLY, and (c) an explicit caveat that
-cross-gateway ABSENCE is unreliable precisely because of such renames. The
-normalizer is honest about its own ceiling: prefix-style renames
-(`tencent/hy3:free` vs `hy3-free`) share distinctive tokens and ARE caught;
-full rebrands (`stealth/ox-alpha` vs `x-preview-f-free`) share nothing and
-are NOT — that limit is stated in every result's caveats, not papered over.
+HONESTY CONTRACT (Dthen, 2026-08-25): gateways rename inconsistently, so
+get_model reports EXACT id matches per provider plus an explicit caveat that
+cross-gateway ABSENCE is unreliable precisely because of such renames. No
+alias map, no allowlist, no normalized-name matching — exact ids only.
 
 Never raises into the MCP protocol layer: every tool returns structured
 error payloads on missing/corrupt/hostile state. (_StateError below is an
@@ -73,17 +67,6 @@ PROVIDERS = ("nous", "zen", "kilo", "cline", "openrouter", "command_code")
 # Tick cadence, duplicated from inference_watchdog.DEFAULT_CADENCE_S
 # (cross-reference) for the same decoupling reason.
 CADENCE_S = 1 * 3600
-
-# Heuristic tuning. Tokens shorter than 2 chars ('x', 'f', bare versions
-# '2', '0') are noise; 'free' is generic across EVERY gateway's roster and
-# would otherwise conjure phantom overlaps between unrelated models.
-# MIN_SHARED_TOKENS=1 after that filtering is deliberately loose: a single
-# distinctive token ('hy3') is a real signal, and every reported match
-# carries its shared_tokens so the caller — not this tool — judges.
-_MIN_TOKEN_LEN = 2
-_STOPWORDS = frozenset({"free"})
-MIN_SHARED_TOKENS = 1
-MAX_MATCHES_PER_GATEWAY = 8  # keep payloads bounded on huge rosters
 
 
 class _StateError(Exception):
@@ -213,37 +196,14 @@ def list_free_models(provider=None, root=None) -> dict:
 
 # ---------- tool: get_model ----------
 
-def _tokenize(model_id):
-    """Normalized-name tokens: lowercase, split on non-alnum, drop noise.
-
-    Deliberately loses vendor prefixes and ':free' suffixes so
-    'tencent/hy3:free' and 'hy3-free' land on the same distinctive core.
-    """
-    return {
-        tok for tok in re.split(r"[^a-z0-9]+", model_id.lower())
-        if len(tok) >= _MIN_TOKEN_LEN and tok not in _STOPWORDS
-    }
-
-
 ABSENCE_CAVEAT = (
-    "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently "
-    "(stealth models especially — e.g. Ox Alpha is 'x-preview-f-free' on "
-    "zen but 'stealth/ox-alpha' on nous/kilo/cline), so a missing exact id "
-    "does NOT prove the model is unavailable there."
-)
-HEURISTIC_CAVEAT = (
-    "'possible_matches' is a HEURISTIC: normalized-name similarity ONLY, "
-    "never proof of identity. Shared tokens are listed so you can judge."
-)
-REBRAND_CAVEAT = (
-    "Known heuristic limit: FULL rebrands sharing no tokens at all "
-    "(again Ox Alpha: 'stealth/ox-alpha' vs 'x-preview-f-free') evade this "
-    "similarity check entirely."
+    "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, "
+    "so a missing exact id does NOT prove the model is unavailable there."
 )
 
 
 def get_model(model_id, root=None) -> dict:
-    """Which gateways track this id right now — exact, heuristic, caveated."""
+    """Which gateways track this exact id right now — exact only, caveated."""
     r = Path(root).resolve() if root is not None else REPO
     base: dict = {"tool": "get_model", "state_root": str(r)}
     if not isinstance(model_id, str) or not model_id.strip():
@@ -256,33 +216,13 @@ def get_model(model_id, root=None) -> dict:
     providers = roster["providers"]
     exact = {gw: model_id in providers.get(gw, []) for gw in PROVIDERS}
 
-    query_tokens = _tokenize(model_id)
-    possible: dict = {}
-    if query_tokens:
-        for gw in PROVIDERS:
-            if exact[gw]:
-                continue  # heuristics never repeat an exact gateway
-            hits = []
-            for mid in _clean_ids(providers.get(gw, [])):
-                shared = query_tokens & _tokenize(mid)
-                if len(shared) >= MIN_SHARED_TOKENS:
-                    hits.append({
-                        "id": mid,
-                        "shared_tokens": sorted(shared, key=_natural_key),
-                    })
-            if hits:
-                hits.sort(key=lambda h: (-len(h["shared_tokens"]),
-                                         _natural_key(h["id"])))
-                possible[gw] = hits[:MAX_MATCHES_PER_GATEWAY]
-
     return {
         **base,
         "ok": True,
         "query": model_id,
         "exact_matches": exact,
         "exact_gateways": [gw for gw in PROVIDERS if exact[gw]],
-        "possible_matches": possible,
-        "caveats": [ABSENCE_CAVEAT, HEURISTIC_CAVEAT, REBRAND_CAVEAT],
+        "caveats": [ABSENCE_CAVEAT],
     }
 
 
@@ -351,11 +291,9 @@ TOOL_DESCRIPTIONS = {
         "counts. Read-only snapshot of the latest watchdog tick.",
     "get_model":
         "Cross-gateway PRESENCE lookup: which of the six gateways track "
-        "this exact model id right now. Returns exact_matches per gateway, "
-        "plus a HEURISTIC possible_matches section (normalized-name "
-        "similarity only — gateways rename inconsistently, so cross-gateway "
-        "absence is unreliable and full rebrands evade the heuristic; see "
-        "the caveats attached to every result).",
+        "this exact model id right now. Returns exact_matches per gateway "
+        "(exact ids only — gateways rename inconsistently, so cross-gateway "
+        "absence is unreliable; see the caveats attached to every result).",
     "watchdog_status":
         "Watchdog health: last tick age vs the 1h cadence, stale/failing "
         "providers, per-gateway model counts, pending-alert queue depth, "
@@ -380,9 +318,9 @@ def build_server(root=None):
         title="Free Inference Watchdog",
         instructions=(
             "Read-only queries over the free-inference-watchdog roster "
-            "state (refreshed every 6h). Presence answers are exact-id "
-            "based; treat possible_matches as leads, not facts, and never "
-            "read cross-gateway absence as proof of unavailability."),
+            "state (refreshed hourly). Presence answers are exact-id "
+            "based; never read cross-gateway absence as proof of "
+            "unavailability."),
     )
     srv.add_tool(lambda provider=None: list_free_models(provider, root=root),
                  name="list_free_models",

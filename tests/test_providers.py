@@ -127,7 +127,7 @@ def test_is_free_missing_or_malformed():
 
 NOUS_MODELS = {
     "data": [
-        {"id": "stealth/ox-alpha", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "vendor-z/zero-priced-model", "pricing": {"prompt": "0", "completion": "0"}},
         {"id": "paid/model", "pricing": {"prompt": "0.00001", "completion": "0.00002"}},
         {"id": "nopricing/model"},
         {"id": "weird/model", "pricing": {"prompt": None, "completion": None}},
@@ -139,7 +139,7 @@ def test_fetch_nous_filters_to_free_and_captures_headers():
     hdrs = {"x-ratelimit-remaining-requests": "2099"}
     g = fake_getter({"/v1/models": ok(json.dumps(NOUS_MODELS), hdrs)})
     ids, meta = providers._fetch_nous(getter=g, auth={"token": "t", "base": "https://x/v1"})
-    assert ids == ["stealth/ox-alpha"]
+    assert ids == ["vendor-z/zero-priced-model"]
     assert meta["ratelimit"] == {"x-ratelimit-remaining-requests": "2099"}
 
 
@@ -184,12 +184,12 @@ def test_fetch_openrouter():
 
 ZEN_PAID_AND_FREE = {
     "data": [
-        {"id": "claude-opus-5"},                       # paid, no marker -> OUT
-        {"id": "gpt-5.4-pro"},                         # paid -> OUT
-        {"id": "deepseek-v4-flash-free"},              # marker -> IN
-        {"id": "x-preview-f-free"},                    # Ox Alpha -> IN
-        {"id": "big-pickle"},                          # stealth allowlist -> IN
-        {"id": "nemotron-3-ultra-free"},               # marker -> IN
+        {"id": "vendor-a/paid-model-1"},                       # paid, no marker -> OUT
+        {"id": "vendor-b/paid-model-2"},                         # paid -> OUT
+        {"id": "vendor-a/model-1-free"},              # marker -> IN
+        {"id": "vendor-x/preview-free"},                    # marker -> IN
+        {"id": "vendor-x/no-marker-model"},                          # no marker -> OUT
+        {"id": "vendor-b/model-2-free"},               # marker -> IN
     ]
 }
 
@@ -215,7 +215,7 @@ def test_fetch_zen_model_dict_objects_extract_id():
     coerce-contract helper. Still bare-ID diffing (decision #3) — we extract
     the id field, no alias mapping."""
     body = json.dumps([
-        {"id": "claude-fable-5-free", "object": "model", "owned_by": "opencode"},
+        {"id": "vendor-c/model-3-free", "object": "model", "owned_by": "opencode"},
         "bare-string-model-free",
         {"object": "model"},             # missing id (yields None) -> OUT: type gate drops non-str
         {"id": "", "object": "model"},   # empty str id -> OUT: passes type gate, fails free-marker filter
@@ -224,40 +224,40 @@ def test_fetch_zen_model_dict_objects_extract_id():
     ])
     g = fake_getter({"/zen/v1/models": ok(body)})
     ids, _ = providers._fetch_zen(getter=g)
-    assert ids == ["bare-string-model-free", "claude-fable-5-free"]
+    assert ids == ["bare-string-model-free", "vendor-c/model-3-free"]
     # Each rejection mechanism independently visible:
     assert "" not in ids            # empty str: fails the free-marker filter
     assert "None" not in ids        # null/missing id: dropped by type gate, never repr-coerced
     assert "42" not in ids          # int: dropped by type gate, never coerced
 
 
-def test_fetch_zen_keeps_only_free_marked_and_allowlisted():
+def test_fetch_zen_keeps_only_free_marked():
     g = fake_getter({"/zen/v1/models": ok(json.dumps(ZEN_PAID_AND_FREE))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
-    assert ids == ["big-pickle", "deepseek-v4-flash-free",
-                   "nemotron-3-ultra-free", "x-preview-f-free"]
+    assert ids == ["vendor-a/model-1-free",
+                   "vendor-b/model-2-free", "vendor-x/preview-free"]
 
 
 def test_fetch_zen_empty_after_filter_is_real_data():
     """Healthy 200 whose every model is paid -> [] roster (never an error)."""
     g = fake_getter({"/zen/v1/models": ok(json.dumps(
-        {"data": [{"id": "claude-opus-5"}]}))})
+        {"data": [{"id": "vendor-a/paid-model-1"}]}))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
     assert ids == []
 
 
 def test_fetch_zen_case_insensitive_and_position_independent_marker():
-    """'free' may appear anywhere, any case; allowlist match is case-insensitive."""
+    """'free' may appear anywhere, any case; no marker means not tracked."""
     g = fake_getter({"/zen/v1/models": ok(json.dumps({"data": [
-        {"id": "BIG-PICKLE"},            # allowlist, uppercase -> IN
+        {"id": "BIG-PICKLE"},            # no free marker -> OUT
         {"id": "Model-FREE"},            # suffix marker, uppercase -> IN
         {"id": "free-experiment-tier"},  # PREFIX marker -> IN
         {"id": "model-free-preview"},    # middle marker -> IN
         {"id": "freetier"},              # substring anywhere counts -> IN (rule is literal substring)
-        {"id": "claude-opus-5"},         # no marker -> OUT
+        {"id": "vendor-a/paid-model-1"},         # no marker -> OUT
     ]}))})
     ids, _ = providers._fetch_zen(getter=g, key="k")
-    assert ids == ["BIG-PICKLE", "Model-FREE", "free-experiment-tier",
+    assert ids == ["Model-FREE", "free-experiment-tier",
                    "freetier", "model-free-preview"]
 
 
@@ -289,7 +289,7 @@ KILO_MODELS = {
     "data": [
         {"id": "kilo-auto/free", "pricing": {"prompt": "0", "completion": "0"}},
         {"id": "unknown/-1", "pricing": {"prompt": "-1", "completion": "-1"}},
-        {"id": "stepfun/free:free", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "vendor-g/free:free", "pricing": {"prompt": "0", "completion": "0"}},
     ]
 }
 
@@ -297,7 +297,7 @@ KILO_MODELS = {
 def test_fetch_kilo_sentinel_excluded():
     g = fake_getter({"api.kilo.ai": ok(json.dumps(KILO_MODELS))})
     ids, _ = providers._fetch_kilo(getter=g, key="k")
-    assert ids == ["kilo-auto/free", "stepfun/free:free"]
+    assert ids == ["kilo-auto/free", "vendor-g/free:free"]
 
 
 # ---------- S5-1: mixed str/int ids must coerce to str, never FATAL ----------
@@ -377,14 +377,14 @@ def test_cline_endpoint_zero_id_dict_item_yields_string_zero():
 
 CLINE_FREE_MODELS_PAGE = (
     "# Free Models\n\nLook for models tagged FREE.\n"
-    "| Free experimentation | `deepseek/deepseek-v4-flash` |\n"
-    "| Poolside Laguna | `poolside/laguna-s-2.1:free` |\n"
-    "| Ox Alpha | `stealth/ox-alpha` |\n"
+    "| Free experimentation | `vendor-a/model-9` |\n"
+    "| Poolside Laguna | `vendor-h/model-8:free` |\n"
+    "| Ox Alpha | `vendor-z/zero-priced-model` |\n"
     "Run `provider/model-name` locally if you like.\n"
 )
 CLINE_FREE_MODELS_PAGE_WITH_DUPE = (
     CLINE_FREE_MODELS_PAGE
-    + "\nRepeated for emphasis: `deepseek/deepseek-v4-flash`.\n"
+    + "\nRepeated for emphasis: `vendor-a/model-9`.\n"
 )
 
 
@@ -399,19 +399,19 @@ def test_extract_cline_ids_accepts_mixed_case_ids():
 def test_extract_cline_ids_backticked_only():
     # F-R2-1: `provider/model-name` is a docs EXAMPLE span, not a model — rejected.
     ids = providers._extract_cline_ids(CLINE_FREE_MODELS_PAGE)
-    assert ids == ["deepseek/deepseek-v4-flash", "poolside/laguna-s-2.1:free",
-                   "stealth/ox-alpha"]
+    assert ids == ["vendor-a/model-9", "vendor-h/model-8:free",
+                   "vendor-z/zero-priced-model"]
 
 
 def test_extract_cline_ids_rejects_placeholder_spans():
     """F-R2-1: docs pages carry placeholder/example spans that match the ID
     shape (`provider/model-name` verified live on docs.cline.bot/api/models.md).
     Ingesting them poisons the roster and later fires a false 🔴 removal."""
-    md = ("Real: `minimax/minimax-m2.5`. Placeholders: `provider/model-name`, "
+    md = ("Real: `vendor-e/paid-model-3`. Placeholders: `provider/model-name`, "
           "`provider/name`, `example/model`, `your/api-key`, "
           "case-variant `Provider/Model-Name`.\n")
     ids = providers._extract_cline_ids(md)
-    assert ids == ["minimax/minimax-m2.5"]
+    assert ids == ["vendor-e/paid-model-3"]
 
 
 def test_extract_cline_ids_rejects_doc_file_spans():
@@ -456,9 +456,9 @@ def test_fetch_cline_single_page_dedupe_sorted():
 
     ids, _ = providers._fetch_cline(getter=g)
     assert ids == [
-        "deepseek/deepseek-v4-flash",
-        "poolside/laguna-s-2.1:free",
-        "stealth/ox-alpha",
+        "vendor-a/model-9",
+        "vendor-h/model-8:free",
+        "vendor-z/zero-priced-model",
     ]
     assert len(ids) == len(set(ids))           # within-page dupe collapsed
     assert not any("api/models.md" in u for u in calls)
@@ -476,8 +476,8 @@ def test_fetch_cline_live_page_placeholder_span_rejected():
         "```\n\n"
         "For example: `provider/model-name` or `provider/name`.\n\n"
         "| Model | ID |\n|---|---|\n"
-        "| DeepSeek V4 Flash | `deepseek/deepseek-v4-flash` |\n"
-        "| Poolside Laguna S | `poolside/laguna-s-2.1:free` |\n"
+        "| DeepSeek V4 Flash | `vendor-a/model-9` |\n"
+        "| Poolside Laguna S | `vendor-h/model-8:free` |\n"
     )
     calls = []
 
@@ -486,7 +486,7 @@ def test_fetch_cline_live_page_placeholder_span_rejected():
         return ok(live_page)
 
     ids, _ = providers._fetch_cline(getter=g)
-    assert ids == ["deepseek/deepseek-v4-flash", "poolside/laguna-s-2.1:free"]
+    assert ids == ["vendor-a/model-9", "vendor-h/model-8:free"]
     assert "provider/model-name" not in ids
     assert not any(i.lower().startswith("provider/") for i in ids)
     assert not any("api/models.md" in u for u in calls)   # F2: poison page gone
@@ -514,15 +514,15 @@ def test_fetch_cline_endpoint_free_ids_extracted():
     dicts with an id field; recommended/clinePass/clineCloud NEVER leak in."""
     body = json.dumps({
         "recommended": [
-            {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet",
+            {"id": "vendor-c/paid-model-4", "name": "Claude Sonnet",
              "description": "flagship", "tags": ["paid"]},
-            {"id": "minimax/minimax-m2.5", "name": "MiniMax M2.5",
+            {"id": "vendor-e/paid-model-3", "name": "MiniMax M2.5",
              "description": "", "tags": ["recommended"]},
         ],
         "free": [
             {"id": "qwen/qwen3-coder", "name": "Qwen3 Coder",
              "description": "free tier", "tags": ["free"]},
-            {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat",
+            {"id": "vendor-a/paid-chat", "name": "DeepSeek Chat",
              "description": "free tier", "tags": ["free"]},
         ],
         "clinePass": [{"id": "pass/only-model", "name": "Pass",
@@ -536,7 +536,7 @@ def test_fetch_cline_endpoint_free_ids_extracted():
         return ok(body)
 
     ids, _ = providers._fetch_cline(getter=g)
-    assert ids == ["deepseek/deepseek-chat", "qwen/qwen3-coder"]
+    assert ids == ["qwen/qwen3-coder", "vendor-a/paid-chat"]
     assert seen["url"] == providers.CLINE_ENDPOINT
     assert "Authorization" not in seen["headers"]          # public, NO auth
     assert "User-Agent" in seen["headers"]                 # UA always sent
@@ -570,9 +570,9 @@ def test_fetch_cline_docs_fallback_when_endpoint_fails():
 
     ids, _ = providers._fetch_cline(getter=g)
     assert ids == [
-        "deepseek/deepseek-v4-flash",
-        "poolside/laguna-s-2.1:free",
-        "stealth/ox-alpha",
+        "vendor-a/model-9",
+        "vendor-h/model-8:free",
+        "vendor-z/zero-priced-model",
     ]
     assert not any("api/models.md" in u for u in calls)
 
@@ -592,9 +592,9 @@ def test_fetch_cline_http_error_endpoint_uses_docs_fallback():
 
     ids, _ = providers._fetch_cline(getter=g)
     assert ids == [
-        "deepseek/deepseek-v4-flash",
-        "poolside/laguna-s-2.1:free",
-        "stealth/ox-alpha",
+        "vendor-a/model-9",
+        "vendor-h/model-8:free",
+        "vendor-z/zero-priced-model",
     ]
     assert not any("api/models.md" in u for u in calls)
 
@@ -706,7 +706,7 @@ def test_fetch_wellformed_dict_input_unchanged(name, url_frag, kw):
     if name == "openrouter":
         assert ids == ["a/free:free"]
     else:
-        assert ids == ["kilo-auto/free", "stepfun/free:free"]
+        assert ids == ["kilo-auto/free", "vendor-g/free:free"]
 
 
 # ---------- CHANGE 2 (fix-round-9): empty 200 roster is REAL data ----------

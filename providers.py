@@ -169,11 +169,10 @@ def _fetch_openrouter(getter=_default_getter):
 ZEN_URL = "https://opencode.ai/zen/v1/models"
 
 # Zen ships NO pricing metadata (probed 2026-08-25: objects carry only
-# id/object/created/owned_by). Free-roster rule: explicit "free" name marker,
-# plus a hand-maintained stealth allowlist (stealth models ship under opaque
-# ids). A NEW stealth arrival needs a one-line addition here — accepted cost,
-# documented in README.
-ZEN_STEALTH_ALLOWLIST = frozenset({"big-pickle"})
+# id/object/created/owned_by). Free-roster rule: explicit "free" name marker
+# ONLY — no alias map, no allowlist, no normalized-name matching. A new
+# stealth arrival ships under whatever id the gateway assigns; if that id
+# doesn't contain "free", it is not tracked.
 # Deploy note: a persisted roster.json written BEFORE this filter holds the
 # paid tiers; the first good tick without a manual `python3 inference_watchdog.py
 # --init` rebaseline computes removals for every persisted unmarked id (dozens
@@ -184,13 +183,12 @@ ZEN_STEALTH_ALLOWLIST = frozenset({"big-pickle"})
 def _zen_is_free(model_id):
     if not isinstance(model_id, str):
         return False
-    mid = model_id.lower()
-    return "free" in mid or mid in ZEN_STEALTH_ALLOWLIST
+    return "free" in model_id.lower()
 
 
 def _fetch_zen(getter=_default_getter, key=None):
     """Model ids only, FREE-ONLY (decision 2026-08-25): keep ids carrying the
-    'free' marker or on the stealth allowlist. Everything else on Zen is a
+    'free' marker. Everything else on Zen is a
     paid tier (claude/gpt/gemini/grok/kimi/...) and must never be tracked.
     Type-gated at a single point over BOTH item shapes — dict items
     contribute their 'id', bare items themselves; anything that is not a str
@@ -353,11 +351,11 @@ COMMAND_CODE_URL = "https://api.commandcode.ai/provider/v1/models"
 def _command_code_is_free(model_id):
     """Command Code ships NO pricing metadata (probed 2026-08-26: objects carry
     only id/object/created/owned_by/name/context_length). Free-roster rule:
-    explicit "free" name marker only — no stealth allowlist yet (the free lane
-    is small and deal-structured: minimax-m3-free, minimax-m2.7-free,
-    laguna-s-2.1-free). A NEW free arrival needs its id to carry the "free"
-    marker; if Command Code ever ships a free model under an opaque id, add
-    a ZEN_STEALTH_ALLOWLIST-style allowlist here."""
+    explicit "free" name marker only — no alias map, no allowlist, no
+    normalized-name matching (the free lane is small and deal-structured:
+    minimax-m3-free, minimax-m2.7-free, laguna-s-2.1-free). A NEW free
+    arrival needs its id to carry the "free" marker; if Command Code ever
+    ships a free model under an opaque id, it is simply not tracked."""
     if not isinstance(model_id, str):
         return False
     return "free" in model_id.lower()

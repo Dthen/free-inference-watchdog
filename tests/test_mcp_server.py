@@ -22,20 +22,20 @@ import mcp_server
 @pytest.fixture()
 def state_dir(tmp_path):
     """A realistic fixture state dir: five providers, one id shared by all,
-    one stealth-renamed pair (stealth/ox-alpha vs x-preview-f-free), and one
+    one stealth-renamed pair (vendor-z/zero-priced-model vs vendor-x/preview-free), and one
     single-gateway exclusive."""
     roster = {
         "tick_epoch": 1_787_721_434,
         "providers": {
-            "nous": ["stealth/ox-alpha", "tencent/hy3:free"],
-            "zen": ["x-preview-f-free", "hy3-free"],
+            "nous": ["vendor-z/zero-priced-model", "vendor-d/model-6:free"],
+            "zen": ["vendor-x/preview-free", "vendor-d/model-4-free"],
             "kilo": [
-                "stealth/ox-alpha",
+                "vendor-z/zero-priced-model",
                 "cohere/north-mini-code:free",
                 "kilo-auto/free",
             ],
-            "cline": ["stealth/ox-alpha"],
-            "openrouter": ["google/gemma-4-26b-a4b-it:free"],
+            "cline": ["vendor-z/zero-priced-model"],
+            "openrouter": ["vendor-f/model-5:free"],
         },
         "stale_providers": [],
         "transients": {},
@@ -71,7 +71,7 @@ def test_list_full_roster(state_dir):
     # the five known gateways, always — unknown junk roster keys are ignored,
     # gateways missing from this tick degrade to empty lists.
     assert set(provs) == set(mcp_server.PROVIDERS)
-    assert provs["nous"] == ["stealth/ox-alpha", "tencent/hy3:free"]
+    assert provs["nous"] == ["vendor-d/model-6:free", "vendor-z/zero-priced-model"]
     assert res["counts"]["nous"] == 2
     assert res["n_gateways"] == len(mcp_server.PROVIDERS) == 6
     assert res["total_ids"] > 0
@@ -87,7 +87,7 @@ def test_list_partial_roster_canonical_six_shape(tmp_path):
     (tmp_path / "state" / "roster.json").write_text(json.dumps({
         "tick_epoch": 100,
         "providers": {
-            "nous": ["stealth/ox-alpha"],
+            "nous": ["vendor-z/zero-priced-model"],
             "zen": [],
             "mysterygw": ["junk/id"],
         },
@@ -95,7 +95,7 @@ def test_list_partial_roster_canonical_six_shape(tmp_path):
     res = mcp_server.list_free_models(root=tmp_path)
     assert res["ok"] is True
     assert set(res["providers"]) == set(mcp_server.PROVIDERS)
-    assert res["providers"]["nous"] == ["stealth/ox-alpha"]
+    assert res["providers"]["nous"] == ["vendor-z/zero-priced-model"]
     for gw in ("zen", "kilo", "cline", "openrouter"):
         assert res["providers"][gw] == []
     assert res["counts"] == {"nous": 1, "zen": 0, "kilo": 0,
@@ -110,7 +110,7 @@ def test_list_single_provider_filter(state_dir):
     assert res["ok"] is True
     assert res["provider"] == "kilo"
     assert res["model_ids"] == sorted(res["model_ids"])
-    assert "stealth/ox-alpha" in res["model_ids"]
+    assert "vendor-z/zero-priced-model" in res["model_ids"]
 
 
 def test_list_unknown_provider_clean_error(state_dir):
@@ -148,102 +148,14 @@ def test_get_model_exact_match_across_gateways(state_dir):
 
 
 def test_get_model_exact_match_everywhere(state_dir):
-    res = mcp_server.get_model("stealth/ox-alpha", root=state_dir)
+    res = mcp_server.get_model("vendor-z/zero-priced-model", root=state_dir)
     present = [gw for gw, p in res["exact_matches"].items() if p]
     assert sorted(present) == ["cline", "kilo", "nous"]
 
 
-def test_get_model_unknown_id_empty_matches_still_has_caveat(state_dir):
-    res = mcp_server.get_model("totally/not-here:free", root=state_dir)
-    assert res["exact_matches"] == {gw: False for gw in mcp_server.PROVIDERS}
-    assert res["possible_matches"] == {}
-    assert res["caveats"]
-
-
-# ---------- get_model: heuristic rename handling ----------
-
 def _tokens(s):
     return mcp_server._tokenize(s)
 
-
-def test_tokenizer_normalizes_separators():
-    # lowercase + split on non-alnum; noise dropped: sub-2-char tokens
-    # ('x', 'f') and the generic 'free' are junk signal, by design.
-    assert _tokens("Stealth/Ox-Alpha") == {"stealth", "ox", "alpha"}
-    assert _tokens("x_preview_f.free") == {"preview"}
-
-
-def test_heuristic_prefix_style_rename_caught(state_dir):
-    """Prefix-style rename: zen's 'hy3-free' is the same core model as
-    nous' 'tencent/hy3:free' after normalization ('hy3' survives, vendor
-    prefix and ':free' don't) — the heuristic MUST surface that."""
-    res = mcp_server.get_model("tencent/hy3:free", root=state_dir)
-    assert res["exact_matches"]["nous"] is True
-    assert res["exact_matches"]["zen"] is False
-    heur = res["possible_matches"]
-    assert heur and "zen" in heur
-    assert heur["zen"][0]["id"] == "hy3-free"
-    assert heur["zen"][0]["shared_tokens"] == ["hy3"]
-
-
-def test_full_rebrand_pair_gets_no_false_match(state_dir):
-    """Honest-ceiling pin: Ox Alpha as 'x-preview-f-free' (zen) vs
-    'stealth/ox-alpha' (elsewhere) share ZERO tokens after the noise
-    filter — no heuristic hit may be fabricated. The limitation lives in
-    the caveats instead."""
-    res = mcp_server.get_model("stealth/ox-alpha", root=state_dir)
-    assert res["possible_matches"] == {}
-    caveats = " ".join(res["caveats"]).lower()
-    assert "rebrand" in caveats and "evade" in caveats
-
-
-def test_heuristic_never_repeats_exact_gateway(state_dir):
-    """The exact-match skip is REAL loop-body behavior, not a vacuous pass:
-    nous holds 'tencent/hy3:free' EXACTLY, while zen is not exact but shares
-    the distinctive token 'hy3' via 'hy3-free'. The loop must therefore
-    execute (zen present through shared tokens) AND still exclude nous —
-    which would trivially win any similarity contest — from the results."""
-    res = mcp_server.get_model("tencent/hy3:free", root=state_dir)
-    assert res["exact_matches"]["nous"] is True
-    heur = res["possible_matches"]
-    assert heur, "guarded assertions below would be vacuous"
-    assert "zen" in heur
-    assert heur["zen"][0]["id"] == "hy3-free"
-    assert heur["zen"][0]["shared_tokens"] == ["hy3"]
-    # ...and the invariant under test: no exact gateway repeats in heuristics.
-    for gw in heur:
-        assert res["exact_matches"][gw] is False
-    assert "nous" not in heur
-
-
-def test_heuristic_requires_meaningful_overlap(state_dir):
-    """Generic tokens alone never conjure matches: 'google/gemma-4-26b-'
-    shares nothing distinctive with anything except openrouter's exact
-    'google/gemma-4-26b-a4b-it:free' (excluded by the exact-skip), so the
-    remaining gateways stay clean. Contrast: zen's 'hy3-free' genuinely
-    overlaps nous' queried 'tencent/hy3:free' on the distinctive token
-    'hy3' — that one MUST appear with its shared_tokens."""
-    res = mcp_server.get_model("google/gemma-4-26b-a4b-it:free",
-                               root=state_dir)
-    # openrouter has it exactly; every OTHER gateway stays clean.
-    assert res["exact_matches"]["openrouter"] is True
-    assert res["possible_matches"] == {}
-    # Positive control on the SAME fixture: shared-token hits do surface,
-    # proving the emptiness above is discrimination, not dead machinery.
-    hy = mcp_server.get_model("tencent/hy3:free", root=state_dir)
-    heur = hy["possible_matches"]
-    assert heur and "zen" in heur, \
-        "fixture must produce real shared-token hits"
-    assert hy["exact_matches"]["zen"] is False
-    assert heur["zen"][0]["id"] == "hy3-free"
-    assert heur["zen"][0]["shared_tokens"] == ["hy3"]
-    for gw, hits in heur.items():
-        assert hy["exact_matches"][gw] is False
-        assert all(len(h["shared_tokens"]) >= mcp_server.MIN_SHARED_TOKENS
-                   for h in hits)
-
-
-# ---------- watchdog_status ----------
 
 def test_status_fields_present(state_dir):
     now = 1_787_721_434 + 60  # one minute after the tick

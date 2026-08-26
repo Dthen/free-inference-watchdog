@@ -150,8 +150,8 @@ def render_page(roster, logo_b64):
     """Render the full HTML document as one string (byte-deterministic)."""
     providers = roster["providers"]
     ids, counts = build_counts(providers)
-    # availability-count desc, then id asc as the deterministic tie-break
-    ordered_ids = sorted(ids, key=lambda mid: (-counts[mid], mid))
+    # alphabetical by model id — groups same-model variants together
+    ordered_ids = sorted(ids)
     tick = roster.get("tick_epoch")
     if (
         isinstance(tick, (int, float))
@@ -256,8 +256,7 @@ def render_page(roster, logo_b64):
 {body_rows}</tbody>
 <tfoot><tr><th>tracked ids per gateway</th><td></td>{foot_cells}</tr></tfoot>
 </table>
-<footer class="note">ids shown verbatim per gateway — the same underlying model can ship under different local ids
-(e.g. Ox&nbsp;Alpha = <code>x-preview-f-free</code> on zen, <code>stealth/ox-alpha</code> elsewhere).
+<footer class="note">ids shown verbatim per gateway — the same underlying model can ship under different local ids.
 Static file, rebuilt each tick.</footer>
 </div></body></html>"""
 

@@ -42,11 +42,11 @@ BUILDER = REPO / "build_site.py"
 SEED_ROSTER = {
     "tick_epoch": 1787721434,
     "providers": {
-        "nous": ["stealth/ox-alpha", "stepfun/step-3.7-flash:free"],
-        "openrouter": ["stealth/ox-alpha"],
-        "zen": ["stealth/ox-alpha", "x-preview-f-free"],
-        "kilo": ["stealth/ox-alpha"],
-        "cline": ["stealth/ox-alpha"],
+        "nous": ["vendor-z/zero-priced-model", "vendor-g/model-7:free"],
+        "openrouter": ["vendor-z/zero-priced-model"],
+        "zen": ["vendor-z/zero-priced-model", "vendor-x/preview-free"],
+        "kilo": ["vendor-z/zero-priced-model"],
+        "cline": ["vendor-z/zero-priced-model"],
     },
     "stale_providers": [],
 }
@@ -88,7 +88,7 @@ def test_builder_renders_seeded_id():
         proc = _run_builder(SEED_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        assert "stealth/ox-alpha" in html
+        assert "vendor-z/zero-priced-model" in html
 
 
 def test_roster_data_script_extracts_cleanly():
@@ -107,7 +107,7 @@ def test_roster_data_script_extracts_cleanly():
         assert m, "roster-data script tag missing from output"
         data = json.loads(m.group(1))
         assert set(data["providers"]) == {"nous", "openrouter", "zen", "kilo", "cline"}
-        assert "stealth/ox-alpha" in data["providers"]["nous"]
+        assert "vendor-z/zero-priced-model" in data["providers"]["nous"]
 
 
 def test_deterministic_output():
@@ -179,7 +179,7 @@ def test_presence_matrix_structure():
         head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
         cols = re.findall(r"<th>([^<]*)</th>", head)
         assert cols == ["model id", "#", "nous", "zen", "kilo", "cline", "openrouter", "command_code"]
-        # unique ids: stealth/ox-alpha + stepfun + x-preview-f-free = 3 rows
+        # unique ids: vendor-z/zero-priced-model + stepfun + vendor-x/preview-free = 3 rows
         tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
         rows = re.findall(r"<tr><th>", tbody)
         assert len(rows) == 3
@@ -229,8 +229,8 @@ def test_logo_embedded_as_data_uri():
 # ---------- C1: hostile providers values must exit 2, never render ----------
 
 @pytest.mark.parametrize("bad", [
-    "stealth/ox-alpha",            # bare string -> was iterated char-by-char
-    {"nous": ["stealth/ox-alpha"]},  # dict value -> was a false presence dot
+    "vendor-z/zero-priced-model",            # bare string -> was iterated char-by-char
+    {"nous": ["vendor-z/zero-priced-model"]},  # dict value -> was a false presence dot
     None,                          # null -> was unhandled TypeError rc=1
     7,                             # int -> was unhandled TypeError rc=1
 ])
