@@ -33,7 +33,12 @@ def _load_json_or_default(path, default):
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, RecursionError):
+        # RecursionError: a hand-edited/hostile file with absurd nesting
+        # blows the stdlib parser's recursion stack. Same degradation class
+        # as network JSON (providers._loads_or_fetcherror) — fall back to
+        # the default instead of escaping into run_tick's fatal handler and
+        # permanently FATAL exit-2 looping on every tick.
         return default
     return data
 

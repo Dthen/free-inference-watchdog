@@ -394,3 +394,48 @@ def test_cooldowns_negative_age_stamp_dropped(tmp_path):
     now = 5_000_000.0
     state.save_cooldowns(p, {"skewed": now + 1}, ttl_s=43_200, now=now)
     assert state.load_cooldowns(p) == {}
+
+
+# ---------- sweep-2: RecursionError gate on local-disk JSON loads ----------
+
+# Raw hostile literal: nesting so deep the stdlib parser exhausts the
+# interpreter's recursion stack. Written verbatim (not via json.dumps).
+DEEP_NEST_JSON = "[" * 120000 + "]" * 120000
+
+
+@pytest.mark.parametrize(
+    "loader_name,default",
+    [
+        ("load_roster", None),
+        ("load_cooldowns", {}),
+        ("load_pending", []),
+        ("load_alive", {}),
+    ],
+)
+def test_deep_nested_json_returns_loader_default(tmp_path, loader_name,
+                                                 default):
+    """Sweep #2: a deeply-nested state file makes json.load raise
+    RecursionError, which was NOT in _load_json_or_default's except tuple
+    (OSError, json.JSONDecodeError) — it escaped every loader into
+    run_tick's fatal handler and permanently FATAL exit-2 looped the
+    monitor. Round 2 fixed exactly this class for NETWORK JSON
+    (providers._loads_or_fetcherror); the local-disk seam must degrade the
+    same way: each public loader falls back to its DEFAULT, like any other
+    unreadable/corrupt file."""
+    p = tmp_path / f"{loader_name}.json"
+    p.write_text(DEEP_NEST_JSON, encoding="utf-8")
+    assert getattr(state, loader_name)(p) == default
+
+
+def test_deep_but_under_limit_json_still_parses(tmp_path):
+    """Guard-rail: the RecursionError gate must not swallow legitimate
+    deep-but-parseable JSON — nesting comfortably under the interpreter's
+    recursion limit still parses with structure intact."""
+    p = tmp_path / "deep.json"
+    depth = 300
+    p.write_text("[" * depth + '{"k": 1}' + "]" * depth, encoding="utf-8")
+    data = state._load_json_or_default(p, None)
+    assert data is not None          # parsed, not defaulted
+    for _ in range(depth):
+        data = data[0]
+    assert data == {"k": 1}
