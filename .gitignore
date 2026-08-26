@@ -1,5 +1,8 @@
 state/
-site/
+# Dashboard publish: only the built index.html is tracked (CI uploads it to
+# GitHub Pages); every other file under site/ stays local-only.
+site/*
+!site/index.html
 __pycache__/
 *.pyc
 .pytest_cache/
