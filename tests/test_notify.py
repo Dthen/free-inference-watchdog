@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import notify
 
 
@@ -282,3 +284,215 @@ def test_drain_retries_each_chunk_independently(tmp_path, monkeypatch):
     sent = notify.drain_pending("https://hook", q)
     assert sent == 1 and calls["n"] == before + 1
     assert notify.load_pending(q) == []
+
+
+# ---------- F1: retry-queue identity — per-send nonce, no content dedup ----------
+
+def _ok_resp():
+    class R(FakeResp):
+        pass
+    return R()
+
+
+def test_f1_identical_chunks_of_one_alert_stay_distinct(tmp_path, monkeypatch):
+    """F1(a): two identical-content chunks of one oversized alert that BOTH
+    fail POST must enqueue as TWO independent items — content alone is not
+    an identity, so nothing is merged away."""
+    monkeypatch.setattr(notify, "_urlopen", _boom)
+    q = tmp_path / "pending.json"
+    same = "y" * 100
+    assert notify._send_webhook_chunk("https://hook", same, q) is False
+    assert notify._send_webhook_chunk("https://hook", same, q) is False
+    items = notify.load_pending(q)
+    assert len(items) == 2
+    assert all(it["payload"]["content"] == same for it in items)
+    assert [it["attempts"] for it in items] == [1, 1]
+
+
+def test_f1_week_old_item_never_absorbs_fresh_failure(tmp_path, monkeypatch):
+    """F1(b): a week-old queued item with identical content does not merge
+    with (nor get attempt-bumped by) this week's identical failed ping."""
+    monkeypatch.setattr(notify, "_urlopen", _boom)
+    q = tmp_path / "pending.json"
+    notify.append_pending(q, {"content": "ping"}, now=1_000_000.0, attempts=3)
+    before = notify.get_dropped_total()
+    assert notify._send_webhook_chunk("https://hook", "ping", q) is False
+    items = notify.load_pending(q)
+    assert len(items) == 2
+    old = next(it for it in items if it["first_queued_epoch"] == 1_000_000.0)
+    fresh = next(it for it in items if it["first_queued_epoch"] != 1_000_000.0)
+    assert old["attempts"] == 3 and old["payload"]["content"] == "ping"
+    assert fresh["attempts"] == 1
+    assert notify.get_dropped_total() == before   # old item untouched
+
+
+def test_f1_same_uid_retries_still_merge(tmp_path, monkeypatch):
+    """F1(c): the SAME send retried (same uid) still merges into one item —
+    identity is (content, uid), so genuine re-attempts don't multiply rows.
+    Reaching max attempts drops exactly once."""
+    monkeypatch.setattr(notify, "_urlopen", _boom)
+    q = tmp_path / "pending.json"
+    uid = "fixed-uid"
+    ok = notify._send_webhook_chunk("https://hook", "dup", q, uid=uid,
+                                    max_attempts=3)
+    ok &= notify._send_webhook_chunk("https://hook", "dup", q, uid=uid,
+                                     max_attempts=3)
+    ok &= notify._send_webhook_chunk("https://hook", "dup", q, uid=uid,
+                                     max_attempts=3)
+    assert ok is False
+    items = notify.load_pending(q)
+    assert len(items) == 0                        # merged item dropped at 3
+    assert notify.get_dropped_total() >= 1
+
+
+def test_f1_recovery_drains_n_messages_for_n_chunks(tmp_path, monkeypatch):
+    """F1(d): end-to-end recovery — N distinct queued chunks deliver as N
+    separate messages; none were silently merged while queued."""
+    monkeypatch.setattr(notify, "_urlopen", _boom)
+    q = tmp_path / "pending.json"
+    msg = "\n".join(f"🟢 `p/model-{i}`" for i in range(200))
+    chunks = notify.split_message(msg)
+    assert len(chunks) > 1
+    assert notify.send_webhook("https://hook", msg, q) is False
+    queued = notify.load_pending(q)
+    assert len(queued) == len(chunks)             # one row per chunk
+    monkeypatch.setattr(notify, "_urlopen", _urlopen_ok)
+    assert notify.drain_pending("https://hook", q) == len(chunks)
+    assert notify.load_pending(q) == []
+
+
+# ---------- F2: chunk budget measured in UTF-16 code units ----------
+
+def _u16(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
+def test_discord_len_matches_utf16_units():
+    assert notify._discord_len("") == 0
+    assert notify._discord_len("hello") == 5
+    assert notify._discord_len("🟢🔴🔔") == 6      # astral chars count DOUBLE
+    assert _u16("🟢🔴🔔") == notify._discord_len("🟢🔴🔔")
+
+
+def test_split_emoji_mass_alert_every_chunk_within_u16_budget():
+    """F2 core: realistic mass-alert text whose Python char count fits but
+    whose UTF-16 count exceeds Discord's limit must split so EVERY chunk's
+    UTF-16 unit count is <= SAFE_CHUNK_CHARS; joined output is lossless."""
+    lines = ["🟢 `m`"] * 300
+    text = "\n".join(lines)
+    assert len(text) <= notify.SAFE_CHUNK_CHARS            # py-chars fit...
+    assert _u16(text) > notify.SAFE_CHUNK_CHARS            # ...but units don't
+    chunks = notify.split_message(text)
+    assert len(chunks) > 1
+    assert all(_u16(c) <= notify.SAFE_CHUNK_CHARS for c in chunks)
+    assert "\n".join(chunks) == text                        # lossless join
+
+
+def test_split_pure_emoji_pathological_bounded():
+    # multi-line pathological: every line is pure astral emoji (2 units/char)
+    text = "\n".join("🟢🔴" * 400 for _ in range(15))     # 15 x 2400 u16
+    chunks = notify.split_message(text)
+    assert all(_u16(c) <= notify.SAFE_CHUNK_CHARS for c in chunks)
+    assert "\n".join(chunks) == text
+
+
+def test_split_ascii_golden_byte_identical():
+    """F2: ASCII input behaves byte-for-byte as before the UTF-16 change."""
+    golden_in = ("alpha\nbeta gamma\ndelta\n" + "x" * 40 + "\nepsilon")
+    assert notify.split_message(golden_in, max_chars=20) == [
+        "alpha\nbeta gamma",
+        "delta",
+        "x" * 40,                       # oversize line stays its own chunk
+        "epsilon",
+    ]
+    assert notify.split_message("short ascii") == ["short ascii"]
+    assert notify.split_message("") == [""]
+
+
+def test_split_single_astral_line_own_chunk_not_dropped():
+    long_line = "🟢" * 1200                               # 1200 chars, 2400 u16
+    chunks = notify.split_message(f"h\n{long_line}\nt", max_chars=1900)
+    assert long_line in chunks
+    assert "\n".join(chunks) == f"h\n{long_line}\nt"
+
+
+def test_safe_chunk_units_value():
+    assert notify.SAFE_CHUNK_CHARS == 1900               # value unchanged
+
+
+# ---------- F3: drain durability — save after EVERY successful POST ----------
+
+def test_drain_abort_midway_keeps_only_undelivered(tmp_path, monkeypatch):
+    """F3: abort after the 2nd of 3 POSTs must leave EXACTLY the undelivered
+    item queued — delivered ones are gone from disk (at-least-once)."""
+    calls = {"n": 0}
+
+    def flaky(req, timeout=10):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt()
+        return FakeResp()
+
+    monkeypatch.setattr(notify, "_urlopen", flaky)
+    q = tmp_path / "pending.json"
+    for c in ("first", "second", "third"):
+        notify.append_pending(q, {"content": c}, attempts=1)
+    with pytest.raises(KeyboardInterrupt):
+        notify.drain_pending("https://hook", q)
+    remaining = notify.load_pending(q)
+    # delivered 'first' is gone; undelivered 'second'+'third' stay queued
+    assert [it["payload"]["content"] for it in remaining] == ["second", "third"]
+
+
+def test_drain_full_success_still_empties_queue(tmp_path, monkeypatch):
+    monkeypatch.setattr(notify, "_urlopen", _urlopen_ok)
+    q = tmp_path / "pending.json"
+    for c in ("a", "b", "c"):
+        notify.append_pending(q, {"content": c})
+    assert notify.drain_pending("https://hook", q) == 3
+    assert notify.load_pending(q) == []
+
+
+def test_drain_failed_post_bumps_attempts_and_retains(tmp_path, monkeypatch):
+    def boom_first_then_fail(req, timeout=10):
+        raise OSError("down")
+
+    monkeypatch.setattr(notify, "_urlopen", boom_first_then_fail)
+    q = tmp_path / "pending.json"
+    notify.append_pending(q, {"content": "keep"}, attempts=2)
+    assert notify.drain_pending("https://hook", q) == 0
+    items = notify.load_pending(q)
+    assert len(items) == 1
+    assert items[0]["attempts"] == 3                      # bumped, retained
+
+
+# ---------- F4: _bump_attempts strict int gate ----------
+
+@pytest.mark.parametrize("raw,expected", [(True, 1), (2.0, 1), (3, 4)])
+def test_bump_attempts_type_gate(raw, expected):
+    item = {"payload": {"content": "x"}, "attempts": raw}
+    notify._bump_attempts(item)
+    assert item["attempts"] == expected
+
+
+# ---------- F5: format_transient_counts tolerates hand-edited shapes ----------
+
+def test_transient_counts_non_dict_truthy_renders_as_one():
+    out = notify.format_transient_counts({"weird": "x", "float": 3.5,
+                                          "ok": {"added": ["a"],
+                                                 "removed": []},
+                                          "num": 4})
+    bits = sorted(out.split(", "))
+    assert bits == ["float(1)", "num(4)", "ok(1)", "weird(1)"]
+
+
+def test_transient_counts_none_and_empty_map_skipped():
+    assert notify.format_transient_counts({"gone": None}) == ""
+    assert notify.format_transient_counts({"empty": {}}) == ""
+    assert notify.format_transient_counts({}) == ""
+    assert notify.format_transient_counts(None) == ""
+
+
+def test_transient_counts_int_passthrough_alive_consumer():
+    """alive.format_alive consumes this — signature/shape unchanged."""
+    assert notify.format_transient_counts({"zen": 2}) == "zen(2)"
