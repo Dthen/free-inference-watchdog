@@ -66,6 +66,39 @@ def test_load_nous_auth_empty_or_nonstring_base_is_fetch_error(tmp_path):
             providers._load_nous_auth(path)
 
 
+# ---------- F1: RecursionError meets the FetchError contract ----------
+
+DEEP_NEST_JSON = "[" * 120000 + "]" * 120000
+
+
+@pytest.mark.parametrize("site", ["parse_model_list", "cline_endpoint",
+                                  "nous_auth"])
+def test_deeply_nested_json_raises_fetcherror_not_recursionerror(site,
+                                                                 tmp_path):
+    """F1: CPython's json decoder raises RecursionError on deeply nested
+    documents ('['*N + ']'*N). RecursionError is NOT a FetchError, so it
+    escapes build_fetch_all's `except providers.FetchError`, reaches
+    run_tick's fatal handler and exits 2 EVERY tick until the provider is
+    fixed. All three parse sites (_parse_model_list, _fetch_cline_endpoint,
+    _load_nous_auth) must convert it. pytest.raises(FetchError) doubles as
+    the nothing-else-escapes assertion — a leaking RecursionError fails."""
+    if site == "parse_model_list":
+        with pytest.raises(FetchError):
+            providers._parse_model_list(DEEP_NEST_JSON)
+    elif site == "cline_endpoint":
+        def g(url, headers=None, timeout=15):
+            return (200, DEEP_NEST_JSON, {})
+
+        with pytest.raises(FetchError):
+            providers._fetch_cline_endpoint(g)
+    else:
+        p = tmp_path / "auth.json"
+        p.write_text('{"providers": {"nous": ' + DEEP_NEST_JSON + '}}',
+                     encoding="utf-8")
+        with pytest.raises(FetchError):
+            providers._load_nous_auth(str(p))
+
+
 # ---------- is_free ----------
 
 def test_is_free_string_zero():
@@ -297,14 +330,62 @@ def test_fetch_mixed_int_and_str_ids_coerced(name, url_frag, kw):
     assert ids == ["1", "a-model"]
 
 
-# ---------- cline (docs change-detector) ----------
+# ---------- F4: dict-id gate is None-check, not truthiness ----------
 
-CLINE_PAGE_A = (
+ZERO_ID_ITEMS = {
+    "data": [
+        {"id": 0, "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "normal/free-model", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": None, "pricing": {"prompt": "0", "completion": "0"}},
+    ]
+}
+
+
+@pytest.mark.parametrize("name,url_frag,kw", [
+    ("nous", "/v1/models", {"auth": {"token": "t", "base": "https://x/v1"}}),
+    ("openrouter", "openrouter.ai", {}),
+    ("kilo", "api.kilo.ai", {"key": "k"}),
+])
+def test_fetch_zero_id_dict_item_yields_string_zero(name, url_frag, kw):
+    """F4: the dict-item gate is `it.get('id') is not None`, never truthiness
+    — numeric id 0 is a REAL id and coerces to "0" exactly like S5-1 pins
+    {"id":1}->"1". Null ids stay dropped (no 'None' leak the other way)."""
+    g = fake_getter({url_frag: ok(json.dumps(ZERO_ID_ITEMS))})
+    ids, _ = providers.PROVIDERS[name](getter=g, **kw)
+    assert ids == ["0", "normal/free-model"]
+
+
+def test_cline_endpoint_zero_id_dict_item_yields_string_zero():
+    """Fix-round-2 S3: _fetch_cline_endpoint's keep-lambda still used bare
+    truthiness (`lambda it: it.get("id")`), so a numeric id 0 in free[] was
+    dropped — violating its own docstring and every sibling fetcher (F4).
+    Same gate as the others: `is not None`, with None-ids never leaking."""
+    body = json.dumps({
+        "recommended": [],
+        "free": [{"id": 0}, {"id": "real/free"}],
+        "clinePass": [], "clineCloud": [],
+    })
+    g = fake_getter({"/api/v1/ai/cline/recommended-models": ok(body)})
+    ids, _ = providers._fetch_cline(getter=g)
+    assert ids == ["0", "real/free"]
+
+
+# ---------- cline (endpoint-primary, free-models-docs fallback) ----------
+# F2 de-poisoning: the ONLY docs fallback page is getting-started/
+# free-models.md. The api/models.md catalog lists the PAID roster, so its
+# fixture is gone entirely — no test may teach providers to scrape it.
+
+CLINE_FREE_MODELS_PAGE = (
     "# Free Models\n\nLook for models tagged FREE.\n"
-    "| Free experimentation | `minimax/minimax-m2.5` |\n"
-    "Run `provider/name` locally if you like.\n"
+    "| Free experimentation | `deepseek/deepseek-v4-flash` |\n"
+    "| Poolside Laguna | `poolside/laguna-s-2.1:free` |\n"
+    "| Ox Alpha | `stealth/ox-alpha` |\n"
+    "Run `provider/model-name` locally if you like.\n"
 )
-CLINE_PAGE_B = "Examples:\n\n* `anthropic/claude-sonnet-4-6` - Claude\n* `minimax/minimax-m2.5` - dup\n"
+CLINE_FREE_MODELS_PAGE_WITH_DUPE = (
+    CLINE_FREE_MODELS_PAGE
+    + "\nRepeated for emphasis: `deepseek/deepseek-v4-flash`.\n"
+)
 
 
 def test_extract_cline_ids_accepts_mixed_case_ids():
@@ -316,9 +397,10 @@ def test_extract_cline_ids_accepts_mixed_case_ids():
 
 
 def test_extract_cline_ids_backticked_only():
-    # F-R2-1: `provider/name` is a docs EXAMPLE span, not a model — rejected.
-    ids = providers._extract_cline_ids(CLINE_PAGE_A)
-    assert ids == ["minimax/minimax-m2.5"]
+    # F-R2-1: `provider/model-name` is a docs EXAMPLE span, not a model — rejected.
+    ids = providers._extract_cline_ids(CLINE_FREE_MODELS_PAGE)
+    assert ids == ["deepseek/deepseek-v4-flash", "poolside/laguna-s-2.1:free",
+                   "stealth/ox-alpha"]
 
 
 def test_extract_cline_ids_rejects_placeholder_spans():
@@ -341,43 +423,73 @@ def test_extract_cline_ids_rejects_doc_file_spans():
     assert ids == ["Qwen/Qwen3-32B"]
 
 
-def test_fetch_cline_union_dedupe_sorted():
+def test_extract_cline_ids_rejects_multi_extension_doc_tails():
+    """F3: stacked-extension doc tails (.md.txt & friends) match the ID shape
+    but are FILES, not models — rejected by the extended suffix rule."""
+    md = ("Links: `x/y.md.txt`, `docs/guide.html.tmp`, `w/paper.pdf`; "
+          "real: `Qwen/Qwen3-32B`.\n")
+    ids = providers._extract_cline_ids(md)
+    assert ids == ["Qwen/Qwen3-32B"]
+    assert "x/y.md.txt" not in ids
+
+
+def test_extract_cline_ids_version_tails_and_plain_colon_ids_survive():
+    """F3 guard rails: the extended suffix rule must NOT eat legitimate dotted
+    model ids — version-like tails (`org/model-name.v2`, `qwen/qwen3-0.6b`)
+    and plain colon ids (`a/b:c`) are accepted unchanged."""
+    md = "`a/b:c` `org/model-name.v2` `qwen/qwen3-0.6b`"
+    assert providers._extract_cline_ids(md) == [
+        "a/b:c", "org/model-name.v2", "qwen/qwen3-0.6b"]
+
+
+def test_fetch_cline_single_page_dedupe_sorted():
+    """F2: CLINE_PAGES shrank to the free-models page only, so the old
+    cross-page union is gone — dedupe/sort must hold WITHIN the single page
+    instead. Calls are recorded to pin that api/models.md is never requested."""
+    calls = []
+
     def g(url, headers=None, timeout=15):
+        calls.append(url)
         if "free-models" in url:
-            return ok(CLINE_PAGE_A)
-        return ok(CLINE_PAGE_B)
+            return ok(CLINE_FREE_MODELS_PAGE_WITH_DUPE)
+        raise FetchError(f"no fixture for {url}")
 
     ids, _ = providers._fetch_cline(getter=g)
     assert ids == [
-        "anthropic/claude-sonnet-4-6",
-        "minimax/minimax-m2.5",
+        "deepseek/deepseek-v4-flash",
+        "poolside/laguna-s-2.1:free",
+        "stealth/ox-alpha",
     ]
+    assert len(ids) == len(set(ids))           # within-page dupe collapsed
+    assert not any("api/models.md" in u for u in calls)
 
 
 def test_fetch_cline_live_page_placeholder_span_rejected():
-    """F-R2-1 regression: the LIVE docs.cline.bot/api/models.md page carries
-    the example span `provider/model-name` (verified HTTP 200 on 2026-08-22,
-    where it had already leaked into state/roster.json). A page shaped like
-    that must yield only real IDs — never the placeholder."""
+    """F-R2-1 regression, reshaped for F2: a docs page shaped like the live
+    free-models page can carry example spans (`provider/model-name`) next to
+    real IDs — it must yield only real IDs, never the placeholder."""
     live_page = (
-        "# Models\n\n"
+        "# Free Models\n\n"
         "Configure your provider:\n\n"
         "```json\n"
         '{"apiModelId": "provider/model-name"}\n'
         "```\n\n"
         "For example: `provider/model-name` or `provider/name`.\n\n"
         "| Model | ID |\n|---|---|\n"
-        "| Claude Sonnet | `anthropic/claude-sonnet-4-6` |\n"
-        "| MiniMax M2.5 | `minimax/minimax-m2.5` |\n"
+        "| DeepSeek V4 Flash | `deepseek/deepseek-v4-flash` |\n"
+        "| Poolside Laguna S | `poolside/laguna-s-2.1:free` |\n"
     )
+    calls = []
 
     def g(url, headers=None, timeout=15):
+        calls.append(url)
         return ok(live_page)
 
     ids, _ = providers._fetch_cline(getter=g)
-    assert ids == ["anthropic/claude-sonnet-4-6", "minimax/minimax-m2.5"]
+    assert ids == ["deepseek/deepseek-v4-flash", "poolside/laguna-s-2.1:free"]
     assert "provider/model-name" not in ids
     assert not any(i.lower().startswith("provider/") for i in ids)
+    assert not any("api/models.md" in u for u in calls)   # F2: poison page gone
 
 
 def test_fetch_cline_empty_parse_raises():
@@ -442,36 +554,49 @@ def test_fetch_cline_endpoint_empty_free_list_is_real_data_not_error():
 
 
 def test_fetch_cline_docs_fallback_when_endpoint_fails():
-    """CHANGE 3: when the endpoint RAISES FetchError / HTTP-fails, the two
-    docs pages (free-models.md + api/models.md) become the SECONDARY fallback;
-    their extracted IDs merge as the fallback roster that ticks."""
+    """CHANGE 3 + F2: when the endpoint RAISES FetchError / HTTP-fails, the
+    FREE-MODELS docs page is the SECONDARY fallback and its IDs tick. The
+    paid-roster catalog page (api/models.md) is not part of that story and
+    must not even be requested."""
+    calls = []
+
     def g(url, headers=None, timeout=15):
+        calls.append(url)
         if "api.cline.bot" in url:
             raise FetchError("HTTP 503 from " + url)
         if "free-models" in url:
-            return ok(CLINE_PAGE_A)
-        return ok(CLINE_PAGE_B)
+            return ok(CLINE_FREE_MODELS_PAGE)
+        raise FetchError(f"no fixture for {url}")
 
     ids, _ = providers._fetch_cline(getter=g)
     assert ids == [
-        "anthropic/claude-sonnet-4-6",
-        "minimax/minimax-m2.5",
+        "deepseek/deepseek-v4-flash",
+        "poolside/laguna-s-2.1:free",
+        "stealth/ox-alpha",
     ]
+    assert not any("api/models.md" in u for u in calls)
 
 
 def test_fetch_cline_http_error_endpoint_uses_docs_fallback():
     """CHANGE 3: an endpoint non-200 (not just a transport raise) must also
-    fall back to the docs pages."""
+    fall back to the free-models docs page — and ONLY that page (F2)."""
+    calls = []
+
     def g(url, headers=None, timeout=15):
+        calls.append(url)
         if "api.cline.bot" in url:
             return (500, "server error", {})
-        return ok(CLINE_PAGE_A + CLINE_PAGE_B)
+        if "free-models" in url:
+            return ok(CLINE_FREE_MODELS_PAGE)
+        raise FetchError(f"no fixture for {url}")
 
     ids, _ = providers._fetch_cline(getter=g)
     assert ids == [
-        "anthropic/claude-sonnet-4-6",
-        "minimax/minimax-m2.5",
+        "deepseek/deepseek-v4-flash",
+        "poolside/laguna-s-2.1:free",
+        "stealth/ox-alpha",
     ]
+    assert not any("api/models.md" in u for u in calls)
 
 
 def test_fetch_cline_both_sources_fail_is_loud_fetcherror():
@@ -505,6 +630,36 @@ def test_fetch_cline_endpoint_ok_docs_never_polled():
     ids, _ = providers._fetch_cline(getter=g)
     assert ids == ["only/free-model"]
     assert len(calls) == 1 and "api.cline.bot" in calls[0]
+
+
+def test_cline_pages_constant_is_free_models_page_only():
+    """F2 root pin: the fallback source list itself carries ONLY the
+    free-models page. The all-models catalog was live-verified as a PAID
+    roster (claude-sonnet-4-6 / deepseek-chat / gemini-2.5-pro /
+    minimax-m2.5 / gpt-4o — zero overlap with the endpoint's true free[]);
+    an outage must never swap the roster for that list."""
+    assert providers.CLINE_PAGES == (
+        "https://docs.cline.bot/getting-started/free-models.md",
+    )
+
+
+def test_fetch_cline_api_models_md_never_requested_even_if_everything_fails():
+    """F2 explicit negative: with the endpoint AND every docs page dead, the
+    getter is pointed at the endpoint then the free-models page — NEVER at
+    the api/models.md paid catalog."""
+    calls = []
+
+    def g(url, headers=None, timeout=15):
+        calls.append(url)
+        raise FetchError(f"dead: {url}")
+
+    with pytest.raises(FetchError):
+        providers._fetch_cline(getter=g)
+
+    assert calls                                     # getter was exercised
+    assert providers.CLINE_ENDPOINT in calls         # primary tried first
+    assert any("free-models" in u for u in calls)    # free fallback tried too
+    assert not any("api/models.md" in u for u in calls)  # poison page: never
 
 
 # ---------- CHANGE 1 (fix-round-9): shape-tolerant parsers ----------

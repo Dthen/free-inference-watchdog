@@ -55,12 +55,23 @@ def _headers(extra=None):
     return {"User-Agent": USER_AGENT, **(extra or {})}
 
 
+def _loads_or_fetcherror(text, ctx_msg):
+    """json.loads under the FetchError contract (fix-round F1).
+
+    Malformed bytes raise json.JSONDecodeError, and DEEPLY NESTED documents
+    ('['*120000 + ']'*120000) raise RecursionError straight out of CPython's
+    json scanner. Neither subclasses FetchError, so either escaping a fetcher
+    would blow through build_fetch_all's `except providers.FetchError` into
+    run_tick's fatal handler (exit 2, every tick). Both convert here."""
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise FetchError(ctx_msg) from exc
+
+
 def _parse_model_list(body):
     """OpenAI-style {"data":[...]} or bare list -> list[dict|str]."""
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise FetchError("response was not valid JSON") from exc
+    payload = _loads_or_fetcherror(body, "response was not valid JSON")
     items = payload.get("data", payload) if isinstance(payload, dict) else payload
     if not isinstance(items, list):
         raise FetchError("unexpected models payload shape")
@@ -73,10 +84,11 @@ def _extract_ids(items, keep):
     Real captured roster shapes: nous/openrouter/kilo ship dict items
     {"id": ...}; zen ships MIXED bare strings + dicts. Every API fetcher must
     accept BOTH: dicts yield their `id` field, plain strings/ints are kept
-    verbatim (str'd), and only missing/empty/null ids are skipped.
-    `keep(dict)` is the per-provider dict predicate (pricing/free filter);
-    non-dict items bypass it entirely. Zen previously shared this helper but
-    now intentionally diverges — see _fetch_zen's own type-gated extraction."""
+    verbatim (str'd). Whether a dict item survives at all is `keep(dict)`'s
+    call — per-provider `id is not None` + pricing/free filter (F4: gated on
+    None, never truthiness, so a numeric id 0 survives like {"id":1}->"1").
+    Zen previously shared this helper but now intentionally diverges — see
+    _fetch_zen's own type-gated extraction."""
     return [
         str(it.get("id")) if isinstance(it, dict) else str(it)
         for it in items
@@ -97,14 +109,20 @@ def _load_nous_auth(auth_path="~/.hermes/auth.json"):
     F3: a malformed VALUE (null/empty/non-string token or base) must surface
     as FetchError — same contract as every other fetch failure — never as an
     AttributeError escaping to a whole-tick FATAL.
-    """
+    F1: a deeply nested document raises RecursionError inside the json
+    decoder; it converts to FetchError here via _loads_or_fetcherror too."""
     import os
     path = os.path.expanduser(auth_path)
     try:
         with open(path, encoding="utf-8") as fh:
-            nous = json.load(fh)["providers"]["nous"]
+            text = fh.read()
+    except OSError as exc:
+        raise FetchError(f"cannot load nous auth from {path}") from exc
+    try:
+        nous = _loads_or_fetcherror(
+            text, f"cannot load nous auth from {path}")["providers"]["nous"]
         token, base = nous["access_token"], nous["inference_base_url"]
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+    except (KeyError, TypeError) as exc:
         raise FetchError(f"cannot load nous auth from {path}") from exc
     if not isinstance(token, str) or not token:
         raise FetchError(
@@ -127,7 +145,8 @@ def _fetch_nous(getter=_default_getter, auth=None):
     _require_ok(status, url)
     ids = sorted(_extract_ids(
         _parse_model_list(body),
-        keep=lambda it: it.get("id") and is_free(it.get("pricing"))))
+        keep=lambda it: (it.get("id") is not None
+                         and is_free(it.get("pricing")))))
     ratelimit = {k: v for k, v in (hdrs or {}).items() if "ratelimit" in k.lower()}
     return ids, {"ratelimit": ratelimit}
 
@@ -140,7 +159,8 @@ def _fetch_openrouter(getter=_default_getter):
     _require_ok(status, url)
     ids = sorted(_extract_ids(
         _parse_model_list(body),
-        keep=lambda it: it.get("id") and is_free(it.get("pricing"))))
+        keep=lambda it: (it.get("id") is not None
+                         and is_free(it.get("pricing")))))
     return ids, {}
 
 
@@ -199,24 +219,37 @@ def _fetch_kilo(getter=_default_getter, key=None):
     _require_ok(status, KILO_URL)
     ids = sorted(_extract_ids(
         _parse_model_list(body),
-        keep=lambda it: it.get("id") and is_free(it.get("pricing"))))
+        keep=lambda it: (it.get("id") is not None
+                         and is_free(it.get("pricing")))))
     return ids, {}
 
 
 # ---------- cline (endpoint-primary, docs-fallback) ----------
 
 # CHANGE 3 (fix-round-9): Cline DOES expose a public roster endpoint (probed
-# live, no auth header required) — it is now the PRIMARY source. The two docs
-# pages stay as a SECONDARY FALLBACK used only when the endpoint fails.
+# live, no auth header required) — it is now the PRIMARY source. Docs remain
+# a SECONDARY FALLBACK used only when the endpoint fails.
+# F2 (this round): that fallback is the FREE-MODELS page ONLY. The old
+# second entry (api/models.md) is the ALL-models catalog — live-verified as
+# a PAID roster (claude-sonnet-4-6, deepseek-chat, gemini-2.5-pro,
+# minimax-m2.5, gpt-4o; zero overlap with the endpoint's true free[]), so an
+# endpoint outage used to swap the free roster for paid ids. An outage now
+# yields either this page's ids or an honest loud FetchError (empty-parse
+# rule in _fetch_cline_docs_fallback) — sticky carry-forward, never a
+# paid-roster swap.
 CLINE_ENDPOINT = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
 CLINE_PAGES = (
     "https://docs.cline.bot/getting-started/free-models.md",
-    "https://docs.cline.bot/api/models.md",
 )
 
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
 _MODEL_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+$")  # R2-3: case-insensitive both sides
-_DOC_SUFFIX = re.compile(r"\.(md|html|pdf)$", re.IGNORECASE)   # F5: doc links, not IDs
+# F5/F3: backticked DOC-file links, not model IDs. The tail may stack
+# (.md.txt, .html.tmp) and every stacked segment is still a file, so accept
+# extra dotted segments after a doc extension; IGNORECASE kept from F5.
+# Guard rails: dotted VERSION tails (`qwen/qwen3-0.6b`, `model-name.v2`)
+# don't start with a doc extension, so legitimate ids survive untouched.
+_DOC_SUFFIX = re.compile(r"\.(md|html|pdf|mdx|txt)(\.\w+)*$", re.IGNORECASE)
 
 # F-R2-1: placeholder spans docs pages use in examples (provider/model-name
 # verified live on docs.cline.bot/api/models.md). They match the ID shape but
@@ -231,6 +264,7 @@ def _extract_cline_ids(markdown_text):
 
     F5: spans ending .md/.html/.pdf are documentation file paths that happen
     to match the ID shape — rejected so docs edits can't churn the roster.
+    F3: stacked-extension tails (.md.txt & friends) are rejected the same way.
     F-R2-1: placeholder/example spans (`provider/model-name` & friends) are
     rejected the same way."""
     found = set()
@@ -261,20 +295,20 @@ def _fetch_cline_endpoint(getter):
     status, body, _hdrs = getter(CLINE_ENDPOINT, headers=_headers(),
                                  timeout=TIMEOUT_S)
     _require_ok(status, CLINE_ENDPOINT)
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise FetchError("cline endpoint response was not valid JSON") from exc
+    payload = _loads_or_fetcherror(
+        body, "cline endpoint response was not valid JSON")
     free = payload.get("free") if isinstance(payload, dict) else None
     if not isinstance(free, list):
         raise FetchError("unexpected cline endpoint payload shape")
-    ids = sorted(_extract_ids(free, keep=lambda it: it.get("id")))
+    ids = sorted(_extract_ids(free, keep=lambda it: it.get("id") is not None))
     return ids
 
 
 def _fetch_cline_docs_fallback(getter):
-    """SECONDARY FALLBACK (docs change-detector): watch the two docs pages'
-    backticked IDs. Used ONLY when the primary endpoint fails."""
+    """SECONDARY FALLBACK (docs change-detector): watch the free-models docs
+    page's backticked IDs (F2: that page ONLY — api/models.md is a paid
+    catalog and is never requested). Used ONLY when the primary endpoint
+    fails."""
     collected = set()
     got_any_page = False
     for page in CLINE_PAGES:
@@ -298,10 +332,12 @@ def _fetch_cline(getter=_default_getter):
 
     Primary source GET api.cline.bot/api/v1/ai/cline/recommended-models
     (public, NO auth header): diff free[].id like every other provider.
-    Docs pages (free-models.md + api/models.md + placeholder denylist regex)
-    remain SECONDARY fallback only — merged in when the endpoint raises
-    FetchError / HTTP-fails. Both failing is an honest loud FetchError
-    (sticky carry-forward), never a silent empty roster."""
+    The free-models docs page (plus the placeholder/denylist and doc-suffix
+    span rules) remains SECONDARY fallback only — used when the endpoint
+    raises FetchError / HTTP-fails; F2 removed the api/models.md catalog from
+    that fallback so an outage can never surface PAID ids. Both sources
+    failing is an honest loud FetchError (sticky carry-forward), never a
+    silent empty roster."""
     try:
         return _fetch_cline_endpoint(getter), {}
     except FetchError:
