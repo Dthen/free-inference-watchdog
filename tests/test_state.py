@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -143,6 +144,37 @@ def test_alive_wellformed_file_unchanged(tmp_path):
         "dropped_alerts_total": 0}
 
 
+# ---------- fix-round-2 S1: NaN/Infinity JSON literals ----------
+
+def test_alive_nonfinite_json_literals_drop_field(tmp_path):
+    """S1: json.load accepts Python's NaN/Infinity/-Infinity literals (the
+    stdlib parser is deliberately liberal). They are int/float, so they used
+    to pass the boundary gate and explode in int() — ValueError for NaN,
+    OverflowError for Infinity — a FATAL exit-2 on EVERY tick. Worse, the
+    poison self-perpetuates: save only happens after the read that crashed.
+    Non-finite numbers must DROP the field exactly like str/None junk."""
+    p = tmp_path / "alive.json"
+    # Raw text: these literals have no JSON.dumps round-trip via allow_nan
+    # defaults worth relying on — write them verbatim.
+    p.write_text(
+        '{"last_tick_epoch": NaN, "last_output_epoch": Infinity,'
+        ' "dropped_alerts_total": -Infinity, "extra": "kept"}',
+        encoding="utf-8")
+    assert state.load_alive(p) == {"extra": "kept"}
+
+
+def test_alive_finite_float_still_coerces_after_nan_guard(tmp_path):
+    """S1 guard-rail: the non-finite rejection must not swallow legitimate
+    finite float stamps (json may carry 1755.9) — they still coerce."""
+    p = tmp_path / "alive.json"
+    p.write_text(json.dumps({"last_tick_epoch": 1755.9,
+                             "dropped_alerts_total": 3.0}),
+                 encoding="utf-8")
+    assert state.load_alive(p) == {"last_tick_epoch": 1755,
+                                   "dropped_alerts_total": 3}
+
+
+
 # ---------- lockfile ----------
 
 def test_lock_acquire_and_release(tmp_path):
@@ -166,3 +198,199 @@ def test_lock_stale_broken(tmp_path):
     os.utime(lock, (old, old))
     assert state.acquire_lock(lock) is True  # stale (>30 min) gets broken
     state.release_lock(lock)
+
+
+# ---------- F1: O_EXCL acquisition — no TOCTOU dual holders ----------
+
+def test_lock_live_contention_leaves_file_byte_and_mtime_identical(tmp_path):
+    """F1(a): a live lock must make the second acquire return False WITHOUT
+    touching the file — no pid overwrite, no mtime bump (O_EXCL open fails
+    before any write)."""
+    lock = tmp_path / "monitor.lock"
+    assert state.acquire_lock(lock) is True
+    bytes_before = lock.read_bytes()
+    mtime_before = os.stat(lock).st_mtime_ns
+    assert state.acquire_lock(lock) is False
+    assert lock.read_bytes() == bytes_before == str(os.getpid()).encode()
+    assert os.stat(lock).st_mtime_ns == mtime_before
+
+
+def test_lock_stale_takeover_writes_own_pid(tmp_path):
+    """F1(b): serialized stale-break still succeeds and stamps OUR pid."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("999999", encoding="utf-8")
+    old = time.time() - 31 * 60
+    os.utime(lock, (old, old))
+    assert state.acquire_lock(lock) is True
+    assert lock.read_text(encoding="utf-8") == str(os.getpid())
+    state.release_lock(lock)
+
+
+def test_lock_race_stale_break_single_winner(tmp_path, monkeypatch):
+    """F1(c): two acquirers race the stale break — exactly one may win.
+
+    Ordering 1: rival completes its WHOLE acquire inside our unlink window,
+    so it recreates the file first; we must lose on the retry (its file is
+    fresh) instead of stamping over it. The old exists()/unlink/write code
+    made BOTH acquirers return True here."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("888888", encoding="utf-8")
+    old = time.time() - 31 * 60
+    os.utime(lock, (old, old))
+
+    results = {}
+    real_unlink = os.unlink
+    fired = []
+
+    def rival_full_acquire():
+        results["rival"] = state.acquire_lock(lock)
+
+    def hooked(path, *args, **kwargs):
+        result = real_unlink(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(lock) and not fired:
+            fired.append(True)
+            rival_full_acquire()
+        return result
+
+    monkeypatch.setattr(os, "unlink", hooked)
+    ours = state.acquire_lock(lock)
+    monkeypatch.undo()
+
+    assert results.get("rival") is True
+    assert ours is False                      # loser stands down
+    assert sum(1 for v in results.values() if v) + (1 if ours else 0) == 1
+    assert lock.read_text(encoding="utf-8") != "888888"   # stale pid gone
+    state.release_lock(lock)
+
+
+def test_lock_race_rival_dies_after_break_we_recover(tmp_path):
+    """F1(c), ordering 2: a rival breaks the stale file then vanishes before
+    creating its own — from our side that is exactly the plain stale-break
+    path (unlink succeeded, nothing re-created the file). The exclusive
+    create must succeed: crash recovery still works when the file vanishes
+    between break and create."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("777777", encoding="utf-8")
+    old = time.time() - 31 * 60
+    os.utime(lock, (old, old))
+    assert state.acquire_lock(lock) is True
+    assert lock.read_text(encoding="utf-8") == str(os.getpid())
+    state.release_lock(lock)
+
+
+def test_lock_race_rival_raw_creates_first_we_stand_down(tmp_path):
+    """F1(c), ordering 3: during our stale-break window a rival raw-writes a
+    FRESH lockfile (crashed mid-acquire while holding it). Our retry hits
+    FileExistsError on a fresh file -> False. Never overwrite a fresh peer."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("666666", encoding="utf-8")
+    old = time.time() - 31 * 60
+    os.utime(lock, (old, old))
+
+    real_unlink = os.unlink
+    fired = []
+
+    def rival_raw_create():
+        lock.write_text("424242", encoding="utf-8")  # fresh rival holder
+
+    def hooked(path, *args, **kwargs):
+        result = real_unlink(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(lock) and not fired:
+            fired.append(True)
+            rival_raw_create()
+        return result
+
+    import unittest.mock as mock
+    with mock.patch("os.unlink", hooked):
+        ours = state.acquire_lock(lock)
+    assert ours is False
+    assert lock.read_text(encoding="utf-8") == "424242"   # rival untouched
+
+
+# ---------- F2: unique temp name per writer ----------
+
+def test_atomic_write_concurrent_threads_no_lost_tmp(tmp_path):
+    """F2: two writers racing the SAME target must never steal each other's
+    temp file (shared '<name>.tmp' caused FileNotFoundError ~27% of raced
+    rounds). 2 threads x 50 writes: zero exceptions, target always valid
+    JSON from exactly one writer, no *.tmp leftovers."""
+    target = tmp_path / "target.json"
+    errors = []
+
+    def worker(n):
+        try:
+            for i in range(50):
+                state._atomic_write_json(target, {"worker": n, "i": i})
+        except Exception as exc:  # noqa: BLE001 — any failure is the bug
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["worker"] in (0, 1)
+    assert isinstance(data["i"], int)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_write_failed_dump_leaves_only_own_named_tmp(tmp_path):
+    """F2: a mid-write failure may leave the WRITER'S OWN temp behind but
+    nothing else — the temp name carries this process's pid so a crashed
+    writer's debris can't be mistaken for another writer's."""
+    target = tmp_path / "target.json"
+    with pytest.raises(TypeError):
+        state._atomic_write_json(target, {"bad": {1, 2}})  # set: unserializable
+    leftovers = list(tmp_path.glob("*.tmp"))
+    for leftover in leftovers:
+        assert leftover.name.startswith("target.json.")
+        assert str(os.getpid()) in leftover.name
+    assert not target.exists()
+
+
+# ---------- F3: cooldown stamp sanitation at persist ----------
+
+def test_cooldowns_save_drops_nonfinite_future_bool_and_string(tmp_path):
+    """F3: Infinity suppressed alerts forever, future-dated stamps suppressed
+    them arbitrarily long, NaN survived every prune. Sanitation happens at
+    persist: keep ONLY finite numbers (bool excluded) whose age satisfies
+    0 <= now - v < ttl_s."""
+    p = tmp_path / "cooldowns.json"
+    now = 1_000_000_000.0
+    ttl = 43_200
+    data = {
+        "good|fresh": now - 100,
+        "good|near_ttl": now - ttl + 5,
+        "bad|inf": float("inf"),
+        "bad|-inf": float("-inf"),
+        "bad|nan": float("nan"),
+        "bad|future": now + 500,
+        "bad|bool": True,
+        "bad|string": "123",
+    }
+    state.save_cooldowns(p, data, ttl_s=ttl, now=now)
+    assert state.load_cooldowns(p) == {
+        "good|fresh": now - 100,
+        "good|near_ttl": now - ttl + 5,
+    }
+
+
+def test_cooldowns_exact_ttl_boundary_dropped(tmp_path):
+    """F3 boundary: age exactly ttl_s drops — matches cooldown.py's strict
+    `now - last < ttl_s` suppression check."""
+    p = tmp_path / "cooldowns.json"
+    now = 5_000_000.0
+    state.save_cooldowns(p, {"edge": now - 43_200}, ttl_s=43_200, now=now)
+    assert state.load_cooldowns(p) == {}
+
+
+def test_cooldowns_negative_age_stamp_dropped(tmp_path):
+    """F3: a stamp dated AFTER now (clock skew / hand edit) has negative age
+    and is treated as stale, not preserved forever."""
+    p = tmp_path / "cooldowns.json"
+    now = 5_000_000.0
+    state.save_cooldowns(p, {"skewed": now + 1}, ttl_s=43_200, now=now)
+    assert state.load_cooldowns(p) == {}

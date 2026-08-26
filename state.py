@@ -6,7 +6,9 @@ never silently swallow an alert.
 """
 
 import json
+import math
 import os
+import threading
 import time
 
 
@@ -14,10 +16,17 @@ import time
 
 def _atomic_write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # Unique per process + thread: a shared '<name>.tmp' let two concurrent
+    # writers race — one writer's os.replace moved the other's temp file away,
+    # so the loser died on FileNotFoundError (spurious FATAL exit-2 upstream).
+    # threading.get_ident() is deliberate belt-and-braces: ticks are
+    # single-threaded today, but the temp name stays collision-free if that
+    # ever changes.
+    tmp = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh)
-    os.replace(tmp, path)  # atomic on local ext4
+    os.replace(tmp, path)  # atomic rename on local ext4; finality unchanged
 
 
 def _load_json_or_default(path, default):
@@ -51,12 +60,23 @@ def load_cooldowns(path):
 def save_cooldowns(path, cooldowns, ttl_s=43200, now=None):
     """Prune entries older than TTL before writing (map never grows forever).
 
+    Sanitation happens here at persist (cooldown.filter_cooldown is left as
+    is — every persisted map passes through this save): an entry survives
+    ONLY if it is a finite number (bool excluded — bool subclasses int) AND
+    its age satisfies 0 <= now - v < ttl_s. Infinity/nan and future-dated
+    stamps (negative age) are junk that would otherwise suppress alerts
+    forever or arbitrarily long; age == ttl_s drops (matches cooldown.py's
+    strict <).
+
     `now` is injectable so ticks (and tests) prune against the tick clock,
     never against a mismatched wall clock.
     """
     now = time.time() if now is None else now
     pruned = {k: v for k, v in cooldowns.items()
-              if isinstance(v, (int, float)) and now - v < ttl_s}
+              if isinstance(v, (int, float))
+              and not isinstance(v, bool)
+              and math.isfinite(v)
+              and 0 <= now - v < ttl_s}
     _atomic_write_json(path, pruned)
 
 
@@ -89,7 +109,11 @@ def load_alive(path):
     last_tick_epoch / last_output_epoch / dropped_alerts_total feed raw
     arithmetic downstream — int/float coerce via int(), anything else
     (str, None, missing) DROPS the field so it reads as absent (callers
-    already default absent fields). Other keys pass through untouched."""
+    already default absent fields). Non-finite floats are junk too (S1):
+    json.load happily parses NaN/Infinity literals, but int(nan) raises
+    ValueError and int(inf) OverflowError — a FATAL exit-2 on every tick,
+    self-perpetuating because save only runs after this read. They drop
+    like any other junk value. Other keys pass through untouched."""
     data = _load_json_or_default(path, {})
     if not isinstance(data, dict):
         return {}
@@ -97,7 +121,8 @@ def load_alive(path):
     for field in ("last_tick_epoch", "last_output_epoch",
                   "dropped_alerts_total"):
         if field in clean and not isinstance(clean[field], bool) \
-                and isinstance(clean[field], (int, float)):
+                and isinstance(clean[field], (int, float)) \
+                and math.isfinite(clean[field]):
             clean[field] = int(clean[field])
         else:
             clean.pop(field, None)
@@ -121,14 +146,48 @@ def acquire_lock(lock_path, now=None):
     """True + hold the lock, or False if a LIVE lock exists (never wait).
 
     Stale locks (>30 min mtime) are broken — crash recovery.
+
+    Acquisition is exclusively os.open(O_CREAT|O_EXCL): create-or-fail is
+    atomic, so two processes racing the same stale break can never both
+    win. The old exists()->stat()->unlink()->write_text() interleave let a
+    second process slip in between "stale file unlinked" and "new file
+    written" — both returned True and stamped their pid over each other.
+    Now the loser's create fails against the winner's FRESH file and it
+    stands down. Exactly one stale-break retry: if that create also hits
+    FileExistsError, someone fresher won — live-lock fast-fail unchanged,
+    release_lock unchanged.
     """
-    if lock_path.exists():
-        age = (now if now is not None else time.time()) - lock_path.stat().st_mtime
-        if age < LOCK_STALE_S:
-            return False
-        lock_path.unlink()  # stale — break it
+    now_v = time.time() if now is None else now
+
+    def _create_exclusive():
+        # The ONLY acquisition primitive: returns an open fd, or None if
+        # the path already exists (atomically — never truncates a peer's
+        # lockfile).
+        try:
+            return os.open(str(lock_path),
+                           os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            return None
+
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text(str(os.getpid()), encoding="utf-8")
+    fd = _create_exclusive()
+    if fd is None:
+        try:
+            age = now_v - lock_path.stat().st_mtime
+        except FileNotFoundError:
+            age = None  # vanished mid-race (rival broke it): just retry below
+        if age is not None and age < LOCK_STALE_S:
+            return False  # live lock — fast fail; bytes/mtime untouched
+        if age is not None:
+            try:
+                os.unlink(str(lock_path))  # stale — break it
+            except FileNotFoundError:
+                pass  # a rival broke it first
+        fd = _create_exclusive()  # ONE retry; losing it = fresher acquirer won
+        if fd is None:
+            return False
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
     return True
 
 
