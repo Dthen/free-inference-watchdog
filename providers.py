@@ -7,7 +7,6 @@ The real getter ALWAYS sends a User-Agent (Nous 403s bare urllib — probed).
 """
 
 import json
-import re
 import urllib.error
 import urllib.request
 
@@ -222,74 +221,23 @@ def _fetch_kilo(getter=_default_getter, key=None):
     return ids, {}
 
 
-# ---------- cline (endpoint-primary, docs-fallback) ----------
-
-# CHANGE 3 (fix-round-9): Cline DOES expose a public roster endpoint (probed
-# live, no auth header required) — it is now the PRIMARY source. Docs remain
-# a SECONDARY FALLBACK used only when the endpoint fails.
-# F2 (this round): that fallback is the FREE-MODELS page ONLY. The old
-# second entry (api/models.md) is the ALL-models catalog — live-verified as
-# a PAID roster (claude-sonnet-4-6, deepseek-chat, gemini-2.5-pro,
-# minimax-m2.5, gpt-4o; zero overlap with the endpoint's true free[]), so an
-# endpoint outage used to swap the free roster for paid ids. An outage now
-# yields either this page's ids or an honest loud FetchError (empty-parse
-# rule in _fetch_cline_docs_fallback) — sticky carry-forward, never a
-# paid-roster swap.
+# ---------- cline (endpoint-only) ----------
+# Dthen 2026-08-26: docs-watching/scraping is OUT OF SPEC. Cline has a real
+# API endpoint, so there is NO docs-markdown fallback at all. Endpoint fails
+# or returns no parseable free[] ⇒ raise FetchError (sticky carry-forward),
+# exactly like every other provider. No second source, no soft-200 rescue.
 CLINE_ENDPOINT = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
-CLINE_PAGES = (
-    "https://docs.cline.bot/getting-started/free-models.md",
-)
-
-_CODE_SPAN = re.compile(r"`([^`\n]+)`")
-_MODEL_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+$")  # R2-3: case-insensitive both sides
-# F5/F3: backticked DOC-file links, not model IDs. The tail may stack
-# (.md.txt, .html.tmp) and every stacked segment is still a file, so accept
-# extra dotted segments after a doc extension; IGNORECASE kept from F5.
-# Guard rails: dotted VERSION tails (`qwen/qwen3-0.6b`, `model-name.v2`)
-# don't start with a doc extension, so legitimate ids survive untouched.
-_DOC_SUFFIX = re.compile(r"\.(md|html|pdf|mdx|txt)(\.\w+)*$", re.IGNORECASE)
-
-# F-R2-1: placeholder spans docs pages use in examples (provider/model-name
-# verified live on docs.cline.bot/api/models.md). They match the ID shape but
-# are not models — ingesting them poisons the roster and later fires a false
-# 🔴 removal when Cline edits the example.
-_PLACEHOLDER_PROVIDERS = {"provider", "example", "your"}
-_PLACEHOLDER_SPANS = {"provider/model-name", "provider/name"}
 
 
-def _extract_cline_ids(markdown_text):
-    """Backticked inline-code spans that look like provider/model IDs.
+def _fetch_cline(getter=_default_getter):
+    """Endpoint-only: GET recommended-models, extract ids from free[] ONLY.
 
-    F5: spans ending .md/.html/.pdf are documentation file paths that happen
-    to match the ID shape — rejected so docs edits can't churn the roster.
-    F3: stacked-extension tails (.md.txt & friends) are rejected the same way.
-    F-R2-1: placeholder/example spans (`provider/model-name` & friends) are
-    rejected the same way."""
-    found = set()
-    for span in _CODE_SPAN.findall(markdown_text):
-        candidate = span.strip()
-        if _DOC_SUFFIX.search(candidate):
-            continue
-        if not _MODEL_ID.match(candidate):
-            continue
-        lowered = candidate.lower()
-        if lowered in _PLACEHOLDER_SPANS:
-            continue
-        if lowered.split("/", 1)[0] in _PLACEHOLDER_PROVIDERS:
-            continue
-        found.add(candidate)
-    return sorted(found)
-
-
-def _fetch_cline_endpoint(getter):
-    """PRIMARY: GET recommended-models, extract ids from free[] ONLY.
-
-    Response shape: {recommended:[{id,...}], free:[...], clinePass:[...],
+    Response shape: {recommended:[...], free:[...], clinePass:[...],
     clineCloud:[]} — free[] is the free-roster we track; recommended/
     clinePass/clineCloud are PAID tiers and must never leak into the roster.
     An empty free[] on a healthy 200 is REAL data (CHANGE 2): returned as [],
-    never an error, never a fallback trigger. Any transport/HTTP failure
-    raises FetchError so the caller can fall back."""
+    never an error. Any transport/HTTP failure or unparseable payload raises
+    FetchError — sticky carry-forward, exactly like every other provider."""
     status, body, _hdrs = getter(CLINE_ENDPOINT, headers=_headers(),
                                  timeout=TIMEOUT_S)
     _require_ok(status, CLINE_ENDPOINT)
@@ -299,48 +247,7 @@ def _fetch_cline_endpoint(getter):
     if not isinstance(free, list):
         raise FetchError("unexpected cline endpoint payload shape")
     ids = sorted(_extract_ids(free, keep=lambda it: it.get("id") is not None))
-    return ids
-
-
-def _fetch_cline_docs_fallback(getter):
-    """SECONDARY FALLBACK (docs change-detector): watch the free-models docs
-    page's backticked IDs (F2: that page ONLY — api/models.md is a paid
-    catalog and is never requested). Used ONLY when the primary endpoint
-    fails."""
-    collected = set()
-    got_any_page = False
-    for page in CLINE_PAGES:
-        try:
-            status, body, _hdrs = getter(page, headers=_headers(), timeout=TIMEOUT_S)
-        except FetchError:
-            continue  # one dead page shouldn't erase the other's signal
-        if status != 200:
-            continue
-        got_any_page = True
-        collected.update(_extract_cline_ids(body))
-    if not got_any_page or not collected:
-        # Moved/renamed/error pages read as OUTAGE (sticky carry-forward),
-        # never as mass removal — plan's empty-parse rule.
-        raise FetchError("empty parse: no cline docs pages yielded model ids")
-    return sorted(collected)
-
-
-def _fetch_cline(getter=_default_getter):
-    """Endpoint-primary with docs fallback (CHANGE 3).
-
-    Primary source GET api.cline.bot/api/v1/ai/cline/recommended-models
-    (public, NO auth header): diff free[].id like every other provider.
-    The free-models docs page (plus the placeholder/denylist and doc-suffix
-    span rules) remains SECONDARY fallback only — used when the endpoint
-    raises FetchError / HTTP-fails; F2 removed the api/models.md catalog from
-    that fallback so an outage can never surface PAID ids. Both sources
-    failing is an honest loud FetchError (sticky carry-forward), never a
-    silent empty roster."""
-    try:
-        return _fetch_cline_endpoint(getter), {}
-    except FetchError:
-        pass  # fall through to the docs change-detector
-    return _fetch_cline_docs_fallback(getter), {}
+    return ids, {}
 
 
 # ---------- command code ----------

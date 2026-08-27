@@ -12,8 +12,7 @@ sets the ~3-minute confirm nap before a diff is believed), the monitor:
 1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**
    (only ids containing "free" — see [Zen free-only rule](#zen-free-only-rule)),
    **Kilo**,
-   **Cline** (endpoint-primary, docs fallback), and **Command Code** (only
-   ids containing "free" — the free lane is deal-structured).
+   **Cline**, and **Command Code** (only ids containing "free" — the free lane is deal-structured).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
    an outage never looks like a mass removal).
 3. Set-diffs against the previous `roster.json`.
@@ -178,18 +177,6 @@ Running `--init` archives any existing `roster.json` to `roster.json.bak`
 before clean-rebaselining. It always prints "initialized, no diff" and never
 alerts. A prior `roster.json.bak` is overwritten by each successful init.
 Safe to re-run at any time.
-
-## Cline endpoint-primary with docs fallback
-
-Cline's primary source is the public roster endpoint
-`GET https://api.cline.bot/api/v1/ai/cline/recommended-models` (no auth
-header); the free-roster tracked is the endpoint's `free[]` id list. The
-free-models docs page (`getting-started/free-models.md`) remains a SECONDARY
-fallback used only when the endpoint fails; if both sources fail the tick
-reports a loud fetch failure (sticky carry-forward), never a mass removal.
-(The all-models catalog page is deliberately NOT a fallback: it documents
-paid tiers, and scraping it would swap paid ids into the roster on every
-endpoint outage.)
 
 ## Exit codes
 
