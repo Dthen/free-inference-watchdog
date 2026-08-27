@@ -514,3 +514,9 @@ def test_registry_has_five_providers():
     assert set(providers.PROVIDERS) == {
         "nous", "openrouter", "zen", "kilo", "cline", "command_code"
     }
+
+
+def test_gateway_wiring_keys_match_providers():
+    """GATEWAY_WIRING is the single source of truth for gateway wiring and
+    must stay pinned to PROVIDERS — same six keys, no drift."""
+    assert set(providers.GATEWAY_WIRING) == set(providers.PROVIDERS)

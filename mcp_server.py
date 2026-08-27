@@ -64,6 +64,12 @@ import state
 # moves, grep for this comment.
 PROVIDERS = ("nous", "zen", "kilo", "cline", "openrouter", "command_code")
 
+# Gateway wiring (base URL, auth shape, api_type) and the free-marker stripper
+# — imported from their single sources of truth so MCP tools and the site
+# builder never drift.
+from providers import GATEWAY_WIRING
+from build_site import strip_free_marker
+
 # Tick cadence, duplicated from inference_watchdog.DEFAULT_CADENCE_S
 # (cross-reference) for the same decoupling reason.
 CADENCE_S = 1 * 3600
@@ -203,7 +209,15 @@ ABSENCE_CAVEAT = (
 
 
 def get_model(model_id, root=None) -> dict:
-    """Which gateways track this exact id right now — exact only, caveated."""
+    """Which gateways track this exact id right now — exact only, caveated.
+
+    Additive change: also returns ``endpoints`` — one entry per (gateway,
+    raw id) in the roster whose free-marker-stripped name equals the
+    stripped query. This makes ``get_model("foo")`` and
+    ``get_model("foo:free")`` return the same wiring list (marker-insensitive
+    lookup). ``exact_matches`` stays STRICTLY exact — the honest raw answer,
+    never grouped.
+    """
     r = Path(root).resolve() if root is not None else REPO
     base: dict = {"tool": "get_model", "state_root": str(r)}
     if not isinstance(model_id, str) or not model_id.strip():
@@ -213,8 +227,36 @@ def get_model(model_id, root=None) -> dict:
     except _StateError as exc:
         return exc.payload
 
-    providers = roster["providers"]
-    exact = {gw: model_id in providers.get(gw, []) for gw in PROVIDERS}
+    providers_map = roster["providers"]
+    exact = {gw: model_id in providers_map.get(gw, []) for gw in PROVIDERS}
+
+    # Marker-insensitive wiring lookup: strip the query, then collect every
+    # (gateway, raw id) in the roster whose stripped name matches. Order:
+    # PROVIDERS display order, then raw id by _natural_key.
+    needle = strip_free_marker(model_id)
+    endpoints = []
+    for gw in PROVIDERS:
+        for raw_id in _clean_ids(providers_map.get(gw, [])):
+            if strip_free_marker(raw_id) == needle:
+                wiring = GATEWAY_WIRING.get(gw, {})
+                endpoints.append({
+                    "gateway": gw,
+                    "model_id": raw_id,
+                    "chat_completions_url": wiring.get("chat_completions_url"),
+                    "auth": wiring.get("auth"),
+                    "api_type": wiring.get("api_type"),
+                })
+    # Deduplicate while preserving order (a gateway carries a raw id once),
+    # then sort by (PROVIDERS index, _natural_key(model_id)).
+    seen = set()
+    unique = []
+    for ep in endpoints:
+        key = (ep["gateway"], ep["model_id"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(ep)
+    gw_index = {gw: i for i, gw in enumerate(PROVIDERS)}
+    unique.sort(key=lambda ep: (gw_index[ep["gateway"]], _natural_key(ep["model_id"])))
 
     return {
         **base,
@@ -222,7 +264,66 @@ def get_model(model_id, root=None) -> dict:
         "query": model_id,
         "exact_matches": exact,
         "exact_gateways": [gw for gw in PROVIDERS if exact[gw]],
+        "endpoints": unique,
         "caveats": [ABSENCE_CAVEAT],
+    }
+
+
+# ---------- tool: list_endpoints ----------
+
+def list_endpoints(provider=None, root=None) -> dict:
+    """All gateway wiring entries across the roster, or one gateway's.
+
+    Returns every (gateway, raw id) pair in the roster with the gateway's
+    wiring (base URL, auth, api_type). Optional provider=<name> filters to a
+    single gateway. Structured errors, no raises into the MCP layer.
+    """
+    r = Path(root).resolve() if root is not None else REPO
+    base: dict = {"tool": "list_endpoints", "state_root": str(r)}
+
+    if provider is not None and (
+            not isinstance(provider, str) or provider not in PROVIDERS):
+        return _error(
+            base, f"unknown provider {provider!r}; "
+                  f"valid providers: {', '.join(PROVIDERS)}",
+            valid_providers=list(PROVIDERS))
+    try:
+        roster = _load_roster_checked(r, base)
+    except _StateError as exc:
+        return exc.payload
+
+    raw = roster["providers"]
+    gateways = {}
+    total_endpoints = 0
+    all_stripped = set()
+    for gw in PROVIDERS:
+        if provider is not None and gw != provider:
+            continue
+        ids = _clean_ids(raw.get(gw, []))
+        wiring = GATEWAY_WIRING.get(gw, {})
+        gateways[gw] = {
+            "chat_completions_url": wiring.get("chat_completions_url"),
+            "auth": wiring.get("auth"),
+            "api_type": wiring.get("api_type"),
+            "model_ids": ids,
+        }
+        # Include optional notes field if present (cline, command_code)
+        if "notes" in wiring:
+            gateways[gw]["notes"] = wiring["notes"]
+        total_endpoints += len(ids)
+        all_stripped.update(strip_free_marker(mid) for mid in ids)
+
+    return {
+        **base,
+        "ok": True,
+        "gateways": gateways,
+        "counts": {
+            "endpoints": total_endpoints,
+            "models": len(all_stripped),
+            "gateways": len(PROVIDERS),
+        },
+        "provider": provider,
+        "tick_epoch": _epoch_or_none(roster),
     }
 
 
@@ -293,11 +394,20 @@ TOOL_DESCRIPTIONS = {
         "Cross-gateway PRESENCE lookup: which of the six gateways track "
         "this exact model id right now. Returns exact_matches per gateway "
         "(exact ids only — gateways rename inconsistently, so cross-gateway "
-        "absence is unreliable; see the caveats attached to every result).",
+        "absence is unreliable; see the caveats attached to every result). "
+        "Also returns 'endpoints' — one wiring entry (base URL, auth, "
+        "api_type) per (gateway, raw id) in the roster whose stripped name "
+        "matches the query, so get_model('foo') and get_model('foo:free') "
+        "return the same wiring list.",
     "watchdog_status":
         "Watchdog health: last tick age vs the 1h cadence, stale/failing "
         "providers, per-gateway model counts, pending-alert queue depth, "
         "and the age of the last static-site publish.",
+    "list_endpoints":
+        "All gateway wiring entries across the roster: for each gateway, "
+        "its base URL, auth shape, api_type, and the raw model ids tracked. "
+        "Pass provider=<name> for one gateway; omit for all. Read-only "
+        "snapshot of the latest watchdog tick.",
 }
 
 
@@ -320,7 +430,8 @@ def build_server(root=None):
             "Read-only queries over the free-inference-watchdog roster "
             "state (refreshed hourly). Presence answers are exact-id "
             "based; never read cross-gateway absence as proof of "
-            "unavailability."),
+            "unavailability. Use list_endpoints to get wiring (base URL, "
+            "auth, api_type) for actually calling a model."),
     )
     srv.add_tool(lambda provider=None: list_free_models(provider, root=root),
                  name="list_free_models",
@@ -331,6 +442,9 @@ def build_server(root=None):
     srv.add_tool(lambda: watchdog_status(root=root),
                  name="watchdog_status",
                  description=TOOL_DESCRIPTIONS["watchdog_status"])
+    srv.add_tool(lambda provider=None: list_endpoints(provider, root=root),
+                 name="list_endpoints",
+                 description=TOOL_DESCRIPTIONS["list_endpoints"])
     return srv
 
 

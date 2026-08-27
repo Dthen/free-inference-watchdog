@@ -294,3 +294,49 @@ PROVIDERS = {
     "cline": _fetch_cline,
     "command_code": _fetch_command_code,
 }
+
+
+# ---------- gateway wiring (single source of truth) ----------
+
+# Probe results (verified 2026-08-26):
+#   nous          {inference_base_url}/chat/completions           200  completion returned — confirmed
+#   openrouter    https://openrouter.ai/api/v1/chat/completions  200  completion returned — confirmed
+#   kilo          https://api.kilo.ai/api/gateway/v1/chat/completions  200  completion returned — confirmed
+#   zen           https://opencode.ai/zen/v1/chat/completions    400  real API error (Model is unavailable) — route valid
+#   command_code  https://api.commandcode.ai/provider/v1/chat/completions  400  real API error (insufficient credits) — route valid
+#   cline         https://api.cline.bot/api/v1/chat/completions  403  real API error: "only available via Cline product surfaces"
+GATEWAY_WIRING = {
+    "nous": {
+        "chat_completions_url": None,
+        "base_url_source": "~/.hermes/auth.json → providers.nous.inference_base_url (already ends in /v1)",
+        "auth": "Bearer <your Nous access token>",
+        "api_type": "openai_compatible",
+    },
+    "openrouter": {
+        "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
+        "auth": "Bearer <your OpenRouter API key>",
+        "api_type": "openai_compatible",
+    },
+    "zen": {
+        "chat_completions_url": "https://opencode.ai/zen/v1/chat/completions",
+        "auth": "Bearer <your OpenCode Zen API key>",
+        "api_type": "openai_compatible",
+    },
+    "kilo": {
+        "chat_completions_url": "https://api.kilo.ai/api/gateway/v1/chat/completions",
+        "auth": "Bearer <your Kilo API key>",
+        "api_type": "openai_compatible",
+    },
+    "cline": {
+        "chat_completions_url": "https://api.cline.bot/api/v1/chat/completions",
+        "auth": "Bearer <your Cline API key>",
+        "api_type": "openai_compatible",
+        "notes": "Route exists but Cline gates free models to its own product surfaces (IDE/CLI). An external call returns 403 'only available via Cline product surfaces'. Listed for completeness; not callable from third-party code.",
+    },
+    "command_code": {
+        "chat_completions_url": "https://api.commandcode.ai/provider/v1/chat/completions",
+        "auth": "Bearer <your Command Code API key>",
+        "api_type": "openai_compatible",
+        "notes": "Cloudflare 403s a default urllib UA — send a browser/curl User-Agent",
+    },
+}

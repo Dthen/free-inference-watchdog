@@ -15,6 +15,7 @@ import json
 import pytest
 
 import mcp_server
+import providers
 
 
 # ---------- fixtures ----------
@@ -219,3 +220,126 @@ def test_status_graceful_on_empty_dir(empty_dir):
         assert field in res
     assert res["site_published"] is False
     assert res["pending_alerts"] is None
+
+
+# ---------- GATEWAY_WIRING pins ----------
+
+def test_gateway_wiring_keys_match_providers():
+    """GATEWAY_WIRING keys must match PROVIDERS keys exactly — the two are
+    pinned together so a new gateway added to one is always added to the other."""
+    assert set(providers.GATEWAY_WIRING) == set(providers.PROVIDERS)
+
+
+# ---------- get_model: endpoints (wiring) ----------
+
+def test_get_model_returns_endpoints_for_grouped_name(state_dir):
+    """get_model on a stripped name returns one endpoint per (gateway, raw id)
+    whose free-marker-stripped name matches — marker-insensitive lookup."""
+    res = mcp_server.get_model("vendor-d/model-6", root=state_dir)
+    assert res["ok"] is True
+    # vendor-d/model-6:free on nous strips to vendor-d/model-6
+    assert len(res["endpoints"]) == 1
+    ep = res["endpoints"][0]
+    assert ep["gateway"] == "nous"
+    assert ep["model_id"] == "vendor-d/model-6:free"
+    assert "chat_completions_url" in ep
+    assert "auth" in ep
+    assert "api_type" in ep
+
+
+def test_get_model_raw_variant_returns_same_endpoints(state_dir):
+    """get_model on the raw :free variant returns the SAME endpoints list as
+    the stripped name — marker-insensitive lookup."""
+    stripped = mcp_server.get_model("vendor-d/model-6", root=state_dir)
+    raw = mcp_server.get_model("vendor-d/model-6:free", root=state_dir)
+    assert stripped["endpoints"] == raw["endpoints"]
+
+
+def test_get_model_exact_matches_strictly_unchanged(state_dir):
+    """exact_matches stays STRICTLY exact — the honest raw answer, never
+    grouped. A stripped query must NOT match a :free raw id here."""
+    res = mcp_server.get_model("vendor-d/model-6", root=state_dir)
+    # exact_matches is exact: "vendor-d/model-6" is NOT in any roster list
+    assert res["exact_matches"]["nous"] is False
+    assert res["exact_gateways"] == []
+    # but endpoints (wiring) DOES resolve via strip_free_marker
+    assert len(res["endpoints"]) == 1
+
+
+def test_get_model_endpoints_ordered_by_providers_then_natural_key(state_dir):
+    """endpoints order: PROVIDERS display order, then raw id by _natural_key."""
+    res = mcp_server.get_model("vendor-z/zero-priced-model", root=state_dir)
+    # present on nous, kilo, cline (in PROVIDERS order)
+    assert [ep["gateway"] for ep in res["endpoints"]] == ["nous", "kilo", "cline"]
+    assert [ep["model_id"] for ep in res["endpoints"]] == [
+        "vendor-z/zero-priced-model"] * 3
+
+
+def test_get_model_no_match_returns_empty_endpoints(state_dir):
+    """No match at all (even after stripping) => endpoints: []."""
+    res = mcp_server.get_model("nonexistent/model", root=state_dir)
+    assert res["ok"] is True
+    assert res["endpoints"] == []
+
+
+# ---------- tool: list_endpoints ----------
+
+def test_list_endpoints_totals_match_roster(state_dir):
+    """list_endpoints() totals match the roster; counts.models < counts.endpoints
+    on the live-shaped fixture (9 raw ids, 7 stripped names)."""
+    res = mcp_server.list_endpoints(root=state_dir)
+    assert res["ok"] is True
+    assert res["tool"] == "list_endpoints"
+    # 9 raw ids across the fixture
+    assert res["counts"]["endpoints"] == 9
+    # 7 distinct stripped names (vendor-x/preview-free -> vendor-x/preview,
+    # vendor-d/model-4-free -> vendor-d/model-4, cohere/north-mini-code:free
+    # -> cohere/north-mini-code, vendor-f/model-5:free -> vendor-f/model-5)
+    assert res["counts"]["models"] == 7
+    assert res["counts"]["models"] < res["counts"]["endpoints"]
+    assert res["counts"]["gateways"] == 6
+    assert res["provider"] is None
+    # All six gateways present in the gateways map
+    assert set(res["gateways"]) == set(mcp_server.PROVIDERS)
+
+
+def test_list_endpoints_filter_zen(state_dir):
+    """list_endpoints("zen") returns only zen's wiring + model_ids."""
+    res = mcp_server.list_endpoints(provider="zen", root=state_dir)
+    assert res["ok"] is True
+    assert res["provider"] == "zen"
+    assert set(res["gateways"]) == {"zen"}
+    # zen carries vendor-x/preview-free and vendor-d/model-4-free
+    assert sorted(res["gateways"]["zen"]["model_ids"]) == [
+        "vendor-d/model-4-free", "vendor-x/preview-free"]
+    # wiring fields present
+    assert "chat_completions_url" in res["gateways"]["zen"]
+    assert "auth" in res["gateways"]["zen"]
+    assert "api_type" in res["gateways"]["zen"]
+
+
+def test_list_endpoints_unknown_provider_error(state_dir):
+    """list_endpoints("nope") returns a structured error payload."""
+    res = mcp_server.list_endpoints(provider="nope", root=state_dir)
+    assert res["ok"] is False
+    assert "error" in res
+    assert set(mcp_server.PROVIDERS) & set(res["valid_providers"]) == set(
+        mcp_server.PROVIDERS)
+
+
+def test_list_endpoints_hostile_roster_degrades(tmp_path):
+    """Hostile roster (provider value is a bare string, not a list) degrades
+    cleanly — no exception, hostile ids dropped, ok stays True."""
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "roster.json").write_text(json.dumps({
+        "tick_epoch": 100,
+        "providers": {
+            "nous": "not-a-list",  # hostile: bare string
+            "zen": [],
+        },
+    }))
+    res = mcp_server.list_endpoints(root=tmp_path)
+    assert res["ok"] is True
+    # Hostile value degrades to an empty list (same rule as _clean_ids)
+    assert res["gateways"]["nous"]["model_ids"] == []
+    assert res["gateways"]["zen"]["model_ids"] == []
