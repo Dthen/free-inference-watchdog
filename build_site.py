@@ -154,8 +154,38 @@ def load_logo_b64(root):
     return base64.b64encode(blob).decode("ascii")
 
 
+def build_groups(providers):
+    """Group raw ids by their free-marker-stripped name, deterministically.
+
+    Returns (group_names, groups, raw_count) where:
+      - group_names: alphabetically sorted list of stripped names, one per row
+      - groups: dict[stripped_name] -> {"gateways": set[str], "raw_count": int}
+        where `gateways` is every gateway that carries ANY variant of this
+        model and `raw_count` is the number of distinct raw ids in the group
+      - raw_count: total number of distinct raw ids across all providers
+        (the honest "endpoints" number; <tfoot> totals also derive from raw)
+
+    The grouping removes ONLY a free-marker we already know is present
+    (the same marker the free-roster rule tested for), so two genuinely
+    different models can never collide. No fuzzy match, no rename map.
+    """
+    raw_ids = sorted({mid for models in providers.values() for mid in models})
+    groups: dict = {}
+    for mid in raw_ids:
+        name = strip_free_marker(mid)
+        slot = groups.setdefault(name, {"gateways": set(), "raw_count": 0})
+        slot["raw_count"] += 1
+        for gw in DISPLAY_ORDER:
+            if mid in providers.get(gw, []):
+                slot["gateways"].add(gw)
+    group_names = sorted(groups.keys())
+    return group_names, groups, len(raw_ids)
+
+
 def build_counts(providers):
-    """Per-id availability count across the gateway union (deterministic)."""
+    """Kept for backward-compat with the test suite; returns per-raw-id
+    availability across DISPLAY_ORDER. The dashboard now renders by
+    stripped group, not by raw id — see build_groups / render_page."""
     ids = sorted({mid for models in providers.values() for mid in models})
     counts = {}
     for mid in ids:
@@ -168,11 +198,20 @@ def build_counts(providers):
 
 
 def render_page(roster, logo_b64):
-    """Render the full HTML document as one string (byte-deterministic)."""
+    """Render the full HTML document as one string (byte-deterministic).
+
+    Rows are GROUPED by stripped name: a model that ships as
+    `vendor/x:free` on gateway A and `vendor/x-free` on gateway B renders
+    as ONE row with dots on both A and B; the `#` column counts distinct
+    gateways reached (so a gateway carrying both variants counts once).
+    The <tfoot> per-gateway totals stay RAW per-gateway counts — that is
+    the honest "ids tracked per gateway" number and must not change
+    meaning just because the matrix collapsed. The embedded
+    <script id="roster-data"> JSON island keeps the RAW roster verbatim
+    (MCP and any other consumer read raw ids, not groups).
+    """
     providers = roster["providers"]
-    ids, counts = build_counts(providers)
-    # alphabetical by model id — groups same-model variants together
-    ordered_ids = sorted(ids)
+    group_names, groups, raw_count = build_groups(providers)
     tick = roster.get("tick_epoch")
     if (
         isinstance(tick, (int, float))
@@ -191,16 +230,16 @@ def render_page(roster, logo_b64):
     else:
         ts = "unknown"
 
-    def row_html(mid):
-        cells = []
-        for gw in DISPLAY_ORDER:
-            present = mid in providers.get(gw, [])
-            cells.append(
-                '<td class="yes">&#9679;</td>' if present else '<td class="no"></td>'
-            )
+    def row_html(name):
+        group = groups[name]
+        present_gws = group["gateways"]
+        cells = [
+            '<td class="yes">&#9679;</td>' if gw in present_gws else '<td class="no"></td>'
+            for gw in DISPLAY_ORDER
+        ]
         return (
-            f"<tr><th>{escape(mid)}</th>"
-            f'<td class="n">{counts[mid]}</td>'
+            f"<tr><th>{escape(name)}</th>"
+            f'<td class="n">{len(present_gws)}</td>'
             + "".join(cells)
             + "</tr>"
         )
@@ -208,20 +247,26 @@ def render_page(roster, logo_b64):
     head_cells = "<th>model id</th><th>#</th>" + "".join(
         f"<th>{escape(gw)}</th>" for gw in DISPLAY_ORDER
     )
+    # <tfoot> stays RAW per-gateway counts — that is the honest "ids
+    # tracked per gateway" number and must not change meaning because
+    # the matrix collapsed to one row per group above.
     foot_cells = "".join(
         '<td class="n">%d</td>' % len(providers.get(gw, [])) for gw in DISPLAY_ORDER
     )
     chips = (
-        f'<span class="chip"><b>{len(ids)}</b> unique models</span>'
+        f'<span class="chip"><b>{len(group_names)}</b> unique models</span>'
+        f'<span class="chip"><b>{raw_count}</b> endpoints</span>'
         f'<span class="chip"><b>{len(DISPLAY_ORDER)}</b> gateways</span>'
     )
     meta = f"last refreshed {ts} · rebuilt every 1h"
-    # sort_keys keeps the embedded JSON byte-stable across builds
+    # sort_keys keeps the embedded JSON byte-stable across builds; the
+    # JSON island stays the RAW roster so MCP and other consumers that
+    # read raw ids are unaffected by the matrix grouping.
     roster_json = json.dumps(roster, sort_keys=True).replace("</", "<\\/")
     roster_script = (
         f'<script type="application/json" id="roster-data">{roster_json}</script>'
     )
-    body_rows = "".join(row_html(mid) for mid in ordered_ids)
+    body_rows = "".join(row_html(name) for name in group_names)
 
     css = """  :root { color-scheme: dark;
     --nord0:#2e3440; --nord1:#3b4252; --nord2:#434c5e; --nord3:#4c566a;

@@ -405,3 +405,231 @@ def test_strip_free_marker_never_returns_empty():
     """Never returns '' — a bare 'free' returns 'free'."""
     from build_site import strip_free_marker
     assert strip_free_marker("free") == "free"
+
+
+# ---------- Task 3: matrix rows grouped by stripped name ----------
+
+# Fixture with multi-variant groups: one model ships on two gateways under
+# different free-marker forms; another ships on the SAME gateway under both
+# forms (must not double-count in '#'); a third is single-variant (control).
+GROUP_ROSTER = {
+    "tick_epoch": 1787721434,
+    "providers": {
+        "nous": [
+            "vendor-x/poolside-s-2.1:free",      # variant A
+            "vendor-x/standalone-1:free",        # single-variant
+        ],
+        "zen": [
+            "vendor-x/poolside-s-2.1-free",      # variant B (different gw)
+        ],
+        "kilo": [
+            "vendor-x/poolside-s-2.1-free",      # variant B (overlap on kilo!)
+            "vendor-x/poolside-s-2.1:free",      # variant A (overlap on kilo!)
+            "vendor-x/standalone-2:free",        # single-variant
+        ],
+        "openrouter": [
+            "vendor-x/standalone-2-free",        # another single-variant
+        ],
+    },
+    "stale_providers": [],
+}
+
+
+def _row_count(html):
+    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
+    return len(re.findall(r"<tr><th>", tbody))
+
+
+def _tfoot_numbers(html):
+    """Return the per-gateway <tfoot> numbers in DISPLAY_ORDER."""
+    tfoot = html.split("<tfoot>", 1)[1].split("</tfoot>", 1)[0]
+    return [int(n) for n in re.findall(r'class="n">(\d+)<', tfoot)]
+
+
+def _row_for(html, stripped_name):
+    """Return the <tr> for `stripped_name` from the rendered tbody."""
+    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
+    rows = re.findall(r"<tr>.*?</tr>", tbody, re.S)
+    for row in rows:
+        if stripped_name in row:
+            return row
+    return None
+
+
+def test_grouped_rows_one_per_stripped_name(tmp_path):
+    """Task 3: a stripped name that has 2 raw variants on different gateways
+    renders as ONE row, not two. (Today the builder makes one row per raw id,
+    so this test fails pre-fix.)"""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    # Stripped groups: poolside-s-2.1 (2 variants), standalone-1 (1),
+    # standalone-2 (2 variants) -> 3 rows total
+    assert _row_count(html) == 3, f"expected 3 grouped rows, got {_row_count(html)}"
+
+
+def test_grouped_row_dot_count_aggregates_across_variants(tmp_path):
+    """Task 3: '#' column = number of gateways the group REACHES, not the
+    number of variants. A group with two variants on three gateways
+    (one of which has both variants) shows '#' = 3, not 4."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    row = _row_for(html, "vendor-x/poolside-s-2.1")
+    assert row is not None, "no row for vendor-x/poolside-s-2.1"
+    # '#' is the first <td class="n"> after the <th>
+    m = re.search(r'<th>vendor-x/poolside-s-2.1</th><td class="n">(\d+)</td>', row)
+    assert m, f"could not find # cell in row: {row!r}"
+    assert int(m.group(1)) == 3, (
+        f"group's # must equal number of gateways it reaches "
+        f"(kilo+openrouter+nous+zen = up to 4, but poolside-s-2.1 "
+        f"is on nous+zen+kilo = 3); got {m.group(1)}"
+    )
+
+
+def test_grouped_row_dots_on_every_gateway_any_variant_reaches(tmp_path):
+    """Task 3: presence on a gateway is true if ANY of the group's raw
+    variants is on that gateway. For vendor-x/poolside-s-2.1: variant A is
+    on nous, variant B is on zen and kilo -> dots on nous, zen, kilo,
+    NOT on cline/openrouter/command_code."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    row = _row_for(html, "vendor-x/poolside-s-2.1")
+    assert row is not None
+    # The row has 6 gateway cells in DISPLAY_ORDER. Count yes/no.
+    yes = row.count('<td class="yes">')
+    no = row.count('<td class="no">')
+    assert yes == 3, f"expected 3 yes dots (nous+zen+kilo), got {yes}"
+    assert no == 3, f"expected 3 no cells (cline+openrouter+command_code), got {no}"
+
+
+def test_group_overlap_on_same_gateway_not_double_counted(tmp_path):
+    """Task 3: a group whose variants both appear on the SAME gateway
+    (here poolside-s-2.1 has BOTH variants on kilo) must not double-count
+    that gateway in '#'."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    row = _row_for(html, "vendor-x/poolside-s-2.1")
+    m = re.search(r'<th>vendor-x/poolside-s-2.1</th><td class="n">(\d+)</td>', row)
+    # nous, zen, kilo — three distinct gateways reached
+    assert int(m.group(1)) == 3, (
+        f"kilo has both variants but counts as 1 gateway; # must be 3, got {m.group(1)}"
+    )
+    # Sanity: only ONE yes-dot in the kilo column for this row.
+    assert row.count('<td class="yes">') == 3  # nous, zen, kilo each contribute one yes
+
+
+def test_tfoot_totals_stay_raw_per_gateway_counts(tmp_path):
+    """Task 3: <tfoot> counts must remain the honest 'ids tracked per
+    gateway' number, not collapsed to groups. GROUP_ROSTER's raw per-gw
+    counts: nous=2, zen=1, kilo=3, cline=0, openrouter=1, command_code=0."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    nums = _tfoot_numbers(html)
+    assert nums == [2, 1, 3, 0, 1, 0], (
+        f"tfoot must stay raw per-gateway counts in DISPLAY_ORDER, got {nums}"
+    )
+
+
+def test_inlined_roster_data_json_stays_raw(tmp_path):
+    """Task 3: the <script id='roster-data'> JSON island must remain the
+    raw roster (MCP and any other consumer reads raw ids, not groups)."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    m = re.search(
+        r'<script type="application/json" id="roster-data">(.*?)</script>',
+        html, re.S,
+    )
+    assert m, "roster-data script tag missing from output"
+    data = json.loads(m.group(1))
+    # Raw ids are present — variants preserved, not collapsed
+    assert "vendor-x/poolside-s-2.1-free" in data["providers"]["zen"]
+    assert "vendor-x/poolside-s-2.1:free" in data["providers"]["nous"]
+    assert "vendor-x/poolside-s-2.1-free" in data["providers"]["kilo"]
+
+
+def test_grouped_deterministic_output(tmp_path):
+    """Task 3: same roster in -> identical HTML out (regression guard:
+    the new group loop must stay sorted for byte-identical rebuilds)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        a = Path(td) / "a"
+        b = Path(td) / "b"
+        _seed_logo(a)
+        _seed_logo(b)
+        p1 = _run_builder(GROUP_ROSTER, a)
+        p2 = _run_builder(GROUP_ROSTER, b)
+        assert p1.returncode == 0 and p2.returncode == 0
+        assert _build_html(a) == _build_html(b)
+
+
+def test_chip_counts_groups_and_endpoints(tmp_path):
+    """Task 3: header chip N is now groups, and a second chip M
+    ('endpoints') is the raw count. GROUP_ROSTER has 3 groups and
+    5 unique raw ids (poolside-s-2.1 has ':free' and '-free'; standalone-2
+    has ':free' and '-free'; standalone-1 has only ':free')."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    chips = html.split('<div class="chips">', 1)[1].split("</div>", 1)[0]
+    assert "<b>3</b> unique models" in chips, (
+        f"unique-models chip must count groups (3), got: {chips}"
+    )
+    assert "<b>5</b> endpoints" in chips, (
+        f"endpoints chip must count raw ids (5), got: {chips}"
+    )
+
+
+def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
+    """Task 3: groups sort alphabetically by stripped name. The first body
+    row in DISPLAY_ORDER is the alphabetically-first group."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
+    names = re.findall(r"<tr><th>([^<]*)</th>", tbody)
+    assert names == sorted(names), (
+        f"groups must be alphabetically sorted by stripped name; got {names}"
+    )
+    assert names == [
+        "vendor-x/poolside-s-2.1",
+        "vendor-x/standalone-1",
+        "vendor-x/standalone-2",
+    ]
+
+
+def test_live_roster_groups_match_plan_evidence(tmp_path):
+    """Task 3 live-data guard: the live roster must render as exactly one
+    row per distinct stripped name. Pin the current group count so future
+    roster changes update the pin in the same commit."""
+    _seed_logo(tmp_path)
+    live_roster_path = REPO / "state" / "roster.json"
+    live_roster = json.loads(live_roster_path.read_text(encoding="utf-8"))
+    proc = _run_builder(live_roster, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    # Every raw id in the roster must be reachable from a group row's #.
+    # The strongest invariant: every unique stripped name appears as a
+    # row, and no raw id is a row itself.
+    from build_site import strip_free_marker
+    all_ids = sorted({m for models in live_roster["providers"].values() for m in models})
+    expected_groups = sorted({strip_free_marker(m) for m in all_ids})
+    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
+    names = re.findall(r"<tr><th>([^<]*)</th>", tbody)
+    assert names == expected_groups, (
+        f"live roster: groups must equal sorted unique stripped names.\n"
+        f"  expected ({len(expected_groups)}): {expected_groups}\n"
+        f"  got      ({len(names)}): {names}"
+    )
