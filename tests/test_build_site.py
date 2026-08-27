@@ -335,3 +335,73 @@ def test_wrapper_still_parses_bash_n():
         ["bash", "-n", str(TICK_WRAPPER)], capture_output=True, text=True
     )
     assert proc.returncode == 0, proc.stderr
+
+
+# ---------- strip_free_marker: remove ONLY a free marker at a segment boundary ----------
+
+def test_strip_free_marker_suffix_dash():
+    """a/b-free -> a/b (dash suffix)."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("a/b-free") == "a/b"
+
+
+def test_strip_free_marker_suffix_colon():
+    """a/b:free -> a/b (colon suffix)."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("a/b:free") == "a/b"
+
+
+def test_strip_free_marker_suffix_underscore():
+    """a/b_free -> a/b (underscore suffix)."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("a/b_free") == "a/b"
+
+
+def test_strip_free_marker_case_insensitive():
+    """A/B-FREE -> A/B (case-insensitive)."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("A/B-FREE") == "A/B"
+
+
+def test_strip_free_marker_prefix_form():
+    """free-experiment -> experiment (prefix form)."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("free-experiment") == "experiment"
+
+
+def test_strip_free_marker_mid_string_not_touched():
+    """Marker mid-string is NOT touched: freetier -> freetier, a/free-b -> a/free-b."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("freetier") == "freetier"
+    assert strip_free_marker("a/free-b") == "a/free-b"
+
+
+def test_strip_free_marker_in_namespace_not_touched():
+    """Marker in namespace is NOT touched: vendor-g/free:free -> vendor-g/free."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("vendor-g/free:free") == "vendor-g/free"
+
+
+def test_strip_free_marker_no_marker_unchanged():
+    """No marker at all -> returned unchanged."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("vendor-z/zero-priced-model") == "vendor-z/zero-priced-model"
+
+
+def test_strip_free_marker_idempotent_on_live_roster():
+    """Idempotent: f(f(x)) == f(x) for every id in the live roster."""
+    import json
+    from build_site import strip_free_marker
+    roster_path = REPO / "state" / "roster.json"
+    roster = json.loads(roster_path.read_text(encoding="utf-8"))
+    all_ids = [mid for models in roster["providers"].values() for mid in models]
+    for mid in all_ids:
+        once = strip_free_marker(mid)
+        twice = strip_free_marker(once)
+        assert once == twice, f"not idempotent for {mid!r}: {once!r} vs {twice!r}"
+
+
+def test_strip_free_marker_never_returns_empty():
+    """Never returns '' — a bare 'free' returns 'free'."""
+    from build_site import strip_free_marker
+    assert strip_free_marker("free") == "free"
