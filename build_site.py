@@ -55,6 +55,12 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
+# Probe-verified gateway wiring (single source of truth): see providers.py
+# GATEWAY_WIRING. We IMPORT rather than re-hardcode so a probed-URL fix
+# in providers.py reaches the dashboard on the next tick with no second
+# site to keep in sync.
+from providers import GATEWAY_WIRING  # noqa: E402
+
 REPO = Path(__file__).resolve().parent
 
 # Dthen's quality ranking, best first; openrouter LAST because its limits
@@ -154,14 +160,23 @@ def load_logo_b64(root):
     return base64.b64encode(blob).decode("ascii")
 
 
+def _natural_key(s):
+    """Numeric-segment-aware ordering so 'x-2.10' sorts after 'x-2.2'."""
+    return [int(p) if p.isdigit() else p.lower()
+            for p in re.split(r"(\d+)", s)]
+
+
 def build_groups(providers):
     """Group raw ids by their free-marker-stripped name, deterministically.
 
     Returns (group_names, groups, raw_count) where:
       - group_names: alphabetically sorted list of stripped names, one per row
-      - groups: dict[stripped_name] -> {"gateways": set[str], "raw_count": int}
-        where `gateways` is every gateway that carries ANY variant of this
-        model and `raw_count` is the number of distinct raw ids in the group
+      - groups: dict[stripped_name] -> {
+            "gateways": set[str],                  # every gw carrying ANY variant
+            "raw_count": int,                      # # of distinct raw ids in the group
+            "variants": list[(gateway, raw_id)],   # per-(gw,raw) wiring rows, in
+                                                   # DISPLAY_ORDER then natural key
+          }
       - raw_count: total number of distinct raw ids across all providers
         (the honest "endpoints" number; <tfoot> totals also derive from raw)
 
@@ -171,13 +186,26 @@ def build_groups(providers):
     """
     raw_ids = sorted({mid for models in providers.values() for mid in models})
     groups: dict = {}
+    # Build the per-(gw, raw_id) variant map deterministically: one slot
+    # per distinct raw id, then sort variants by DISPLAY_ORDER then by
+    # the natural key of the raw id. We keep this separate from
+    # `groups[].variants` so the byte-order in the HTML is stable.
     for mid in raw_ids:
         name = strip_free_marker(mid)
-        slot = groups.setdefault(name, {"gateways": set(), "raw_count": 0})
+        slot = groups.setdefault(
+            name,
+            {"gateways": set(), "raw_count": 0, "variants": []},
+        )
         slot["raw_count"] += 1
         for gw in DISPLAY_ORDER:
             if mid in providers.get(gw, []):
                 slot["gateways"].add(gw)
+                slot["variants"].append((gw, mid))
+    for slot in groups.values():
+        slot["variants"].sort(
+            key=lambda pair: (DISPLAY_ORDER.index(pair[0]),
+                              _natural_key(pair[1]))
+        )
     group_names = sorted(groups.keys())
     return group_names, groups, len(raw_ids)
 
@@ -230,19 +258,68 @@ def render_page(roster, logo_b64):
     else:
         ts = "unknown"
 
-    def row_html(name):
+    def _wire_cell(gw, raw_id):
+        """Return the inner-HTML for one (gateway, raw_id) wiring row.
+
+        Imports from GATEWAY_WIRING; nous has no static URL (its base is
+        read from auth.json at runtime) so the URL column carries the
+        `base_url_source` prose instead so the reader still gets the
+        exact runtime path.
+        """
+        w = GATEWAY_WIRING[gw]
+        url_text = w.get("chat_completions_url") or w.get("base_url_source") or ""
+        notes = w.get("notes", "")
+        # All visible strings: escaped, monospaced, copy-pasteable.
+        return (
+            f'<span class="wire-gw">{escape(gw)}</span>'
+            f'<span class="wire-id">{escape(raw_id)}</span>'
+            f'<span class="wire-url">{escape(url_text)}</span>'
+            f'<span class="wire-auth">{escape(w["auth"])}</span>'
+            f'<span class="wire-api">{escape(w["api_type"])}</span>'
+            + (f'<span class="wire-notes">{escape(notes)}</span>' if notes else "")
+        )
+
+    def row_html(name, group_index):
         group = groups[name]
         present_gws = group["gateways"]
         cells = [
             '<td class="yes">&#9679;</td>' if gw in present_gws else '<td class="no"></td>'
             for gw in DISPLAY_ORDER
         ]
-        return (
-            f"<tr><th>{escape(name)}</th>"
+        # One <input type="checkbox"> per group, named with a stable
+        # group_index so two groups can never share an id. The label
+        # wraps both the checkbox and the stripped name, so clicking
+        # the name flips the checkbox (no onclick, no JS).
+        # `tr:has(input:checked) ~ tr.expand` in the stylesheet reveals
+        # the per-variant wiring rows when the user expands the name.
+        cb_id = f"row-{group_index}"
+        name_row = (
+            f'<tr class="name-row">'
+            f'<th>'
+            f'<label for="{cb_id}">'
+            f'<input type="checkbox" id="{cb_id}" class="row-expand" aria-label="toggle wiring for {escape(name)}">'
+            f'<span class="caret" aria-hidden="true">&#9656;</span> '
+            f'{escape(name)}'
+            f'</label>'
+            f'</th>'
             f'<td class="n">{len(present_gws)}</td>'
             + "".join(cells)
             + "</tr>"
         )
+        # Per-(gateway, raw_id) expansion rows. One row per variant; a
+        # single-variant group still gets its one wiring row so nothing
+        # is hidden. colspan = 2 + len(DISPLAY_ORDER) so the row spans
+        # the full table width on expand.
+        colspan = 2 + len(DISPLAY_ORDER)
+        expand_rows = "".join(
+            f'<tr class="expand">'
+            f'<td colspan="{colspan}">'
+            f'<div class="wire">{_wire_cell(gw, mid)}</div>'
+            f'</td>'
+            f'</tr>'
+            for (gw, mid) in group["variants"]
+        )
+        return name_row + expand_rows
 
     head_cells = "<th>model id</th><th>#</th>" + "".join(
         f"<th>{escape(gw)}</th>" for gw in DISPLAY_ORDER
@@ -266,7 +343,9 @@ def render_page(roster, logo_b64):
     roster_script = (
         f'<script type="application/json" id="roster-data">{roster_json}</script>'
     )
-    body_rows = "".join(row_html(name) for name in group_names)
+    body_rows = "".join(
+        row_html(name, i) for i, name in enumerate(group_names)
+    )
 
     css = """  :root { color-scheme: dark;
     --nord0:#2e3440; --nord1:#3b4252; --nord2:#434c5e; --nord3:#4c566a;
@@ -305,6 +384,29 @@ def render_page(roster, logo_b64):
                         font-weight:600; text-transform:lowercase; text-align:center; font-size:12px; }}
   tfoot th {{ text-align:left; }}
   footer.note {{ margin-top:14px; color:var(--nord4); opacity:.55; font-size:11.5px; }}
+  /* ---- expand rows: pure CSS, no JS ---- */
+  /* Hide the native checkbox; the <label> is the visible click target. */
+  tbody td > .row-expand, tbody th .row-expand {{ position:absolute; opacity:0; pointer-events:none; width:0; height:0; }}
+  /* The label wraps the caret + name and is the focus/keyboard target. */
+  tbody th label {{ cursor:pointer; display:inline-flex; align-items:center; gap:4px; }}
+  /* Caret rotates on expand via the :checked state. */
+  tbody th .caret {{ display:inline-block; transition:transform .12s linear; color:var(--nord4); font-size:9px; width:9px; }}
+  /* Expansion rows hidden by default; tr:has(input:checked) ~ tr.expand
+     reveals subsequent .expand rows in the same parent (the body) when
+     the row-expand checkbox is checked. */
+  tbody tr.expand {{ display:none; }}
+  tbody tr:has(input.row-expand:checked) ~ tr.expand {{ display:table-row; }}
+  /* Caret visual feedback on expand. */
+  tbody tr:has(input.row-expand:checked) .caret {{ transform:rotate(90deg); color:var(--nord8); }}
+  /* Wiring panel: monospace, copy-pasteable, dark-elevated. */
+  tbody tr.expand > td {{ background:var(--nord1); border-top:1px solid var(--nord2); padding:8px 14px; text-align:left; }}
+  tbody tr.expand .wire {{ display:grid; grid-template-columns: 92px 1fr 1fr 1fr 92px; gap:6px 14px; font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--nord4); }}
+  tbody tr.expand .wire-gw {{ color:var(--nord9); font-weight:600; }}
+  tbody tr.expand .wire-id {{ color:var(--nord6); }}
+  tbody tr.expand .wire-url {{ color:var(--nord8); word-break:break-all; }}
+  tbody tr.expand .wire-auth {{ color:var(--nord4); }}
+  tbody tr.expand .wire-api {{ color:var(--nord14); }}
+  tbody tr.expand .wire-notes {{ grid-column:2 / -1; color:var(--nord13); font-size:10.5px; font-style:italic; padding-top:2px; }}
 </style></head>
 <body><div class="wrap">
 <header class="top">

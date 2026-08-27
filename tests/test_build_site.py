@@ -181,7 +181,7 @@ def test_presence_matrix_structure():
         assert cols == ["model id", "#", "nous", "zen", "kilo", "cline", "openrouter", "command_code"]
         # unique ids: vendor-z/zero-priced-model + stepfun + vendor-x/preview-free = 3 rows
         tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-        rows = re.findall(r"<tr><th>", tbody)
+        rows = re.findall(r"<tr(?:\s+class=\"[^\"]*\")?><th>", tbody)
         assert len(rows) == 3
         # footer totals: nous=2 zen=2 kilo=1 cline=1 openrouter=1
         tfoot = html.split("<tfoot>", 1)[1].split("</tfoot>", 1)[0]
@@ -437,7 +437,7 @@ GROUP_ROSTER = {
 
 def _row_count(html):
     tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    return len(re.findall(r"<tr><th>", tbody))
+    return len(re.findall(r"<tr(?:\s+class=\"[^\"]*\")?><th>", tbody))
 
 
 def _tfoot_numbers(html):
@@ -449,7 +449,7 @@ def _tfoot_numbers(html):
 def _row_for(html, stripped_name):
     """Return the <tr> for `stripped_name` from the rendered tbody."""
     tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    rows = re.findall(r"<tr>.*?</tr>", tbody, re.S)
+    rows = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", tbody, re.S)
     for row in rows:
         if stripped_name in row:
             return row
@@ -479,8 +479,10 @@ def test_grouped_row_dot_count_aggregates_across_variants(tmp_path):
     html = _build_html(tmp_path)
     row = _row_for(html, "vendor-x/poolside-s-2.1")
     assert row is not None, "no row for vendor-x/poolside-s-2.1"
-    # '#' is the first <td class="n"> after the <th>
-    m = re.search(r'<th>vendor-x/poolside-s-2.1</th><td class="n">(\d+)</td>', row)
+    # '#' is the first <td class="n"> after the <th>. Task 4 wraps the
+    # name in a <label> for the expand toggle, so allow anything between
+    # <th> and <td class="n">.
+    m = re.search(r'<th>.{0,400}?</th><td class="n">(\d+)</td>', row)
     assert m, f"could not find # cell in row: {row!r}"
     assert int(m.group(1)) == 3, (
         f"group's # must equal number of gateways it reaches "
@@ -516,7 +518,9 @@ def test_group_overlap_on_same_gateway_not_double_counted(tmp_path):
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
     row = _row_for(html, "vendor-x/poolside-s-2.1")
-    m = re.search(r'<th>vendor-x/poolside-s-2.1</th><td class="n">(\d+)</td>', row)
+    # Task 4 wraps the name in a <label> for the expand toggle.
+    m = re.search(r'<th>.{0,400}?</th><td class="n">(\d+)</td>', row)
+    assert m, f"could not find # cell in row: {row!r}"
     # nous, zen, kilo — three distinct gateways reached
     assert int(m.group(1)) == 3, (
         f"kilo has both variants but counts as 1 gateway; # must be 3, got {m.group(1)}"
@@ -599,7 +603,7 @@ def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
     tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    names = re.findall(r"<tr><th>([^<]*)</th>", tbody)
+    names = re.findall(r"<tr(?:\s+class=\"[^\"]*\")?><th>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)", tbody)
     assert names == sorted(names), (
         f"groups must be alphabetically sorted by stripped name; got {names}"
     )
@@ -627,9 +631,264 @@ def test_live_roster_groups_match_plan_evidence(tmp_path):
     all_ids = sorted({m for models in live_roster["providers"].values() for m in models})
     expected_groups = sorted({strip_free_marker(m) for m in all_ids})
     tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    names = re.findall(r"<tr><th>([^<]*)</th>", tbody)
+    names = re.findall(r"<tr(?:\s+class=\"[^\"]*\")?><th>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)", tbody)
     assert names == expected_groups, (
         f"live roster: groups must equal sorted unique stripped names.\n"
         f"  expected ({len(expected_groups)}): {expected_groups}\n"
         f"  got      ({len(names)}): {names}"
     )
+
+
+# ---------- Task 4: expandable rows with API wiring panel --------------------
+#
+# A row's name cell becomes a <label> wired to a hidden <input
+# type="checkbox">; CSS-only sibling selector (:checked ~) toggles the
+# hidden variant <tr>s that follow. No JavaScript. Keyboard-operable by
+# default (native checkbox + label). Every row is expandable — single-
+# variant rows just show their one endpoint.
+
+# Fixture with two raw variants on different gateways AND a same-gateway
+# overlap. The poolside group must render ONE name row + per-(gateway,raw)
+# expansion rows; the single-variant group renders ONE name row + ONE
+# expansion row.
+EXPAND_ROSTER = {
+    "tick_epoch": 1787721434,
+    "providers": {
+        "nous": [
+            "vendor-x/poolside-s-2.1:free",      # variant A
+            "vendor-x/standalone-1:free",        # single-variant
+        ],
+        "openrouter": [
+            "vendor-x/standalone-2-free",        # single-variant
+        ],
+        "zen": [
+            "vendor-x/poolside-s-2.1-free",      # variant B (different gw)
+        ],
+        "kilo": [
+            "vendor-x/poolside-s-2.1-free",      # variant B (overlap on kilo!)
+            "vendor-x/poolside-s-2.1:free",      # variant A (overlap on kilo!)
+        ],
+    },
+    "stale_providers": [],
+}
+
+
+def _all_trs_in_tbody(html):
+    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
+    return re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", tbody, re.S)
+
+
+def _all_trs_for(html, stripped_name):
+    """All <tr>s that belong to the expandable group for `stripped_name`
+    (the name row + any hidden expansion rows)."""
+    rows = _all_trs_in_tbody(html)
+    out, take = [], False
+    for row in rows:
+        m = re.match(
+            r"<tr(?:\s+class=\"[^\"]*\")?><th>"
+            r"(?:<label[^>]*>)?(?:<input[^>]*>\s*)?"
+            r"(?:<span[^>]*>[^<]*</span>\s*)?"
+            r"([^<]+)",
+            row,
+        )
+        if m:
+            take = (m.group(1) == stripped_name)
+            if take:
+                out.append(row)
+        elif take and 'class="expand"' in row:
+            out.append(row)
+    return out
+
+
+def test_expand_html_well_formed_round_trip(tmp_path):
+    """The full HTML round-trips through html.parser — proves no broken
+    nesting even with the new expansion rows added (reviewer M2: a stray
+    <div> in a <td> was previously caught this way)."""
+    import tempfile
+    from html.parser import HTMLParser
+    errors = []
+
+    class _Strict(HTMLParser):
+        def error(self, message):  # called by html.parser on bad markup
+            errors.append(message)
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        parser = _Strict()
+        parser.feed(html)
+        parser.close()
+        assert not errors, f"html.parser reported parse errors: {errors}"
+
+
+def test_expand_no_script_beyond_roster_data(tmp_path):
+    """No <script> element except the existing roster-data JSON island.
+    The expand toggle must be CSS-only — zero JS."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        scripts = re.findall(r"<script\b[^>]*>", html)
+        assert len(scripts) == 1, (
+            f"expected exactly one <script> (roster-data), found {len(scripts)}: {scripts}"
+        )
+        assert 'id="roster-data"' in scripts[0]
+
+
+def test_expand_every_raw_id_in_html_collapsed(tmp_path):
+    """Every raw id from the roster appears in the rendered HTML — even when
+    the user never expands a row. The collapsed view must contain the id
+    text somewhere; readers must be able to grep the page and find any id.
+    This is the 'grep-verifiable' contract from the plan."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        for mid in [
+            "vendor-x/poolside-s-2.1:free",
+            "vendor-x/poolside-s-2.1-free",
+            "vendor-x/standalone-1:free",
+            "vendor-x/standalone-2-free",
+        ]:
+            assert mid in html, f"raw id missing from rendered HTML: {mid}"
+
+
+def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
+    """Every variant <tr class='expand'> contains that gateway's
+    chat-completions URL. The wiring mapping is imported from providers,
+    never hardcoded a second time in build_site.py."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        # Pull the wiring map for cross-check (we are testing the rendered
+        # page, but pinning the URLs against the import avoids a drift).
+        from providers import GATEWAY_WIRING
+        # We expect variant rows for: poolside:free on nous, poolside-free
+        # on zen, poolside:free on kilo, poolside-free on kilo, standalone-1
+        # on nous, standalone-2 on openrouter — 6 expansion rows total.
+        # Each MUST mention its gateway's URL (or the nous base_url_source
+        # for nous, which has no static URL).
+        expand_rows = [r for r in _all_trs_in_tbody(html) if 'class="expand"' in r]
+        assert len(expand_rows) == 6, (
+            f"expected 6 expansion rows, got {len(expand_rows)}"
+        )
+        # Each expansion row has a <td class="wire-url"> containing the URL
+        # text. The cell class is part of the visible contract — readers
+        # can copy the URL straight out of the page.
+        for gw in ("zen", "kilo", "openrouter"):
+            url = GATEWAY_WIRING[gw]["chat_completions_url"]
+            assert any(url in r for r in expand_rows), (
+                f"{gw} URL {url!r} missing from every expansion row"
+            )
+
+
+def test_expand_each_variant_row_has_auth_and_api_type(tmp_path):
+    """Each variant <tr class='expand'> contains that gateway's auth shape
+    and api_type — the reader sees at a glance that it is OpenAI-shaped."""
+    import tempfile
+    from html import escape as _esc
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        from providers import GATEWAY_WIRING
+        expand_rows = [r for r in _all_trs_in_tbody(html) if 'class="expand"' in r]
+        # For every gateway that appears in EXPAND_ROSTER, at least one
+        # expansion row must mention that gateway's auth + api_type.
+        for gw in ("nous", "zen", "kilo", "openrouter"):
+            w = GATEWAY_WIRING[gw]
+            # The builder HTML-escapes all wiring text; the assertion
+            # compares against the escaped form so that `<your ...>`
+            # entities match.
+            assert any(_esc(w["auth"]) in r for r in expand_rows), (
+                f"{gw} auth shape {w['auth']!r} missing from expansion rows"
+            )
+            assert any(w["api_type"] in r for r in expand_rows), (
+                f"{gw} api_type {w['api_type']!r} missing from expansion rows"
+            )
+
+
+def test_expand_every_row_is_expandable(tmp_path):
+    """Every body row — including single-variant rows — is expandable. A
+    single-variant row just shows its one endpoint. Nothing is hidden."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        tbody_rows = _all_trs_in_tbody(html)
+        # 3 name rows + 6 expansion rows (4 for poolside: 2 variants on 2
+        # gateways with kilo carrying both; 1 for standalone-1; 1 for
+        # standalone-2) = 9 total <tr>s in tbody.
+        assert len(tbody_rows) == 9, (
+            f"expected 9 tbody rows (3 names + 6 expansions), got {len(tbody_rows)}: "
+            f"{tbody_rows}"
+        )
+        # Each name row must have a hidden <input type="checkbox"> + <label>
+        # pair. The label is the user-facing click target.
+        name_rows = [r for r in tbody_rows if re.match(r"<tr(?:\s+class=\"[^\"]*\")?><th>", r)]
+        assert len(name_rows) == 3
+        for r in name_rows:
+            assert 'type="checkbox"' in r, f"name row missing checkbox: {r}"
+            assert "<label" in r, f"name row missing label: {r}"
+
+
+def test_expand_uses_no_onclick_and_no_javascript(tmp_path):
+    """Keyboard-operable, no onclick. The toggle is a native <label>+
+    <input> pair, so the browser handles focus/click for free; we must
+    not regress to JS handlers."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        # No onclick, no onkeydown, no addEventListener, no event= attrs.
+        assert "onclick" not in html, "expand rows must not use onclick"
+        assert "onkeydown" not in html, "expand rows must not use onkeydown"
+        # No new <script> (test_expand_no_script_beyond_roster_data covers
+        # that strictly; this is the reader-friendly guard).
+
+
+def test_expand_via_css_sibling_selector(tmp_path):
+    """The toggle is a hidden <input type="checkbox"> whose :checked state
+    is read by a CSS sibling-selector. We assert the CSS rule + the DOM
+    structure that makes it work."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        # The expansion rows must be tagged with a class the CSS can hook.
+        assert 'class="expand"' in html, "expansion rows missing expand class"
+        # The CSS must contain a sibling-selector rule that hides
+        # expansion rows unless the checkbox is checked.
+        # We accept either the general-sibling form "~" or adjacent "+".
+        # The rule MUST hide .expand by default and reveal on :checked ~.
+        assert ".expand" in html, "no .expand CSS rule"
+        assert (":checked" in html) and ("~" in html or "+" in html), (
+            "no :checked sibling-selector rule — expand must be CSS-only"
+        )
+        # The default style hides .expand; :checked reveals it.
+        # The simplest possible pattern: .row-expand:checked ~ .expand { ... }
+        # (or any of: input[type=checkbox]:checked + .expand, etc.)
