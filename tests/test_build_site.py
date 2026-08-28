@@ -180,9 +180,9 @@ def test_presence_matrix_structure():
         cols = re.findall(r"<th>([^<]*)</th>", head)
         assert cols == ["model id", "#", "nous", "zen", "kilo", "cline", "openrouter", "command_code"]
         # unique ids: vendor-z/zero-priced-model + stepfun + vendor-x/preview-free = 3 rows
-        tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-        rows = re.findall(r"<tr(?:\s+class=\"[^\"]*\")?><th>", tbody)
-        assert len(rows) == 3
+        # Each group is in its own <tbody>; count name-rows across all
+        name_rows = re.findall(r'<tr class="name-row">', html)
+        assert len(name_rows) == 3
         # footer totals: nous=2 zen=2 kilo=1 cline=1 openrouter=1
         tfoot = html.split("<tfoot>", 1)[1].split("</tfoot>", 1)[0]
         nums = re.findall(r'class="n">(\d+)<', tfoot)
@@ -436,8 +436,8 @@ GROUP_ROSTER = {
 
 
 def _row_count(html):
-    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    return len(re.findall(r"<tr(?:\s+class=\"[^\"]*\")?><th>", tbody))
+    """Count name-rows across all tbodies (each group has its own <tbody>)."""
+    return len(re.findall(r'<tr class="name-row">', html))
 
 
 def _tfoot_numbers(html):
@@ -448,11 +448,11 @@ def _tfoot_numbers(html):
 
 def _row_for(html, stripped_name):
     """Return the <tr> for `stripped_name` from the rendered tbody."""
-    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    rows = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", tbody, re.S)
-    for row in rows:
-        if stripped_name in row:
-            return row
+    for tbody in re.findall(r"<tbody>(.*?)</tbody>", html, re.S):
+        rows = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", tbody, re.S)
+        for row in rows:
+            if stripped_name in row:
+                return row
     return None
 
 
@@ -602,8 +602,11 @@ def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
-    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    names = re.findall(r"<tr(?:\s+class=\"[^\"]*\")?><th>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)", tbody)
+    # Each group is in its own <tbody>; collect name-row labels from all
+    tbodies = re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
+    names = []
+    for tbody in tbodies:
+        names.extend(re.findall(r'<tr class="name-row"><th>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)', tbody))
     assert names == sorted(names), (
         f"groups must be alphabetically sorted by stripped name; got {names}"
     )
@@ -630,8 +633,11 @@ def test_live_roster_groups_match_plan_evidence(tmp_path):
     from build_site import strip_free_marker
     all_ids = sorted({m for models in live_roster["providers"].values() for m in models})
     expected_groups = sorted({strip_free_marker(m) for m in all_ids})
-    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    names = re.findall(r"<tr(?:\s+class=\"[^\"]*\")?><th>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)", tbody)
+    # Each group is in its own <tbody>; collect name-row labels from all
+    tbodies = re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
+    names = []
+    for tbody in tbodies:
+        names.extend(re.findall(r'<tr class="name-row"><th>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)', tbody))
     assert names == expected_groups, (
         f"live roster: groups must equal sorted unique stripped names.\n"
         f"  expected ({len(expected_groups)}): {expected_groups}\n"
@@ -674,30 +680,37 @@ EXPAND_ROSTER = {
 
 
 def _all_trs_in_tbody(html):
-    tbody = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-    return re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", tbody, re.S)
+    """All <tr>s across every <tbody> (each group has its own <tbody>)."""
+    trs = []
+    for tbody in re.findall(r"<tbody>(.*?)</tbody>", html, re.S):
+        trs.extend(re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", tbody, re.S))
+    return trs
 
 
 def _all_trs_for(html, stripped_name):
     """All <tr>s that belong to the expandable group for `stripped_name`
     (the name row + any hidden expansion rows)."""
-    rows = _all_trs_in_tbody(html)
-    out, take = [], False
-    for row in rows:
-        m = re.match(
-            r"<tr(?:\s+class=\"[^\"]*\")?><th>"
-            r"(?:<label[^>]*>)?(?:<input[^>]*>\s*)?"
-            r"(?:<span[^>]*>[^<]*</span>\s*)?"
-            r"([^<]+)",
-            row,
-        )
-        if m:
-            take = (m.group(1) == stripped_name)
-            if take:
+    # Each group is in its own <tbody>
+    for tbody in re.findall(r"<tbody>(.*?)</tbody>", html, re.S):
+        rows = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", tbody, re.S)
+        out, take = [], False
+        for row in rows:
+            m = re.match(
+                r'<tr class="name-row"><th>'
+                r"(?:<label[^>]*>)?(?:<input[^>]*>\s*)?"
+                r'(?:<span[^>]*>[^<]*</span>\s*)?'
+                r"([^<]+)",
+                row,
+            )
+            if m:
+                take = (m.group(1) == stripped_name)
+                if take:
+                    out.append(row)
+            elif take and 'class="expand"' in row:
                 out.append(row)
-        elif take and 'class="expand"' in row:
-            out.append(row)
-    return out
+        if out:
+            return out
+    return []
 
 
 def test_expand_html_well_formed_round_trip(tmp_path):
@@ -807,7 +820,9 @@ def test_expand_each_variant_row_has_auth_and_api_type(tmp_path):
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
         from providers import GATEWAY_WIRING
-        expand_rows = [r for r in _all_trs_in_tbody(html) if 'class="expand"' in r]
+        # Each group is in its own <tbody>; collect expand rows from all
+        all_trs = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", html, re.S)
+        expand_rows = [r for r in all_trs if 'class="expand"' in r]
         # For every gateway that appears in EXPAND_ROSTER, at least one
         # expansion row must mention that gateway's auth + api_type.
         for gw in ("nous", "zen", "kilo", "openrouter"):
@@ -833,18 +848,15 @@ def test_expand_every_row_is_expandable(tmp_path):
         proc = _run_builder(EXPAND_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        tbody_rows = _all_trs_in_tbody(html)
-        # 3 name rows + 6 expansion rows (4 for poolside: 2 variants on 2
-        # gateways with kilo carrying both; 1 for standalone-1; 1 for
-        # standalone-2) = 9 total <tr>s in tbody.
-        assert len(tbody_rows) == 9, (
-            f"expected 9 tbody rows (3 names + 6 expansions), got {len(tbody_rows)}: "
-            f"{tbody_rows}"
-        )
+        # Each group is now in its own <tbody>, so count total <tr>s across
+        # all tbodies. 3 name rows + 6 expansion rows = 9 total.
+        all_trs = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", html, re.S)
+        name_rows = [r for r in all_trs if '<tr class="name-row">' in r]
+        expand_rows = [r for r in all_trs if 'class="expand"' in r]
+        assert len(name_rows) == 3, f"expected 3 name rows, got {len(name_rows)}"
+        assert len(expand_rows) == 6, f"expected 6 expand rows, got {len(expand_rows)}"
         # Each name row must have a hidden <input type="checkbox"> + <label>
         # pair. The label is the user-facing click target.
-        name_rows = [r for r in tbody_rows if re.match(r"<tr(?:\s+class=\"[^\"]*\")?><th>", r)]
-        assert len(name_rows) == 3
         for r in name_rows:
             assert 'type="checkbox"' in r, f"name row missing checkbox: {r}"
             assert "<label" in r, f"name row missing label: {r}"

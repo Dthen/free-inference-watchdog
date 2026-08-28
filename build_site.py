@@ -268,7 +268,6 @@ def render_page(roster, logo_b64):
         """
         w = GATEWAY_WIRING[gw]
         url_text = w.get("chat_completions_url") or w.get("base_url_source") or ""
-        notes = w.get("notes", "")
         # All visible strings: escaped, monospaced, copy-pasteable.
         return (
             f'<span class="wire-gw">{escape(gw)}</span>'
@@ -276,7 +275,6 @@ def render_page(roster, logo_b64):
             f'<span class="wire-url">{escape(url_text)}</span>'
             f'<span class="wire-auth">{escape(w["auth"])}</span>'
             f'<span class="wire-api">{escape(w["api_type"])}</span>'
-            + (f'<span class="wire-notes">{escape(notes)}</span>' if notes else "")
         )
 
     def row_html(name, group_index):
@@ -344,7 +342,8 @@ def render_page(roster, logo_b64):
         f'<script type="application/json" id="roster-data">{roster_json}</script>'
     )
     body_rows = "".join(
-        row_html(name, i) for i, name in enumerate(group_names)
+        f"<tbody>{row_html(name, i)}</tbody>"
+        for i, name in enumerate(group_names)
     )
 
     css = """  :root { color-scheme: dark;
@@ -406,7 +405,6 @@ def render_page(roster, logo_b64):
   tbody tr.expand .wire-url {{ color:var(--nord8); word-break:break-all; }}
   tbody tr.expand .wire-auth {{ color:var(--nord4); }}
   tbody tr.expand .wire-api {{ color:var(--nord14); }}
-  tbody tr.expand .wire-notes {{ grid-column:2 / -1; color:var(--nord13); font-size:10.5px; font-style:italic; padding-top:2px; }}
 </style></head>
 <body><div class="wrap">
 <header class="top">

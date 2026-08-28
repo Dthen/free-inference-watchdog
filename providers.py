@@ -331,12 +331,10 @@ GATEWAY_WIRING = {
         "chat_completions_url": "https://api.cline.bot/api/v1/chat/completions",
         "auth": "Bearer <your Cline API key>",
         "api_type": "openai_compatible",
-        "notes": "Route exists but Cline gates free models to its own product surfaces (IDE/CLI). An external call returns 403 'only available via Cline product surfaces'. Listed for completeness; not callable from third-party code.",
     },
     "command_code": {
         "chat_completions_url": "https://api.commandcode.ai/provider/v1/chat/completions",
         "auth": "Bearer <your Command Code API key>",
         "api_type": "openai_compatible",
-        "notes": "Cloudflare 403s a default urllib UA — send a browser/curl User-Agent",
     },
 }
