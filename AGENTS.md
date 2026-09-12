@@ -7,8 +7,8 @@
 - Empty stdout = healthy-silent; diagnostics go to stderr. Exit codes: 0 normal, 1 partial provider failure / bootstrap refused, 2 fatal.
 
 ## Providers
-- Six gateways in DISPLAY order `nous, zen, kilo, cline, openrouter, command_code` — canonical for UI/MCP surfaces (build_site.py `DISPLAY_ORDER`, mcp_server.py `PROVIDERS` tuple).
-- providers.PROVIDERS dict order differs (nous, openrouter, zen, kilo, cline, command_code); display order above wins everywhere user-visible.
+- Six gateways in DISPLAY order `nous, tokenrouter, kilo, openrouter, amd, bai` — canonical for UI/MCP surfaces (build_site.py `DISPLAY_ORDER`, mcp_server.py `PROVIDERS` tuple).
+- providers.PROVIDERS dict order differs (nous, openrouter, tokenrouter, kilo, amd, bai); display order above wins everywhere user-visible.
 - Free-only rule per provider: an id is tracked iff `"free" in id.lower()`. No alias map, no allowlist, no normalized-name matching — exact ids only. A new stealth arrival ships under whatever id the gateway assigns; if that id doesn't contain "free", it's not tracked.
 - Ollama is gone BY DESIGN (GPU-time metering, no free-model concept) — do not re-add it.
 
