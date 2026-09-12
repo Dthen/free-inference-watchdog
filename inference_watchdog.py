@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,10 @@ from probe_zero_credit import probe_model, Result
 
 DEFAULT_CADENCE_S = 1 * 3600
 HERMES_ENV = Path("~/.hermes/.env").expanduser()
+
+# Concurrency limit for zero-credit probes to avoid 25-minute sequential execution
+MAX_PROBE_CONCURRENCY = 3
+PROBE_TIMEOUT_S = 30
 
 
 # ---------- provider plumbing ----------
@@ -43,18 +48,20 @@ def build_fetch_all(env):
             try:
                 ids, meta = providers.fetch_provider(config)
                 if config.get("detection") == "zero-credit-probe" and ids:
-                    free_ids = []
-                    for model_id in ids:
+                    def _probe(model_id):
                         try:
-                            result, probe_meta = probe_model(
+                            result, _ = probe_model(
                                 config["base_url"],
                                 config.get("_token", ""),
-                                model_id
+                                model_id,
+                                timeout=PROBE_TIMEOUT_S
                             )
-                            if result == Result.FREE:
-                                free_ids.append(model_id)
+                            return model_id, result
                         except Exception:
-                            pass  # Exclude on error
+                            return model_id, None  # errors excluded
+                    with ThreadPoolExecutor(max_workers=MAX_PROBE_CONCURRENCY) as pool:
+                        outcomes = list(pool.map(_probe, ids))
+                    free_ids = [mid for mid, result in outcomes if result == Result.FREE]
                     ids = sorted(free_ids)
                 results[name] = ids
                 metas[name] = meta or {}

@@ -526,3 +526,68 @@ def test_no_alive_ping_when_diff_emitted(tmp_path):
     alive_d = json.loads((tmp_path / "alive.json").read_text())
     # diff alert counts as emitted_real -> last_output_epoch updated
     assert alive_d["last_output_epoch"] == 1_000_000_000 + 25 * 3600
+
+
+def test_zero_credit_probe_concurrency(monkeypatch, tmp_path, capsys):
+    """Concurrent probes: 10 models × 0.2s with 3 workers must complete in < 1.0s.
+    Proves ThreadPoolExecutor replaced the sequential loop."""
+    import inference_watchdog as im
+    from probe_zero_credit import Result
+    import providers
+
+    call_log = []
+    start_time = time.time()
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        call_log.append(model_id)
+        time.sleep(0.2)  # simulate network latency
+        # Return FREE for even-indexed models, PAID for odd
+        if int(model_id.split("-")[-1]) % 2 == 0:
+            return Result.FREE, {"http": 200}
+        return Result.PAID, {"http": 403}
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+
+    # Mock PROVIDERS to only have bai with zero-credit-probe
+    model_ids = [f"model-{i}" for i in range(10)]
+    mock_providers = {
+        "bai": {
+            "base_url": "https://api.example.com",
+            "_token": "test-token",
+            "detection": "zero-credit-probe",
+        }
+    }
+    # Also need to mock the other providers to return empty lists quickly
+    for p in ["nous", "tokenrouter", "kilo", "openrouter", "amd"]:
+        mock_providers[p] = {
+            "base_url": f"https://{p}.example.com",
+            "_token": "",
+            "detection": "other",
+        }
+    monkeypatch.setattr(im, "PROVIDERS", mock_providers)
+
+    # Mock fetch_provider to return our model_ids for bai, empty for others
+    def fake_fetch_provider(config, getter=None):
+        name = config.get("name", "")
+        if config.get("detection") == "zero-credit-probe":
+            return model_ids, {}
+        return [], {}
+
+    monkeypatch.setattr(providers, "fetch_provider", fake_fetch_provider)
+
+    # Build fetch_all with our patched probe_model
+    fetch_all_fn = im.build_fetch_all({})
+    results, metas = fetch_all_fn()
+
+    elapsed = time.time() - start_time
+
+    # 1. All 10 models were probed
+    assert sorted(call_log) == sorted(model_ids), f"Expected all 10 models probed, got {call_log}"
+
+    # 2. Only FREE models (even indices: 0, 2, 4, 6, 8) survive
+    free_ids = results.get("bai", [])
+    assert free_ids == ["model-0", "model-2", "model-4", "model-6", "model-8"], \
+        f"Expected only even models, got {free_ids}"
+
+    # 3. Wall-clock proves concurrency: 10 × 0.2s sequential = 2.0s, but 3 workers < 1.0s
+    assert elapsed < 1.0, f"Expected concurrent execution (< 1.0s), took {elapsed:.2f}s"
