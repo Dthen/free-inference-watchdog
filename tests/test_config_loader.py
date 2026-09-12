@@ -50,3 +50,40 @@ def test_load_configs_sorts_by_display(tmp_path, monkeypatch):
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
     configs = config_loader.load_configs()
     assert [c["name"] for c in configs] == ["A", "B", "C"]
+
+
+def test_load_configs_env_var(tmp_path, monkeypatch):
+    """Config with env_var resolves token from os.environ."""
+    monkeypatch.setenv("TEST_API_KEY", "env-token")
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "all-free",
+              "auth": {"method": "env_var", "env_key": "TEST_API_KEY"},
+              "display": 0}
+    (providers_dir / "test.json").write_text(json.dumps(config))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()
+    assert configs[0]["_token"] == "env-token"
+
+
+def test_load_configs_missing_required_field(tmp_path, monkeypatch):
+    """Config with missing required field raises ValueError."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "all-free"}  # missing auth
+    (providers_dir / "test.json").write_text(json.dumps(config))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    with pytest.raises(ValueError):
+        config_loader.load_configs()
+
+
+def test_load_configs_malformed_json(tmp_path, monkeypatch):
+    """Config with malformed JSON raises ValueError."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "bad.json").write_text("not json{{{")
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    with pytest.raises(ValueError):
+        config_loader.load_configs()

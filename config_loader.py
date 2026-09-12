@@ -23,8 +23,11 @@ def load_configs():
     """Load all providers/*.json, validate schema, resolve auth, sort by display."""
     configs = []
     for path in sorted((REPO / "providers").glob("*.json")):
-        with open(path, encoding="utf-8") as f:
-            config = json.load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                config = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Config {path.name}: invalid JSON: {exc}") from exc
 
         required = {"name", "base_url", "detection", "auth"}
         missing = required - set(config.keys())
@@ -34,11 +37,19 @@ def load_configs():
         auth = config.get("auth", {})
         method = auth.get("method")
         if method == "env_var":
-            token = os.environ.get(auth.get("env_key", ""), "")
+            env_key = auth.get("env_key")
+            if not env_key:
+                raise ValueError(f"Config {path.name}: env_var auth requires env_key field")
+            token = os.environ.get(env_key, "")
         elif method == "token_file":
             token_path = os.path.expanduser(auth.get("path", ""))
-            with open(token_path, encoding="utf-8") as f:
-                token_data = json.load(f)
+            try:
+                with open(token_path, encoding="utf-8") as f:
+                    token_data = json.load(f)
+            except FileNotFoundError:
+                raise ValueError(f"Config {path.name}: token file not found: {token_path}")
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Config {path.name}: token file invalid JSON: {exc}")
             token = _resolve_json_path(token_data, auth.get("key", ""))
         else:
             token = None
