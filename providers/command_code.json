@@ -1,0 +1,7 @@
+{
+  "name": "Command Code",
+  "base_url": "https://api.commandcode.ai/provider/v1",
+  "detection": "id-suffix",
+  "auth": { "method": "env_var", "env_key": "COMMAND_CODE_API_KEY" },
+  "display": 5
+}

@@ -1,41 +1,14 @@
-"""Five provider fetchers for the Free Inference Watchdog. Stdlib only.
-
-Contract: each fetcher returns (ids: list[str], meta: dict) with ids SORTED,
-or raises FetchError. Transport is injectable via `getter(url, headers, timeout)
--> (status:int, body:str, headers:dict)` so tests run without network.
-The real getter ALWAYS sends a User-Agent (Nous 403s bare urllib — probed).
-"""
-
+"""Provider fetchers — config-driven, stdlib only."""
 import json
-import urllib.error
 import urllib.request
+import urllib.error
+from detection import detect_free
 
 USER_AGENT = "free-inference-watchdog/1.0"
 TIMEOUT_S = 15
 
-
 class FetchError(Exception):
-    """Any failure to obtain a usable roster from a provider."""
-
-
-# ---------- shared helpers ----------
-
-def is_free(pricing):
-    """True iff prompt AND completion price are exactly zero.
-
-    Type-safe by design (probe facts): prices arrive as STRINGS on nous/
-    openrouter/kilo; kilo uses '-1' as unknown sentinel; absent/malformed
-    pricing means NOT free (never KeyError, never false mass-removal).
-    """
-    if not isinstance(pricing, dict):
-        return False
-    try:
-        prompt_zero = float(pricing.get("prompt", 1)) == 0.0
-        completion_zero = float(pricing.get("completion", 1)) == 0.0
-    except (TypeError, ValueError):
-        return False
-    return prompt_zero and completion_zero
-
+    pass
 
 def _default_getter(url, headers=None, timeout=TIMEOUT_S):
     req = urllib.request.Request(
@@ -45,296 +18,138 @@ def _default_getter(url, headers=None, timeout=TIMEOUT_S):
             return resp.status, resp.read().decode("utf-8", "replace"), dict(resp.headers.items())
     except urllib.error.HTTPError as exc:
         raise FetchError(f"HTTP {exc.code} from {url}") from exc
-    except Exception as exc:  # URLError, timeouts, sockets
+    except Exception as exc:
         raise FetchError(f"{type(exc).__name__} fetching {url}") from exc
 
-
-def _headers(extra=None):
-    """Every request carries UA regardless of getter injection (Nous 403s bare urllib)."""
-    return {"User-Agent": USER_AGENT, **(extra or {})}
-
-
 def _loads_or_fetcherror(text, ctx_msg):
-    """json.loads under the FetchError contract (fix-round F1).
-
-    Malformed bytes raise json.JSONDecodeError, and DEEPLY NESTED documents
-    ('['*120000 + ']'*120000) raise RecursionError straight out of CPython's
-    json scanner. Neither subclasses FetchError, so either escaping a fetcher
-    would blow through build_fetch_all's `except providers.FetchError` into
-    run_tick's fatal handler (exit 2, every tick). Both convert here."""
     try:
         return json.loads(text)
-    except (json.JSONDecodeError, RecursionError) as exc:
+    except json.JSONDecodeError as exc:
         raise FetchError(ctx_msg) from exc
 
 
 def _parse_model_list(body):
-    """OpenAI-style {"data":[...]} or bare list -> list[dict|str]."""
     payload = _loads_or_fetcherror(body, "response was not valid JSON")
     items = payload.get("data", payload) if isinstance(payload, dict) else payload
     if not isinstance(items, list):
         raise FetchError("unexpected models payload shape")
     return items
 
-
-def _extract_ids(items, keep):
-    """Shape-tolerant id extraction (fix-round-9 CHANGE 1).
-
-    Real captured roster shapes: nous/openrouter/kilo ship dict items
-    {"id": ...}; zen ships MIXED bare strings + dicts. Every API fetcher must
-    accept BOTH: dicts yield their `id` field, plain strings/ints are kept
-    verbatim (str'd). Whether a dict item survives at all is `keep(dict)`'s
-    call — per-provider `id is not None` + pricing/free filter (F4: gated on
-    None, never truthiness, so a numeric id 0 survives like {"id":1}->"1").
-    Zen previously shared this helper but now intentionally diverges — see
-    _fetch_zen's own type-gated extraction."""
+def _extract_ids(items):
     return [
         str(it.get("id")) if isinstance(it, dict) else str(it)
         for it in items
-        if (keep(it) if isinstance(it, dict) else it)
+        if isinstance(it, dict) and it.get("id") is not None
     ]
-
 
 def _require_ok(status, url):
     if status != 200:
         raise FetchError(f"HTTP {status} from {url}")
 
-
-# ---------- nous ----------
-
-def _load_nous_auth(auth_path="~/.hermes/auth.json"):
-    """Named owner of auth.json parsing (plan round-1 finding #8).
-
-    F3: a malformed VALUE (null/empty/non-string token or base) must surface
-    as FetchError — same contract as every other fetch failure — never as an
-    AttributeError escaping to a whole-tick FATAL.
-    F1: a deeply nested document raises RecursionError inside the json
-    decoder; it converts to FetchError here via _loads_or_fetcherror too."""
-    import os
-    path = os.path.expanduser(auth_path)
-    try:
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-    except OSError as exc:
-        raise FetchError(f"cannot load nous auth from {path}") from exc
-    try:
-        nous = _loads_or_fetcherror(
-            text, f"cannot load nous auth from {path}")["providers"]["nous"]
-        token, base = nous["access_token"], nous["inference_base_url"]
-    except (KeyError, TypeError) as exc:
-        raise FetchError(f"cannot load nous auth from {path}") from exc
-    if not isinstance(token, str) or not token:
-        raise FetchError(
-            f"cannot load nous auth from {path}: access_token null/malformed")
-    if not isinstance(base, str) or not base:
-        raise FetchError(
-            f"cannot load nous auth from {path}: inference_base_url null/malformed")
-    return {"token": token, "base": base.rstrip("/")}
-
-
-def _fetch_nous(getter=_default_getter, auth=None):
-    """Probe fact: inference_base_url ALREADY ends in /v1 -> path is {base}/models."""
-    auth = auth or {}
-    url = f"{auth['base']}/models"
-    status, body, hdrs = getter(
-        url,
-        headers=_headers({"Authorization": f"Bearer {auth['token']}"}),
-        timeout=TIMEOUT_S,
-    )
-    _require_ok(status, url)
-    ids = sorted(_extract_ids(
-        _parse_model_list(body),
-        keep=lambda it: (it.get("id") is not None
-                         and is_free(it.get("pricing")))))
-    ratelimit = {k: v for k, v in (hdrs or {}).items() if "ratelimit" in k.lower()}
-    return ids, {"ratelimit": ratelimit}
-
-
-# ---------- openrouter ----------
-
-def _fetch_openrouter(getter=_default_getter):
-    url = "https://openrouter.ai/api/v1/models"  # public, no auth
-    status, body, _hdrs = getter(url, headers=_headers(), timeout=TIMEOUT_S)
-    _require_ok(status, url)
-    ids = sorted(_extract_ids(
-        _parse_model_list(body),
-        keep=lambda it: (it.get("id") is not None
-                         and is_free(it.get("pricing")))))
-    return ids, {}
-
-
-# ---------- zen ----------
-
-ZEN_URL = "https://opencode.ai/zen/v1/models"
-
-# Zen ships NO pricing metadata (probed 2026-08-25: objects carry only
-# id/object/created/owned_by). Free-roster rule: explicit "free" name marker
-# ONLY — no alias map, no allowlist, no normalized-name matching. A new
-# stealth arrival ships under whatever id the gateway assigns; if that id
-# doesn't contain "free", it is not tracked.
-# Deploy note: a persisted roster.json written BEFORE this filter holds the
-# paid tiers; the first good tick without a manual `python3 inference_watchdog.py
-# --init` rebaseline computes removals for every persisted unmarked id (dozens
-# at time of writing) and fires one mass-removal alert
-# (by design — honesty over silence). See README "--init re-baseline".
-
-
-def _zen_is_free(model_id):
-    if not isinstance(model_id, str):
+def is_free(pricing):
+    """True iff prompt AND completion price are exactly zero."""
+    if not isinstance(pricing, dict):
         return False
-    return "free" in model_id.lower()
-
-
-def _fetch_zen(getter=_default_getter, key=None):
-    """Model ids only, FREE-ONLY (decision 2026-08-25): keep ids carrying the
-    'free' marker. Everything else on Zen is a
-    paid tier (claude/gpt/gemini/grok/kimi/...) and must never be tracked.
-    Type-gated at a single point over BOTH item shapes — dict items
-    contribute their 'id', bare items themselves; anything that is not a str
-    is dropped, never repr-coerced. Uniqueness comes from set ∘ type-gate ∘
-    free-filter together; the set ensures duplicate ids cannot double-fire
-    alerts."""
-    extra = {"Authorization": f"Bearer {key}"} if key else {}
-    status, body, _hdrs = getter(ZEN_URL, headers=_headers(extra), timeout=TIMEOUT_S)
-    _require_ok(status, ZEN_URL)
-    items = _parse_model_list(body)
-    candidates = (it.get("id") if isinstance(it, dict) else it for it in items)
-    ids = sorted({i for i in candidates
-                  if isinstance(i, str) and _zen_is_free(i)})
-    return ids, {}
-
-
-# ---------- kilo ----------
-
-KILO_URL = "https://api.kilo.ai/api/gateway/v1/models"
-
-
-def _fetch_kilo(getter=_default_getter, key=None):
-    """Listed-$0 filter only; '-1' sentinels excluded by is_free(); plain report."""
-    extra = {"Authorization": f"Bearer {key}"} if key else {}
-    status, body, _hdrs = getter(KILO_URL, headers=_headers(extra), timeout=TIMEOUT_S)
-    _require_ok(status, KILO_URL)
-    ids = sorted(_extract_ids(
-        _parse_model_list(body),
-        keep=lambda it: (it.get("id") is not None
-                         and is_free(it.get("pricing")))))
-    return ids, {}
-
-
-# ---------- cline (endpoint-only) ----------
-# Dthen 2026-08-26: docs-watching/scraping is OUT OF SPEC. Cline has a real
-# API endpoint, so there is NO docs-markdown fallback at all. Endpoint fails
-# or returns no parseable free[] ⇒ raise FetchError (sticky carry-forward),
-# exactly like every other provider. No second source, no soft-200 rescue.
-CLINE_ENDPOINT = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
-
-
-def _fetch_cline(getter=_default_getter):
-    """Endpoint-only: GET recommended-models, extract ids from free[] ONLY.
-
-    Response shape: {recommended:[...], free:[...], clinePass:[...],
-    clineCloud:[]} — free[] is the free-roster we track; recommended/
-    clinePass/clineCloud are PAID tiers and must never leak into the roster.
-    An empty free[] on a healthy 200 is REAL data (CHANGE 2): returned as [],
-    never an error. Any transport/HTTP failure or unparseable payload raises
-    FetchError — sticky carry-forward, exactly like every other provider."""
-    status, body, _hdrs = getter(CLINE_ENDPOINT, headers=_headers(),
-                                 timeout=TIMEOUT_S)
-    _require_ok(status, CLINE_ENDPOINT)
-    payload = _loads_or_fetcherror(
-        body, "cline endpoint response was not valid JSON")
-    free = payload.get("free") if isinstance(payload, dict) else None
-    if not isinstance(free, list):
-        raise FetchError("unexpected cline endpoint payload shape")
-    ids = sorted(_extract_ids(free, keep=lambda it: it.get("id") is not None))
-    return ids, {}
-
-
-# ---------- command code ----------
-
-COMMAND_CODE_URL = "https://api.commandcode.ai/provider/v1/models"
-
-
-def _command_code_is_free(model_id):
-    """Command Code ships NO pricing metadata (probed 2026-08-26: objects carry
-    only id/object/created/owned_by/name/context_length). Free-roster rule:
-    explicit "free" name marker only — no alias map, no allowlist, no
-    normalized-name matching (the free lane is small and deal-structured:
-    minimax-m3-free, minimax-m2.7-free, laguna-s-2.1-free). A NEW free
-    arrival needs its id to carry the "free" marker; if Command Code ever
-    ships a free model under an opaque id, it is simply not tracked."""
-    if not isinstance(model_id, str):
+    try:
+        prompt_zero = float(pricing.get("prompt", 1)) == 0.0
+        completion_zero = float(pricing.get("completion", 1)) == 0.0
+    except (TypeError, ValueError):
         return False
-    return "free" in model_id.lower()
+    return prompt_zero and completion_zero
 
+def fetch_provider(config, getter=_default_getter):
+    """Fetch free models for a provider config."""
+    base_url = config["base_url"].rstrip("/")
+    token = config.get("_token")
 
-def _fetch_command_code(getter=_default_getter):
-    """Command Code free-only filter: endpoint serves the full catalog (60+
-    models, NO pricing field) — only ids carrying the "free" marker are
-    tracked. Paid tiers (claude/gpt/gemini/grok/...) must never leak into
-    the roster. Same type-gated extraction as zen: dict items contribute
-    their 'id', non-dicts are dropped, never repr-coerced."""
-    status, body, _hdrs = getter(COMMAND_CODE_URL, headers=_headers(),
-                                  timeout=TIMEOUT_S)
-    _require_ok(status, COMMAND_CODE_URL)
+    headers = {"User-Agent": USER_AGENT}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    status, body, resp_headers = getter(
+        f"{base_url}/models", headers=headers, timeout=TIMEOUT_S)
+    if status != 200:
+        raise FetchError(f"HTTP {status} from {base_url}/models")
+
     items = _parse_model_list(body)
-    candidates = (it.get("id") if isinstance(it, dict) else it for it in items)
-    ids = sorted({i for i in candidates
-                  if isinstance(i, str) and _command_code_is_free(i)})
-    return ids, {}
+    detection = config["detection"]
+
+    if detection == "zero-credit-probe":
+        return sorted(_extract_ids(items)), {}
+
+    free_ids = [i["id"] for i in items if detect_free(i, detection)]
+    return sorted(free_ids), {}
 
 
-# ---------- registry (order = display order) ----------
+# ---------- config-driven provider registry ----------
 
-PROVIDERS = {
-    "nous": _fetch_nous,
-    "openrouter": _fetch_openrouter,
-    "zen": _fetch_zen,
-    "kilo": _fetch_kilo,
-    "cline": _fetch_cline,
-    "command_code": _fetch_command_code,
-}
+def _build_provider_registry():
+    """Build PROVIDERS dict from config files (lazy-loaded to avoid circular imports)."""
+    from config_loader import load_configs
+    configs = load_configs()
+    registry = {}
+    for config in configs:
+        # Map config names to expected provider keys
+        name_map = {
+            "Nous Portal": "nous",
+            "TokenRouter": "tokenrouter",
+            "Kilo Gateway": "kilo",
+            "OpenRouter": "openrouter",
+            "AMD Radeon": "amd",
+            "B.AI": "bai",
+            "Zen": "zen",
+            "Cline": "cline",
+            "Command Code": "command_code",
+        }
+        name = name_map.get(config["name"], config["name"].lower().replace(" ", "_"))
+        # Create a fetcher bound to this config
+        def make_fetcher(cfg):
+            def fetcher(getter=_default_getter, **kwargs):
+                return fetch_provider(cfg, getter)
+            return fetcher
+        registry[name] = make_fetcher(config)
+    return registry
 
 
-# ---------- gateway wiring (single source of truth) ----------
+PROVIDERS = _build_provider_registry()
 
-# Probe results (verified 2026-08-26):
-#   nous          {inference_base_url}/chat/completions           200  completion returned — confirmed
-#   openrouter    https://openrouter.ai/api/v1/chat/completions  200  completion returned — confirmed
-#   kilo          https://api.kilo.ai/api/gateway/v1/chat/completions  200  completion returned — confirmed
-#   zen           https://opencode.ai/zen/v1/chat/completions    400  real API error (Model is unavailable) — route valid
-#   command_code  https://api.commandcode.ai/provider/v1/chat/completions  400  real API error (insufficient credits) — route valid
-#   cline         https://api.cline.bot/api/v1/chat/completions  403  real API error: "only available via Cline product surfaces"
-GATEWAY_WIRING = {
-    "nous": {
-        "chat_completions_url": None,
-        "base_url_source": "~/.hermes/auth.json → providers.nous.inference_base_url (already ends in /v1)",
-        "auth": "Bearer <your Nous access token>",
-        "api_type": "openai_compatible",
-    },
-    "openrouter": {
-        "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
-        "auth": "Bearer <your OpenRouter API key>",
-        "api_type": "openai_compatible",
-    },
-    "zen": {
-        "chat_completions_url": "https://opencode.ai/zen/v1/chat/completions",
-        "auth": "Bearer <your OpenCode Zen API key>",
-        "api_type": "openai_compatible",
-    },
-    "kilo": {
-        "chat_completions_url": "https://api.kilo.ai/api/gateway/v1/chat/completions",
-        "auth": "Bearer <your Kilo API key>",
-        "api_type": "openai_compatible",
-    },
-    "cline": {
-        "chat_completions_url": "https://api.cline.bot/api/v1/chat/completions",
-        "auth": "Bearer <your Cline API key>",
-        "api_type": "openai_compatible",
-    },
-    "command_code": {
-        "chat_completions_url": "https://api.commandcode.ai/provider/v1/chat/completions",
-        "auth": "Bearer <your Command Code API key>",
-        "api_type": "openai_compatible",
-    },
-}
+
+# ---------- gateway wiring (config-driven) ----------
+
+def _build_gateway_wiring():
+    """Build GATEWAY_WIRING dict from config files."""
+    from config_loader import load_configs
+    configs = load_configs()
+    wiring = {}
+    name_map = {
+        "Nous Portal": "nous",
+        "TokenRouter": "tokenrouter",
+        "Kilo Gateway": "kilo",
+        "OpenRouter": "openrouter",
+        "AMD Radeon": "amd",
+        "B.AI": "bai",
+        "Zen": "zen",
+        "Cline": "cline",
+        "Command Code": "command_code",
+    }
+    for config in configs:
+        name = name_map.get(config["name"], config["name"].lower().replace(" ", "_"))
+        auth = config.get("auth", {})
+        method = auth.get("method", "none")
+        if method == "env_var":
+            env_key = auth.get("env_key", "")
+            auth_str = f"Bearer <your {env_key}>"
+        elif method == "token_file":
+            auth_str = "Bearer <from token file>"
+        else:
+            auth_str = "Bearer <your API key>"
+        
+        wiring[name] = {
+            "chat_completions_url": f"{config['base_url'].rstrip('/')}/chat/completions",
+            "auth": auth_str,
+            "api_type": "openai_compatible",
+        }
+    return wiring
+
+
+GATEWAY_WIRING = _build_gateway_wiring()
