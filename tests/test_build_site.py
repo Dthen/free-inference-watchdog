@@ -415,6 +415,19 @@ def test_strip_free_marker_never_returns_empty():
     assert strip_free_marker("free") == "free"
 
 
+def test_is_model_router_filters_explicit():
+    """Router filter uses explicit patterns, NOT 'free' substring matching."""
+    from build_site import is_model_router
+    # Known routers
+    assert is_model_router("kilo-auto/free") == True
+    assert is_model_router("kilo-auto/efficient") == True
+    assert is_model_router("openrouter/free") == True
+    # Real models (must NOT be filtered)
+    assert is_model_router("meituan/longcat-2.0:free") == False
+    assert is_model_router("z-ai/glm-5.3-free") == False
+    assert is_model_router("poolside/laguna-s-2.1:free") == False
+
+
 # ---------- Task 3: matrix rows grouped by stripped name ----------
 
 # Fixture with multi-variant groups: one model ships on two gateways under

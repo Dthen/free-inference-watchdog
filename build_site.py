@@ -12,11 +12,9 @@ as JSON in <script type="application/json" id="roster-data"> so the page is
 fully self-contained (works from file://, no external fetches).
 
 Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
-  - PROVIDER COLUMN ORDER is Dthen's quality ranking: nous, zen, kilo,
-    cline, openrouter — openrouter LAST because its limits suck. This does
-    NOT match the providers.PROVIDERS registry order (nous, openrouter,
-    zen, kilo, cline), and must NOT be alphabetized, so it is hardcoded
-    below as DISPLAY_ORDER.
+  - Display order is derived from config_loader.PROVIDERS (sorted by the
+    `display` field in each provider's JSON config). This does NOT match
+    the providers.PROVIDERS registry order, and must NOT be alphabetized.
   - Header copy is minimal: title + "last refreshed {ts} · rebuilt every
     1h" + two chips ("N unique models", "6 gateways"). NO snapshot/alert/
     stale wording anywhere.
@@ -93,6 +91,22 @@ def strip_free_marker(model_id: str) -> str:
     s = _FREE_SUFFIX.sub("", model_id)
     s = _FREE_PREFIX.sub("", s)
     return s or model_id
+
+
+# Model-router endpoints: ids that route to a model selector rather than
+# a specific model. These are not "free models" and must not be displayed.
+# Known patterns (explicit, NOT regex-matched on "free"):
+#   - openrouter/free  (OpenRouter's free router)
+#   - kilo-auto/*      (Kilo's auto-router, e.g. kilo-auto/free, kilo-auto/efficient)
+_ROUTER_EXACT = {"openrouter/free"}
+_ROUTER_PREFIXES = ("kilo-auto/",)
+
+
+def is_model_router(model_id: str) -> bool:
+    """True iff the id is a model-router endpoint, not a real model."""
+    if model_id in _ROUTER_EXACT:
+        return True
+    return any(model_id.startswith(p) for p in _ROUTER_PREFIXES)
 
 
 def load_roster(root):
