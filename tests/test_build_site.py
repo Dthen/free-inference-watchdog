@@ -123,13 +123,19 @@ def test_deterministic_output():
 
 
 def test_display_order_constant():
-    """DISPLAY_ORDER is Dthen's quality ranking, not the providers.py registry
-    order (nous, openrouter, tokenrouter, kilo, amd, bai) and NOT alphabetical."""
+    """DISPLAY_ORDER is Dthen's quality ranking, derived dynamically from
+    config_loader.PROVIDERS (sorted by `display` field). Must produce
+    [nous, tokenrouter, kilo, openrouter, amd, bai] — NOT providers.py
+    registry order (nous, openrouter, tokenrouter, kilo, amd, bai) and NOT
+    alphabetical."""
+    from build_site import DISPLAY_ORDER
+    assert DISPLAY_ORDER == ["nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"]
+    # Confirm it's sourced from config_loader (dynamic), not a hardcoded list.
     src = BUILDER.read_text(encoding="utf-8")
-    m = re.search(r'DISPLAY_ORDER\s*=\s*\[(.*?)\]', src, re.S)
-    assert m, "DISPLAY_ORDER constant missing from build_site.py"
-    order = [s.strip().strip('"\'') for s in m.group(1).split(",") if s.strip()]
-    assert order == ["nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"]
+    assert "PROVIDERS" in src and "config_loader" in src, \
+        "DISPLAY_ORDER must be derived from config_loader.PROVIDERS, not hardcoded"
+    assert re.search(r'DISPLAY_ORDER\s*=\s*list\(PROVIDERS\.keys\(\)\)', src), \
+        "DISPLAY_ORDER must be derived via list(PROVIDERS.keys())"
 
 
 def test_missing_roster_fails_without_writing_site():
@@ -167,8 +173,9 @@ def test_empty_providers_map_renders_zero_rows():
 
 
 def test_presence_matrix_structure():
-    """One row per unique id; one column per gateway in display order;
-    footer row of per-gateway totals; sticky header present."""
+    """One row per unique id; one column per active gateway in display order;
+    footer row of per-gateway totals; sticky header present. Empty providers
+    (bai in this fixture) are hidden from the matrix."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -176,17 +183,18 @@ def test_presence_matrix_structure():
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
         # header column order pins the display order end-to-end
+        # SEED_ROSTER has no bai models, so bai is hidden: 5 active gateways
         head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
         cols = re.findall(r"<th>([^<]*)</th>", head)
-        assert cols == ["model id", "#", "nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"]
+        assert cols == ["model id", "#", "nous", "tokenrouter", "kilo", "openrouter", "amd"]
         # unique ids: vendor-z/zero-priced-model + stepfun + vendor-x/preview-free = 3 rows
         # Each group is in its own <tbody>; count name-rows across all
         name_rows = re.findall(r'<tr class="name-row">', html)
         assert len(name_rows) == 3
-        # footer totals: nous=2 tokenrouter=2 kilo=1 openrouter=1 amd=1 bai=0
+        # footer totals: nous=2 tokenrouter=2 kilo=1 openrouter=1 amd=1 (bai hidden)
         tfoot = html.split("<tfoot>", 1)[1].split("</tfoot>", 1)[0]
         nums = re.findall(r'class="n">(\d+)<', tfoot)
-        assert nums == ["2", "2", "1", "1", "1", "0"]
+        assert nums == ["2", "2", "1", "1", "1"]
         assert "position:sticky" in html
 
 
@@ -495,18 +503,20 @@ def test_grouped_row_dots_on_every_gateway_any_variant_reaches(tmp_path):
     """Task 3: presence on a gateway is true if ANY of the group's raw
     variants is on that gateway. For vendor-x/poolside-s-2.1: variant A is
     on nous, variant B is on tokenrouter and kilo -> dots on nous, tokenrouter, kilo,
-    NOT on openrouter/amd/bai."""
+    NOT on openrouter. amd and bai have no models in this fixture, so their
+    columns are hidden."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
     row = _row_for(html, "vendor-x/poolside-s-2.1")
     assert row is not None
-    # The row has 6 gateway cells in DISPLAY_ORDER. Count yes/no.
+    # The row has 4 active gateway cells (nous, tokenrouter, kilo, openrouter).
+    # Count yes/no.
     yes = row.count('<td class="yes">')
     no = row.count('<td class="no">')
     assert yes == 3, f"expected 3 yes dots (nous+tokenrouter+kilo), got {yes}"
-    assert no == 3, f"expected 3 no cells (openrouter+amd+bai), got {no}"
+    assert no == 1, f"expected 1 no cell (openrouter), got {no}"
 
 
 def test_group_overlap_on_same_gateway_not_double_counted(tmp_path):
@@ -532,14 +542,15 @@ def test_group_overlap_on_same_gateway_not_double_counted(tmp_path):
 def test_tfoot_totals_stay_raw_per_gateway_counts(tmp_path):
     """Task 3: <tfoot> counts must remain the honest 'ids tracked per
     gateway' number, not collapsed to groups. GROUP_ROSTER's raw per-gw
-    counts: nous=2, tokenrouter=1, kilo=3, openrouter=1, amd=0, bai=0."""
+    counts: nous=2, tokenrouter=1, kilo=3, openrouter=1, amd=0, bai=0.
+    Empty providers (amd, bai) are hidden from the matrix."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
     nums = _tfoot_numbers(html)
-    assert nums == [2, 1, 3, 1, 0, 0], (
-        f"tfoot must stay raw per-gateway counts in DISPLAY_ORDER, got {nums}"
+    assert nums == [2, 1, 3, 1], (
+        f"tfoot must stay raw per-gateway counts for active gateways only, got {nums}"
     )
 
 

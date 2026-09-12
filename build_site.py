@@ -59,13 +59,15 @@ from pathlib import Path
 # GATEWAY_WIRING. We IMPORT rather than re-hardcode so a probed-URL fix
 # in config_loader.py reaches the dashboard on the next tick with no second
 # site to keep in sync.
-from config_loader import GATEWAY_WIRING  # noqa: E402
+from config_loader import GATEWAY_WIRING, PROVIDERS  # noqa: E402
+
+# Dthen's quality ranking, derived from config_loader.PROVIDERS (sorted by
+# `display` field in providers/*.json). Single source of truth; a display
+# reorder in config reaches the dashboard on the next tick with no second
+# site to keep in sync.
+DISPLAY_ORDER = list(PROVIDERS.keys())
 
 REPO = Path(__file__).resolve().parent
-
-# Dthen's quality ranking, best first; openrouter LAST because its limits
-# suck. Must match config_loader.PROVIDERS keys (the six canonical gateways).
-DISPLAY_ORDER = ["nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"]
 
 ROSTER_REL = Path("state/roster.json")
 SITE_REL = Path("site/index.html")
@@ -235,8 +237,16 @@ def render_page(roster, logo_b64):
     meaning just because the matrix collapsed. The embedded
     <script id="roster-data"> JSON island keeps the RAW roster verbatim
     (MCP and any other consumer read raw ids, not groups).
+
+    Providers with zero free models are hidden from the matrix — they
+    clutter the view with an empty column and inflate the gateway chip.
     """
     providers = roster["providers"]
+    # Hide providers with zero free models — they clutter the matrix with
+    # an empty column and inflate the "gateways" chip for no reason.
+    providers = {gw: ids for gw, ids in providers.items() if ids}
+    # Active gateways in display order: only providers with models.
+    active_gateways = [gw for gw in DISPLAY_ORDER if gw in providers]
     group_names, groups, raw_count = build_groups(providers)
     tick = roster.get("tick_epoch")
     if (
@@ -280,7 +290,7 @@ def render_page(roster, logo_b64):
         present_gws = group["gateways"]
         cells = [
             '<td class="yes">&#9679;</td>' if gw in present_gws else '<td class="no"></td>'
-            for gw in DISPLAY_ORDER
+            for gw in active_gateways
         ]
         # One <input type="checkbox"> per group, named with a stable
         # group_index so two groups can never share an id. The label
@@ -304,9 +314,9 @@ def render_page(roster, logo_b64):
         )
         # Per-(gateway, raw_id) expansion rows. One row per variant; a
         # single-variant group still gets its one wiring row so nothing
-        # is hidden. colspan = 2 + len(DISPLAY_ORDER) so the row spans
+        # is hidden. colspan = 2 + len(active_gateways) so the row spans
         # the full table width on expand.
-        colspan = 2 + len(DISPLAY_ORDER)
+        colspan = 2 + len(active_gateways)
         expand_rows = "".join(
             f'<tr class="expand">'
             f'<td colspan="{colspan}">'
@@ -318,18 +328,18 @@ def render_page(roster, logo_b64):
         return name_row + expand_rows
 
     head_cells = "<th>model id</th><th>#</th>" + "".join(
-        f"<th>{escape(gw)}</th>" for gw in DISPLAY_ORDER
+        f"<th>{escape(gw)}</th>" for gw in active_gateways
     )
     # <tfoot> stays RAW per-gateway counts — that is the honest "ids
     # tracked per gateway" number and must not change meaning because
     # the matrix collapsed to one row per group above.
     foot_cells = "".join(
-        '<td class="n">%d</td>' % len(providers.get(gw, [])) for gw in DISPLAY_ORDER
+        '<td class="n">%d</td>' % len(providers.get(gw, [])) for gw in active_gateways
     )
     chips = (
         f'<span class="chip"><b>{len(group_names)}</b> unique models</span>'
         f'<span class="chip"><b>{raw_count}</b> endpoints</span>'
-        f'<span class="chip"><b>{len(DISPLAY_ORDER)}</b> gateways</span>'
+        f'<span class="chip"><b>{len(active_gateways)}</b> gateways</span>'
     )
     meta = f"last refreshed {ts} · rebuilt every 1h"
     # sort_keys keeps the embedded JSON byte-stable across builds; the
