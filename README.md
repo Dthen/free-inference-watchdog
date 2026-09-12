@@ -4,15 +4,19 @@ Zero-token cron watchdog for six free-tier LLM gateways. Alerts Discord when a
 free model appears or disappears. Stdlib-only Python, one tick per invocation,
 no LLM calls ever.
 
+Providers are **config-driven**: each gateway is a JSON file under
+[`providers/`](providers/). Adding or removing a provider is a file drop, not a
+code change.
+
 ## What it does
 
 Every hour (cadence comes from the cron schedule; `--recheck-delay` only
 sets the ~3-minute confirm nap before a diff is believed), the monitor:
 
-1. Fetches free-model rosters from **Nous**, **OpenRouter**, **OpenCode Zen**
-   (only ids containing "free" — see [Zen free-only rule](#zen-free-only-rule)),
-   **Kilo**,
-   **Cline**, and **Command Code** (only ids containing "free" — the free lane is deal-structured).
+1. Loads every `providers/*.json` config and fetches free-model rosters from
+   **Nous**, **TokenRouter**, **Kilo**, **OpenRouter**, **AMD**, and **B.AI**
+   (in that display order). Which ids count as free is decided per provider by
+   its `detection` method (see [Architecture](#architecture)).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
    an outage never looks like a mass removal).
 3. Set-diffs against the previous `roster.json`.
@@ -37,6 +41,7 @@ dropped entirely (2026-08-25).
 
 ```bash
 cd ~/projects/free-inference-watchdog
+cp .env.example .env                    # then fill in your keys
 python3 inference_watchdog.py --dry-run          # see what would happen
 python3 inference_watchdog.py --init             # bootstrap roster.json
 python3 inference_watchdog.py                    # one tick (cron does this)
@@ -46,7 +51,7 @@ python3 inference_watchdog.py                    # one tick (cron does this)
 
 The monitor runs as a silent Hermes cron script-mode job (`--no-agent`: no LLM
 is woken — the wrapper script IS the job). It is **not** a delivery channel:
-the webhook in `~/.hermes/.env` delivers alerts; cron stdout stays local.
+the webhook in `.env` delivers alerts; cron stdout stays local.
 
 Create `~/.hermes/scripts/inference-watchdog-tick.sh`:
 
@@ -76,22 +81,27 @@ lands on stderr for the operator to find.
 
 ## Environment variables
 
-All secrets live in `~/.hermes/.env`:
+Secrets live in a **project-local `.env`** (gitignored) — not in a shared
+home/profile env file. This keeps the repo agent-agnostic: copy
+[`.env.example`](.env.example) to `.env` and fill in your keys the same way on
+any host.
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | yes (for alerts) | Kennel/alerts channel webhook — the only delivery path. |
-| `OPENCODE_ZEN_API_KEY` | no | OpenCode Zen fetcher — endpoint serves its roster keyless (verified HTTP 200); a key buys higher rate limits. |
-| `KILOCODE_API_KEY` | no | Kilo fetcher — endpoint also serves its roster keyless (verified HTTP 200); a key buys authenticated/higher-limit access. |
+| `NOUS_ACCESS_TOKEN` | yes (for Nous) | Nous Portal auth token (see [Nous auth](#nous-auth)). |
+| `TOKENROUTER_API_KEY` | no | TokenRouter fetcher — endpoint serves its roster keyless; a key buys higher limits. |
+| `KILOCODE_API_KEY` | no | Kilo fetcher — endpoint also serves its roster keyless; a key buys authenticated/higher-limit access. |
+| `AMD_API_KEY` | no | AMD Radeon gateway auth. |
+| `BAI_API_KEY` | no | B.AI gateway auth — required for the `zero-credit-probe` detection method. |
 
-OpenRouter needs no key — its models endpoint is public. Cline's roster
-endpoint is also public (no auth header); no key is read for it either. The
-code treats the Zen/Kilo keys as optional too (missing key ⇒ fetch with no
-auth header), so both watchdog paths work with neither set.
+OpenRouter needs no key — its models endpoint is public. The code treats the
+TokenRouter/Kilo/AMD keys as optional too (missing key ⇒ fetch with no auth
+header), so those watchdog paths work with neither set.
 
 ### Webhook rotation
 
-1. Update `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in `~/.hermes/.env`.
+1. Update `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in `.env`.
 2. Undelivered alerts queue in `state/pending_alerts.json` — drain manually:
 
 ```bash
@@ -102,9 +112,18 @@ The queue auto-drains on the next successful tick.
 
 ### Nous auth
 
-`~/.hermes/auth.json` holds `providers.nous.access_token` and
-`providers.nous.inference_base_url`. Hermes refreshes the token automatically;
-the monitor reads it at tick time, so a mid-token expiry just looks like a
+Nous auth is configured via the `NOUS_ACCESS_TOKEN` environment variable
+(single-line token). The provider config can alternatively point at a **token
+file** via the `auth` object (`method: token_file` with a `path` — a JSON
+object from which a dot-separated `key` is resolved). Set whichever matches
+your deployment:
+
+```bash
+# in .env
+NOUS_ACCESS_TOKEN=<your nous token>
+```
+
+The monitor reads it at tick time, so a mid-token expiry just looks like a
 provider failure (sticky carry-forward) — the next tick picks up the fresh
 token naturally.
 
@@ -122,27 +141,57 @@ token naturally.
 All per-tick fields are **rebuilt** (never appended to). The only persistent
 counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 
-## Drop-a-provider / Zen eviction
+## Drop-a-provider / managing providers
 
-The roster is filtered to the PROVIDERS registry keys on load. To drop a
-provider (e.g. Zen emitting phantom pairs), remove its entry from
-`providers.PROVIDERS` in `providers.py`. The registry filter in
-`diffing.load_filtered_roster()` silently drops the zombie entry on the next
-tick — no manual state surgery needed.
+Providers are plain JSON config files in `providers/`. The watchdog loads every
+`*.json` at startup.
 
-### Zen free-only rule
+- **To add a provider**: drop a new JSON config file into `providers/`.
+- **To remove a provider**: delete its JSON file — it silently disappears on
+  the next tick (the loader only materializes configs that exist on disk).
 
-Zen exposes no pricing metadata, so its roster is filtered at fetch time: an id
-is tracked iff it contains `free` (case-insensitive, anywhere in the id). No
-alias map, no allowlist, no normalized-name matching — exact ids only. A new
-stealth arrival ships under whatever id the gateway assigns; if that id doesn't
-contain `free`, it is not tracked. Everything else on Zen is a paid tier and
-must never be tracked. (This also supersedes the fetch-time passthrough older
-zen tests pinned; their fixtures now carry marked ids.) Duplicate ids are deduplicated
-at fetch time (a repeated id must not double-fire alerts), and non-string ids
-are dropped outright rather than coerced — unlike nous, openrouter, and kilo,
-whose coerce-then-filter contract is pinned by
-test_fetch_mixed_int_and_str_ids_coerced.
+See [`providers/README.md`](providers/README.md) for the full schema and
+detection-method reference.
+
+## Architecture
+
+The watchdog is **config-driven**: none of the gateways are hard-coded in the
+monitor logic. Each provider is a `providers/*.json` file whose schema the
+loader validates at startup:
+
+| Field | Meaning |
+|---|---|
+| `name` | Human-readable name |
+| `base_url` | API base URL (no trailing `/`) |
+| `detection` | Which free-model detection method to apply |
+| `auth.method` | `env_var`, `token_file`, or `none` |
+| `auth.env_key` | Env var name (when `auth.method` is `env_var`) |
+| `display` | Column order (0 = first) |
+
+Detection methods (dispatched by string key, so a provider can pick any):
+
+- `api-pricing` — model is free when `pricing.prompt == "0"` AND `pricing.completion == "0"` (Nous, OpenRouter).
+- `api-flag` — model is free when `isFree == true` (Kilo).
+- `id-suffix` — model id ends with `:free` / `-free`, or contains `free` (TokenRouter).
+- `all-free` — every model in the catalog is treated as free (AMD).
+- `zero-credit-probe` — fire a 1-token completion per model and classify by the
+  response (B.AI). This is slow, so probes run concurrently (3 workers, 30s
+  timeout) and results are deferred rather than blocking a tick.
+
+### Modules
+
+- **`config_loader.py`** — loads and validates every `providers/*.json`,
+  resolves auth (`env_var` / `token_file` / `none`) into an in-memory token,
+  and sorts configs by `display` order. Exposes the `PROVIDERS` dict used by the
+  rest of the watchdog, plus `build_gateway_wiring()`.
+- **`detection.py`** — string-keyed `detect_free(model, method)` dispatch used
+  at fetch time to decide which ids count as free.
+- **`probe_zero_credit.py`** — the `zero-credit-probe` backend: fires a
+  1-token completion per model and classifies it as `free` / `paid` / `defer`
+  based on the HTTP response (a `403` mentioning "deposit" ⇒ paid).
+
+To add a provider, drop in a JSON config (see `providers/README.md`); to change
+a detection strategy, edit the JSON — no Python changes required.
 
 ## Cadence change
 
