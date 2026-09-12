@@ -1,0 +1,10 @@
+{
+  "name": "Nous Portal",
+  "base_url": "https://inference-api.nousresearch.com/v1",
+  "detection": "api-pricing",
+  "auth": {
+    "method": "env_var",
+    "env_key": "NOUS_ACCESS_TOKEN"
+  },
+  "display": 0
+}

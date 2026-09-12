@@ -1,0 +1,7 @@
+{
+  "name": "OpenRouter",
+  "base_url": "https://openrouter.ai/api/v1",
+  "detection": "api-pricing",
+  "auth": { "method": "none" },
+  "display": 3
+}

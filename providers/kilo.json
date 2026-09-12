@@ -1,0 +1,7 @@
+{
+  "name": "Kilo Gateway",
+  "base_url": "https://api.kilo.ai/api/gateway/v1",
+  "detection": "api-flag",
+  "auth": { "method": "env_var", "env_key": "KILOCODE_API_KEY" },
+  "display": 2
+}

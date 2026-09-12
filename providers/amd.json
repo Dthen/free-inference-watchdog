@@ -1,0 +1,7 @@
+{
+  "name": "AMD Radeon",
+  "base_url": "https://developer.amd.com.cn/radeon/api/v1",
+  "detection": "all-free",
+  "auth": { "method": "env_var", "env_key": "AMD_API_KEY" },
+  "display": 4
+}

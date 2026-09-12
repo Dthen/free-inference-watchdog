@@ -1,0 +1,7 @@
+{
+  "name": "B.AI",
+  "base_url": "https://api.b.ai/v1",
+  "detection": "zero-credit-probe",
+  "auth": { "method": "env_var", "env_key": "BAI_API_KEY" },
+  "display": 5
+}

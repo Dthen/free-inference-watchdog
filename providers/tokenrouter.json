@@ -1,0 +1,7 @@
+{
+  "name": "TokenRouter",
+  "base_url": "https://api.tokenrouter.com/v1",
+  "detection": "id-suffix",
+  "auth": { "method": "env_var", "env_key": "TOKENROUTER_API_KEY" },
+  "display": 1
+}
