@@ -214,3 +214,27 @@ def test_fetch_provider_strips_trailing_slash(mock_getter):
     mock_getter.response = (200, json.dumps({"data": [{"id": "model"}]}), {})
     providers.fetch_provider(config, getter=mock_getter)
     assert mock_getter.last_url == "https://api.example.com/v1/models"
+
+
+def test_fetch_provider_captures_ratelimit_headers():
+    """x-ratelimit headers land in meta dict (nous telemetry contract)."""
+    def getter(url, headers=None, timeout=15):
+        body = json.dumps({"data": [{"id": "m1", "pricing": {"prompt": "0", "completion": "0"}}]})
+        return 200, body, {"x-ratelimit-remaining-requests": "42", "x-ratelimit-limit-requests": "100"}
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "api-pricing", "_token": None}
+    ids, meta = providers.fetch_provider(config, getter=getter)
+    assert ids == ["m1"]
+    assert meta.get("ratelimit", {}).get("x-ratelimit-remaining-requests") == "42"
+
+
+def test_fetch_provider_no_ratelimit_headers_empty_meta():
+    """No ratelimit headers -> empty meta, not a dict with empty ratelimit key."""
+    def getter(url, headers=None, timeout=15):
+        body = json.dumps({"data": [{"id": "m1", "pricing": {"prompt": "0", "completion": "0"}}]})
+        return 200, body, {}
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "api-pricing", "_token": None}
+    ids, meta = providers.fetch_provider(config, getter=getter)
+    assert ids == ["m1"]
+    assert meta == {}

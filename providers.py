@@ -67,4 +67,6 @@ def fetch_provider(config, getter=_default_getter):
         return sorted(_extract_ids(items)), {}
 
     free_ids = [i["id"] for i in items if detect_free(i, detection)]
-    return sorted(free_ids), {}
+    # Capture ratelimit headers for passive telemetry
+    ratelimit = {k: v for k, v in resp_headers.items() if "ratelimit" in k.lower()}
+    return sorted(free_ids), {"ratelimit": ratelimit} if ratelimit else {}
