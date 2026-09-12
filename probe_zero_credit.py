@@ -16,7 +16,7 @@ def probe_model(base_url, token, model_id, timeout=30):
         "max_tokens": 1,
     }).encode()
     req = urllib.request.Request(
-        f"{base_url}/v1/chat/completions",
+        f"{base_url.rstrip('/').removesuffix('/v1')}/v1/chat/completions",
         data=body,
         headers={
             "User-Agent": "free-inference-watchdog/1.0",
