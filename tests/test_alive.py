@@ -45,7 +45,7 @@ def test_format_alive_variants():
     # rendering notify.format_alert uses, not bare names.
     busy = alive.format_alive(
         5, ["nous"],
-        {"zen": {"added": [], "removed": ["z2"]}, "kilo": 2}, 2)
+        {"test_gw": {"added": [], "removed": ["z2"]}, "kilo": 2}, 2)
     assert "nous" in busy and "2" in busy
-    assert "zen(1)" in busy          # dict event -> added+removed count
+    assert "test_gw(1)" in busy          # dict event -> added+removed count
     assert "kilo(2)" in busy         # pre-counted int passes through

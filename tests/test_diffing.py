@@ -33,7 +33,7 @@ def test_new_provider_in_fetched_counts_as_all_added():
 def test_provider_gone_from_fetched_is_not_a_removal():
     # A provider missing from `fetched` means the tick never ran it
     # (registry change) — sticky handled upstream; never a removal event.
-    prev = {"providers": {"nous": ["a"], "zen": ["z1"]}}
+    prev = {"providers": {"nous": ["a"], "test_gw": ["z1"]}}
     events, _ = diffing.compute_events(prev, {"nous": ["a"]})
     assert events == {}
 
@@ -42,8 +42,8 @@ def test_provider_gone_from_fetched_is_not_a_removal():
 
 def test_failed_fetch_carries_forward_prev_ids():
     new_map, stale = diffing.apply_sticky(
-        {"nous": ["a", "b"], "zen": ["z"]}, {"nous": None, "zen": ["z2"]})
-    assert new_map == {"nous": ["a", "b"], "zen": ["z2"]}
+        {"nous": ["a", "b"], "test_gw": ["z"]}, {"nous": None, "test_gw": ["z2"]})
+    assert new_map == {"nous": ["a", "b"], "test_gw": ["z2"]}
     assert stale == ["nous"]
 
 
@@ -73,9 +73,9 @@ def test_load_filtered_roster_drops_evicted_providers(tmp_path):
     import json
     p = tmp_path / "roster.json"
     p.write_text(json.dumps(
-        {"providers": {"nous": ["a"], "zen": ["zombie"]},
-         "stale_providers": ["zen"]}), encoding="utf-8")
-    roster = diffing.load_filtered_roster(p, {"nous", "kilo", "cline"})
+        {"providers": {"nous": ["a"], "test_gw": ["zombie"]},
+         "stale_providers": ["test_gw"]}), encoding="utf-8")
+    roster = diffing.load_filtered_roster(p, {"nous", "kilo", "provider_x"})
     assert roster["providers"] == {"nous": ["a"]}
 
 
@@ -103,10 +103,10 @@ def test_load_filtered_roster_coerces_non_list_values_to_empty(tmp_path):
     p = tmp_path / "roster.json"
     p.write_text(json.dumps(
         {"providers": {"nous": "model-a", "kilo": {"oops": 1},
-                       "cline": ["real/id"]}}), encoding="utf-8")
-    roster = diffing.load_filtered_roster(p, {"nous", "kilo", "cline"})
+                       "provider_x": ["real/id"]}}), encoding="utf-8")
+    roster = diffing.load_filtered_roster(p, {"nous", "kilo", "provider_x"})
     assert roster is not None
-    assert roster["providers"] == {"nous": [], "kilo": [], "cline": ["real/id"]}
+    assert roster["providers"] == {"nous": [], "kilo": [], "provider_x": ["real/id"]}
 
 
 def test_load_filtered_roster_coerces_non_string_list_elements(tmp_path):
@@ -119,11 +119,11 @@ def test_load_filtered_roster_coerces_non_string_list_elements(tmp_path):
     p.write_text(json.dumps(
         {"providers": {"nous": [{"id": "x-model"}],
                        "kilo": [42, None, "ok/id"],
-                       "cline": ["real/id"]}}), encoding="utf-8")
-    roster = diffing.load_filtered_roster(p, {"nous", "kilo", "cline"})
+                       "provider_x": ["real/id"]}}), encoding="utf-8")
+    roster = diffing.load_filtered_roster(p, {"nous", "kilo", "provider_x"})
     assert roster is not None
     assert roster["providers"] == {"nous": [], "kilo": ["ok/id"],
-                                   "cline": ["real/id"]}
+                                   "provider_x": ["real/id"]}
 
 
 def test_dict_element_prev_value_no_bogus_repr_alert_downstream(tmp_path):
@@ -171,6 +171,6 @@ def test_string_prev_value_no_bogus_removal_alerts_downstream(tmp_path):
 
 
 def test_compute_events_ignores_zombie_provider_in_prev():
-    prev = {"providers": {"nous": ["a"], "zen": ["zombie"]}}
+    prev = {"providers": {"nous": ["a"], "test_gw": ["zombie"]}}
     events, _ = diffing.compute_events(prev, {"nous": ["a"]}, registry={"nous"})
     assert events == {}

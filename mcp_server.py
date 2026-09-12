@@ -309,7 +309,7 @@ def list_endpoints(provider=None, root=None) -> dict:
             "api_type": wiring.get("api_type"),
             "model_ids": ids,
         }
-        # Include optional notes field if present (cline, command_code)
+        # Include optional notes field if present
         if "notes" in wiring:
             gateways[gw]["notes"] = wiring["notes"]
         total_endpoints += len(ids)
@@ -389,7 +389,7 @@ def watchdog_status(now=None, root=None) -> dict:
 TOOL_DESCRIPTIONS = {
     "list_free_models":
         "List free-tier model ids across the watched gateways "
-        "(nous, zen, kilo, cline, openrouter, command_code). Pass provider=<name> for one "
+        "(nous, tokenrouter, kilo, openrouter, amd, bai). Pass provider=<name> for one "
         "gateway's id list; omit it for the full roster with per-gateway "
         "counts. Read-only snapshot of the latest watchdog tick.",
     "get_model":

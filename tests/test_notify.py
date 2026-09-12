@@ -36,8 +36,8 @@ def test_format_lists_every_model_no_cap():
 def test_format_mentions_transients_stale_dropped():
     msg = notify.format_alert(
         {}, tick_iso="t", providers_polled=5,
-        transients={"zen": 2}, stale=["nous"], dropped_total=3)
-    assert "zen" in msg and "nous" in msg and "3" in msg
+        transients={"test_gw": 2}, stale=["nous"], dropped_total=3)
+    assert "test_gw" in msg and "nous" in msg and "3" in msg
 
 
 def test_format_huge_event_uncapped_every_id_survives():
@@ -48,7 +48,7 @@ def test_format_huge_event_uncapped_every_id_survives():
                       "removed": [f"z/w-{j}" for j in range(40)]}
             for i in range(6)}
     msg = notify.format_alert(huge, tick_iso="t", providers_polled=6,
-                              transients={}, stale=["zen"], dropped_total=99)
+                              transients={}, stale=["test_gw"], dropped_total=99)
     assert len(msg) >= 1900                       # uncapped by design
     for i in range(6):
         for j in range(40):
@@ -71,7 +71,7 @@ def test_split_oversized_chunks_bounded_all_ids_survive_footer_last():
                         "removed": [f"z/w-{i}-{j}" for j in range(50)]}
               for i in range(6)}
     msg = notify.format_alert(events, tick_iso="2026-08-24 12:00",
-                              providers_polled=6, transients={"zen": 2},
+                              providers_polled=6, transients={"test_gw": 2},
                               stale=["kilo"], dropped_total=7)
     assert len(msg) > 1900
     chunks = notify.split_message(msg)
@@ -495,4 +495,4 @@ def test_transient_counts_none_and_empty_map_skipped():
 
 def test_transient_counts_int_passthrough_alive_consumer():
     """alive.format_alive consumes this — signature/shape unchanged."""
-    assert notify.format_transient_counts({"zen": 2}) == "zen(2)"
+    assert notify.format_transient_counts({"test_gw": 2}) == "test_gw(2)"

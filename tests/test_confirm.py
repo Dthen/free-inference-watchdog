@@ -70,21 +70,21 @@ def test_recheck_failure_marks_unconfirmed():
 
 
 def test_mixed_providers_single_nap_each_resolves():
-    resps = {"nous": ["a2"], "zen": ["z1", "z2", "z9"]}  # zen: z9 still there = transient
+    resps = {"nous": ["a2"], "test_gw": ["z1", "z2", "z9"]}  # zen: z9 still there = transient
     fetch, calls = _fetch_map(_ids(resps))
     naps = []
     candidates = {
         "nous": {"added": ["a2"], "removed": ["a1"]},   # persists
-        "zen": {"added": [], "removed": ["z9"]},        # transient (z9 not gone)
+        "test_gw": {"added": [], "removed": ["z9"]},        # transient (z9 not gone)
     }
     result = diffing.confirm_diffs(
         candidates=candidates,
-        prev_providers={"nous": ["a1"], "zen": ["z1", "z2", "z9"]},
+        prev_providers={"nous": ["a1"], "test_gw": ["z1", "z2", "z9"]},
         fetch_one=fetch, sleep=naps.append, delay=180)
     assert result["confirmed"] == {"nous": {"added": ["a2"], "removed": ["a1"]}}
-    assert result["transients"] == {"zen": {"added": [], "removed": ["z9"]}}
+    assert result["transients"] == {"test_gw": {"added": [], "removed": ["z9"]}}
     assert naps == [180]          # exactly ONE nap total, not per provider
-    assert sorted(calls) == ["nous", "zen"]
+    assert sorted(calls) == ["nous", "test_gw"]
 
 
 # ---------- R2-2: corrected id-map (recheck outcomes persist) ----------
@@ -92,13 +92,13 @@ def test_mixed_providers_single_nap_each_resolves():
 def test_corrected_transient_equals_prev_ids():
     # Flap recovered on recheck -> corrected map must equal PREV ids so the
     # persisted roster never holds the pre-recheck snapshot nor the flap.
-    fetch, _ = _fetch_map(_ids({"zen": ["z1", "z2"]}))
+    fetch, _ = _fetch_map(_ids({"test_gw": ["z1", "z2"]}))
     result = diffing.confirm_diffs(
-        candidates={"zen": {"added": [], "removed": ["z2"]}},
-        prev_providers={"zen": ["z1", "z2"]},
+        candidates={"test_gw": {"added": [], "removed": ["z2"]}},
+        prev_providers={"test_gw": ["z1", "z2"]},
         fetch_one=fetch, sleep=lambda s: None, delay=0)
-    assert result["corrected"] == {"zen": ["z1", "z2"]}
-    assert result["transients"] == {"zen": {"added": [], "removed": ["z2"]}}
+    assert result["corrected"] == {"test_gw": ["z1", "z2"]}
+    assert result["transients"] == {"test_gw": {"added": [], "removed": ["z2"]}}
 
 
 def test_corrected_confirmed_equals_refetch_truth():
@@ -129,26 +129,26 @@ def test_corrected_unconfirmed_provider_absent():
         raise diffing.FetchError("timeout")
 
     result = diffing.confirm_diffs(
-        candidates={"zen": {"added": ["z1"], "removed": []}},
-        prev_providers={"zen": ["old1"]},
+        candidates={"test_gw": {"added": ["z1"], "removed": []}},
+        prev_providers={"test_gw": ["old1"]},
         fetch_one=failing, sleep=lambda s: None, delay=0)
-    assert result["unconfirmed"] == {"zen": {"added": ["z1"], "removed": []}}
-    assert "zen" not in result["corrected"]
+    assert result["unconfirmed"] == {"test_gw": {"added": ["z1"], "removed": []}}
+    assert "test_gw" not in result["corrected"]
 
 
 # ---------- R2-2 caller-side merge (merge_corrected) ----------
 
 def test_merge_corrected_transient_and_confirmed():
-    new_map = {"zen": ["z1"], "nous": ["a1", "a2"], "kilo": ["k1"]}
+    new_map = {"test_gw": ["z1"], "nous": ["a1", "a2"], "kilo": ["k1"]}
     confirmation = {
-        "corrected": {"zen": ["z1", "z2"],        # transient -> prev ids
+        "corrected": {"test_gw": ["z1", "z2"],        # transient -> prev ids
                       "nous": ["a1"]},            # confirmed -> refetch ids
         "unconfirmed": {},
     }
     merged = diffing.merge_corrected(
-        new_map, confirmation, prev_providers={"zen": ["z1", "z2"],
+        new_map, confirmation, prev_providers={"test_gw": ["z1", "z2"],
                                                "nous": ["a1", "a2"]})
-    assert merged["zen"] == ["z1", "z2"]      # flap leaves no trace
+    assert merged["test_gw"] == ["z1", "z2"]      # flap leaves no trace
     assert merged["nous"] == ["a1"]           # refetch truth persisted
     assert merged["kilo"] == ["k1"]           # untouched provider survives
 
@@ -156,14 +156,14 @@ def test_merge_corrected_transient_and_confirmed():
 def test_merge_corrected_unconfirmed_keeps_sticky_old():
     # Unconfirmed: corrected map lacks the provider -> previous-roster entry
     # is restored (NOT this tick's pre-recheck fetch, which showed the flap).
-    new_map = {"zen": ["z1"]}                 # pre-recheck snapshot w/ flap
+    new_map = {"test_gw": ["z1"]}                 # pre-recheck snapshot w/ flap
     confirmation = {
         "corrected": {},                       # zen ABSENT (refetch failed)
-        "unconfirmed": {"zen": {"added": [], "removed": ["z2"]}},
+        "unconfirmed": {"test_gw": {"added": [], "removed": ["z2"]}},
     }
     merged = diffing.merge_corrected(
-        new_map, confirmation, prev_providers={"zen": ["z1", "z2"]})
-    assert merged["zen"] == ["z1", "z2"]      # sticky-old wins
+        new_map, confirmation, prev_providers={"test_gw": ["z1", "z2"]})
+    assert merged["test_gw"] == ["z1", "z2"]      # sticky-old wins
 
 
 def test_merge_corrected_unconfirmed_no_prev_entry_sticky_empty():
@@ -179,8 +179,8 @@ def test_merge_corrected_unconfirmed_no_prev_entry_sticky_empty():
 
 
 def test_merge_corrected_does_not_mutate_input():
-    new_map = {"zen": ["z1"]}
-    confirmation = {"corrected": {"zen": ["z1", "z2"]}, "unconfirmed": {}}
-    merged = diffing.merge_corrected(new_map, confirmation, {"zen": ["z1", "z2"]})
+    new_map = {"test_gw": ["z1"]}
+    confirmation = {"corrected": {"test_gw": ["z1", "z2"]}, "unconfirmed": {}}
+    merged = diffing.merge_corrected(new_map, confirmation, {"test_gw": ["z1", "z2"]})
     assert merged is not new_map
-    assert new_map == {"zen": ["z1"]}
+    assert new_map == {"test_gw": ["z1"]}
