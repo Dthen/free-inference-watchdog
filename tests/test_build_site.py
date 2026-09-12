@@ -8,9 +8,9 @@ state/roster.json into site/index.html. Pinned here:
 - the full roster is INLINED as JSON in <script type="application/json"
   id="roster-data"> and extracts cleanly with json.loads,
 - output is DETERMINISTIC (same roster -> byte-identical HTML),
-- PROVIDER DISPLAY ORDER is Dthen's quality ranking [nous, zen, kilo,
-  cline, openrouter] — openrouter LAST (limits), NOT registry order and
-  NOT alphabetical,
+- PROVIDER DISPLAY ORDER is Dthen's quality ranking [nous, tokenrouter, kilo,
+  openrouter, amd, bai] — openrouter BEFORE amd/bai (limits), NOT registry order
+  and NOT alphabetical,
 - missing or corrupt roster.json exits non-zero WITHOUT writing
   site/index.html (never publish garbage),
 - HOSTILE provider values (bare string / dict / null / int instead of a
@@ -44,9 +44,9 @@ SEED_ROSTER = {
     "providers": {
         "nous": ["vendor-z/zero-priced-model", "vendor-g/model-7:free"],
         "openrouter": ["vendor-z/zero-priced-model"],
-        "zen": ["vendor-z/zero-priced-model", "vendor-x/preview-free"],
+        "tokenrouter": ["vendor-z/zero-priced-model", "vendor-x/preview-free"],
         "kilo": ["vendor-z/zero-priced-model"],
-        "cline": ["vendor-z/zero-priced-model"],
+        "amd": ["vendor-z/zero-priced-model"],
     },
     "stale_providers": [],
 }
@@ -106,7 +106,7 @@ def test_roster_data_script_extracts_cleanly():
         )
         assert m, "roster-data script tag missing from output"
         data = json.loads(m.group(1))
-        assert set(data["providers"]) == {"nous", "openrouter", "zen", "kilo", "cline"}
+        assert set(data["providers"]) == {"nous", "openrouter", "tokenrouter", "kilo", "amd"}
         assert "vendor-z/zero-priced-model" in data["providers"]["nous"]
 
 
@@ -124,12 +124,12 @@ def test_deterministic_output():
 
 def test_display_order_constant():
     """DISPLAY_ORDER is Dthen's quality ranking, not the providers.py registry
-    order (nous, openrouter, zen, kilo, cline) and NOT alphabetical."""
+    order (nous, openrouter, tokenrouter, kilo, amd, bai) and NOT alphabetical."""
     src = BUILDER.read_text(encoding="utf-8")
     m = re.search(r'DISPLAY_ORDER\s*=\s*\[(.*?)\]', src, re.S)
     assert m, "DISPLAY_ORDER constant missing from build_site.py"
     order = [s.strip().strip('"\'') for s in m.group(1).split(",") if s.strip()]
-    assert order == ["nous", "zen", "kilo", "cline", "openrouter", "command_code"]
+    assert order == ["nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"]
 
 
 def test_missing_roster_fails_without_writing_site():
@@ -178,12 +178,12 @@ def test_presence_matrix_structure():
         # header column order pins the display order end-to-end
         head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
         cols = re.findall(r"<th>([^<]*)</th>", head)
-        assert cols == ["model id", "#", "nous", "zen", "kilo", "cline", "openrouter", "command_code"]
+        assert cols == ["model id", "#", "nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"]
         # unique ids: vendor-z/zero-priced-model + stepfun + vendor-x/preview-free = 3 rows
         # Each group is in its own <tbody>; count name-rows across all
         name_rows = re.findall(r'<tr class="name-row">', html)
         assert len(name_rows) == 3
-        # footer totals: nous=2 zen=2 kilo=1 cline=1 openrouter=1
+        # footer totals: nous=2 tokenrouter=2 kilo=1 openrouter=1 amd=1 bai=0
         tfoot = html.split("<tfoot>", 1)[1].split("</tfoot>", 1)[0]
         nums = re.findall(r'class="n">(\d+)<', tfoot)
         assert nums == ["2", "2", "1", "1", "1", "0"]
@@ -419,7 +419,7 @@ GROUP_ROSTER = {
             "vendor-x/poolside-s-2.1:free",      # variant A
             "vendor-x/standalone-1:free",        # single-variant
         ],
-        "zen": [
+        "tokenrouter": [
             "vendor-x/poolside-s-2.1-free",      # variant B (different gw)
         ],
         "kilo": [
@@ -470,9 +470,9 @@ def test_grouped_rows_one_per_stripped_name(tmp_path):
 
 
 def test_grouped_row_dot_count_aggregates_across_variants(tmp_path):
-    """Task 3: '#' column = number of gateways the group REACHES, not the
-    number of variants. A group with two variants on three gateways
-    (one of which has both variants) shows '#' = 3, not 4."""
+    """Task 3: '#' column counts DISTINCT gateways reached, not total variants.
+    poolside-s-2.1 has variant A on nous, variant B on tokenrouter and kilo ->
+    distinct gateways = {nous, tokenrouter, kilo} -> # must be 3."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
@@ -486,16 +486,16 @@ def test_grouped_row_dot_count_aggregates_across_variants(tmp_path):
     assert m, f"could not find # cell in row: {row!r}"
     assert int(m.group(1)) == 3, (
         f"group's # must equal number of gateways it reaches "
-        f"(kilo+openrouter+nous+zen = up to 4, but poolside-s-2.1 "
-        f"is on nous+zen+kilo = 3); got {m.group(1)}"
+        f"(kilo+openrouter+nous+tokenrouter = up to 4, but poolside-s-2.1 "
+        f"is on nous+tokenrouter+kilo = 3); got {m.group(1)}"
     )
 
 
 def test_grouped_row_dots_on_every_gateway_any_variant_reaches(tmp_path):
     """Task 3: presence on a gateway is true if ANY of the group's raw
     variants is on that gateway. For vendor-x/poolside-s-2.1: variant A is
-    on nous, variant B is on zen and kilo -> dots on nous, zen, kilo,
-    NOT on cline/openrouter/command_code."""
+    on nous, variant B is on tokenrouter and kilo -> dots on nous, tokenrouter, kilo,
+    NOT on openrouter/amd/bai."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
@@ -505,8 +505,8 @@ def test_grouped_row_dots_on_every_gateway_any_variant_reaches(tmp_path):
     # The row has 6 gateway cells in DISPLAY_ORDER. Count yes/no.
     yes = row.count('<td class="yes">')
     no = row.count('<td class="no">')
-    assert yes == 3, f"expected 3 yes dots (nous+zen+kilo), got {yes}"
-    assert no == 3, f"expected 3 no cells (cline+openrouter+command_code), got {no}"
+    assert yes == 3, f"expected 3 yes dots (nous+tokenrouter+kilo), got {yes}"
+    assert no == 3, f"expected 3 no cells (openrouter+amd+bai), got {no}"
 
 
 def test_group_overlap_on_same_gateway_not_double_counted(tmp_path):
@@ -521,24 +521,24 @@ def test_group_overlap_on_same_gateway_not_double_counted(tmp_path):
     # Task 4 wraps the name in a <label> for the expand toggle.
     m = re.search(r'<th>.{0,400}?</th><td class="n">(\d+)</td>', row)
     assert m, f"could not find # cell in row: {row!r}"
-    # nous, zen, kilo — three distinct gateways reached
+    # nous, tokenrouter, kilo — three distinct gateways reached
     assert int(m.group(1)) == 3, (
         f"kilo has both variants but counts as 1 gateway; # must be 3, got {m.group(1)}"
     )
     # Sanity: only ONE yes-dot in the kilo column for this row.
-    assert row.count('<td class="yes">') == 3  # nous, zen, kilo each contribute one yes
+    assert row.count('<td class="yes">') == 3  # nous, tokenrouter, kilo each contribute one yes
 
 
 def test_tfoot_totals_stay_raw_per_gateway_counts(tmp_path):
     """Task 3: <tfoot> counts must remain the honest 'ids tracked per
     gateway' number, not collapsed to groups. GROUP_ROSTER's raw per-gw
-    counts: nous=2, zen=1, kilo=3, cline=0, openrouter=1, command_code=0."""
+    counts: nous=2, tokenrouter=1, kilo=3, openrouter=1, amd=0, bai=0."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
     nums = _tfoot_numbers(html)
-    assert nums == [2, 1, 3, 0, 1, 0], (
+    assert nums == [2, 1, 3, 1, 0, 0], (
         f"tfoot must stay raw per-gateway counts in DISPLAY_ORDER, got {nums}"
     )
 
@@ -557,7 +557,7 @@ def test_inlined_roster_data_json_stays_raw(tmp_path):
     assert m, "roster-data script tag missing from output"
     data = json.loads(m.group(1))
     # Raw ids are present — variants preserved, not collapsed
-    assert "vendor-x/poolside-s-2.1-free" in data["providers"]["zen"]
+    assert "vendor-x/poolside-s-2.1-free" in data["providers"]["tokenrouter"]
     assert "vendor-x/poolside-s-2.1:free" in data["providers"]["nous"]
     assert "vendor-x/poolside-s-2.1-free" in data["providers"]["kilo"]
 
@@ -667,7 +667,7 @@ EXPAND_ROSTER = {
         "openrouter": [
             "vendor-x/standalone-2-free",        # single-variant
         ],
-        "zen": [
+        "tokenrouter": [
             "vendor-x/poolside-s-2.1-free",      # variant B (different gw)
         ],
         "kilo": [
@@ -777,7 +777,7 @@ def test_expand_every_raw_id_in_html_collapsed(tmp_path):
 
 def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
     """Every variant <tr class='expand'> contains that gateway's
-    chat-completions URL. The wiring mapping is imported from providers,
+    chat-completions URL. The wiring mapping is imported from config_loader,
     never hardcoded a second time in build_site.py."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -788,9 +788,9 @@ def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
         html = _build_html(tmp)
         # Pull the wiring map for cross-check (we are testing the rendered
         # page, but pinning the URLs against the import avoids a drift).
-        from providers import GATEWAY_WIRING
+        from config_loader import GATEWAY_WIRING
         # We expect variant rows for: poolside:free on nous, poolside-free
-        # on zen, poolside:free on kilo, poolside-free on kilo, standalone-1
+        # on tokenrouter, poolside:free on kilo, poolside-free on kilo, standalone-1
         # on nous, standalone-2 on openrouter — 6 expansion rows total.
         # Each MUST mention its gateway's URL (or the nous base_url_source
         # for nous, which has no static URL).
@@ -801,7 +801,7 @@ def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
         # Each expansion row has a <td class="wire-url"> containing the URL
         # text. The cell class is part of the visible contract — readers
         # can copy the URL straight out of the page.
-        for gw in ("zen", "kilo", "openrouter"):
+        for gw in ("tokenrouter", "kilo", "openrouter"):
             url = GATEWAY_WIRING[gw]["chat_completions_url"]
             assert any(url in r for r in expand_rows), (
                 f"{gw} URL {url!r} missing from every expansion row"
@@ -819,13 +819,13 @@ def test_expand_each_variant_row_has_auth_and_api_type(tmp_path):
         proc = _run_builder(EXPAND_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        from providers import GATEWAY_WIRING
+        from config_loader import GATEWAY_WIRING
         # Each group is in its own <tbody>; collect expand rows from all
         all_trs = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", html, re.S)
         expand_rows = [r for r in all_trs if 'class="expand"' in r]
         # For every gateway that appears in EXPAND_ROSTER, at least one
         # expansion row must mention that gateway's auth + api_type.
-        for gw in ("nous", "zen", "kilo", "openrouter"):
+        for gw in ("nous", "tokenrouter", "kilo", "openrouter"):
             w = GATEWAY_WIRING[gw]
             # The builder HTML-escapes all wiring text; the assertion
             # compares against the escaped form so that `<your ...>`

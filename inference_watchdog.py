@@ -20,6 +20,7 @@ import diffing
 import notify
 import providers
 import state
+from config_loader import PROVIDERS
 from envfile import parse_envfile
 
 DEFAULT_CADENCE_S = 1 * 3600
@@ -34,21 +35,12 @@ def build_fetch_all(env):
     Failures become None in the results map (sticky) and are ABSENT from the
     meta map. Meta is passive telemetry only (nous x-ratelimit headers, R2-6).
     """
-    keys = {
-        "zen": env.get("OPENCODE_ZEN_API_KEY"),
-        "kilo": env.get("KILOCODE_API_KEY"),
-    }
 
     def fetch_all():
         results, metas = {}, {}
-        for name, fetcher in providers.PROVIDERS.items():
+        for name, config in PROVIDERS.items():
             try:
-                if name == "nous":
-                    ids, meta = fetcher(auth=providers._load_nous_auth())
-                elif name in keys:
-                    ids, meta = fetcher(key=keys[name])
-                else:
-                    ids, meta = fetcher()
+                ids, meta = providers.fetch_provider(config)
                 results[name] = ids
                 metas[name] = meta or {}
             except providers.FetchError:
@@ -61,19 +53,9 @@ def build_fetch_all(env):
 def build_fetch_one(env):
     """Return fetch_one(name) -> (ids, meta_dict). Raises on failure."""
 
-    keys = {
-        "zen": env.get("OPENCODE_ZEN_API_KEY"),
-        "kilo": env.get("KILOCODE_API_KEY"),
-    }
-
     def fetch_one(name):
-        fetcher = providers.PROVIDERS[name]
-        if name == "nous":
-            ids, meta = fetcher(auth=providers._load_nous_auth())
-        elif name in keys:
-            ids, meta = fetcher(key=keys[name])
-        else:
-            ids, meta = fetcher()
+        config = PROVIDERS[name]
+        ids, meta = providers.fetch_provider(config)
         return ids, meta or {}
 
     return fetch_one
@@ -299,10 +281,10 @@ def main(argv=None):
     fetch_one = build_fetch_one(env)
 
     if args.init:
-        return run_tick(state_dir, providers.PROVIDERS, fetch_all, fetch_one,
+        return run_tick(state_dir, PROVIDERS, fetch_all, fetch_one,
                         webhook_url=None, sleep=lambda s: None, now=time.time(),
                         recheck_delay=0, dry_run=False, init=True)
-    return run_tick(state_dir, providers.PROVIDERS, fetch_all, fetch_one,
+    return run_tick(state_dir, PROVIDERS, fetch_all, fetch_one,
                     webhook_url=webhook, sleep=time.sleep, now=time.time(),
                     recheck_delay=args.recheck_delay,
                     cooldown_hours=args.cooldown_hours,

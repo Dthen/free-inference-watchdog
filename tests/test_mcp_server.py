@@ -29,13 +29,13 @@ def state_dir(tmp_path):
         "tick_epoch": 1_787_721_434,
         "providers": {
             "nous": ["vendor-z/zero-priced-model", "vendor-d/model-6:free"],
-            "zen": ["vendor-x/preview-free", "vendor-d/model-4-free"],
+            "tokenrouter": ["vendor-x/preview-free", "vendor-d/model-4-free"],
             "kilo": [
                 "vendor-z/zero-priced-model",
                 "cohere/north-mini-code:free",
                 "kilo-auto/free",
             ],
-            "cline": ["vendor-z/zero-priced-model"],
+            "amd": ["vendor-z/zero-priced-model"],
             "openrouter": ["vendor-f/model-5:free"],
         },
         "stale_providers": [],
@@ -80,16 +80,16 @@ def test_list_full_roster(state_dir):
 
 
 def test_list_partial_roster_canonical_six_shape(tmp_path):
-    """One gateway-key semantic everywhere: a partial roster ({nous, zen}
-    plus a junk key) STILL yields all five canonical gateways — kilo/cline/
-    openrouter as empty lists, n_gateways==5 — and 'mysterygw' never leaks
+    """One gateway-key semantic everywhere: a partial roster ({nous, tokenrouter}
+    plus a junk key) STILL yields all six canonical gateways — kilo/openrouter/amd/bai
+    as empty lists, n_gateways==6 — and 'mysterygw' never leaks
     into the output."""
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "roster.json").write_text(json.dumps({
         "tick_epoch": 100,
         "providers": {
             "nous": ["vendor-z/zero-priced-model"],
-            "zen": [],
+            "tokenrouter": [],
             "mysterygw": ["junk/id"],
         },
     }))
@@ -97,10 +97,10 @@ def test_list_partial_roster_canonical_six_shape(tmp_path):
     assert res["ok"] is True
     assert set(res["providers"]) == set(mcp_server.PROVIDERS)
     assert res["providers"]["nous"] == ["vendor-z/zero-priced-model"]
-    for gw in ("zen", "kilo", "cline", "openrouter"):
+    for gw in ("tokenrouter", "kilo", "openrouter", "amd", "bai"):
         assert res["providers"][gw] == []
-    assert res["counts"] == {"nous": 1, "zen": 0, "kilo": 0,
-                             "cline": 0, "openrouter": 0, "command_code": 0}
+    assert res["counts"] == {"nous": 1, "tokenrouter": 0, "kilo": 0,
+                             "openrouter": 0, "amd": 0, "bai": 0}
     assert res["n_gateways"] == 6
     assert "mysterygw" not in res["providers"]
     assert "mysterygw" not in res["counts"]
@@ -142,7 +142,7 @@ def test_get_model_exact_match_across_gateways(state_dir):
     res = mcp_server.get_model("cohere/north-mini-code:free", root=state_dir)
     assert res["query"] == "cohere/north-mini-code:free"
     assert res["exact_matches"]["kilo"] is True
-    for gw in ("nous", "zen", "cline", "openrouter"):
+    for gw in ("nous", "tokenrouter", "amd", "openrouter", "bai"):
         assert res["exact_matches"][gw] is False
     # caveat present on EVERY get_model result
     assert any("unreliable" in s.lower() for s in res["caveats"])
@@ -151,7 +151,7 @@ def test_get_model_exact_match_across_gateways(state_dir):
 def test_get_model_exact_match_everywhere(state_dir):
     res = mcp_server.get_model("vendor-z/zero-priced-model", root=state_dir)
     present = [gw for gw, p in res["exact_matches"].items() if p]
-    assert sorted(present) == ["cline", "kilo", "nous"]
+    assert sorted(present) == ["amd", "kilo", "nous"]
 
 
 def _tokens(s):
@@ -166,9 +166,9 @@ def test_status_fields_present(state_dir):
     assert res["last_tick_age_s"] == 60
     assert res["tick_fresh"] is True
     assert res["stale_providers"] == []
-    # All five DISPLAY_ORDER gateways always appear (stable shape), plus
+    # All six DISPLAY_ORDER gateways always appear (stable shape), plus
     # any unknown roster keys.
-    for gw in ("nous", "zen", "kilo", "cline", "openrouter", "command_code"):
+    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"):
         assert gw in res["provider_counts"]
     assert res["provider_counts"]["kilo"] == 3
     assert res["provider_counts"]["nous"] == 2
@@ -188,23 +188,23 @@ def test_status_reports_stale_providers(tmp_path):
     (tmp_path / "state" / "roster.json").write_text(json.dumps({
         "tick_epoch": 100,
         "providers": {"nous": [], "openrouter": []},
-        "stale_providers": ["zen", "kilo"],
+        "stale_providers": ["tokenrouter", "kilo"],
     }))
     res = mcp_server.watchdog_status(now=200, root=tmp_path)
-    assert res["stale_providers"] == ["zen", "kilo"]
-    for gw in ("nous", "zen", "kilo", "cline", "openrouter", "command_code"):
+    assert res["stale_providers"] == ["tokenrouter", "kilo"]
+    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"):
         assert res["provider_counts"][gw] == 0
 
 
 def test_status_stale_providers_hostile_string_degrades(tmp_path):
     """Hostile roster: stale_providers as a bare STRING must degrade to []
     (same rule as _clean_ids for id lists) — never char-split into
-    ['z', 'e', 'n']."""
+    ['t', 'o', 'k', 'e', 'n', 'r', 'o', 'u', 't', 'e', 'r']."""
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "roster.json").write_text(json.dumps({
         "tick_epoch": 100,
         "providers": {"nous": [], "openrouter": []},
-        "stale_providers": "zen",
+        "stale_providers": "tokenrouter",
     }))
     res = mcp_server.watchdog_status(now=200, root=tmp_path)
     assert res["ok"] is True
@@ -227,7 +227,8 @@ def test_status_graceful_on_empty_dir(empty_dir):
 def test_gateway_wiring_keys_match_providers():
     """GATEWAY_WIRING keys must match PROVIDERS keys exactly — the two are
     pinned together so a new gateway added to one is always added to the other."""
-    assert set(providers.GATEWAY_WIRING) == set(providers.PROVIDERS)
+    from config_loader import PROVIDERS, GATEWAY_WIRING
+    assert set(GATEWAY_WIRING) == set(PROVIDERS)
 
 
 # ---------- get_model: endpoints (wiring) ----------
@@ -269,8 +270,8 @@ def test_get_model_exact_matches_strictly_unchanged(state_dir):
 def test_get_model_endpoints_ordered_by_providers_then_natural_key(state_dir):
     """endpoints order: PROVIDERS display order, then raw id by _natural_key."""
     res = mcp_server.get_model("vendor-z/zero-priced-model", root=state_dir)
-    # present on nous, kilo, cline (in PROVIDERS order)
-    assert [ep["gateway"] for ep in res["endpoints"]] == ["nous", "kilo", "cline"]
+    # present on nous, kilo, amd (in PROVIDERS order)
+    assert [ep["gateway"] for ep in res["endpoints"]] == ["nous", "kilo", "amd"]
     assert [ep["model_id"] for ep in res["endpoints"]] == [
         "vendor-z/zero-priced-model"] * 3
 
@@ -303,19 +304,19 @@ def test_list_endpoints_totals_match_roster(state_dir):
     assert set(res["gateways"]) == set(mcp_server.PROVIDERS)
 
 
-def test_list_endpoints_filter_zen(state_dir):
-    """list_endpoints("zen") returns only zen's wiring + model_ids."""
-    res = mcp_server.list_endpoints(provider="zen", root=state_dir)
+def test_list_endpoints_filter_tokenrouter(state_dir):
+    """list_endpoints("tokenrouter") returns only tokenrouter's wiring + model_ids."""
+    res = mcp_server.list_endpoints(provider="tokenrouter", root=state_dir)
     assert res["ok"] is True
-    assert res["provider"] == "zen"
-    assert set(res["gateways"]) == {"zen"}
-    # zen carries vendor-x/preview-free and vendor-d/model-4-free
-    assert sorted(res["gateways"]["zen"]["model_ids"]) == [
+    assert res["provider"] == "tokenrouter"
+    assert set(res["gateways"]) == {"tokenrouter"}
+    # tokenrouter carries vendor-x/preview-free and vendor-d/model-4-free
+    assert sorted(res["gateways"]["tokenrouter"]["model_ids"]) == [
         "vendor-d/model-4-free", "vendor-x/preview-free"]
     # wiring fields present
-    assert "chat_completions_url" in res["gateways"]["zen"]
-    assert "auth" in res["gateways"]["zen"]
-    assert "api_type" in res["gateways"]["zen"]
+    assert "chat_completions_url" in res["gateways"]["tokenrouter"]
+    assert "auth" in res["gateways"]["tokenrouter"]
+    assert "api_type" in res["gateways"]["tokenrouter"]
 
 
 def test_list_endpoints_unknown_provider_error(state_dir):
@@ -335,11 +336,11 @@ def test_list_endpoints_hostile_roster_degrades(tmp_path):
         "tick_epoch": 100,
         "providers": {
             "nous": "not-a-list",  # hostile: bare string
-            "zen": [],
+            "tokenrouter": [],
         },
     }))
     res = mcp_server.list_endpoints(root=tmp_path)
     assert res["ok"] is True
     # Hostile value degrades to an empty list (same rule as _clean_ids)
     assert res["gateways"]["nous"]["model_ids"] == []
-    assert res["gateways"]["zen"]["model_ids"] == []
+    assert res["gateways"]["tokenrouter"]["model_ids"] == []

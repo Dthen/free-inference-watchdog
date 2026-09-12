@@ -1,7 +1,0 @@
-{
-  "name": "Cline",
-  "base_url": "https://api.cline.bot/api/v1",
-  "detection": "all-free",
-  "auth": { "method": "none" },
-  "display": 3
-}

@@ -55,19 +55,17 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
-# Probe-verified gateway wiring (single source of truth): see providers.py
+# Probe-verified gateway wiring (single source of truth): see config_loader.py
 # GATEWAY_WIRING. We IMPORT rather than re-hardcode so a probed-URL fix
-# in providers.py reaches the dashboard on the next tick with no second
+# in config_loader.py reaches the dashboard on the next tick with no second
 # site to keep in sync.
-from providers import GATEWAY_WIRING  # noqa: E402
+from config_loader import GATEWAY_WIRING  # noqa: E402
 
 REPO = Path(__file__).resolve().parent
 
 # Dthen's quality ranking, best first; openrouter LAST because its limits
-# suck. Differs from providers.py registry order (nous, openrouter, zen,
-# kilo, cline) by design: display order is curation, not implementation
-# detail, so it is hardcoded rather than derived from the registry.
-DISPLAY_ORDER = ["nous", "zen", "kilo", "cline", "openrouter", "command_code"]
+# suck. Must match config_loader.PROVIDERS keys (the six canonical gateways).
+DISPLAY_ORDER = ["nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"]
 
 ROSTER_REL = Path("state/roster.json")
 SITE_REL = Path("site/index.html")

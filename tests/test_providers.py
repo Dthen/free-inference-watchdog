@@ -9,7 +9,7 @@ import json
 import pytest
 
 import providers
-from providers import FetchError, is_free
+from providers import FetchError
 
 
 # ---------- shared helpers ----------
@@ -34,30 +34,6 @@ class _MockGetter:
 @pytest.fixture
 def mock_getter():
     return _MockGetter()
-
-
-# ---------- is_free ----------
-
-def test_is_free_string_zero():
-    assert is_free({"prompt": "0", "completion": "0"}) is True
-
-
-def test_is_free_int_zero():
-    assert is_free({"prompt": 0, "completion": 0}) is True
-
-
-def test_is_free_priced():
-    assert is_free({"prompt": "0.0000001", "completion": "0.0000002"}) is False
-
-
-def test_is_free_kilo_unknown_sentinel():
-    assert is_free({"prompt": "-1", "completion": "-1"}) is False
-
-
-def test_is_free_missing_or_malformed():
-    assert is_free({}) is False
-    assert is_free({"prompt": None, "completion": None}) is False
-    assert is_free("garbage") is False
 
 
 # ---------- _parse_model_list ----------

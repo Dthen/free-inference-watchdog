@@ -8,7 +8,7 @@ import time
 import inference_watchdog as im
 
 
-REGISTRY = {"nous", "openrouter", "zen", "kilo", "cline"}
+REGISTRY = {"nous", "openrouter", "tokenrouter", "kilo", "amd", "bai"}
 
 
 def _fetcher(scenarios):
@@ -184,15 +184,15 @@ def test_confirmed_removal_alerts_once_then_cooldowns(tmp_path, capsys):
 
 
 def test_transient_removal_never_alerts(tmp_path, capsys):
-    _run(tmp_path, [{"zen": ["z1", "z2"]}])
+    _run(tmp_path, [{"tokenrouter": ["z1", "z2"]}])
     # candidate removal, but recheck sees z2 back -> transient, silent
-    code, _ = _run(tmp_path, [{"zen": ["z1"]}, {"zen": ["z1", "z2"]}],
+    code, _ = _run(tmp_path, [{"tokenrouter": ["z1"]}, {"tokenrouter": ["z1", "z2"]}],
                    now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 0
     assert "🔴" not in out
     roster = json.loads((tmp_path / "roster.json").read_text())
-    assert roster["providers"]["zen"] == ["z1", "z2"]  # recheck state wins
+    assert roster["providers"]["tokenrouter"] == ["z1", "z2"]  # recheck state wins
 
 
 def test_empty_roster_diffs_honestly_into_alert(tmp_path, capsys):
@@ -323,11 +323,11 @@ def test_emit_dry_run_webhook_line_only_when_webhook_configured(capsys):
 
 
 def test_registry_filter_kills_zombies(tmp_path, capsys):
-    _run(tmp_path, [{"nous": ["a"], "zen": ["zombie"]}])
-    # registry shrinks to nous only: zombie zen must vanish silently
+    _run(tmp_path, [{"nous": ["a"], "tokenrouter": ["zombie"]}])
+    # registry shrinks to nous only: zombie tokenrouter must vanish silently
     code, _ = _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 1 * 3600)
     roster = json.loads((tmp_path / "roster.json").read_text())
-    assert "zen" not in roster["providers"]
+    assert "tokenrouter" not in roster["providers"]
     assert "🔴" not in capsys.readouterr().out
 
 
@@ -352,17 +352,17 @@ def test_roster_persists_transients_from_flap(tmp_path, capsys):
     no candidate diff ever arose, so transients == {} passed vacuously. This
     shape is an honest flap: baseline [a,b] -> candidate tick sees [a] ->
     recheck sees [a,b] again => b's removal recorded as transient, silent."""
-    _run(tmp_path, [{"zen": ["a", "b"]}])                       # baseline
+    _run(tmp_path, [{"tokenrouter": ["a", "b"]}])                       # baseline
     capsys.readouterr()
     # candidate tick: b gone; recheck: b back => transient flap
-    code, _ = _run(tmp_path, [{"zen": ["a"]}, {"zen": ["a", "b"]}],
+    code, _ = _run(tmp_path, [{"tokenrouter": ["a"]}, {"tokenrouter": ["a", "b"]}],
                    now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 0
     assert "🔴" not in out                        # transient never alerts
     roster = json.loads((tmp_path / "roster.json").read_text())
-    assert roster["transients"] == {"zen": {"added": [], "removed": ["b"]}}
-    assert roster["providers"]["zen"] == ["a", "b"]   # recheck truth persisted
+    assert roster["transients"] == {"tokenrouter": {"added": [], "removed": ["b"]}}
+    assert roster["providers"]["tokenrouter"] == ["a", "b"]   # recheck truth persisted
 
 
 def test_nous_ratelimit_persisted_from_meta(tmp_path):
@@ -446,12 +446,12 @@ def test_bootstrap_guard_allows_partial_success(tmp_path):
 def test_first_run_partial_failure_exits_one_but_initializes(tmp_path, capsys):
     """F7: init/first-run with SOME providers failed aligns its exit code
     with the normal-tick partial-failure code (1), still initializing."""
-    code, _ = _run(tmp_path, [{"nous": ["a"], "zen": None}])
+    code, _ = _run(tmp_path, [{"nous": ["a"], "tokenrouter": None}])
     assert code == 1
     assert "initialized, no diff" in capsys.readouterr().out
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"]["nous"] == ["a"]
-    assert roster["stale_providers"] == ["zen"]
+    assert roster["stale_providers"] == ["tokenrouter"]
 
 
 def test_unconfirmed_then_confirmed_alerts_once(tmp_path, capsys):

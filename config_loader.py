@@ -58,3 +58,51 @@ def load_configs():
         configs.append(config)
 
     return sorted(configs, key=lambda c: c.get("display", 0))
+
+
+# ---------- provider key mapping ----------
+
+_PROVIDER_KEY_MAP = {
+    "Nous Portal": "nous",
+    "TokenRouter": "tokenrouter",
+    "Kilo Gateway": "kilo",
+    "OpenRouter": "openrouter",
+    "AMD Radeon": "amd",
+    "B.AI": "bai",
+}
+
+
+def _provider_key(config):
+    """Map a config to its canonical provider key."""
+    return _PROVIDER_KEY_MAP.get(config["name"], config["name"].lower().replace(" ", "_"))
+
+
+def build_providers():
+    """Build PROVIDERS dict mapping provider key -> config dict."""
+    return {_provider_key(cfg): cfg for cfg in load_configs()}
+
+
+def build_gateway_wiring():
+    """Build GATEWAY_WIRING dict mapping provider key -> wiring info."""
+    wiring = {}
+    for cfg in load_configs():
+        key = _provider_key(cfg)
+        auth = cfg.get("auth", {})
+        method = auth.get("method", "none")
+        if method == "env_var":
+            env_key = auth.get("env_key", "")
+            auth_str = f"Bearer <your {env_key}>"
+        elif method == "token_file":
+            auth_str = "Bearer <from token file>"
+        else:
+            auth_str = "Bearer <your API key>"
+        wiring[key] = {
+            "chat_completions_url": f"{cfg['base_url'].rstrip('/')}/chat/completions",
+            "auth": auth_str,
+            "api_type": "openai_compatible",
+        }
+    return wiring
+
+
+PROVIDERS = build_providers()
+GATEWAY_WIRING = build_gateway_wiring()

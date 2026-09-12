@@ -57,17 +57,19 @@ except ImportError:  # pragma: no cover - exercised only off the venv
 
 import state
 
-# Gateway names in Dthen's DISPLAY_ORDER. DUPLICATED from build_site.py:63
+# Gateway names in Dthen's DISPLAY_ORDER. MUST match config_loader.PROVIDERS keys
+# (the six canonical gateways). DUPLICATED from build_site.py:64
 # (cross-reference) rather than imported: importing build_site would drag the
 # site builder's module surface along just for six strings, and display
 # order is curation, not implementation detail — if the canonical tuple ever
 # moves, grep for this comment.
-PROVIDERS = ("nous", "zen", "kilo", "cline", "openrouter", "command_code")
+from config_loader import PROVIDERS as PROVIDER_KEYS
+PROVIDERS = PROVIDER_KEYS
 
 # Gateway wiring (base URL, auth shape, api_type) and the free-marker stripper
 # — imported from their single sources of truth so MCP tools and the site
 # builder never drift.
-from providers import GATEWAY_WIRING
+from config_loader import GATEWAY_WIRING
 from build_site import strip_free_marker
 
 # Tick cadence, duplicated from inference_watchdog.DEFAULT_CADENCE_S
