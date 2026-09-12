@@ -32,7 +32,7 @@
 - 12h dedup cooldown per (provider, model, event).
 
 ## Delivery topology (operator decision 2026-08-26)
-- The Discord webhook `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in ~/.hermes/.env is the ONLY alert path.
+- The Discord webhook `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in the project-local `.env` is the ONLY alert path.
 - The cron job is silent (`--deliver local`); wrapper failures go to stderr, never stdout.
 
 ## Dashboard & MCP
