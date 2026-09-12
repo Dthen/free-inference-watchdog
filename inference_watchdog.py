@@ -22,6 +22,7 @@ import providers
 import state
 from config_loader import PROVIDERS
 from envfile import parse_envfile
+from probe_zero_credit import probe_model, Result
 
 DEFAULT_CADENCE_S = 1 * 3600
 HERMES_ENV = Path("~/.hermes/.env").expanduser()
@@ -41,6 +42,20 @@ def build_fetch_all(env):
         for name, config in PROVIDERS.items():
             try:
                 ids, meta = providers.fetch_provider(config)
+                if config.get("detection") == "zero-credit-probe" and ids:
+                    free_ids = []
+                    for model_id in ids:
+                        try:
+                            result, probe_meta = probe_model(
+                                config["base_url"],
+                                config.get("_token", ""),
+                                model_id
+                            )
+                            if result == Result.FREE:
+                                free_ids.append(model_id)
+                        except Exception:
+                            pass  # Exclude on error
+                    ids = sorted(free_ids)
                 results[name] = ids
                 metas[name] = meta or {}
             except providers.FetchError:
