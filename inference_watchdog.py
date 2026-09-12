@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Free Inference Watchdog — one tick per invocation. Stdlib only, zero tokens.
 
-Delivery topology (fix-round-2 S4): the webhook in ~/.hermes/.env
-($DISCORD_WEBHOOK_INFERENCE_WATCHDOG) is the ONLY alert delivery channel.
+Delivery topology (fix-round-2 S4): the webhook in this project's
+.env ($DISCORD_WEBHOOK_INFERENCE_WATCHDOG) is the ONLY alert delivery
+channel.
 The Hermes cron job runs silent (--deliver local): stdout stays local and is
 not a delivery path; stderr carries fatal diagnostics for the operator.
 """
@@ -26,7 +27,6 @@ from envfile import parse_envfile
 from probe_zero_credit import probe_model, Result
 
 DEFAULT_CADENCE_S = 1 * 3600
-HERMES_ENV = Path("~/.hermes/.env").expanduser()
 
 # Concurrency limit for zero-credit probes to avoid 25-minute sequential execution
 MAX_PROBE_CONCURRENCY = 3
@@ -297,7 +297,7 @@ def main(argv=None):
 
     state_dir = Path(args.state_dir) if args.state_dir else (
         Path(__file__).resolve().parent / "state")
-    env = parse_envfile(HERMES_ENV)
+    env = parse_envfile()
     webhook = env.get("DISCORD_WEBHOOK_INFERENCE_WATCHDOG") or None
     fetch_all = build_fetch_all(env)
     fetch_one = build_fetch_one(env)

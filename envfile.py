@@ -1,7 +1,15 @@
 """Parse a .env file into a dict. Stdlib only; never logs values."""
 
-def parse_envfile(path):
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent
+
+
+def parse_envfile(path=REPO / ".env"):
     """Return {KEY: value} from KEY=VALUE lines. Missing file -> {}.
+
+    Defaults to the project-local <repo>/.env so the watchdog is agent-
+    agnostic (no hardcoded ~/.hermes/.env); callers may pass any path.
 
     Skips blank lines, '#' comments, lines without '=', and empty keys.
     Accepts shell-style 'export KEY=v' lines: a leading 'export ' /

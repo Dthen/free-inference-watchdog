@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import time
+from pathlib import Path
 
 import inference_watchdog as im
 
@@ -591,3 +592,34 @@ def test_zero_credit_probe_concurrency(monkeypatch, tmp_path, capsys):
 
     # 3. Wall-clock proves concurrency: 10 × 0.2s sequential = 2.0s, but 3 workers < 1.0s
     assert elapsed < 1.0, f"Expected concurrent execution (< 1.0s), took {elapsed:.2f}s"
+
+
+def test_env_loaded_from_project_local_env_not_hermes(tmp_path, monkeypatch):
+    """The watchdog must read its webhook/config from THIS project's .env
+    (envfile.parse_envfile default), never from ~/.hermes/.env — the repo is
+    agent-agnostic. Guards against a hardcoded Hermes path sneaking back in.
+
+    Regression: a source-level pin proving (a) the hardcoded HERMES_ENV path
+    is gone and (b) main() loads via parse_envfile() project-local default.
+    """
+    src = (Path(__file__).resolve().parent.parent / "inference_watchdog.py").read_text()
+
+    # (a) no hardcoded Hermes env path and no HERMES_ENV constant may exist
+    assert "HERMES_ENV" not in src
+    assert "~/.hermes/.env" not in src
+
+    # (b) main() reads env via parse_envfile() with NO explicit path arg,
+    # so it resolves to envfile's project-local .env default (agent-agnostic).
+    assert "env = parse_envfile()" in src
+
+    # (c) behavioral proof: parse_envfile with no arg reads the project-local
+    # .env next to the repo (envfile default), not ~/.hermes/.env.
+    captured = {}
+    def fake_parse_envfile(*args):
+        captured["args"] = args
+        return {}
+    monkeypatch.setattr(im, "parse_envfile", fake_parse_envfile)
+    fake_tick = lambda *a, **kw: 0
+    monkeypatch.setattr(im, "run_tick", fake_tick)
+    im.main([])
+    assert captured["args"] == (), f"parse_envfile called with args {captured['args']}"
