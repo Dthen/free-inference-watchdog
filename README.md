@@ -191,7 +191,10 @@ Detection methods (dispatched by string key, so a provider can pick any):
   response (B.AI). Probes run **serially with 10s spacing** (6 RPM) to avoid
   b.ai's undocumented rate limits; verdicts are persisted to `probe_state.json`
   and the roster is verdict-filtered (ONLY FREE-verdict models). A DEFER never
-  overwrites a prior verdict (sticky roster survives burst 429s).
+  overwrites a prior verdict (sticky roster survives burst 429s). The probe
+  phase is capped at 240s (`PROBE_PHASE_BUDGET_S`) — the Hermes cron runner
+  kills the wrapper at 300s, so fetches + probes must fit under it; a truncated
+  pass persists its probed subset and the next tick resumes (self-healing).
 
 ### Modules
 

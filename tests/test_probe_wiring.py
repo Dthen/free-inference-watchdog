@@ -560,7 +560,7 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
         probe_calls.append(model_id)
         return Result.FREE, {"http": 200}
 
-    # Inject a clock that advances by 100s per probe to consume the 900s budget
+    # Inject a clock that advances by 30s per probe to consume the 240s budget
     clock = {"t": 0}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -575,7 +575,7 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
     orig_time = inference_watchdog.time.time
     def advancing_time():
         val = clock["t"]
-        clock["t"] += 100  # each probe "takes" 100s of budget
+        clock["t"] += 30  # each probe "takes" 30s of budget
         return val
     inference_watchdog.time.time = advancing_time
 
@@ -586,14 +586,14 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
     finally:
         inference_watchdog.time.time = orig_time
 
-    # Budget 900s, 100s per probe. The budget check fires BEFORE each probe
-    # (including the first), so when elapsed >= 900 the probe is skipped.
-    # probe_phase_start captures t=0, then clock advances to 100.
-    # Probe 1: elapsed=100 < 900, fires. ... Probe 8: elapsed=800 < 900, fires.
-    # Probe 9: elapsed=900 >= 900, SKIPPED. So 8 probes fire.
-    assert len(probe_calls) == 8, (
-        f"expected 8 probes (budget), got {len(probe_calls)}: {probe_calls}")
-    assert len(results["bai"]) == 8
+    # Budget 240s, 30s per probe. The budget check fires BEFORE each probe
+    # (including the first), so when elapsed >= 240 the probe is skipped.
+    # probe_phase_start captures t=0, then clock advances to 30.
+    # Probe 1: elapsed=30 < 240, fires. ... Probe 7: elapsed=210 < 240, fires.
+    # Probe 8: elapsed=240 >= 240, SKIPPED. So 7 probes fire.
+    assert len(probe_calls) == 7, (
+        f"expected 7 probes (budget), got {len(probe_calls)}: {probe_calls}")
+    assert len(results["bai"]) == 7
 
 
 def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
@@ -611,7 +611,7 @@ def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
     orig_time = inference_watchdog.time.time
     def advancing_time():
         val = clock["t"]
-        clock["t"] += 500  # each probe "takes" 500s of budget
+        clock["t"] += 120  # each probe "takes" 120s of budget
         return val
     inference_watchdog.time.time = advancing_time
 
@@ -629,12 +629,101 @@ def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
     finally:
         inference_watchdog.time.time = orig_time
 
-    # 500s per probe: probe 1 at elapsed=500 < 900 fires, probe 2 at
-    # elapsed=1000 >= 900 skipped (4 remaining).
+    # 120s per probe: probe 1 at elapsed=120 < 240 fires, probe 2 at
+    # elapsed=240 >= 240 skipped (4 remaining).
     assert len(probe_calls) == 1
     err = capsys.readouterr().err
     assert "bai" in err
     assert "4 remaining" in err
+
+
+def test_probe_phase_budget_regression_pin():
+    """REGRESSION PIN: PROBE_PHASE_BUDGET_S must stay <= 240s.
+
+    The Hermes cron runner SIGKILLs the wrapper script at 300s ("Script
+    timed out after 300s" — observed 3x consecutively on 2026-09-13).
+    A tick is fetches + probe phase + recheck (~30s + budget + 180s), so
+    the probe budget MUST satisfy: budget + ~30s fetches + margin < 300s.
+    240s + 30s + margin ≈ 270s < 300s. Any value above 240 risks the
+    runner killing the tick MID-PROBE-LOOP, before save_probe_state runs
+    → nothing persists → every tick restarts the full pass → death
+    spiral (site frozen, ticks die at the same wall-clock point forever).
+
+    If you need a bigger budget: first make the runner's kill window
+    bigger, then bump this pin in the same change. A silent bump here
+    reintroduces the death spiral.
+    """
+    assert im.PROBE_PHASE_BUDGET_S <= 240, (
+        f"PROBE_PHASE_BUDGET_S={im.PROBE_PHASE_BUDGET_S} exceeds 240s — "
+        "the Hermes cron runner SIGKILLs the wrapper at 300s; "
+        "fetches (~30s) + budget must fit under it. "
+        "See the comment on PROBE_PHASE_BUDGET_S in inference_watchdog.py.")
+
+
+def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,
+                                                             tmp_path):
+    """Budget-truncated tick PERSISTS the probed subset — the property that
+    makes truncation safe instead of a death spiral.
+
+    When the budget cuts the queue mid-way, the verdicts gathered so far
+    must still be saved (save_probe_state runs at END of build_fetch_all,
+    BEFORE run_tick's confirm_diffs). The next tick then finds the skipped
+    models still queued (no verdict => new arrival) and finishes them —
+    progress accumulates instead of resetting.
+    """
+    probe_calls = []
+    clock = {"t": 0}
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        probe_calls.append(model_id)
+        # Odd models answer PAID so the persisted subset is mixed
+        if model_id.endswith(("1", "3")):
+            return Result.PAID, {"http": 403}
+        return Result.FREE, {"http": 200}
+
+    import inference_watchdog
+    orig_time = inference_watchdog.time.time
+    def advancing_time():
+        val = clock["t"]
+        clock["t"] += 100  # each probe "takes" 100s of budget
+        return val
+    inference_watchdog.time.time = advancing_time
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
+        [f"m{i}" for i in range(5)]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(
+                            [f"m{i}" for i in range(5)]))
+
+    try:
+        fetch_all_fn = im.build_fetch_all(
+            {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        results, _ = fetch_all_fn()
+    finally:
+        inference_watchdog.time.time = orig_time
+
+    # 100s per probe, budget 240s: probes m0 (elapsed=100 < 240) and m1
+    # (elapsed=200 < 240) fire; m2 (elapsed=300 >= 240) is skipped.
+    assert len(probe_calls) == 2, (
+        f"expected 2 probes before truncation, got {len(probe_calls)}")
+
+    state_path = tmp_path / "probe_state.json"
+    persisted = probe_state.load_probe_state(state_path)
+
+    # The probed subset IS on disk with the tick's epoch — truncation did
+    # not discard partial progress.
+    assert persisted["bai"]["m0"] == {"verdict": "free",
+                                      "epoch": 1_000_000_000}
+    assert persisted["bai"]["m1"] == {"verdict": "paid",
+                                      "epoch": 1_000_000_000}
+    # The unprobed remainder has NO verdict — it will be queued as a new
+    # arrival next tick (self-healing).
+    for unprobed in ("m2", "m3", "m4"):
+        assert unprobed not in persisted["bai"], (
+            f"{unprobed} must not have a verdict — it was never probed")
+    # Roster reflects only FREE verdicts among the probed subset.
+    assert results["bai"] == ["m0"]
 
 
 # ---------- save skip when unchanged (P3 MINOR 8) ----------

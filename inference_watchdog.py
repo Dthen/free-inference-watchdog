@@ -33,12 +33,20 @@ DEFAULT_CADENCE_S = 1 * 3600
 PROBE_INTERVAL_S = 10
 PROBE_TIMEOUT_S = 30
 
-# Probe-phase budget (seconds): worst-case all-timeout tick must stay well
-# under LOCK_STALE_S (1800s). Real bai catalog is ~47 models; a pathological
-# tick (all timeouts, no budget) could exceed 1800s. 15 min = 900s leaves
-# headroom for fetches + recheck + margin. When the budget is exhausted,
-# remaining queue items stay unprobed (self-healing next tick).
-PROBE_PHASE_BUDGET_S = 900
+# Probe-phase budget (seconds). The REAL constraint is the Hermes cron
+# runner: it SIGKILLs the wrapper script at 300s ("Script timed out after
+# 300s" — observed 2026-09-13, 3 consecutive ticks died mid-probe-loop,
+# before save_probe_state, so nothing persisted and every tick restarted
+# the full pass: death spiral). A tick must fit fetches (~30s) + probe
+# phase + margin under that kill: 240 + ~30 + margin ≈ 270s < 300s.
+# The 30-min lock window (LOCK_STALE_S=1800) is only the OUTER bound and
+# is unaffected. When the budget is exhausted, remaining queue items
+# stay unprobed but the probed subset still persists (save_probe_state
+# runs at the end of build_fetch_all) — the next tick resumes from
+# cached verdicts (self-healing, no death spiral). A 24h stale-paid
+# re-probe pass truncated at 240s/tick simply spreads across 2-3 hourly
+# ticks, oldest-first priority preserved.
+PROBE_PHASE_BUDGET_S = 240
 
 
 # ---------- provider plumbing ----------
