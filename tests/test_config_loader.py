@@ -433,7 +433,7 @@ def test_shipped_configs_declare_ignored_slugs():
     repo = Path(config_loader.__file__).resolve().parent
     kilo = json.loads((repo / "providers" / "kilo.json").read_text(encoding="utf-8"))
     orouter = json.loads((repo / "providers" / "openrouter.json").read_text(encoding="utf-8"))
-    assert kilo["ignored_slugs"] == ["kilo-auto/free"]
+    assert kilo["ignored_slugs"] == ["kilo-auto/free", "openrouter/free"]
     assert orouter["ignored_slugs"] == ["openrouter/free"]
 
 
