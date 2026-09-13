@@ -5,7 +5,7 @@ Three read-only tools, no enrichment (none exists anywhere in the repo):
 
   list_free_models(provider=None)   full roster, or one provider's id list
   get_model(model_id)               CROSS-GATEWAY PRESENCE LOOKUP: which of
-                                    the six gateways track this id right now
+                                    the seven gateways track this id right now
   watchdog_status()                 tick freshness vs the 1h cadence, stale/
                                     failing providers, per-provider counts,
                                     pending-alert queue depth, last site publish
@@ -58,15 +58,15 @@ except ImportError:  # pragma: no cover - exercised only off the venv
 import state
 
 # Gateway names in Dthen's DISPLAY_ORDER. MUST match config_loader.PROVIDERS keys
-# (the six canonical gateways). DUPLICATED from build_site.py:64
+# (the seven canonical gateways). DUPLICATED from build_site.py:64
 # (cross-reference) rather than imported: importing build_site would drag the
-# site builder's module surface along just for six strings, and display
+# site builder's module surface along just for seven strings, and display
 # order is curation, not implementation detail — if the canonical tuple ever
 # moves, grep for this comment.
 from config_loader import PROVIDERS as PROVIDER_KEYS
 PROVIDERS = PROVIDER_KEYS
 
-# Gateway wiring (base URL, auth shape, api_type) and the free-marker stripper
+# Gateway wiring (base URL, api_type) and the free-marker stripper
 # — imported from their single sources of truth so MCP tools and the site
 # builder never drift.
 from config_loader import GATEWAY_WIRING
@@ -245,7 +245,6 @@ def get_model(model_id, root=None) -> dict:
                     "gateway": gw,
                     "model_id": raw_id,
                     "chat_completions_url": wiring.get("chat_completions_url"),
-                    "auth": wiring.get("auth"),
                     "api_type": wiring.get("api_type"),
                 })
     # Deduplicate while preserving order (a gateway carries a raw id once),
@@ -305,7 +304,6 @@ def list_endpoints(provider=None, root=None) -> dict:
         wiring = GATEWAY_WIRING.get(gw, {})
         gateways[gw] = {
             "chat_completions_url": wiring.get("chat_completions_url"),
-            "auth": wiring.get("auth"),
             "api_type": wiring.get("api_type"),
             "model_ids": ids,
         }
@@ -389,15 +387,15 @@ def watchdog_status(now=None, root=None) -> dict:
 TOOL_DESCRIPTIONS = {
     "list_free_models":
         "List free-tier model ids across the watched gateways "
-        "(nous, tokenrouter, kilo, openrouter, amd, bai). Pass provider=<name> for one "
+        "(nous, tokenrouter, kilo, openrouter, amd, bai, nim). Pass provider=<name> for one "
         "gateway's id list; omit it for the full roster with per-gateway "
         "counts. Read-only snapshot of the latest watchdog tick.",
     "get_model":
-        "Cross-gateway PRESENCE lookup: which of the six gateways track "
+        "Cross-gateway PRESENCE lookup: which of the seven gateways track "
         "this exact model id right now. Returns exact_matches per gateway "
         "(exact ids only — gateways rename inconsistently, so cross-gateway "
         "absence is unreliable; see the caveats attached to every result). "
-        "Also returns 'endpoints' — one wiring entry (base URL, auth, "
+        "Also returns 'endpoints' — one wiring entry (base URL, "
         "api_type) per (gateway, raw id) in the roster whose stripped name "
         "matches the query, so get_model('foo') and get_model('foo:free') "
         "return the same wiring list.",
@@ -407,7 +405,7 @@ TOOL_DESCRIPTIONS = {
         "and the age of the last static-site publish.",
     "list_endpoints":
         "All gateway wiring entries across the roster: for each gateway, "
-        "its base URL, auth shape, api_type, and the raw model ids tracked. "
+        "its base URL, api_type, and the raw model ids tracked. "
         "Pass provider=<name> for one gateway; omit for all. Read-only "
         "snapshot of the latest watchdog tick.",
 }

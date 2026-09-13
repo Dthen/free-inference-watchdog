@@ -125,11 +125,11 @@ def test_deterministic_output():
 def test_display_order_constant():
     """DISPLAY_ORDER is Dthen's quality ranking, derived dynamically from
     config_loader.PROVIDERS (sorted by `display` field). Must produce
-    [nous, tokenrouter, kilo, openrouter, amd, bai] — NOT providers.py
-    registry order (nous, openrouter, tokenrouter, kilo, amd, bai) and NOT
-    alphabetical."""
+    [nous, tokenrouter, kilo, openrouter, amd, bai, nim] — NOT providers.py
+    registry order and NOT alphabetical. nim is last (display 6)."""
     from build_site import DISPLAY_ORDER
-    assert DISPLAY_ORDER == ["nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"]
+    assert DISPLAY_ORDER == ["nous", "tokenrouter", "kilo", "openrouter",
+                             "amd", "bai", "nim"]
     # Confirm it's sourced from config_loader (dynamic), not a hardcoded list.
     src = BUILDER.read_text(encoding="utf-8")
     assert "PROVIDERS" in src and "config_loader" in src, \
@@ -881,11 +881,13 @@ def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
             )
 
 
-def test_expand_each_variant_row_has_auth_and_api_type(tmp_path):
-    """Each variant <tr class='expand'> contains that gateway's auth shape
-    and api_type — the reader sees at a glance that it is OpenAI-shaped."""
+def test_expand_each_variant_row_has_api_type_and_no_auth(tmp_path):
+    """Each variant <tr class='expand'> contains that gateway's api_type —
+    the reader sees at a glance that it is OpenAI-shaped — and NO auth
+    field: the operator dropped 'Bearer <your API key>' from the wiring
+    displays because it read the same for every gateway (and its length
+    overflowed the expand row)."""
     import tempfile
-    from html import escape as _esc
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         _seed_logo(tmp)
@@ -893,19 +895,19 @@ def test_expand_each_variant_row_has_auth_and_api_type(tmp_path):
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
         from config_loader import GATEWAY_WIRING
+        # The auth field is gone from the wiring contract itself...
+        for w in GATEWAY_WIRING.values():
+            assert "auth" not in w
+        # ...and never reaches the rendered page.
+        assert "wire-auth" not in html, "wire-auth span back in the page"
+        assert "Bearer" not in html, "Bearer auth prose back in the page"
         # Each group is in its own <tbody>; collect expand rows from all
         all_trs = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", html, re.S)
         expand_rows = [r for r in all_trs if 'class="expand"' in r]
         # For every gateway that appears in EXPAND_ROSTER, at least one
-        # expansion row must mention that gateway's auth + api_type.
+        # expansion row must mention that gateway's api_type.
         for gw in ("nous", "tokenrouter", "kilo", "openrouter"):
             w = GATEWAY_WIRING[gw]
-            # The builder HTML-escapes all wiring text; the assertion
-            # compares against the escaped form so that `<your ...>`
-            # entities match.
-            assert any(_esc(w["auth"]) in r for r in expand_rows), (
-                f"{gw} auth shape {w['auth']!r} missing from expansion rows"
-            )
             assert any(w["api_type"] in r for r in expand_rows), (
                 f"{gw} api_type {w['api_type']!r} missing from expansion rows"
             )
@@ -977,3 +979,56 @@ def test_expand_via_css_sibling_selector(tmp_path):
         # The default style hides .expand; :checked reveals it.
         # The simplest possible pattern: .row-expand:checked ~ .expand { ... }
         # (or any of: input[type=checkbox]:checked + .expand, etc.)
+
+
+# ---------- NIM column + expand-row overflow (operator fixes, 2026-09-13) ----------
+
+NIM_ROSTER = {
+    "tick_epoch": 1787721434,
+    "providers": {
+        "nous": ["vendor-z/zero-priced-model"],
+        "nim": ["meta/llama-3.3-70b-instruct"],
+    },
+    "stale_providers": [],
+}
+
+
+def test_nim_gets_a_column_and_wiring_url(tmp_path):
+    """A roster carrying nim renders a nim column, and its expand row shows
+    the NVIDIA chat-completions URL — the full all-free catalog joins every
+    user-visible surface with zero per-gateway special-casing."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(NIM_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        assert "<th>nim</th>" in html, "nim column header missing"
+        assert "integrate.api.nvidia.com/v1/chat/completions" in html, (
+            "nim chat-completions URL missing from the expand row")
+        assert "Bearer" not in html
+
+
+def test_expand_wire_cell_wraps_long_urls(tmp_path):
+    """Operator-reported overflow: long wiring URLs (e.g. the NIM
+    chat-completions endpoint) must never spill out of the expand-row cell.
+    The grid gives the text columns a minmax(0, 1fr) floor (a bare 1fr track
+    cannot shrink below its content) and every text span breaks long words;
+    both properties are pinned."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _seed_logo(tmp)
+        proc = _run_builder(EXPAND_ROSTER, tmp)
+        assert proc.returncode == 0, proc.stderr
+        html = _build_html(tmp)
+        wire_css = [ln for ln in html.splitlines() if ".wire {" in ln]
+        assert wire_css, "no .wire grid CSS rule"
+        assert "minmax(0," in wire_css[0], (
+            "wire grid columns must be minmax(0,1fr) so long URLs can shrink")
+        for cls in (".wire-gw", ".wire-id", ".wire-url", ".wire-api"):
+            rule = [ln for ln in html.splitlines() if f".wire" in ln and cls in ln]
+            assert rule, f"missing CSS rule for {cls}"
+            assert ("word-break" in rule[0]) or ("overflow-wrap" in rule[0]), (
+                f"{cls} must break long words/URLs to stay inside the cell")

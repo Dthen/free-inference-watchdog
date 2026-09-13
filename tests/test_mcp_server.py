@@ -68,20 +68,20 @@ def test_list_full_roster(state_dir):
     assert res["ok"] is True
     provs = res["providers"]
     # CANONICAL GATEWAY-KEY SEMANTIC (shared with watchdog_status): exactly
-    # the five known gateways, always — unknown junk roster keys are ignored,
+    # the seven known gateways, always — unknown junk roster keys are ignored,
     # gateways missing from this tick degrade to empty lists.
     assert set(provs) == set(mcp_server.PROVIDERS)
     assert provs["nous"] == ["vendor-d/model-6:free", "vendor-z/zero-priced-model"]
     assert res["counts"]["nous"] == 2
-    assert res["n_gateways"] == len(mcp_server.PROVIDERS) == 6
+    assert res["n_gateways"] == len(mcp_server.PROVIDERS) == 7
     assert res["total_ids"] > 0
     assert isinstance(res["tick_epoch"], int)
 
 
-def test_list_partial_roster_canonical_six_shape(tmp_path):
+def test_list_partial_roster_canonical_seven_shape(tmp_path):
     """One gateway-key semantic everywhere: a partial roster ({nous, tokenrouter}
-    plus a junk key) STILL yields all six canonical gateways — kilo/openrouter/amd/bai
-    as empty lists, n_gateways==6 — and 'mysterygw' never leaks
+    plus a junk key) STILL yields all seven canonical gateways — kilo/openrouter/amd/bai/nim
+    as empty lists, n_gateways==7 — and 'mysterygw' never leaks
     into the output."""
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "roster.json").write_text(json.dumps({
@@ -96,11 +96,11 @@ def test_list_partial_roster_canonical_six_shape(tmp_path):
     assert res["ok"] is True
     assert set(res["providers"]) == set(mcp_server.PROVIDERS)
     assert res["providers"]["nous"] == ["vendor-z/zero-priced-model"]
-    for gw in ("tokenrouter", "kilo", "openrouter", "amd", "bai"):
+    for gw in ("tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"):
         assert res["providers"][gw] == []
     assert res["counts"] == {"nous": 1, "tokenrouter": 0, "kilo": 0,
-                             "openrouter": 0, "amd": 0, "bai": 0}
-    assert res["n_gateways"] == 6
+                             "openrouter": 0, "amd": 0, "bai": 0, "nim": 0}
+    assert res["n_gateways"] == 7
     assert "mysterygw" not in res["providers"]
     assert "mysterygw" not in res["counts"]
 
@@ -165,9 +165,9 @@ def test_status_fields_present(state_dir):
     assert res["last_tick_age_s"] == 60
     assert res["tick_fresh"] is True
     assert res["stale_providers"] == []
-    # All six DISPLAY_ORDER gateways always appear (stable shape), plus
+    # All seven DISPLAY_ORDER gateways always appear (stable shape), plus
     # any unknown roster keys.
-    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"):
+    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"):
         assert gw in res["provider_counts"]
     assert res["provider_counts"]["kilo"] == 3
     assert res["provider_counts"]["nous"] == 2
@@ -191,7 +191,7 @@ def test_status_reports_stale_providers(tmp_path):
     }))
     res = mcp_server.watchdog_status(now=200, root=tmp_path)
     assert res["stale_providers"] == ["tokenrouter", "kilo"]
-    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"):
+    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"):
         assert res["provider_counts"][gw] == 0
 
 
@@ -243,7 +243,7 @@ def test_get_model_returns_endpoints_for_grouped_name(state_dir):
     assert ep["gateway"] == "nous"
     assert ep["model_id"] == "vendor-d/model-6:free"
     assert "chat_completions_url" in ep
-    assert "auth" in ep
+    assert "auth" not in ep, "Bearer auth field dropped from wiring displays"
     assert "api_type" in ep
 
 
@@ -297,9 +297,9 @@ def test_list_endpoints_totals_match_roster(state_dir):
     # -> cohere/north-mini-code, vendor-f/model-5:free -> vendor-f/model-5)
     assert res["counts"]["models"] == 7
     assert res["counts"]["models"] < res["counts"]["endpoints"]
-    assert res["counts"]["gateways"] == 6
+    assert res["counts"]["gateways"] == 7
     assert res["provider"] is None
-    # All six gateways present in the gateways map
+    # All seven gateways present in the gateways map
     assert set(res["gateways"]) == set(mcp_server.PROVIDERS)
 
 
@@ -312,9 +312,9 @@ def test_list_endpoints_filter_tokenrouter(state_dir):
     # tokenrouter carries vendor-x/preview-free and vendor-d/model-4-free
     assert sorted(res["gateways"]["tokenrouter"]["model_ids"]) == [
         "vendor-d/model-4-free", "vendor-x/preview-free"]
-    # wiring fields present
+    # wiring fields present — auth is gone (dropped from every display)
     assert "chat_completions_url" in res["gateways"]["tokenrouter"]
-    assert "auth" in res["gateways"]["tokenrouter"]
+    assert "auth" not in res["gateways"]["tokenrouter"]
     assert "api_type" in res["gateways"]["tokenrouter"]
 
 

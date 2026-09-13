@@ -1,6 +1,6 @@
 # free-inference-watchdog
 
-Zero-token cron watchdog for six free-tier LLM gateways. Alerts Discord when a
+Zero-token cron watchdog for seven free-tier LLM gateways. Alerts Discord when a
 free model appears or disappears. Stdlib-only Python, one tick per invocation,
 no LLM calls ever.
 
@@ -14,8 +14,8 @@ Every hour (cadence comes from the cron schedule; `--recheck-delay` only
 sets the ~3-minute confirm nap before a diff is believed), the monitor:
 
 1. Loads every `providers/*.json` config and fetches free-model rosters from
-   **Nous**, **TokenRouter**, **Kilo**, **OpenRouter**, **AMD**, and **B.AI**
-   (in that display order). Which ids count as free is decided per provider by
+   **Nous**, **TokenRouter**, **Kilo**, **OpenRouter**, **AMD**, **B.AI**, and
+   **NVIDIA NIM** (in that display order). Which ids count as free is decided per provider by
    its `detection` method (see [Architecture](#architecture)).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
    an outage never looks like a mass removal).
@@ -93,10 +93,11 @@ any host.
 | `KILOCODE_API_KEY` | no | Kilo fetcher — endpoint also serves its roster keyless; a key buys authenticated/higher-limit access. |
 | `AMD_API_KEY` | no | AMD Radeon gateway auth. |
 | `BAI_API_KEY` | no | B.AI gateway auth — required for the `zero-credit-probe` detection method. |
+| `NVIDIA_API_KEY` | no | NVIDIA NIM gateway auth — on this box the key lives in `~/.hermes/.env`, not the project `.env`. |
 
 OpenRouter needs no key — its models endpoint is public. The code treats the
-TokenRouter/Kilo/AMD keys as optional too (missing key ⇒ fetch with no auth
-header), so those watchdog paths work with neither set.
+TokenRouter/Kilo/AMD/NIM keys as optional too (missing key ⇒ fetch with no
+auth header), so those watchdog paths work with neither set.
 
 ### Webhook rotation
 
@@ -184,7 +185,7 @@ Detection methods (dispatched by string key, so a provider can pick any):
 - `api-pricing` — model is free when `pricing.prompt == "0"` AND `pricing.completion == "0"` (Nous, OpenRouter).
 - `api-flag` — model is free when `isFree == true` (Kilo).
 - `id-suffix` — model id ends with `:free` / `-free`, or contains `free` (TokenRouter).
-- `all-free` — every model in the catalog is treated as free (AMD).
+- `all-free` — every model in the catalog is treated as free (AMD, NVIDIA NIM).
 - `zero-credit-probe` — fire a minimal 3-token completion per model and classify by the
   response (B.AI). Probes run **serially with 5s spacing** (12 RPM) to stay
   under b.ai's undocumented rate limits (operator pacing choice

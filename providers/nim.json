@@ -1,0 +1,7 @@
+{
+  "name": "NVIDIA NIM",
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "detection": "all-free",
+  "auth": { "method": "env_var", "env_key": "NVIDIA_API_KEY" },
+  "display": 6
+}

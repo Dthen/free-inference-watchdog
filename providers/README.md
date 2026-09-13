@@ -23,5 +23,5 @@ To add a provider: drop in a new JSON file. To remove: delete the file.
 - `api-pricing` — pricing.prompt == "0" AND pricing.completion == "0"
 - `api-flag` — isFree == true
 - `id-suffix` — id ends with ":free" or "-free"
-- `all-free` — every model in catalog
+- `all-free` — every model in catalog (AMD, NVIDIA NIM)
 - `zero-credit-probe` — fire a minimal 3-token completion per model (slow, deferred)

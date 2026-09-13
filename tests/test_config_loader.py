@@ -373,3 +373,55 @@ def test_load_configs_token_file_oserror_degrades_not_crashes(tmp_path, monkeypa
     assert configs[0]["_token"] is None
     stderr = capsys.readouterr().err
     assert "degraded" in stderr.lower()
+
+
+# ---------- NVIDIA NIM gateway (all-free, Sept-9 refresh spec plan gap) ----------
+
+
+def test_provider_key_derives_nim_from_name():
+    """The provider key for NIM MUST be exactly 'nim' (operator tooling keys
+    on nim). The fallback derivation (lowercase, spaces -> '_') would land
+    'NVIDIA NIM' as nvidia_nim, so the explicit _PROVIDER_KEY_MAP entry is
+    the mechanism that yields nim — pinned via _provider_key so neither the
+    map nor the name can drift without a red test."""
+    assert config_loader._provider_key({"name": "NVIDIA NIM"}) == "nim"
+
+
+def test_real_configs_include_nim_last_display():
+    """providers/nim.json exists in the real repo config dir: all-free
+    detection against https://integrate.api.nvidia.com/v1 with NVIDIA_API_KEY
+    env_var auth, and display 6 so NIM sorts AFTER bai in every user-visible
+    surface."""
+    repo = Path(config_loader.__file__).resolve().parent
+    cfg = json.loads((repo / "providers" / "nim.json").read_text(encoding="utf-8"))
+    assert cfg["name"] == "NVIDIA NIM"
+    assert cfg["base_url"] == "https://integrate.api.nvidia.com/v1"
+    assert cfg["detection"] == "all-free"
+    assert cfg["auth"] == {"method": "env_var", "env_key": "NVIDIA_API_KEY"}
+    assert cfg["display"] == 6
+    configs = config_loader.load_configs()
+    assert len(configs) == 7, "real providers/ dir must hold seven configs"
+    assert configs[-1]["name"] == "NVIDIA NIM", "nim must sort last"
+
+
+def test_build_gateway_wiring_shape_and_nim():
+    """GATEWAY_WIRING has one entry per gateway; the 'auth' field is GONE
+    (operator: 'Bearer <your API key>' read the same for every gateway — it
+    was dropped from all site/MCP surfaces), and only the two remaining
+    fields survive."""
+    wiring = config_loader.build_gateway_wiring()
+    assert "nim" in wiring
+    assert wiring["nim"] == {
+        "chat_completions_url": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "api_type": "openai_compatible",
+    }
+    for gw, w in wiring.items():
+        assert set(w) == {"chat_completions_url", "api_type"}, f"{gw} wiring fields drifted"
+
+
+def test_env_example_documents_nvidia_api_key():
+    """.env.example must solicit NVIDIA_API_KEY — the NIM key lives in
+    ~/.hermes/.env on this box, never a literal token copy anywhere."""
+    repo = Path(config_loader.__file__).resolve().parent
+    text = (repo / ".env.example").read_text(encoding="utf-8")
+    assert "NVIDIA_API_KEY=" in text

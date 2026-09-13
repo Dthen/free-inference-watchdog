@@ -301,7 +301,6 @@ def render_page(roster, logo_b64):
             f'<span class="wire-gw">{escape(gw)}</span>'
             f'<span class="wire-id">{escape(raw_id)}</span>'
             f'<span class="wire-url">{escape(url_text)}</span>'
-            f'<span class="wire-auth">{escape(w["auth"])}</span>'
             f'<span class="wire-api">{escape(w["api_type"])}</span>'
         )
 
@@ -428,12 +427,14 @@ def render_page(roster, logo_b64):
   tbody tr:has(input.row-expand:checked) .caret {{ transform:rotate(90deg); color:var(--nord8); }}
   /* Wiring panel: monospace, copy-pasteable, dark-elevated. */
   tbody tr.expand > td {{ background:var(--nord1); border-top:1px solid var(--nord2); padding:8px 14px; text-align:left; }}
-  tbody tr.expand .wire {{ display:grid; grid-template-columns: 92px 1fr 1fr 1fr 92px; gap:6px 14px; font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--nord4); }}
-  tbody tr.expand .wire-gw {{ color:var(--nord9); font-weight:600; }}
-  tbody tr.expand .wire-id {{ color:var(--nord6); }}
+  /* Text columns use minmax(0,1fr): a bare 1fr track can't shrink below its
+     content, so long chat-completions URLs overflowed the cell (operator
+     report 2026-09-13). Every span also breaks long words. */
+  tbody tr.expand .wire {{ display:grid; grid-template-columns: 92px minmax(0,1fr) minmax(0,1fr) 92px; gap:6px 14px; font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--nord4); }}
+  tbody tr.expand .wire-gw {{ color:var(--nord9); font-weight:600; overflow-wrap:anywhere; }}
+  tbody tr.expand .wire-id {{ color:var(--nord6); overflow-wrap:anywhere; }}
   tbody tr.expand .wire-url {{ color:var(--nord8); word-break:break-all; }}
-  tbody tr.expand .wire-auth {{ color:var(--nord4); }}
-  tbody tr.expand .wire-api {{ color:var(--nord14); }}
+  tbody tr.expand .wire-api {{ color:var(--nord14); overflow-wrap:anywhere; }}
 </style></head>
 <body><div class="wrap">
 <header class="top">

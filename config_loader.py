@@ -109,6 +109,9 @@ _PROVIDER_KEY_MAP = {
     "OpenRouter": "openrouter",
     "AMD Radeon": "amd",
     "B.AI": "bai",
+    # NVIDIA NIM's name would fall back to "nvidia_nim"; the roster key the
+    # operator's tooling expects is exactly "nim".
+    "NVIDIA NIM": "nim",
 }
 
 
@@ -127,18 +130,8 @@ def build_gateway_wiring():
     wiring = {}
     for cfg in load_configs():
         key = _provider_key(cfg)
-        auth = cfg.get("auth", {})
-        method = auth.get("method", "none")
-        if method == "env_var":
-            env_key = auth.get("env_key", "")
-            auth_str = f"Bearer <your {env_key}>"
-        elif method == "token_file":
-            auth_str = "Bearer <from token file>"
-        else:
-            auth_str = "Bearer <your API key>"
         wiring[key] = {
             "chat_completions_url": f"{cfg['base_url'].rstrip('/')}/chat/completions",
-            "auth": auth_str,
             "api_type": "openai_compatible",
         }
     return wiring
