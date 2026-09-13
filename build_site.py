@@ -15,8 +15,9 @@ Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
   - Display order is derived from config_loader.PROVIDERS (sorted by the
     `display` field in each provider's JSON config). This does NOT match
     the providers.PROVIDERS registry order, and must NOT be alphabetized.
-  - Header copy is minimal: title + "last refreshed {ts} · rebuilt every
-    1h" + two chips ("N unique models", "6 gateways"). NO snapshot/alert/
+  - Header copy is minimal: title + "last refreshed {ts} · updated
+    hourly" + three chips ("N unique models", "M endpoints",
+    "G gateways"). NO snapshot/alert/
     stale wording anywhere.
   - Colors are Nord strictly: nord0 bg #2e3440, nord1 elevated/thead/chips
     #3b4252, nord2 hover #434c5e, nord6 text #eceff4, nord4 subtle
@@ -183,7 +184,7 @@ def _natural_key(s):
 def build_groups(providers):
     """Group raw ids by their free-marker-stripped name, deterministically.
 
-    Returns (group_names, groups, raw_count) where:
+    Returns (group_names, groups, endpoints) where:
       - group_names: alphabetically sorted list of stripped names, one per row
       - groups: dict[stripped_name] -> {
             "gateways": set[str],                  # every gw carrying ANY variant
@@ -191,8 +192,12 @@ def build_groups(providers):
             "variants": list[(gateway, raw_id)],   # per-(gw,raw) wiring rows, in
                                                    # DISPLAY_ORDER then natural key
           }
-      - raw_count: total number of distinct raw ids across all providers
-        (the honest "endpoints" number; <tfoot> totals also derive from raw)
+      - endpoints: number of distinct (gateway, raw_id) wiring pairs, i.e.
+        sum(len(slot["variants"]) for slot in groups.values()). An id
+        callable at two gateways is TWO endpoints — that is what a caller
+        can actually hit — and this equals the sum of the <tfoot>
+        per-gateway totals. The count of distinct raw ids across all
+        providers is a third quantity nobody renders.
 
     The grouping removes ONLY a free-marker we already know is present
     (the same marker the free-roster rule tested for), so two genuinely
@@ -221,7 +226,8 @@ def build_groups(providers):
                               _natural_key(pair[1]))
         )
     group_names = sorted(groups.keys())
-    return group_names, groups, len(raw_ids)
+    endpoints = sum(len(slot["variants"]) for slot in groups.values())
+    return group_names, groups, endpoints
 
 
 def build_counts(providers):
@@ -261,7 +267,7 @@ def render_page(roster, logo_b64):
     providers = {gw: ids for gw, ids in providers.items() if ids}
     # Active gateways in display order: only providers with models.
     active_gateways = [gw for gw in DISPLAY_ORDER if gw in providers]
-    group_names, groups, raw_count = build_groups(providers)
+    group_names, groups, endpoints = build_groups(providers)
     tick = roster.get("tick_epoch")
     if (
         isinstance(tick, (int, float))
@@ -352,10 +358,10 @@ def render_page(roster, logo_b64):
     )
     chips = (
         f'<span class="chip"><b>{len(group_names)}</b> unique models</span>'
-        f'<span class="chip"><b>{raw_count}</b> endpoints</span>'
+        f'<span class="chip"><b>{endpoints}</b> endpoints</span>'
         f'<span class="chip"><b>{len(active_gateways)}</b> gateways</span>'
     )
-    meta = f"last refreshed {ts} · rebuilt every 1h"
+    meta = f"last refreshed {ts} · updated hourly"
     # sort_keys keeps the embedded JSON byte-stable across builds; the
     # JSON island stays the RAW roster so MCP and other consumers that
     # read raw ids are unaffected by the matrix grouping.
@@ -405,6 +411,7 @@ def render_page(roster, logo_b64):
                         font-weight:600; text-transform:lowercase; text-align:center; font-size:12px; }}
   tfoot th {{ text-align:left; }}
   footer.note {{ margin-top:14px; color:var(--nord4); opacity:.55; font-size:11.5px; }}
+  footer.note a {{ color:var(--nord8); text-decoration:none; }}
   /* ---- expand rows: pure CSS, no JS ---- */
   /* Hide the native checkbox; the <label> is the visible click target. */
   tbody td > .row-expand, tbody th .row-expand {{ position:absolute; opacity:0; pointer-events:none; width:0; height:0; }}
@@ -444,7 +451,8 @@ def render_page(roster, logo_b64):
 {body_rows}</tbody>
 <tfoot><tr><th>tracked ids per gateway</th><td></td>{foot_cells}</tr></tfoot>
 </table>
-<footer class="note">ids shown verbatim per gateway — the same underlying model can ship under different local ids.
+<footer class="note"><div style="display:flex;gap:20px;justify-content:center;margin-bottom:12px;"><a href="https://github.com/Dthen/free-inference-watchdog" target="_blank" rel="noopener">GitHub</a><a href="https://ko-fi.com/dthen" target="_blank" rel="noopener">Ko-fi</a></div>
+ids shown verbatim per gateway — the same underlying model can ship under different local ids.
 Static file, rebuilt each tick.</footer>
 </div></body></html>"""
 

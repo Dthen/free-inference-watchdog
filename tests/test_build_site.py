@@ -602,10 +602,14 @@ def test_grouped_deterministic_output(tmp_path):
 
 
 def test_chip_counts_groups_and_endpoints(tmp_path):
-    """Task 3: header chip N is now groups, and a second chip M
-    ('endpoints') is the raw count. GROUP_ROSTER has 3 groups and
-    5 unique raw ids (poolside-s-2.1 has ':free' and '-free'; standalone-2
-    has ':free' and '-free'; standalone-1 has only ':free')."""
+    """Header chip N counts groups ('unique models'); the endpoints chip M
+    counts distinct (gateway, raw_id) WIRINGS, not distinct raw ids. An id
+    callable at two gateways is two endpoints — that is what a caller can
+    actually hit — so the chip must equal the sum of the <tfoot> per-gateway
+    totals. GROUP_ROSTER wirings: nous 2 + tokenrouter 1 + kilo 3 +
+    openrouter 1 = 7, even though only 5 distinct raw ids exist (poolside
+    '-free' spans tokenrouter+kilo and poolside ':free' spans nous+kilo).
+    Live roster after this semantics: 35 unique models / 58 endpoints."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
@@ -614,8 +618,53 @@ def test_chip_counts_groups_and_endpoints(tmp_path):
     assert "<b>3</b> unique models" in chips, (
         f"unique-models chip must count groups (3), got: {chips}"
     )
-    assert "<b>5</b> endpoints" in chips, (
-        f"endpoints chip must count raw ids (5), got: {chips}"
+    assert "<b>7</b> endpoints" in chips, (
+        f"endpoints chip must count (gateway,id) wirings (7), got: {chips}"
+    )
+    # Consistency invariant: endpoints chip == sum of <tfoot> per-gateway
+    # totals (both count wirings; the chip previously lied).
+    assert "<b>7</b> endpoints" in chips and _tfoot_numbers(html) == [2, 1, 3, 1]
+    assert sum(_tfoot_numbers(html)) == 7
+
+
+def test_meta_copy_says_updated_hourly(tmp_path):
+    """Operator copy fix: the header stamp reads 'updated hourly', never
+    the old 'rebuilt every 1h' wording."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    meta = html.split('<div class="meta">', 1)[1].split("</div>", 1)[0]
+    assert "updated hourly" in meta, f"meta must read 'updated hourly', got: {meta}"
+    assert "rebuilt every" not in meta
+    assert "last refreshed" in meta, f"refresh stamp missing: {meta}"
+
+
+def test_footer_has_github_and_kofi_links(tmp_path):
+    """souls.dthen.xyz footer pattern: a centred links row ABOVE the note
+    text linking GitHub then Ko-fi, opening safely in a new tab."""
+    _seed_logo(tmp_path)
+    proc = _run_builder(GROUP_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+    footer = html.split('<footer class="note">', 1)[1].split("</footer>", 1)[0]
+    assert 'href="https://github.com/Dthen/free-inference-watchdog"' in footer, (
+        f"GitHub link missing from footer: {footer}"
+    )
+    assert 'href="https://ko-fi.com/dthen"' in footer, (
+        f"Ko-fi link missing from footer: {footer}"
+    )
+    # GitHub first, then Ko-fi, both opening safely in a new tab.
+    gh = footer.index("github.com")
+    kf = footer.index("ko-fi.com")
+    assert gh < kf, "GitHub link must come before Ko-fi"
+    for link in re.findall(r"<a\b[^>]*>", footer):
+        assert 'target="_blank"' in link and 'rel="noopener"' in link, (
+            f"footer link lacks target=_blank rel=noopener: {link}"
+        )
+    # The links row sits ABOVE the existing note text.
+    assert footer.index("ko-fi.com") < footer.index("ids shown verbatim"), (
+        "links row must be above the note text"
     )
 
 
