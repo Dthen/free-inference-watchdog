@@ -22,14 +22,12 @@
 ## State layout (state/, gitignored)
 - roster.json: providers + tick_epoch + stale_providers + transients + unconfirmed + nous_ratelimit. Never hand-edit — use --init.
 - alive.json: last_tick_epoch + last_output_epoch + dropped_alerts_total.
-- cooldowns.json: `provider|model|kind` epoch stamps, pruned at persist (12h TTL).
 - pending_alerts.json: bounded retry queue (MAX_ATTEMPTS 5 per alert).
 - Lockfile recovery per README (state/monitor.lock; stale >30 min auto-broken).
 
-## Alert hygiene — all three exist so noise never reaches Discord; preserve them
+## Alert hygiene — both exist so noise never reaches Discord; preserve them
 - Fetch failure = sticky carry-forward of last-known-good ids, never a mass removal.
 - Every diff is re-fetched after a ~3-minute delay (recheck_delay 180) before it is believed.
-- 12h dedup cooldown per (provider, model, event).
 
 ## Delivery topology (operator decision 2026-08-26)
 - The Discord webhook `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in the project-local `.env` is the ONLY alert path.

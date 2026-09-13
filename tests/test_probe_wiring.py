@@ -681,8 +681,8 @@ def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
 
     Realistic pacing: the injected sleep advances the same fake clock the
     budget check reads, and each probe "takes" 1s of wall time (b.ai
-    answers a 1-token completion well under 30s; 1s is the observed
-    order of magnitude). 47 probes need 46×4s sleeps + 47×1s probes ≈
+    answers a 1-token completion well under 30s; 1s is the expected
+    order of magnitude — confirm at the next natural full-47 pass).
     231s elapsed — inside 260, and the persist point lands ~235s, under
     the restored 300s cron kill. If spacing climbs back to 10s (460s+)
     or the budget drops below the pass cost, this fails.
@@ -766,8 +766,8 @@ def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,
     finally:
         inference_watchdog.time.time = orig_time
 
-    # 100s per probe, budget 240s: probes m0 (elapsed=100 < 240) and m1
-    # (elapsed=200 < 240) fire; m2 (elapsed=300 >= 240) is skipped.
+    # 100s per probe, budget 260s: probes m0 (elapsed=100 < 260) and m1
+    # (elapsed=200 < 260) fire; m2 (elapsed=300 >= 260) is skipped.
     assert len(probe_calls) == 2, (
         f"expected 2 probes before truncation, got {len(probe_calls)}")
 
