@@ -47,9 +47,16 @@ def _require_ok(status, url):
         raise FetchError(f"HTTP {status} from {url}")
 
 def fetch_provider(config, getter=_default_getter):
-    """Fetch free models for a provider config."""
+    """Fetch free models for a provider config.
+
+    Optional ignored_slugs: a list of exact model ids excluded AFTER
+    detection — the free-marker rule itself is untouched; this is purely
+    an exclusion layer for ids the operator does not want tracked.
+    Excluded ids drop silently (operator decision 2026-09-13).
+    """
     base_url = config["base_url"].rstrip("/")
     token = config.get("_token")
+    ignored = set(config.get("ignored_slugs", []))
 
     headers = {"User-Agent": USER_AGENT}
     if token:
@@ -64,9 +71,10 @@ def fetch_provider(config, getter=_default_getter):
     detection = config["detection"]
 
     if detection == "zero-credit-probe":
-        return sorted(_extract_ids(items)), {}
+        return sorted(i for i in _extract_ids(items) if i not in ignored), {}
 
     free_ids = [i["id"] for i in items if detect_free(i, detection)]
+    free_ids = [i for i in free_ids if i not in ignored]
     # Capture ratelimit headers for passive telemetry
     ratelimit = {k: v for k, v in resp_headers.items() if "ratelimit" in k.lower()}
     return sorted(free_ids), {"ratelimit": ratelimit} if ratelimit else {}

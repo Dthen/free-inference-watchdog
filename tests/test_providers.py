@@ -238,3 +238,57 @@ def test_fetch_provider_no_ratelimit_headers_empty_meta():
     ids, meta = providers.fetch_provider(config, getter=getter)
     assert ids == ["m1"]
     assert meta == {}
+
+
+# ---------- ignored_slugs: config-driven exclusions at the detection layer ----------
+
+
+def test_fetch_provider_ignored_slugs_excludes_on_detect_free(mock_getter):
+    """An id in ignored_slugs is dropped even though it passes the free-marker
+    detection — the exclusion is applied AFTER detection, which itself stays
+    exactly as-is (openrouter case: openrouter/free matches the free rule)."""
+    config = {
+        "name": "Test",
+        "base_url": "https://example.com/v1",
+        "detection": "id-suffix",
+        "_token": None,
+        "ignored_slugs": ["test-co/router-free"],
+    }
+    mock_getter.response = (200, json.dumps({"data": [
+        {"id": "vendor/model:free"}, {"id": "test-co/router-free"},
+    ]}), {})
+    ids, meta = providers.fetch_provider(config, getter=mock_getter)
+    assert ids == ["vendor/model:free"]
+
+
+def test_fetch_provider_ignored_slugs_excludes_on_zero_credit_probe(mock_getter):
+    """The zero-credit-probe catalog branch applies ignored_slugs too — the
+    exclusion covers BOTH return paths (kilo case: kilo-auto/free)."""
+    config = {
+        "name": "Test",
+        "base_url": "https://example.com/v1",
+        "detection": "zero-credit-probe",
+        "_token": None,
+        "ignored_slugs": ["kilo-auto/free"],
+    }
+    mock_getter.response = (200, json.dumps({"data": [
+        {"id": "kilo-auto/free"}, {"id": "cohere/north-mini-code:free"},
+    ]}), {})
+    ids, meta = providers.fetch_provider(config, getter=mock_getter)
+    assert ids == ["cohere/north-mini-code:free"]
+
+
+def test_fetch_provider_ignored_slugs_absent_is_noop(mock_getter):
+    """Configs without the optional field behave exactly as before — the
+    feature is purely additive."""
+    config = {
+        "name": "Test",
+        "base_url": "https://example.com/v1",
+        "detection": "id-suffix",
+        "_token": None,
+    }
+    mock_getter.response = (200, json.dumps({"data": [
+        {"id": "vendor/model:free"}, {"id": "test-co/router-free"},
+    ]}), {})
+    ids, meta = providers.fetch_provider(config, getter=mock_getter)
+    assert ids == ["test-co/router-free", "vendor/model:free"]

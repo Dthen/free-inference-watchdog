@@ -4,6 +4,7 @@
   "detection": "api-flag",
   "auth": { "method": "env_var", "env_key": "KILOCODE_API_KEY" },
   "display": 2,
+  "ignored_slugs": ["kilo-auto/free"],
   "signup_url": "https://app.kilo.ai/users/sign_in",
   "limits_note": "200 req/hr per IP across all free models combined (published, as of 2026-09-13)"
 }

@@ -369,6 +369,74 @@ def test_nous_config_uses_path_pointer_auth():
     assert "~/.hermes" not in json.dumps(cfg), "no hardcoded agent paths in the committed config"
 
 
+# ---------- ignored_slugs: optional, validated list-of-non-empty-strings ----------
+
+
+def test_load_configs_valid_ignored_slugs_passes_through(tmp_path, monkeypatch, capsys):
+    """A well-formed ignored_slugs list is optional and loads untouched."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "api-pricing", "auth": {"method": "none"},
+              "display": 0, "ignored_slugs": ["openrouter/free"]}
+    (providers_dir / "test.json").write_text(json.dumps(config))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()
+    assert len(configs) == 1
+    assert configs[0]["ignored_slugs"] == ["openrouter/free"]
+    assert "skipping" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad", [
+    "openrouter/free",          # bare string, not a list
+    None,                       # explicit JSON null (set(None) would crash)
+    42,                         # number
+    {"a": 1},                   # object
+    [""],                       # empty string element
+    ["ok", None],               # non-string element
+    ["ok", "  "],               # blank (whitespace-only) element
+    [123],                      # int element
+], ids=["str", "null", "int", "dict", "empty-str", "none-elem", "blank-elem", "int-elem"])
+def test_load_configs_invalid_ignored_slugs_skips_file(tmp_path, monkeypatch, capsys, bad):
+    """A malformed ignored_slugs costs exactly that file: ValueError -> the
+    existing per-file skip + stderr-warning contract."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "api-pricing", "auth": {"method": "none"},
+              "display": 0, "ignored_slugs": bad}
+    (providers_dir / "test.json").write_text(json.dumps(config))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()
+    assert configs == []
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr and "ignored_slugs" in stderr
+
+
+def test_load_configs_empty_ignored_slugs_list_ok(tmp_path, monkeypatch, capsys):
+    """[] is a valid (vacuously satisfied) list — file loads, no warning."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "api-pricing", "auth": {"method": "none"},
+              "display": 0, "ignored_slugs": []}
+    (providers_dir / "test.json").write_text(json.dumps(config))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()
+    assert len(configs) == 1
+    assert "skipping" not in capsys.readouterr().err
+
+
+def test_shipped_configs_declare_ignored_slugs():
+    """kilo/openrouter configs carry the exact router ids previously filtered
+    by hardcoded display logic (cross-checked against state/roster.json)."""
+    repo = Path(config_loader.__file__).resolve().parent
+    kilo = json.loads((repo / "providers" / "kilo.json").read_text(encoding="utf-8"))
+    orouter = json.loads((repo / "providers" / "openrouter.json").read_text(encoding="utf-8"))
+    assert kilo["ignored_slugs"] == ["kilo-auto/free"]
+    assert orouter["ignored_slugs"] == ["openrouter/free"]
+
+
 def test_env_example_documents_path_pointer_not_token_copy():
     """.env.example must document NOUS_AUTH_FILE (path pointer) and must not
     solicit a literal NOUS_ACCESS_TOKEN."""

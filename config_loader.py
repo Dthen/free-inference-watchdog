@@ -84,6 +84,22 @@ def _validate_and_read(path):
         # A non-int display breaks load_configs' sort — reject per-file.
         raise ValueError(
             f"display must be an integer, got {type(display).__name__}")
+    if "ignored_slugs" in config:
+        ignored = config["ignored_slugs"]
+        # Optional field: when the key is present (even as explicit JSON
+        # null) it must be a list of non-empty strings — a bare string or a
+        # list of junk would turn the exact-match exclusion in
+        # providers.fetch_provider into a silent no-op (or worse,
+        # per-character set membership), and null would crash set(None).
+        # Reject per-file so the skip+warn path in load_configs handles it.
+        if not isinstance(ignored, list):
+            raise ValueError(
+                f"ignored_slugs must be a list, got {type(ignored).__name__}")
+        for entry in ignored:
+            if not isinstance(entry, str) or not entry.strip():
+                raise ValueError(
+                    "ignored_slugs entries must be non-empty strings, "
+                    f"got {entry!r}")
     return config
 
 

@@ -4,6 +4,7 @@
   "detection": "api-pricing",
   "auth": { "method": "none" },
   "display": 3,
+  "ignored_slugs": ["openrouter/free"],
   "signup_url": "https://openrouter.ai/sign-in",
   "limits_note": "20 RPM / 200 requests/day on free ids (as of 2026-09)"
 }

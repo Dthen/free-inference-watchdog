@@ -97,22 +97,6 @@ def strip_free_marker(model_id: str) -> str:
     return s or model_id
 
 
-# Model-router endpoints: ids that route to a model selector rather than
-# a specific model. These are not "free models" and must not be displayed.
-# Known patterns (explicit, NOT regex-matched on "free"):
-#   - openrouter/free  (OpenRouter's free router)
-#   - kilo-auto/*      (Kilo's auto-router, e.g. kilo-auto/free, kilo-auto/efficient)
-_ROUTER_EXACT = {"openrouter/free"}
-_ROUTER_PREFIXES = ("kilo-auto/",)
-
-
-def is_model_router(model_id: str) -> bool:
-    """True iff the id is a model-router endpoint, not a real model."""
-    if model_id in _ROUTER_EXACT:
-        return True
-    return any(model_id.startswith(p) for p in _ROUTER_PREFIXES)
-
-
 def load_roster(root):
     """Return parsed roster dict; exit 2 (no site write) if missing/corrupt."""
     path = root / ROSTER_REL
