@@ -15,19 +15,17 @@ Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
   - Display order is derived from config_loader.PROVIDERS (sorted by the
     `display` field in each provider's JSON config). This does NOT match
     the providers.PROVIDERS registry order, and must NOT be alphabetized.
-  - Header copy is minimal: title + "last refreshed {ts} · updated
-    hourly" + three chips ("N unique models", "M endpoints",
+  - Header copy is minimal: title + "updated hourly" + three chips
+    ("N unique models", "M endpoints",
     "G gateways"). NO snapshot/alert/
     stale wording anywhere.
   - Colors are Nord strictly: nord0 bg #2e3440, nord1 elevated/thead/chips
     #3b4252, nord2 hover #434c5e, nord6 text #eceff4, nord4 subtle
     #d8dee9 @ opacity .72, nord8 accent (counts) #88c0d0, nord9 column
     heads #81a1c1, nord14 dots #a3be8c.
-  - ts derives from roster tick_epoch as LOCAL time "%Y-%m-%d %H:%M".
 
 Determinism: same roster.json -> byte-identical HTML. All iteration goes
-through sorted()/DISPLAY_ORDER; the only time in the output derives from
-tick_epoch.
+through sorted()/DISPLAY_ORDER.
 
 Logo handling (stdlib-only at build time): assets/logo.png was downscaled
 to 128x128 with PIL during task prep (~31KB, within the <=128px / ~31KB
@@ -50,7 +48,6 @@ import os
 import re
 import sys
 import threading
-from datetime import datetime
 from html import escape
 from pathlib import Path
 
@@ -286,23 +283,6 @@ def render_page(roster, logo_b64, header_meta=None):
     # Active gateways in display order: only providers with models.
     active_gateways = [gw for gw in DISPLAY_ORDER if gw in providers]
     group_names, groups, endpoints = build_groups(providers)
-    tick = roster.get("tick_epoch")
-    if (
-        isinstance(tick, (int, float))
-        and not isinstance(tick, bool)
-        and tick >= 0
-    ):
-        # Out-of-range epochs must degrade cleanly: render "unknown", never
-        # crash the build. Huge future values overflow; floats NaN/inf raise
-        # OverflowError/ValueError. Negative epochs would technically format
-        # (pre-1970) but mark corrupt state, so they degrade to "unknown"
-        # too (reviewer M4 consistency).
-        try:
-            ts = datetime.fromtimestamp(tick).strftime("%Y-%m-%d %H:%M")
-        except (OverflowError, OSError, ValueError):
-            ts = "unknown"
-    else:
-        ts = "unknown"
 
     def _wire_cell(gw, raw_id):
         """Return the inner-HTML for one (gateway, raw_id) wiring row.
@@ -399,7 +379,7 @@ def render_page(roster, logo_b64, header_meta=None):
         f'<span class="chip"><b>{endpoints}</b> endpoints</span>'
         f'<span class="chip"><b>{len(active_gateways)}</b> gateways</span>'
     )
-    meta = f"last refreshed {ts} · updated hourly"
+    meta = "updated hourly"
     # sort_keys keeps the embedded JSON byte-stable across builds; the
     # JSON island stays the RAW roster so MCP and other consumers that
     # read raw ids are unaffected by the matrix grouping.
@@ -492,9 +472,7 @@ def render_page(roster, logo_b64, header_meta=None):
 {body_rows}</tbody>
 <tfoot><tr><th>tracked ids per gateway</th><td></td>{foot_cells}</tr></tfoot>
 </table>
-<footer class="note"><div class="footer-links"><a href="https://github.com/Dthen/free-inference-watchdog" target="_blank" rel="noopener">GitHub</a><a href="https://ko-fi.com/dthen" target="_blank" rel="noopener">Ko-fi</a></div>
-ids shown verbatim per gateway — the same underlying model can ship under different local ids.
-Static file, rebuilt each tick.</footer>
+<footer class="note"><div class="footer-links"><a href="https://github.com/Dthen/free-inference-watchdog" target="_blank" rel="noopener">GitHub</a><a href="https://ko-fi.com/dthen" target="_blank" rel="noopener">Ko-fi</a></div></footer>
 </div></body></html>"""
 
 

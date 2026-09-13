@@ -15,8 +15,8 @@ state/roster.json into site/index.html. Pinned here:
   site/index.html (never publish garbage),
 - HOSTILE provider values (bare string / dict / null / int instead of a
   list of model-id strings) exit 2 WITHOUT writing site/,
-- an out-of-range tick_epoch degrades the refresh stamp to "unknown"
-  instead of crashing the build,
+- an out-of-range tick_epoch is still embedded verbatim in the
+  roster-data JSON island (raw values are an MCP contract),
 - the publish temp file is pid+thread-unique (concurrent builders must
   not collide on a shared index.html.tmp),
 - an oversized logo under --root exits 2 without writing site/,
@@ -201,7 +201,7 @@ def test_presence_matrix_structure():
 
 
 def test_no_snapshot_or_alert_wording():
-    """Header copy contract: refresh timestamp + rebuild cadence only —
+    """Header copy contract: rebuild-cadence wording only —
     NO snapshot/alert/stale/outage wording anywhere in the VISIBLE page copy.
     (The embedded roster-data JSON island is excluded: it legitimately carries
     upstream state keys like stale_providers as data, not copy.)"""
@@ -263,19 +263,19 @@ def test_valid_list_of_str_providers_still_builds(tmp_path):
     assert (tmp_path / "site" / "index.html").exists()
 
 
-# ---------- C2 (+M4 consistency): out-of-range tick_epoch degrades clean ----
+# ---------- C2: out-of-range tick_epoch still embedded verbatim -------------
 
 @pytest.mark.parametrize("epoch", [10**12, -5])
-def test_out_of_range_tick_epoch_renders_unknown(epoch, tmp_path):
-    """OverflowError/negative epochs must degrade to 'unknown' in the refresh
-    stamp at rc=0 — never an unhandled traceback, page still published."""
+def test_out_of_range_tick_epoch_still_embedded_verbatim(epoch, tmp_path):
+    """Overflow-scale/negative epochs must still build at rc=0 and the
+    embedded roster-data JSON island must carry the raw value verbatim
+    (MCP contract) — never an unhandled traceback, page still published.
+    (The header stamp no longer exists, so there is nothing to degrade.)"""
     _seed_logo(tmp_path)
     roster = dict(SEED_ROSTER, tick_epoch=epoch)
     proc = _run_builder(roster, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
-    assert "unknown" in html.split('<div class="meta">', 1)[1].split("</div>", 1)[0]
-    # and the embedded JSON island still carries the raw value verbatim
     m = re.search(r'id="roster-data">(\{.*?\})</script>', html)
     assert m, "roster-data script tag missing from output"
     assert json.loads(m.group(1))["tick_epoch"] == epoch
@@ -617,21 +617,24 @@ def test_chip_counts_groups_and_endpoints(tmp_path):
 
 
 def test_meta_copy_says_updated_hourly(tmp_path):
-    """Operator copy fix: the header stamp reads 'updated hourly', never
-    the old 'rebuilt every 1h' wording."""
+    """Operator copy fix: the header meta line reads ONLY 'updated hourly' —
+    no 'last refreshed' stamp, no old 'rebuilt every 1h' wording."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
     meta = html.split('<div class="meta">', 1)[1].split("</div>", 1)[0]
-    assert "updated hourly" in meta, f"meta must read 'updated hourly', got: {meta}"
+    assert meta.strip() == "updated hourly", (
+        f"meta must equal 'updated hourly', got: {meta!r}"
+    )
     assert "rebuilt every" not in meta
-    assert "last refreshed" in meta, f"refresh stamp missing: {meta}"
+    assert "last refreshed" not in meta
 
 
 def test_footer_has_github_and_kofi_links(tmp_path):
-    """souls.dthen.xyz footer pattern: a centred links row ABOVE the note
-    text linking GitHub then Ko-fi, opening safely in a new tab."""
+    """souls.dthen.xyz footer pattern: a centred links row linking GitHub
+    then Ko-fi, opening safely in a new tab. The note text below the links
+    was deleted by operator copy request — footer is links-only."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
@@ -651,10 +654,9 @@ def test_footer_has_github_and_kofi_links(tmp_path):
         assert 'target="_blank"' in link and 'rel="noopener"' in link, (
             f"footer link lacks target=_blank rel=noopener: {link}"
         )
-    # The links row sits ABOVE the existing note text.
-    assert footer.index("ko-fi.com") < footer.index("ids shown verbatim"), (
-        "links row must be above the note text"
-    )
+    # The note text below the links row is gone entirely.
+    assert "ids shown verbatim" not in footer
+    assert "rebuilt each tick" not in footer
 
 
 def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
