@@ -34,7 +34,7 @@ DEFAULT_CADENCE_S = 1 * 3600
 # PROBE_PHASE_BUDGET_S in one tick; the operator then chose 5s pacing twice
 # ("Idk maybe 5s", "I did say 5") — rate-limit gentleness over one-tick
 # completion. Consequence, accepted knowingly: at 5s a full 47-model pass
-# costs 44×(5+~1) ≈ 280s realistic and EXCEEDS the 260s budget, so the
+# costs 46×(5+~1) ≈ 280s realistic and EXCEEDS the 260s budget, so the
 # last few models are skipped each pass and resume the next tick as tier-1
 # queue items (no verdict yet) via probe_state persistence — the same
 # self-healing mechanism every truncation uses. The ONE-TICK-FULL-PASS
@@ -79,8 +79,8 @@ PROBE_TIMEOUT_S = 30
 # stay unprobed but the probed subset still persists (save_probe_state
 # runs at the end of build_fetch_all) — the next tick resumes from
 # cached verdicts (self-healing, no death spiral). At the operator's 5s
-# pacing a tail cut is the NORMAL every-pass outcome (~4 models deferred,
-# ~43+ carried), not pathological; only a tick where every probe burns its
+# pacing a tail cut is the NORMAL every-pass outcome (~45 of 47 carried,
+# short tail deferred), not pathological; only a tick where every probe burns its
 # full 30s timeout cuts deep. Either way the spread across hourly ticks is
 # the designed fallback, oldest-first priority preserved.
 PROBE_PHASE_BUDGET_S = 260

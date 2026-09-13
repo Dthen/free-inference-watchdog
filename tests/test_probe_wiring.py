@@ -677,9 +677,10 @@ def test_probe_phase_budget_regression_pin():
         "See the comment on PROBE_PHASE_BUDGET_S in inference_watchdog.py.")
     assert im.PROBE_INTERVAL_S >= 5, (
         f"PROBE_INTERVAL_S={im.PROBE_INTERVAL_S} is below 5s — operator "
-        "pacing floor (2026-09-13): don't speed up without asking. b.ai "
-        "burst-kills sustained probe rates above ~15 RPM, and 5s is the "
-        "deliberately gentle setting the operator chose twice.")
+        "pacing floor (2026-09-13): don't speed up without asking. b.ai's "
+        "limit sits above ~20 RPM (sustained 4s/15 RPM ran clean after the "
+        "burst-kill fix); 5s (12 RPM) is the deliberately gentle floor the "
+        "operator chose twice.")
 
 
 def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
@@ -695,10 +696,11 @@ def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
     Realistic pacing: the injected sleep advances the same fake clock the
     budget check reads, and each probe "takes" 1s of wall time (b.ai
     answers a 1-token completion well under 30s). NOTE the exact fired
-    count is budget-dependent, not tail-identity-dependent: with the
-    tier-1 queue sorted by id (free-model-0..9 sort BEFORE -10..46), the
-    id-order cut leaves a 2-model tail; a numerical-tail queue would cut
-    4. The assertions below derive the fired count by replaying the exact
+    count is budget-dependent, not tail-identity-dependent: the fired
+    count is pure loop arithmetic, fixed whatever the queue order —
+    only WHICH models form the tail moves with ordering (with the
+    tier-1 queue sorted by id, free-model-0..9 sort BEFORE -10..46, the
+    tail is its last 2). The assertions below derive the fired count by replaying the exact
     loop arithmetic against the module's own constants — the budget check
     runs BEFORE each probe's own spacing sleep, so probe j (1-based, j≥2)
     is checked at 5(j-2)+(j-1) = 6j-11: probe 45 at 259 fires, probe 46 at
@@ -743,7 +745,7 @@ def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
     # then burns sleep(interval) (skipped for the first probe) + 1s probe.
     # probe_phase_start is captured before the fake clock ticks at all (the
     # fetch reads no time in this fixture). At interval=5 this yields
-    # 45 fired / 2-model tail; at 4s it yields 47; at 10s, 24.
+    # 45 fired / 2-model tail; at 4s it yields 47; at 10s, 25.
     interval = im.PROBE_INTERVAL_S
     budget = im.PROBE_PHASE_BUDGET_S
     t = 0
