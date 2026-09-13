@@ -184,9 +184,9 @@ def list_free_models(provider=None, root=None) -> dict:
         }
 
     # CANONICAL GATEWAY-KEY SEMANTIC (shared with watchdog_status's
-    # provider_counts): report exactly the five known gateways, always.
+    # provider_counts): report exactly the seven known gateways, always.
     # Unknown junk roster keys are ignored; a gateway missing from this tick
-    # degrades to an empty list. n_gateways is therefore a constant 5 — not
+    # degrades to an empty list. n_gateways is therefore a constant 7 — not
     # a count of raw roster keys on partial state.
     raw = roster["providers"]
     cleaned = {gw: _clean_ids(raw.get(gw, [])) for gw in PROVIDERS}
@@ -276,7 +276,7 @@ def list_endpoints(provider=None, root=None) -> dict:
     """All gateway wiring entries across the roster, or one gateway's.
 
     Returns every (gateway, raw id) pair in the roster with the gateway's
-    wiring (base URL, auth, api_type). Optional provider=<name> filters to a
+    wiring (base URL, api_type). Optional provider=<name> filters to a
     single gateway. Structured errors, no raises into the MCP layer.
     """
     r = Path(root).resolve() if root is not None else REPO
@@ -431,7 +431,7 @@ def build_server(root=None):
             "state (refreshed hourly). Presence answers are exact-id "
             "based; never read cross-gateway absence as proof of "
             "unavailability. Use list_endpoints to get wiring (base URL, "
-            "auth, api_type) for actually calling a model."),
+            "api_type) for actually calling a model."),
     )
     srv.add_tool(lambda provider=None: list_free_models(provider, root=root),
                  name="list_free_models",
