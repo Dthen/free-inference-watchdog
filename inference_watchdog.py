@@ -36,37 +36,35 @@ PROBE_TIMEOUT_S = 30
 # Probe-phase budget (seconds). The budget clock starts at the TOP of
 # fetch_all() (probe_phase_start), BEFORE the provider fetch loop — the
 # serial catalog fetches (15s timeout each, providers.TIMEOUT_S) run INSIDE
-# the 900s, so do NOT add ~30s of fetches on top (that double-counts). The
+# the 240s, so do NOT add ~30s of fetches on top (that double-counts). The
 # check is "elapsed >= budget" before each probe, so the last probe can
-# start at 899.9s and run sleep(10) + 30s probe timeout ≈ 40s past it:
-# worst case ~940s from fetch_all() start to save_probe_state — the PERSIST
-# point. The full tick adds confirm_diffs' unconditional 180s recheck nap +
-# re-fetches on top of that (~18-20 min worst case); save_probe_state ALWAYS
-# runs before the recheck, so probe progress persists even if a kill landed
-# mid-recheck.
+# start at 239.9s and run sleep(10) + 30s probe timeout ≈ 40s past it:
+# worst case ~280s from fetch_all() start to save_probe_state — the PERSIST
+# point.
 #
-# Why 900: the budget exists so a pathological provider hang can't wedge a
-# tick past the runner window — currently 1800s (cron.script_timeout_seconds,
-# deployment config outside this repo) — and the persist point (~940s worst
-# case) + recheck must stay inside it with margin. 900 is the value P3
-# originally chose (commit e4ec690) under the same generous-runner design;
-# the full b.ai catalog pass (47 models × 10s spacing ≈ 470s + probe
-# latency + ~90s fetches ≈ 8 min) fits comfortably in ONE tick, which is the
-# point. It was shrunk to 240 (commit 339133c) as an emergency measure while
-# the Hermes cron runner SIGKILLed the wrapper at 300s (2026-09-13: 3
-# consecutive ticks died mid-probe-loop before save_probe_state — death
-# spiral). That 300s kill is HISTORY: the window was raised to 1800s the
-# same day after the 07:17 tick ran 428s and truncated at 44/47 verdicts
-# under the 240 cap. Restoring 900 ends the needless spread.
+# Why 240: the Hermes cron runner SIGKILLed the wrapper at 300s (observed
+# 2026-09-13: 3 consecutive ticks died mid-probe-loop, before
+# save_probe_state, so nothing persisted and every tick restarted the full
+# pass — death spiral). 240 keeps the ~280s persist point under that kill
+# with margin. That 300s kill is HISTORY: the window was raised to 1800s
+# on 2026-09-13 (outside this repo) after the 07:17 tick ran 428s and only
+# completed because of the raise. The full tick (persist point ~280s +
+# confirm_diffs' unconditional 180s recheck nap + re-fetches) does NOT fit
+# under 300s and never did — the invariant is NOT "tick fits under the
+# kill" but "save_probe_state precedes the kill": probe progress always
+# persists; a kill during the recheck nap costs that tick's roster write
+# (roster lags one tick), never probe_state — no spiral. 240 stays as the
+# conservative bound so the spiral-critical save fits even under the
+# historical 300s kill.
 #
-# The 30-min lock window (LOCK_STALE_S=1800) is only the OUTER bound
-# and is unaffected. When the budget is exhausted, remaining queue items
+# The 30-min lock window (LOCK_STALE_S=1800) is only the OUTER bound and
+# is unaffected. When the budget is exhausted, remaining queue items
 # stay unprobed but the probed subset still persists (save_probe_state
 # runs at the end of build_fetch_all) — the next tick resumes from
-# cached verdicts (self-healing, no death spiral). If the provider catalog
-# ever grows past one tick's capacity, truncation spreads the surplus
-# across the next hourly ticks, oldest-first priority preserved.
-PROBE_PHASE_BUDGET_S = 900
+# cached verdicts (self-healing, no death spiral). A 24h stale-paid
+# re-probe pass truncated at 240s/tick simply spreads across 2-3 hourly
+# ticks, oldest-first priority preserved.
+PROBE_PHASE_BUDGET_S = 240
 
 
 # ---------- provider plumbing ----------

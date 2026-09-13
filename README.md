@@ -192,21 +192,17 @@ Detection methods (dispatched by string key, so a provider can pick any):
   b.ai's undocumented rate limits; verdicts are persisted to `probe_state.json`
   and the roster is verdict-filtered (ONLY FREE-verdict models). A DEFER never
   overwrites a prior verdict (sticky roster survives burst 429s). The probe
-  phase is capped at 900s (`PROBE_PHASE_BUDGET_S`) — a safety bound against a
-  pathological provider hang, not a scheduler: the full 47-model catalog pass
-  (~8 min) fits ONE tick. The budget clock starts at the top of
-  `fetch_all()`, so catalog fetches run INSIDE the 900s; worst case to the
-  `save_probe_state` persist point is ~940s (the last probe can start at
-  899.9s and overshoot by sleep(10) + 30s timeout). The persist point plus
-  the unconditional 180s recheck nap and its re-fetches (~18-20 min worst
-  case) stays inside the cron runner's 1800s script window
-  (`cron.script_timeout_seconds`, deployment config) with margin. History:
-  the runner killed the wrapper at 300s until 2026-09-13 — a 3-tick death
-  spiral — and the budget was shrunk to 240s as an emergency bound; the
-  300s kill is gone (window raised to 1800s the same day) and the interim
-  240s cap only caused needless spread (the 07:17 tick truncated at 44/47
-  verdicts). A truncated pass persists its probed subset and the next tick
-  resumes (self-healing).
+  phase is capped at 240s (`PROBE_PHASE_BUDGET_S`). The budget clock starts at
+  the top of `fetch_all()`, so catalog fetches run INSIDE the 240s; worst case
+  to the `save_probe_state` persist point is ~280s (the last probe can start at
+  239.9s and overshoot by sleep(10) + 30s timeout). The cron runner killed the
+  wrapper at 300s until 2026-09-13, when the window was raised to 1800s (after
+  a 428s tick); 240s is kept as the conservative bound so the spiral-critical
+  persist fits even under the historical 300s kill. The full tick (persist +
+  the unconditional 180s recheck nap) can exceed 300s — the invariant is that
+  the persist precedes any kill: a kill during the recheck costs that tick's
+  roster write (roster lags one tick), never probe progress. A truncated
+  pass persists its probed subset and the next tick resumes (self-healing).
 
 ### Modules
 
