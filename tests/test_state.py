@@ -36,33 +36,6 @@ def test_load_roster_non_dict_is_none(tmp_path):
     assert state.load_roster(p) is None
 
 
-# ---------- cooldowns ----------
-
-def test_cooldowns_roundtrip_and_prune(tmp_path):
-    p = tmp_path / "cooldowns.json"
-    now = time.time()
-    data = {"nous|a|added": now - 100, "openrouter|b|removed": now - 999999}
-    state.save_cooldowns(p, data, ttl_s=43200)
-    loaded = state.load_cooldowns(p)
-    assert "nous|a|added" in loaded          # fresh entry survives
-    assert "openrouter|b|removed" not in loaded  # stale entry pruned on save
-
-
-def test_cooldowns_missing_is_empty(tmp_path):
-    assert state.load_cooldowns(tmp_path / "nope.json") == {}
-
-
-def test_cooldowns_prune_uses_injected_now(tmp_path):
-    # Tick-clock pruning: a stamp from the (fake) tick epoch survives/fails
-    # relative to the INJECTED now, not the real wall clock.
-    p = tmp_path / "cooldowns.json"
-    fake_now = 1_000_000_000
-    data = {"nous|a|added": fake_now - 100, "nous|b|added": fake_now - 999_999}
-    state.save_cooldowns(p, data, ttl_s=43200, now=fake_now)
-    loaded = state.load_cooldowns(p)
-    assert loaded == {"nous|a|added": fake_now - 100}
-
-
 # ---------- pending alerts queue ----------
 
 def test_pending_roundtrip(tmp_path):
@@ -351,51 +324,6 @@ def test_atomic_write_failed_dump_leaves_only_own_named_tmp(tmp_path):
     assert not target.exists()
 
 
-# ---------- F3: cooldown stamp sanitation at persist ----------
-
-def test_cooldowns_save_drops_nonfinite_future_bool_and_string(tmp_path):
-    """F3: Infinity suppressed alerts forever, future-dated stamps suppressed
-    them arbitrarily long, NaN survived every prune. Sanitation happens at
-    persist: keep ONLY finite numbers (bool excluded) whose age satisfies
-    0 <= now - v < ttl_s."""
-    p = tmp_path / "cooldowns.json"
-    now = 1_000_000_000.0
-    ttl = 43_200
-    data = {
-        "good|fresh": now - 100,
-        "good|near_ttl": now - ttl + 5,
-        "bad|inf": float("inf"),
-        "bad|-inf": float("-inf"),
-        "bad|nan": float("nan"),
-        "bad|future": now + 500,
-        "bad|bool": True,
-        "bad|string": "123",
-    }
-    state.save_cooldowns(p, data, ttl_s=ttl, now=now)
-    assert state.load_cooldowns(p) == {
-        "good|fresh": now - 100,
-        "good|near_ttl": now - ttl + 5,
-    }
-
-
-def test_cooldowns_exact_ttl_boundary_dropped(tmp_path):
-    """F3 boundary: age exactly ttl_s drops — matches cooldown.py's strict
-    `now - last < ttl_s` suppression check."""
-    p = tmp_path / "cooldowns.json"
-    now = 5_000_000.0
-    state.save_cooldowns(p, {"edge": now - 43_200}, ttl_s=43_200, now=now)
-    assert state.load_cooldowns(p) == {}
-
-
-def test_cooldowns_negative_age_stamp_dropped(tmp_path):
-    """F3: a stamp dated AFTER now (clock skew / hand edit) has negative age
-    and is treated as stale, not preserved forever."""
-    p = tmp_path / "cooldowns.json"
-    now = 5_000_000.0
-    state.save_cooldowns(p, {"skewed": now + 1}, ttl_s=43_200, now=now)
-    assert state.load_cooldowns(p) == {}
-
-
 # ---------- sweep-2: RecursionError gate on local-disk JSON loads ----------
 
 # Raw hostile literal: nesting so deep the stdlib parser exhausts the
@@ -407,7 +335,6 @@ DEEP_NEST_JSON = "[" * 120000 + "]" * 120000
     "loader_name,default",
     [
         ("load_roster", None),
-        ("load_cooldowns", {}),
         ("load_pending", []),
         ("load_alive", {}),
     ],

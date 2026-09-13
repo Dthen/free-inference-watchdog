@@ -60,7 +60,7 @@ def test_first_run_initializes_silently(tmp_path, capsys):
 def test_init_over_existing_roster_archives_and_stays_silent(tmp_path, capsys):
     """F1: --init over an existing roster archives it to roster.json.bak,
     rebaselines cleanly, prints EXACTLY 'initialized, no diff' — never an
-    alert, never a cooldown write."""
+    alert."""
     _run(tmp_path, [{"nous": ["old-1", "old-2"]}])            # baseline
     capsys.readouterr()                            # drain baseline's own line
     # pre-existing roster with DIFFERENT ids + --init
@@ -76,7 +76,6 @@ def test_init_over_existing_roster_archives_and_stays_silent(tmp_path, capsys):
     assert bak["providers"]["nous"] == ["old-1", "old-2"]     # archive intact
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"]["nous"] == ["new-1"]           # fresh baseline
-    assert not (tmp_path / "cooldowns.json").exists()         # no cooldown writes
 
 
 def test_init_refused_by_guard_preserves_roster_exactly(tmp_path, capsys):
@@ -141,23 +140,6 @@ def test_cli_cadence_hours_default_and_override(monkeypatch):
     assert captured["cadence_s"] == 12 * 3600         # override
 
 
-def test_cli_cooldown_hours_default_and_override(monkeypatch):
-    """Fix-round-5 #4: --cooldown-hours is plumbed through main() to run_tick
-    (default 12h). Mirrors test_cli_cadence_hours_default_and_override — a
-    regression dropping cooldown_hours=args.cooldown_hours must go red."""
-    captured = {}
-
-    def fake_tick(state_dir, registry, fetch_all, fetch_one, **kw):
-        captured.update(kw)
-        return 0
-
-    monkeypatch.setattr(im, "run_tick", fake_tick)
-    im.main([])
-    assert captured["cooldown_hours"] == 12           # default
-    im.main(["--cooldown-hours", "24"])
-    assert captured["cooldown_hours"] == 24           # override
-
-
 def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
     """F4: a JSON-valid roster lacking a dict-shaped providers key must
     bootstrap clean (first_run), never emit the universe as 🟢."""
@@ -171,17 +153,13 @@ def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
     assert roster["providers"]["nous"] == ["a"]
 
 
-def test_confirmed_removal_alerts_once_then_cooldowns(tmp_path, capsys):
+def test_confirmed_removal_alerts_once(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a", "b"]}])                       # baseline
     code, _ = _run(tmp_path, [{"nous": ["a"]}],                  # b disappears
                    now=1_000_000_000 + 1 * 3600)
     out = capsys.readouterr().out
     assert code == 0
     assert "🔴 `b`" in out
-    # same flap 1h later: suppressed by cooldown
-    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 7 * 3600)
-    out2 = capsys.readouterr().out
-    assert "🔴 `b`" not in out2
 
 
 def test_transient_removal_never_alerts(tmp_path, capsys):
@@ -246,8 +224,8 @@ def test_lock_contention_preserves_live_lockfile(tmp_path):
     owned by the other running process. F6-1 moved the contention return
     inside run_tick's try/finally, whose release_lock then unconditionally
     unlinked the OTHER process's lock -> mutual exclusion silently died ->
-    next invocation acquired and ran concurrent full ticks (duplicate alerts,
-    lost cooldown stamps). Contract: contended run exits 0 AND leaves the
+    next invocation acquired and ran concurrent full ticks (duplicate alerts).
+    Contract: contended run exits 0 AND leaves the
     lock byte-and-mtime UNCHANGED; the tick body never executes."""
     lock = tmp_path / "monitor.lock"
     lock.write_text("123", encoding="utf-8")
@@ -390,43 +368,6 @@ def test_nous_ratelimit_empty_when_nous_failed(tmp_path):
     assert roster["nous_ratelimit"] == {}
 
 
-def test_roster_written_before_alert_and_cooldowns(tmp_path, monkeypatch):
-    """Item 6: crash-safe write order — roster FIRST, cooldowns LAST."""
-    writes = []
-    import state as st
-    orig_save_roster = st.save_roster_atomic
-    orig_save_cd = st.save_cooldowns
-    def spy_roster(path, data):
-        writes.append(("roster", str(path)))
-        return orig_save_roster(path, data)
-    def spy_cd(path, data, **kw):
-        writes.append(("cooldowns", str(path)))
-        return orig_save_cd(path, data, **kw)
-    monkeypatch.setattr(st, "save_roster_atomic", spy_roster)
-    monkeypatch.setattr(st, "save_cooldowns", spy_cd)
-    _run(tmp_path, [{"nous": ["a", "b"]}])
-    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 1 * 3600)
-    # roster must be written before cooldowns
-    roster_idx = [i for i, (kind, _) in enumerate(writes) if kind == "roster"]
-    cd_idx = [i for i, (kind, _) in enumerate(writes) if kind == "cooldowns"]
-    assert roster_idx and cd_idx
-    assert roster_idx[0] < cd_idx[0]
-
-
-def test_cooldown_hours_wired_to_ttl(tmp_path):
-    """Item 7: --cooldown-hours drives the TTL."""
-    _run(tmp_path, [{"nous": ["a", "b"]}])
-    code, _ = _run(tmp_path, [{"nous": ["a"]}],
-                    now=1_000_000_000 + 1 * 3600)
-    assert code == 0
-    # Same flap 1h later: suppressed (default 12h cooldown)
-    _run(tmp_path, [{"nous": ["a"]}], now=1_000_000_000 + 7 * 3600)
-    import cooldown as cd_mod
-    cds = json.loads((tmp_path / "cooldowns.json").read_text())
-    # One entry should exist (the first alert was stamped)
-    assert len(cds) >= 1
-
-
 def test_bootstrap_guard_zero_providers(tmp_path, capsys):
     """Item 8: first-run with ZERO successful providers exits 1."""
     code, _ = _run(tmp_path, [{"nous": None, "openrouter": None}])
@@ -458,8 +399,7 @@ def test_first_run_partial_failure_exits_one_but_initializes(tmp_path, capsys):
 def test_unconfirmed_then_confirmed_alerts_once(tmp_path, capsys):
     """Item 9 (R2-15): multi-tick unconfirmed → confirmed alerts exactly once.
     Tick A: candidate diff + recheck fails => silent, roster sticky-old.
-    Tick B: same candidate recheck succeeds => one alert.
-    Immediate repeat suppressed by cooldown."""
+    Tick B: same candidate recheck succeeds => one alert."""
     # Baseline
     _run(tmp_path, [{"nous": ["a", "b"]}])
 
@@ -480,12 +420,6 @@ def test_unconfirmed_then_confirmed_alerts_once(tmp_path, capsys):
     assert code == 0
     assert "🔴" in out_b
     assert "b" in out_b
-
-    # Immediate repeat: suppressed by cooldown
-    _run(tmp_path, [{"nous": ["a"]}],
-          now=1_000_000_000 + 13 * 3600)
-    out_c = capsys.readouterr().out
-    assert "🔴" not in out_c
 
 
 def test_missed_tick_warning_does_not_suppress_alive_ping(tmp_path, capsys):

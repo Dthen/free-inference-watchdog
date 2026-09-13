@@ -21,12 +21,11 @@ sets the ~3-minute confirm nap before a diff is believed), the monitor:
    an outage never looks like a mass removal).
 3. Set-diffs against the previous `roster.json`.
 4. Re-fetches affected providers ~3 min later to confirm (kills transient flaps).
-5. Applies a 12h dedup cooldown per `(provider, model, event)`.
-6. Delivers the alert via the `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` webhook
+5. Delivers the alert via the `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` webhook
    (kennel channel). Failed POSTs queue in `state/pending_alerts.json` and
    retry automatically on the next tick. Stdout stays local — the process is
    silent unless something goes catastrophically wrong (stderr).
-7. Writes an alive ping to silence the "is it dead?" question.
+6. Writes an alive ping to silence the "is it dead?" question.
 
 ## Why no Ollama?
 
@@ -146,7 +145,6 @@ counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 
 - `roster.json`: providers + tick_epoch + stale_providers + transients + unconfirmed + nous_ratelimit. Never hand-edit — use --init.
 - `alive.json`: last_tick_epoch + last_output_epoch + dropped_alerts_total.
-- `cooldowns.json`: `provider|model|kind` epoch stamps, pruned at persist (12h TTL).
 - `pending_alerts.json`: bounded retry queue (MAX_ATTEMPTS 5 per alert).
 - `probe_state.json`: per-provider probe verdicts (`{provider: {model_id: {"verdict": "free"|"paid", "epoch": int}}}`). Written once per tick after the serial probe loop. Never hand-edit.
 - `state/monitor.lock`: PID lockfile; stale locks (>30 min old) are auto-broken on the next invocation (crash recovery).
@@ -278,5 +276,5 @@ Safe to re-run at any time.
 python3 -m pytest tests/ -v
 ```
 
-Tests across envfile, providers, state, diffing, cooldown, notify, confirm,
+Tests across envfile, providers, state, diffing, notify, confirm,
 and full integration (stubbed providers through the complete tick loop).

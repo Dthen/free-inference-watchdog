@@ -16,7 +16,6 @@ from datetime import datetime
 from pathlib import Path
 
 import alive
-import cooldown
 import diffing
 import probe_select
 import probe_state
@@ -216,14 +215,13 @@ def build_fetch_one(env, state_dir=None):
 
 def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
              sleep=time.sleep, now=None, recheck_delay=180,
-             cooldown_hours=12, cadence_s=DEFAULT_CADENCE_S, dry_run=False,
+             cadence_s=DEFAULT_CADENCE_S, dry_run=False,
              init=False):
     """Execute one monitor tick. Returns process exit code (0/1/2)."""
     now = now if now is not None else time.time()
     state_dir = Path(state_dir)
     paths = {
         "roster": state_dir / "roster.json",
-        "cooldowns": state_dir / "cooldowns.json",
         "pending": state_dir / "pending_alerts.json",
         "alive": state_dir / "alive.json",
         "lock": state_dir / "monitor.lock",
@@ -244,7 +242,7 @@ def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
             return 0
         acquired = True
         return _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url,
-                            sleep, now, recheck_delay, cooldown_hours,
+                            sleep, now, recheck_delay,
                             cadence_s, dry_run, init=init)
     except Exception as exc:  # fatal — cron captures stderr
         print(f"inference-watchdog: FATAL {type(exc).__name__}: {exc}",
@@ -266,7 +264,7 @@ def _emit(message, webhook_url, pending_path, dry_run):
 
 
 def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
-                 now, recheck_delay, cooldown_hours, cadence_s, dry_run,
+                 now, recheck_delay, cadence_s, dry_run,
                  init=False):
     prev_roster = diffing.load_filtered_roster(paths["roster"], set(registry))
     prev_providers = (prev_roster or {}).get("providers") or {}
@@ -288,9 +286,6 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
 
     # Per-tick field lifecycle: rebuilt EVERY tick, never appended (Task 4).
     transients, unconfirmed = {}, {}
-
-    # --cooldown-hours must be REAL (R2-10): drives both dedup and pruning.
-    ttl_s = int(cooldown_hours * 3600)
 
     prev_alive = state.load_alive(paths["alive"])
     emitted_real = False   # ONLY diff alerts / 💚 ping count (R2-8)
@@ -345,15 +340,13 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         # refetch becomes the persisted truth, unconfirmed keeps sticky-old.
         new_map = diffing.merge_corrected(new_map, confirmation, prev_providers)
 
-        survivors, new_cd = cooldown.filter_cooldown(
-            confirmed, state.load_cooldowns(paths["cooldowns"]), now,
-            ttl_s=ttl_s)
+        survivors = confirmed
     else:
-        survivors, new_cd = {}, {}
+        survivors = {}
 
     # Crash-safe write order (R2-9): roster FIRST, then alert enqueue/send
-    # (pending_alerts.json inside notify), THEN cooldowns.json last. A crash
-    # may lose a cooldown but never silently swallow an alert.
+    # (pending_alerts.json inside notify). A crash may delay a retry but
+    # never silently swallows an alert.
     persist_roster()
 
     # Drain the retry queue before handling new alerts (plan mandate).
@@ -368,9 +361,6 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
             dropped_total=notify.get_dropped_total())
         _emit(msg, webhook_url, paths["pending"], dry_run)
         emitted_real = True
-        if not dry_run:
-            state.save_cooldowns(paths["cooldowns"], new_cd, ttl_s=ttl_s,
-                                 now=now)
 
     # --- alive self-watch (two clocks; critic round-3 R2-8) ---
     # The ⚠️ missed-tick warning is NOT a real emission: it must NOT suppress
@@ -416,7 +406,6 @@ def main(argv=None):
     parser.add_argument("--cadence-hours", type=int, default=1,
                         help="tick cadence in hours — drives missed-tick "
                              "warning; keep in step with the cron schedule")
-    parser.add_argument("--cooldown-hours", type=int, default=12)
     parser.add_argument("--state-dir", default=None,
                         help="default: <this project>/state")
     args = parser.parse_args(argv)
@@ -439,7 +428,6 @@ def main(argv=None):
     return run_tick(state_dir, PROVIDERS, fetch_all, fetch_one,
                     webhook_url=webhook, sleep=time.sleep, now=time.time(),
                     recheck_delay=args.recheck_delay,
-                    cooldown_hours=args.cooldown_hours,
                     cadence_s=args.cadence_hours * 3600, dry_run=args.dry_run)
 
 

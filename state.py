@@ -1,8 +1,8 @@
 """Atomic state persistence for the Free Inference Watchdog. Stdlib only.
 
 Crash-safe write ORDER (plan mandate): roster.json FIRST, then pending
-alerts, THEN cooldowns — a crash between stages can lose a cooldown but
-never silently swallow an alert.
+alerts — a crash between stages may delay a retry but never silently
+swallow an alert.
 """
 
 import json
@@ -53,36 +53,6 @@ def load_roster(path):
 
 def save_roster_atomic(path, data):
     _atomic_write_json(path, data)
-
-
-# ---------- cooldowns ----------
-
-def load_cooldowns(path):
-    data = _load_json_or_default(path, {})
-    return data if isinstance(data, dict) else {}
-
-
-def save_cooldowns(path, cooldowns, ttl_s=43200, now=None):
-    """Prune entries older than TTL before writing (map never grows forever).
-
-    Sanitation happens here at persist (cooldown.filter_cooldown is left as
-    is — every persisted map passes through this save): an entry survives
-    ONLY if it is a finite number (bool excluded — bool subclasses int) AND
-    its age satisfies 0 <= now - v < ttl_s. Infinity/nan and future-dated
-    stamps (negative age) are junk that would otherwise suppress alerts
-    forever or arbitrarily long; age == ttl_s drops (matches cooldown.py's
-    strict <).
-
-    `now` is injectable so ticks (and tests) prune against the tick clock,
-    never against a mismatched wall clock.
-    """
-    now = time.time() if now is None else now
-    pruned = {k: v for k, v in cooldowns.items()
-              if isinstance(v, (int, float))
-              and not isinstance(v, bool)
-              and math.isfinite(v)
-              and 0 <= now - v < ttl_s}
-    _atomic_write_json(path, pruned)
 
 
 # ---------- pending alerts queue ----------
