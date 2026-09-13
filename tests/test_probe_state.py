@@ -1,6 +1,5 @@
 """Tests for probe_state.py — persisted zero-credit probe verdicts."""
 
-import json
 import pytest
 
 import probe_state
@@ -153,3 +152,35 @@ def test_multiple_providers_isolated(tmp_path):
 
     verdict, epoch = probe_state.get_verdict(state, "bai", "model-b")
     assert verdict is None
+
+
+def test_record_verdict_survives_corrupt_provider_value(tmp_path):
+    # A corrupt provider value (non-dict) must not crash the write path:
+    # without the isinstance guard this raises TypeError and FATALs every
+    # subsequent tick, breaking the module's "never fatal" contract.
+    path = tmp_path / "probe_state.json"
+    path.write_text('{"bai": "junk"}', encoding="utf-8")
+
+    probe_state.record_verdict(path, "bai", "model-1", "free", 1000)
+
+    state = probe_state.load_probe_state(path)
+    verdict, epoch = probe_state.get_verdict(state, "bai", "model-1")
+    assert verdict == "free"
+    assert epoch == 1000
+
+
+@pytest.mark.parametrize("junk_epoch", ['"abc"', "null", "true", "NaN"])
+def test_get_verdict_junk_epoch_degrades(tmp_path, junk_epoch):
+    # Mirror state.py load_alive: epoch is validated at the read boundary —
+    # non-numeric/non-finite (junk from a hand-edited file) must never reach
+    # callers; it degrades to None while the verdict still reads.
+    path = tmp_path / "probe_state.json"
+    path.write_text(
+        '{"bai": {"m": {"verdict": "free", "epoch": %s}}}' % junk_epoch,
+        encoding="utf-8",
+    )
+
+    state = probe_state.load_probe_state(path)
+    verdict, epoch = probe_state.get_verdict(state, "bai", "m")
+    assert verdict == "free"
+    assert epoch is None

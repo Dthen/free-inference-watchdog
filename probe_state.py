@@ -6,9 +6,9 @@ DEFER never recorded as a verdict — only 'free'/'paid' strings are valid.
 """
 
 import json
+import math
 import os
 import threading
-import time
 
 
 # ---------- generic atomic write ----------
@@ -57,7 +57,7 @@ def record_verdict(path, provider, model_id, verdict, now, defer_epoch=None):
 
     state = load_probe_state(path)
 
-    if provider not in state:
+    if not isinstance(state.get(provider), dict):
         state[provider] = {}
 
     entry = {"verdict": verdict, "epoch": int(now)}
@@ -86,6 +86,15 @@ def get_verdict(state, provider, model_id):
 
     if verdict not in ("free", "paid"):
         return None, None
+
+    # Validate epoch at the read boundary (mirror state.py load_alive):
+    # non-numeric/bool/non-finite junk from a hand-edited file reads as
+    # absent so it never reaches callers.
+    if isinstance(epoch, bool) or not isinstance(epoch, (int, float)) \
+            or not math.isfinite(epoch):
+        epoch = None
+    else:
+        epoch = int(epoch)
 
     return verdict, epoch
 
