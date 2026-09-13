@@ -8,7 +8,7 @@
 
 ## Providers
 - Seven gateways in DISPLAY order `nous, tokenrouter, kilo, openrouter, amd, bai, nim` — canonical for UI/MCP surfaces (build_site.py `DISPLAY_ORDER`, mcp_server.py `PROVIDERS` tuple).
-- providers.PROVIDERS dict order differs (nous, openrouter, tokenrouter, kilo, amd, bai); display order above wins everywhere user-visible.
+- Provider order everywhere user-visible is DISPLAY order — the `display` number in providers/*.json, which is the canonical list above (nim last); there is no separate providers.py ordering to conflict with.
 - Free-only rule per provider: an id is tracked iff `"free" in id.lower()`. No alias map, no allowlist, no normalized-name matching — exact ids only. A new stealth arrival ships under whatever id the gateway assigns; if that id doesn't contain "free", it's not tracked.
 - Ollama is gone BY DESIGN (GPU-time metering, no free-model concept) — do not re-add it.
 
