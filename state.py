@@ -144,11 +144,15 @@ def save_alive(path, last_tick_epoch, last_output_epoch, dropped_alerts_total=0)
 
 # ---------- PID lockfile ----------
 
-LOCK_STALE_S = 30 * 60  # 30 min — worst tick is bounded by PROBE_PHASE_BUDGET_S
-                          # (240s) + fetches + 180s recheck ≈ 8 min, well
-                          # under 1800s; the lock window is the OUTER bound,
-                          # the real inner constraint is the cron runner's
-                          # 300s kill (see PROBE_PHASE_BUDGET_S)
+LOCK_STALE_S = 30 * 60  # 30 min — full-tick worst case: ~280s to the
+                          # probe_state persist point (240s budget with
+                          # fetches INSIDE it, + ~40s last-probe overshoot)
+                          # + 180s recheck nap + re-fetches ≈ 8-9 min, well
+                          # under 1800s. The lock window is the OUTER bound;
+                          # the runner's kill (300s historically, 1800s since
+                          # 2026-09-13) doesn't bind the lock math — the
+                          # persist point already precedes it by design
+                          # (see PROBE_PHASE_BUDGET_S)
 
 
 def acquire_lock(lock_path, now=None):

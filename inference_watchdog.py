@@ -33,12 +33,30 @@ DEFAULT_CADENCE_S = 1 * 3600
 PROBE_INTERVAL_S = 10
 PROBE_TIMEOUT_S = 30
 
-# Probe-phase budget (seconds). The REAL constraint is the Hermes cron
-# runner: it SIGKILLs the wrapper script at 300s ("Script timed out after
-# 300s" — observed 2026-09-13, 3 consecutive ticks died mid-probe-loop,
-# before save_probe_state, so nothing persisted and every tick restarted
-# the full pass: death spiral). A tick must fit fetches (~30s) + probe
-# phase + margin under that kill: 240 + ~30 + margin ≈ 270s < 300s.
+# Probe-phase budget (seconds). The budget clock starts at the TOP of
+# fetch_all() (probe_phase_start), BEFORE the provider fetch loop — the
+# serial catalog fetches (15s timeout each, providers.TIMEOUT_S) run INSIDE
+# the 240s, so do NOT add ~30s of fetches on top (that double-counts). The
+# check is "elapsed >= budget" before each probe, so the last probe can
+# start at 239.9s and run sleep(10) + 30s probe timeout ≈ 40s past it:
+# worst case ~280s from fetch_all() start to save_probe_state — the PERSIST
+# point.
+#
+# Why 240: the Hermes cron runner SIGKILLed the wrapper at 300s (observed
+# 2026-09-13: 3 consecutive ticks died mid-probe-loop, before
+# save_probe_state, so nothing persisted and every tick restarted the full
+# pass — death spiral). 240 keeps the ~280s persist point under that kill
+# with margin. That 300s kill is HISTORY: the window was raised to 1800s
+# on 2026-09-13 (outside this repo) after the 07:17 tick ran 428s and only
+# completed because of the raise. The full tick (persist point ~280s +
+# confirm_diffs' unconditional 180s recheck nap + re-fetches) does NOT fit
+# under 300s and never did — the invariant is NOT "tick fits under the
+# kill" but "save_probe_state precedes the kill": probe progress always
+# persists; a kill during the recheck nap costs that tick's roster write
+# (roster lags one tick), never probe_state — no spiral. 240 stays as the
+# conservative bound so the spiral-critical save fits even under the
+# historical 300s kill.
+#
 # The 30-min lock window (LOCK_STALE_S=1800) is only the OUTER bound and
 # is unaffected. When the budget is exhausted, remaining queue items
 # stay unprobed but the probed subset still persists (save_probe_state

@@ -640,18 +640,27 @@ def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
 def test_probe_phase_budget_regression_pin():
     """REGRESSION PIN: PROBE_PHASE_BUDGET_S must stay <= 240s.
 
-    The Hermes cron runner SIGKILLs the wrapper script at 300s ("Script
-    timed out after 300s" — observed 3x consecutively on 2026-09-13).
-    A tick is fetches + probe phase + recheck (~30s + budget + 180s), so
-    the probe budget MUST satisfy: budget + ~30s fetches + margin < 300s.
-    240s + 30s + margin ≈ 270s < 300s. Any value above 240 risks the
-    runner killing the tick MID-PROBE-LOOP, before save_probe_state runs
-    → nothing persists → every tick restarts the full pass → death
-    spiral (site frozen, ticks die at the same wall-clock point forever).
+    The budget clock spans fetches + probes from the TOP of fetch_all()
+    (probe_phase_start is captured BEFORE the fetch loop — catalog fetches
+    run INSIDE the budget, so don't add ~30s on top). The check fires
+    before each probe, so the last probe can start at 239.9s and run
+    sleep(10) + 30s timeout ≈ 40s more: worst case ~280s from fetch_all()
+    start to save_probe_state (the PERSIST point).
+
+    The Hermes cron runner killed the wrapper at 300s (observed 3x
+    consecutively on 2026-09-13 — ticks died mid-probe-loop, before
+    save_probe_state, nothing persisted, death spiral). 240 keeps the
+    ~280s persist point under that historical kill; the window was since
+    raised to 1800s (2026-09-13, outside this repo) after the 07:17 tick
+    ran 428s. The invariant is NOT "full tick fits under the kill" (it
+    doesn't — recheck nap alone adds 180s after the save); it is
+    "save_probe_state precedes the kill": probe progress persists, a
+    mid-recheck kill costs that tick's roster write (roster lags one
+    tick), never probe_state — no spiral.
 
     If you need a bigger budget: first make the runner's kill window
     bigger, then bump this pin in the same change. A silent bump here
-    reintroduces the death spiral.
+    reintroduces the death spiral under any future 300s-class kill.
     """
     assert im.PROBE_PHASE_BUDGET_S <= 240, (
         f"PROBE_PHASE_BUDGET_S={im.PROBE_PHASE_BUDGET_S} exceeds 240s — "
