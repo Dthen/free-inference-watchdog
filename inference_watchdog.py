@@ -121,6 +121,8 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
         now_val = now if now is not None else time.time()
         results, metas = {}, {}
         first_probe = True  # first probe of the tick fires immediately
+        # monotonic on purpose (duration, not date) — do NOT unify with
+        # now_val above: that stamps real-world epochs into state files.
         probe_phase_start = monotonic()
         for name, config in PROVIDERS.items():
             try:

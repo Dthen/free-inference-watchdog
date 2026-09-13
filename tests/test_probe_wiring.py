@@ -829,6 +829,9 @@ def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,
 def test_probe_phase_budget_immune_to_wall_clock_jumps(monkeypatch, tmp_path):
     """The budget must ride time.monotonic, NOT the wall clock.
 
+    Forward leaps are the shown case; backward steps are immune by
+    construction — a monotonic clock never steps in either direction.
+
     An NTP step or VM clock jump can advance time.time() by hours mid-tick.
     Here the wall clock leaps forward wildly on every read while the
     monotonic clock advances normally (1s per probe, 5s spacing). If the
