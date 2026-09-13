@@ -14,7 +14,6 @@ holds failed chunks individually (per-chunk semantics).
 """
 
 import json
-import time
 import urllib.request
 import uuid
 

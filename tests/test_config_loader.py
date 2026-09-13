@@ -1,7 +1,6 @@
 # tests/test_config_loader.py
 import pytest
 import json
-import os
 from pathlib import Path
 
 import config_loader

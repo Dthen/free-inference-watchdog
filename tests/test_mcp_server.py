@@ -15,7 +15,6 @@ import json
 import pytest
 
 import mcp_server
-import providers
 
 
 # ---------- fixtures ----------

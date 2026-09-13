@@ -86,7 +86,6 @@ def test_load_filtered_roster_missing_returns_none(tmp_path):
 def test_load_filtered_roster_non_dict_providers_returns_none(tmp_path):
     """F4: JSON-valid but structurally-empty rosters must bootstrap clean —
     loading them as an existing baseline emits the universe as 'added'."""
-    import json
     for body in ('{}', 'null', '{"tick_epoch": 1}',
                  '{"providers": ["nous"]}', '{"providers": null}'):
         p = tmp_path / "roster.json"
@@ -131,7 +130,6 @@ def test_dict_element_prev_value_no_bogus_repr_alert_downstream(tmp_path):
     whole model object must ship NO 🔴 repr bullet like "{'id': 'x-model'}"
     and no phantom 🟢/🔴 pair — boundary-coerced [] makes the next tick a
     truthful added-only candidate whose confirm recheck removes nothing."""
-    import json
     p = tmp_path / "roster.json"
     p.write_text('{"providers": {"nous": [{"id": "x-model"}]}}', encoding="utf-8")
     roster = diffing.load_filtered_roster(p, {"nous"})
@@ -153,7 +151,6 @@ def test_string_prev_value_no_bogus_removal_alerts_downstream(tmp_path):
     """Fix-round-4 #2 end-to-end shape: a seeded string prev value, once
     boundary-coerced to [], produces an added-only candidate and the confirm
     recheck confirms ZERO removal ids — no char-split 🔴 bullets ship."""
-    import json
     p = tmp_path / "roster.json"
     p.write_text('{"providers": {"nous": "model-a"}}', encoding="utf-8")
     roster = diffing.load_filtered_roster(p, {"nous"})

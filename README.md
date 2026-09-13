@@ -185,7 +185,7 @@ Detection methods (dispatched by string key, so a provider can pick any):
 - `api-flag` — model is free when `isFree == true` (Kilo).
 - `id-suffix` — model id ends with `:free` / `-free`, or contains `free` (TokenRouter).
 - `all-free` — every model in the catalog is treated as free (AMD).
-- `zero-credit-probe` — fire a 1-token completion per model and classify by the
+- `zero-credit-probe` — fire a minimal 3-token completion per model and classify by the
   response (B.AI). Probes run **serially with 5s spacing** (12 RPM) to stay
   under b.ai's undocumented rate limits (operator pacing choice
   2026-09-13); verdicts are persisted to
@@ -220,7 +220,7 @@ Detection methods (dispatched by string key, so a provider can pick any):
 - **`detection.py`** — string-keyed `detect_free(model, method)` dispatch used
   at fetch time to decide which ids count as free.
 - **`probe_zero_credit.py`** — the `zero-credit-probe` backend: fires a
-  1-token completion per model and classifies it as `free` / `paid` / `defer`
+  minimal 3-token completion per model and classifies it as `free` / `paid` / `defer`
   based on the HTTP response (a `403` mentioning "deposit" ⇒ paid).
 - **`probe_state.py`** — persisted zero-credit probe verdicts. Atomic write
   pattern: `load_probe_state`, `record_verdict`, `get_verdict`,
@@ -231,6 +231,36 @@ Detection methods (dispatched by string key, so a provider can pick any):
 
 To add a provider, drop in a JSON config (see `providers/README.md`); to change
 a detection strategy, edit the JSON — no Python changes required.
+
+### Zero-credit probe (B.AI)
+
+Black-box gateways with no free-tier metadata get probed, not parsed. The
+`zero-credit-probe` bullet above and the `probe_*.py` docstrings carry the
+rationale; this is the operator cheat-sheet.
+
+- **State file** — `state/probe_state.json`:
+  `{provider: {model_id: {"verdict": "free"|"paid", "epoch": int}}}` (plus an
+  optional `defer_epoch`). Corrupt/missing reads as `{}`; written atomically
+  (temp file + `os.replace`).
+- **Verdicts** — HTTP 200 ⇒ `free`. `403` whose body mentions "deposit", or
+  `400` carrying an insufficient-balance/quota marker ⇒ `paid`. Everything
+  else — `429`, 404, 5xx, an unmarked `400`, network errors — ⇒ `DEFER`: no
+  verdict is recorded, any prior verdict stands (sticky), and a model left
+  without one re-queues next tick. Rate-limit pain shows up only as
+  transient 429 defers, never as a verdict flip.
+- **Queue (`probe_select.select_queue`)** — each tick probes, in order:
+  tier 1 new arrivals (no usable verdict yet), tier 2 every `free` model
+  (a quiet flip to paid must be caught fast), tier 3 `paid` models last
+  probed ≥ 24h ago (`stale_hours`, oldest first — a daily pass catches a
+  promo going free). Paid models inside the 24h window are skipped.
+- **Pacing/budget** — `PROBE_INTERVAL_S = 5` serial spacing (12 RPM),
+  `PROBE_PHASE_BUDGET_S = 260` counted from the top of `fetch_all()`. At 5s
+  one tick carries ~45 of 47 models; the tail resumes next tick as tier 1.
+- **Where it runs** — the probe phase inside `fetch_all()`, before the
+  verdict-filtered roster is returned. `save_probe_state` persists verdicts
+  and catalog prunes once per tick, before the unconditional 180s recheck
+  nap — the invariant is "persist precedes the 300s cron kill", so a crash
+  costs at most one roster write, never probe progress.
 
 ## Cadence change
 
