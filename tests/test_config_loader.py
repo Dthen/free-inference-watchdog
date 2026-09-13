@@ -437,6 +437,14 @@ def test_shipped_configs_declare_ignored_slugs():
     assert orouter["ignored_slugs"] == ["openrouter/free"]
 
 
+def test_real_configs_keys_unchanged_by_stem_migration():
+    """Migration safety net: the 7 shipped configs must resolve to the
+    SAME roster keys as before the _PROVIDER_KEY_MAP deletion (they were
+    map values: nous, tokenrouter, kilo, openrouter, amd, bai, nim)."""
+    expected = {"nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"}
+    assert set(config_loader.PROVIDERS) == expected
+
+
 # ---------- roster_key: optional, validated non-empty string ----------
 
 
