@@ -437,6 +437,23 @@ def test_shipped_configs_declare_ignored_slugs():
     assert orouter["ignored_slugs"] == ["openrouter/free"]
 
 
+# ---------- roster_key: optional, validated non-empty string ----------
+
+
+@pytest.mark.parametrize("bad", [123, "", "   ", True])
+def test_roster_key_field_must_be_nonempty_string(tmp_path, monkeypatch, capsys, bad):
+    """Optional "roster_key" field: when present it must be a non-empty
+    string — a bad value silently re-routes the provider's roster identity."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {"name": "X", "base_url": "https://x.com/v1", "detection": "all-free",
+           "auth": {"method": "none"}, "display": 0, "roster_key": bad}
+    (providers_dir / "x.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs() == []
+    assert "roster_key must be a non-empty string" in capsys.readouterr().err
+
+
 def test_env_example_documents_path_pointer_not_token_copy():
     """.env.example must document NOUS_AUTH_FILE (path pointer) and must not
     solicit a literal NOUS_ACCESS_TOKEN."""
