@@ -553,7 +553,7 @@ def test_junk_model_entry_excluded(monkeypatch, tmp_path):
 
 
 def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
-    """Probe phase is wall-clock bounded — remaining queue items stay
+    """Probe phase is monotonic-clock bounded — remaining queue items stay
     unprobed when the budget would be exceeded."""
     probe_calls = []
 
@@ -571,21 +571,16 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
                         _fake_fetch_provider_factory(
                             [f"m{i}" for i in range(10)]))
 
-    # Patch time.time in the module to consume budget
-    import inference_watchdog
-    orig_time = inference_watchdog.time.time
-    def advancing_time():
+    # Drive the front-door monotonic seam to consume budget
+    def advancing_monotonic():
         val = clock["t"]
         clock["t"] += 30  # each probe "takes" 30s of budget
         return val
-    inference_watchdog.time.time = advancing_time
+    monkeypatch.setattr(im, "monotonic", advancing_monotonic)
 
-    try:
-        fetch_all_fn = im.build_fetch_all(
-            {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
-        results, _ = fetch_all_fn()
-    finally:
-        inference_watchdog.time.time = orig_time
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+    results, _ = fetch_all_fn()
 
     # Budget 260s, 30s per probe. The budget check fires BEFORE each probe
     # (including the first), so when elapsed >= 260 the probe is skipped.
@@ -608,13 +603,11 @@ def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
         probe_calls.append(model_id)
         return Result.FREE, {"http": 200}
 
-    import inference_watchdog
-    orig_time = inference_watchdog.time.time
-    def advancing_time():
+    def advancing_monotonic():
         val = clock["t"]
         clock["t"] += 120  # each probe "takes" 120s of budget
         return val
-    inference_watchdog.time.time = advancing_time
+    monkeypatch.setattr(im, "monotonic", advancing_monotonic)
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
     monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
@@ -623,12 +616,9 @@ def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
                         _fake_fetch_provider_factory(
                             [f"m{i}" for i in range(5)]))
 
-    try:
-        fetch_all_fn = im.build_fetch_all(
-            {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
-        fetch_all_fn()
-    finally:
-        inference_watchdog.time.time = orig_time
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+    fetch_all_fn()
 
     # 120s per probe: probe 1 at elapsed=120 < 260 fires, probe 2 at
     # elapsed=240 < 260 fires, probe 3 at elapsed=360 >= 260 skipped
@@ -724,21 +714,16 @@ def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
     def fake_sleep(s):
         clock["t"] += s  # spacing burns the same fake clock
 
-    import inference_watchdog
-    orig_time = inference_watchdog.time.time
-    inference_watchdog.time.time = lambda: clock["t"]
+    monkeypatch.setattr(im, "monotonic", lambda: clock["t"])
 
     ids = [f"free-model-{i}" for i in range(47)]
     monkeypatch.setattr(im, "probe_model", fake_probe)
     monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(ids))
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(ids))
-    try:
-        fetch_all_fn = im.build_fetch_all(
-            {}, tmp_path, now=1_000_000_000, sleep=fake_sleep)
-        results, _ = fetch_all_fn()
-    finally:
-        inference_watchdog.time.time = orig_time
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=fake_sleep)
+    results, _ = fetch_all_fn()
 
     # Replay the loop arithmetic exactly against the module's own constants:
     # probe j (0-based) is CHECKED at the current elapsed BEFORE its sleep,
@@ -801,13 +786,11 @@ def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,
             return Result.PAID, {"http": 403}
         return Result.FREE, {"http": 200}
 
-    import inference_watchdog
-    orig_time = inference_watchdog.time.time
-    def advancing_time():
+    def advancing_monotonic():
         val = clock["t"]
         clock["t"] += 100  # each probe "takes" 100s of budget
         return val
-    inference_watchdog.time.time = advancing_time
+    monkeypatch.setattr(im, "monotonic", advancing_monotonic)
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
     monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
@@ -816,12 +799,9 @@ def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,
                         _fake_fetch_provider_factory(
                             [f"m{i}" for i in range(5)]))
 
-    try:
-        fetch_all_fn = im.build_fetch_all(
-            {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
-        results, _ = fetch_all_fn()
-    finally:
-        inference_watchdog.time.time = orig_time
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+    results, _ = fetch_all_fn()
 
     # 100s per probe, budget 260s: probes m0 (elapsed=100 < 260) and m1
     # (elapsed=200 < 260) fire; m2 (elapsed=300 >= 260) is skipped.
@@ -844,6 +824,57 @@ def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,
             f"{unprobed} must not have a verdict — it was never probed")
     # Roster reflects only FREE verdicts among the probed subset.
     assert results["bai"] == ["m0"]
+
+
+def test_probe_phase_budget_immune_to_wall_clock_jumps(monkeypatch, tmp_path):
+    """The budget must ride time.monotonic, NOT the wall clock.
+
+    An NTP step or VM clock jump can advance time.time() by hours mid-tick.
+    Here the wall clock leaps forward wildly on every read while the
+    monotonic clock advances normally (1s per probe, 5s spacing). If the
+    budget read the wall clock, the 260s cap would fire after the first
+    probe and truncate the tick; on the monotonic seam every probe runs to
+    completion. This proves jump-immunity — and that the seam is the ONLY
+    clock the budget consults.
+    """
+    probe_calls = []
+    clock = {"t": 0}
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        probe_calls.append(model_id)
+        clock["t"] += 1  # monotonic advances a normal 1s per probe
+        return Result.FREE, {"http": 200}
+
+    def fake_sleep(s):
+        clock["t"] += s  # spacing burns the same monotonic clock
+
+    # Wall clock jumps 10000s forward on every read (NTP-step nightmare).
+    wall = {"t": 1_000_000_000}
+
+    def jumping_wall_time():
+        wall["t"] += 10_000
+        return wall["t"]
+
+    monkeypatch.setattr(im, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(im.time, "time", jumping_wall_time)
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
+        [f"m{i}" for i in range(10)]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(
+                            [f"m{i}" for i in range(10)]))
+
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=fake_sleep)
+    results, _ = fetch_all_fn()
+
+    # 10 models at 1s probes + 5s spacing = ~55s monotonic — well under the
+    # 260s budget — so ALL probes fire despite the wall clock leaping past
+    # the budget on every read.
+    assert len(probe_calls) == 10, (
+        f"wall-clock jump must not expire the budget; only {probe_calls} "
+        f"of 10 probed")
+    assert results["bai"] == [f"m{i}" for i in range(10)]
 
 
 # ---------- save skip when unchanged (P3 MINOR 8) ----------

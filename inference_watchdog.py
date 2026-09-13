@@ -45,8 +45,9 @@ DEFAULT_CADENCE_S = 1 * 3600
 PROBE_INTERVAL_S = 5
 PROBE_TIMEOUT_S = 30
 
-# Probe-phase budget (seconds). The budget clock starts at the TOP of
-# fetch_all() (probe_phase_start), BEFORE the provider fetch loop — the
+# Probe-phase budget (seconds). The budget clock is the monotonic seam
+# above: probe_phase_start = monotonic() at the TOP of fetch_all(), BEFORE
+# the provider fetch loop — the
 # serial catalog fetches (15s timeout each, providers.TIMEOUT_S) run INSIDE
 # the 260s, so do NOT add ~30s of fetches on top (that double-counts). The
 # check is "elapsed >= budget" before each probe, so the last probe can
@@ -85,6 +86,14 @@ PROBE_TIMEOUT_S = 30
 # the designed fallback, oldest-first priority preserved.
 PROBE_PHASE_BUDGET_S = 260
 
+# Injectable monotonic clock for the probe-phase budget. time.monotonic
+# cannot jump (NTP steps, VM clock sync), so elapsed budget math is immune
+# to wall-clock discontinuities. Plain module attribute: tests monkeypatch
+# inference_watchdog.monotonic as the front-door seam. ONLY the two
+# probe-budget reads below use it; every other timestamp in this module
+# stays on time.time().
+monotonic = time.monotonic
+
 
 # ---------- provider plumbing ----------
 
@@ -112,7 +121,7 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
         now_val = now if now is not None else time.time()
         results, metas = {}, {}
         first_probe = True  # first probe of the tick fires immediately
-        probe_phase_start = time.time()
+        probe_phase_start = monotonic()
         for name, config in PROVIDERS.items():
             try:
                 ids, meta = providers.fetch_provider(config)
@@ -139,7 +148,7 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
                         # each probe (including the first). If the NEXT probe
                         # would exceed the budget, stop probing — remaining
                         # items stay unprobed (self-healing next tick).
-                        elapsed = time.time() - probe_phase_start
+                        elapsed = monotonic() - probe_phase_start
                         if elapsed >= PROBE_PHASE_BUDGET_S:
                             remaining = len(queue) - queue.index(model_id)
                             print(
