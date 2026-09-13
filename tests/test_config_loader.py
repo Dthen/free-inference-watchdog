@@ -1,6 +1,9 @@
 # tests/test_config_loader.py
-import pytest
 import json
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import config_loader
@@ -66,26 +69,150 @@ def test_load_configs_env_var(tmp_path, monkeypatch):
     assert configs[0]["_token"] == "env-token"
 
 
-def test_load_configs_missing_required_field(tmp_path, monkeypatch):
-    """Config with missing required field raises ValueError."""
+def _minimal_config(name, display=0):
+    return {"name": name, "base_url": f"https://{name.lower()}.example.com/v1",
+            "detection": "all-free", "auth": {"method": "none"}, "display": display}
+
+
+def test_load_configs_missing_required_field_skips_file(tmp_path, monkeypatch, capsys):
+    """A config missing a required field must cost ONLY that file: skip it
+    with a stderr warning that names it, load the rest, never raise."""
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()
-    config = {"name": "Test", "base_url": "https://example.com/v1",
-              "detection": "all-free"}  # missing auth
-    (providers_dir / "test.json").write_text(json.dumps(config))
+    (providers_dir / "incomplete.json").write_text(json.dumps(
+        {"name": "Test", "base_url": "https://example.com/v1",
+         "detection": "all-free"}))  # missing auth
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    with pytest.raises(ValueError):
-        config_loader.load_configs()
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"], "only the valid file survives"
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower()
+    assert "incomplete.json" in stderr, "warning must name the skipped file"
 
 
-def test_load_configs_malformed_json(tmp_path, monkeypatch):
-    """Config with malformed JSON raises ValueError."""
+def test_load_configs_malformed_json_skips_file(tmp_path, monkeypatch, capsys):
+    """Invalid JSON in one providers/*.json must skip exactly that file with a
+    stderr warning — a hand-mangled config must not crash the loader import
+    and take every healthy gateway down with it."""
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()
     (providers_dir / "bad.json").write_text("not json{{{")
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    with pytest.raises(ValueError):
-        config_loader.load_configs()
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower()
+    assert "bad.json" in stderr, "warning must name the skipped file"
+
+
+def test_load_configs_non_dict_json_skips_file(tmp_path, monkeypatch, capsys):
+    """A providers/*.json holding valid JSON of the wrong shape (a list, a
+    bare string) is a file-level problem: skip it, warn, keep the rest."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "listshape.json").write_text(json.dumps([1, 2, 3]))
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise (AttributeError class)
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "listshape.json" in stderr
+
+
+def test_load_configs_junk_auth_method_skips_file(tmp_path, monkeypatch, capsys):
+    """A config naming an auth method the loader does not implement is a
+    broken config, not a keyless one: skip the file with a warning rather
+    than silently fetching unauthenticated."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "telepathy.json").write_text(json.dumps(
+        {**_minimal_config("Telepathy"), "auth": {"method": "telepathy"}}))
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "telepathy.json" in stderr
+
+
+def test_load_configs_non_dict_auth_skips_file(tmp_path, monkeypatch, capsys):
+    """auth present but not an object ('auth': 'none' as a string) fails
+    field validation: skip that file, not the process."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "strauth.json").write_text(json.dumps(
+        {**_minimal_config("StrAuth"), "auth": "none"}))
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise (AttributeError class)
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "strauth.json" in stderr
+
+
+def test_load_configs_missing_providers_dir_returns_empty(tmp_path, monkeypatch, capsys):
+    """No providers/ directory at all is a directory-level problem: [] plus a
+    stderr warning, never an import-time crash."""
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)  # tmp_path/providers absent
+    configs = config_loader.load_configs()  # must not raise
+    assert configs == []
+    stderr = capsys.readouterr().err
+    assert stderr.strip(), "missing providers dir must warn on stderr"
+
+
+def test_load_configs_unreadable_providers_dir_degrades(tmp_path, monkeypatch, capsys):
+    """An unreadable providers/ dir (or one replaced by a regular file) must
+    degrade to [] with a stderr warning, not raise OSError out of the glob."""
+    # A NON-DIRECTORY where providers/ is expected: is_dir() is False and any
+    # iteration attempt is an error class — both branches must degrade.
+    (tmp_path / "providers").write_text("not a directory")
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert configs == []
+    stderr = capsys.readouterr().err
+    assert stderr.strip(), "unreadable providers dir must warn on stderr"
+
+
+def test_build_providers_degrades_to_valid_subset(tmp_path, monkeypatch, capsys):
+    """PROVIDERS (via build_providers) inherits the per-file skip: a broken
+    file costs exactly its own provider key; healthy keys survive intact."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "nous.json").write_text(json.dumps(_minimal_config("Nous Portal", 0)))
+    (providers_dir / "kilo.json").write_text("{ broken")
+    (providers_dir / "amd.json").write_text(json.dumps(_minimal_config("AMD Radeon", 1)))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    providers = config_loader.build_providers()
+    assert set(providers) == {"nous", "amd"}
+    assert "kilo" not in providers, "the broken file must cost only kilo"
+
+
+def test_import_never_raises_with_a_broken_config(tmp_path):
+    """End-to-end proof of the locked contract: importing config_loader with
+    one invalid providers/*.json on disk succeeds, exposing only the valid
+    subset in PROVIDERS. A subprocess gives a genuinely fresh import, so the
+    module-level build is what runs."""
+    repo = Path(config_loader.__file__).resolve().parent
+    src = tmp_path / "src"
+    src.mkdir()
+    shutil.copy(repo / "config_loader.py", src)
+    shutil.copy(repo / "envfile.py", src)
+    providers_dir = src / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    (providers_dir / "bad.json").write_text("}{ not json")
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import config_loader, json; "
+         "print(json.dumps(sorted(config_loader.PROVIDERS)))"],
+        cwd=src, capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PYTHONPATH": str(src)},
+    )
+    assert proc.returncode == 0, f"import raised: {proc.stderr}"
+    assert json.loads(proc.stdout.strip()) == ["good"]
+    assert "bad.json" in proc.stderr
 
 
 # ---------- token_file auth via path_env (Nous path-pointer design) ----------

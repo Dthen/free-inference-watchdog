@@ -39,62 +39,107 @@ def _resolve_json_path(data, path):
     return current
 
 
-def load_configs():
-    """Load all providers/*.json, validate schema, resolve auth, sort by display."""
-    configs = []
-    for path in sorted((REPO / "providers").glob("*.json")):
-        try:
-            with open(path, encoding="utf-8") as f:
-                config = json.load(f)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Config {path.name}: invalid JSON: {exc}") from exc
+def _validate_and_read(path):
+    """Read + schema-validate one providers/*.json. Raises ValueError/OSError
+    on any file-level problem (unreadable, invalid JSON, wrong shape, missing
+    or invalid required fields, unimplemented auth method)."""
+    with open(path, encoding="utf-8") as f:
+        config = json.load(f)
+    if not isinstance(config, dict):
+        raise ValueError(f"expected a JSON object, got {type(config).__name__}")
 
-        required = {"name", "base_url", "detection", "auth"}
-        missing = required - set(config.keys())
-        if missing:
-            raise ValueError(f"Config {path.name} missing: {missing}")
+    required = {"name", "base_url", "detection", "auth"}
+    missing = required - set(config.keys())
+    if missing:
+        raise ValueError(f"missing: {missing}")
+    auth = config["auth"]
+    if not isinstance(auth, dict):
+        raise ValueError(f"auth must be an object, got {type(auth).__name__}")
+    if auth.get("method") not in ("none", "env_var", "token_file"):
+        # A config naming an auth method the loader does not implement is
+        # broken, not keyless — fetching unauthenticated would mask the typo.
+        raise ValueError(f"unknown auth method: {auth.get('method')!r}")
+    if auth.get("method") == "env_var" and not auth.get("env_key"):
+        raise ValueError("env_var auth requires env_key field")
+    return config
 
-        auth = config.get("auth", {})
-        method = auth.get("method")
-        token = None
-        try:
-            if method == "env_var":
-                env_key = auth.get("env_key")
-                if not env_key:
-                    raise ValueError(f"Config {path.name}: env_var auth requires env_key field")
-                token = os.environ.get(env_key, "")
-            elif method == "token_file":
-                path_env = auth.get("path_env")
-                if path_env:
-                    token_path_raw = _lookup_env(path_env)
-                    if not token_path_raw:
-                        raise ValueError(
-                            f"Config {path.name}: token_file auth requires env var "
-                            f"{path_env} to be set")
-                else:
-                    token_path_raw = auth.get("path", "")
-                token_path = os.path.expanduser(token_path_raw)
-                try:
-                    with open(token_path, encoding="utf-8") as f:
-                        token_data = json.load(f)
-                except FileNotFoundError:
-                    raise ValueError(f"Config {path.name}: token file not found: {token_path}")
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"Config {path.name}: token file invalid JSON: {exc}")
-                token = _resolve_json_path(token_data, auth.get("key", ""))
+
+def _resolve_auth_token(config, fname):
+    """Resolve the _token for a validated config. Auth/environment problems
+    (broken env var, unreadable token file) DEGRADE the provider to
+    _token=None with a stderr warning — a healthy provider must not lose its
+    config because its credential is momentarily unresolvable. Never raises.
+    """
+    auth = config["auth"]
+    method = auth.get("method")
+    try:
+        if method == "env_var":
+            return os.environ.get(auth["env_key"], "")
+        if method == "token_file":
+            path_env = auth.get("path_env")
+            if path_env:
+                token_path_raw = _lookup_env(path_env)
+                if not token_path_raw:
+                    raise ValueError(
+                        f"token_file auth requires env var "
+                        f"{path_env} to be set")
             else:
-                token = None
-        except (ValueError, OSError) as exc:
-            # Degrade, don't die: a broken env (e.g. NOUS_AUTH_FILE unset)
-            # or an unreadable token file (OSError: missing, permission
-            # denied, is-a-directory) must not kill the watchdog at import —
-            # the cron wrapper treats exit 1 as routine and stays silent.
-            # Log to stderr so the operator sees why a provider is degraded.
-            print(f"config_loader: provider {config.get('name', path.name)} auth degraded: {exc}",
-                  file=sys.stderr)
-            token = None
+                token_path_raw = auth.get("path", "")
+            token_path = os.path.expanduser(token_path_raw)
+            try:
+                with open(token_path, encoding="utf-8") as f:
+                    token_data = json.load(f)
+            except FileNotFoundError:
+                raise ValueError(f"token file not found: {token_path}")
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"token file invalid JSON: {exc}") from exc
+            return _resolve_json_path(token_data, auth.get("key", ""))
+        return None  # method == "none"
+    except (ValueError, OSError) as exc:
+        # Degrade, don't die: a broken env (e.g. NOUS_AUTH_FILE unset)
+        # or an unreadable token file (OSError: missing, permission
+        # denied, is-a-directory) must not kill the watchdog at import —
+        # the cron wrapper treats exit 1 as routine and stays silent.
+        # Log to stderr so the operator sees why a provider is degraded.
+        print(f"config_loader: provider {config.get('name', fname)} "
+              f"auth degraded: {exc}", file=sys.stderr)
+        return None
 
-        config["_token"] = token
+
+def load_configs():
+    """Load all providers/*.json, validate schema, resolve auth, sort by display.
+
+    Degradation contract: a per-file problem (unreadable file, invalid JSON,
+    missing/invalid fields, an auth method the loader does not implement)
+    costs EXACTLY that file — it is skipped with a `config: skipping ...`
+    warning on stderr and the rest load normally. A missing or unreadable
+    providers dir degrades to [] the same way. This function must never
+    raise for file/dir problems: PROVIDERS is built at import time, and
+    inference_watchdog/build_site/mcp_server all crash before doing
+    anything if the import raises, silently every hour.
+    """
+    configs = []
+    providers_dir = REPO / "providers"
+    try:
+        paths = sorted(providers_dir.glob("*.json"))
+    except OSError as exc:
+        print(f"config: skipping providers dir {providers_dir}: {exc}",
+              file=sys.stderr)
+        return configs
+    if not providers_dir.is_dir():
+        # ENOTDIR/unreadable dirs yield an empty glob on some platforms
+        # instead of raising — warn explicitly so the degradation is visible.
+        print(f"config: skipping providers dir {providers_dir}: "
+              f"not a readable directory", file=sys.stderr)
+        return configs
+    for path in paths:
+        try:
+            config = _validate_and_read(path)
+        except (OSError, ValueError) as exc:
+            print(f"config: skipping providers/{path.name}: {exc}",
+                  file=sys.stderr)
+            continue
+        config["_token"] = _resolve_auth_token(config, path.name)
         configs.append(config)
 
     return sorted(configs, key=lambda c: c.get("display", 0))

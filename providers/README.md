@@ -2,6 +2,10 @@
 
 Each provider is a JSON file. The watchdog loads all `*.json` at startup.
 To add a provider: drop in a new JSON file. To remove: delete the file.
+A file the loader cannot use (invalid JSON, missing required fields, an
+auth method it does not implement) is skipped with a
+`config: skipping providers/<name>.json: <reason>` warning on stderr and
+costs exactly that provider — the rest of the roster still loads.
 
 ## Schema
 
