@@ -12,13 +12,14 @@ import argparse
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
 import alive
 import cooldown
 import diffing
+import probe_select
+import probe_state
 import notify
 import providers
 import state
@@ -28,56 +29,105 @@ from probe_zero_credit import probe_model, Result
 
 DEFAULT_CADENCE_S = 1 * 3600
 
-# Concurrency limit for zero-credit probes to avoid 25-minute sequential execution
-MAX_PROBE_CONCURRENCY = 3
+# Serial probe spacing (seconds) — 6 RPM avoids b.ai's undocumented rate-limit burst-kill.
+PROBE_INTERVAL_S = 10
 PROBE_TIMEOUT_S = 30
 
 
 # ---------- provider plumbing ----------
 
-def build_fetch_all(env):
+def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep):
     """Return fetch_all() -> ({name: ids|None}, {name: meta_dict}).
 
     Failures become None in the results map (sticky) and are ABSENT from the
     meta map. Meta is passive telemetry only (nous x-ratelimit headers, R2-6).
+
+    Zero-credit-probe providers go through a SERIAL throttled probe loop:
+    verdicts persist via probe_state; the queue is probe_select-driven; the
+    roster is verdict-filtered (ONLY FREE-verdict models).
+
+    state_dir: Path to the state directory (probe_state.json lives here).
+    now: epoch value (int/float), or None for time.time().
+    sleep: callable for throttle spacing (inject in tests).
     """
+    state_dir = Path(state_dir) if state_dir else (Path(__file__).resolve().parent / "state")
+    probe_state_path = state_dir / "probe_state.json"
 
     def fetch_all():
+        state = probe_state.load_probe_state(probe_state_path)
+        now_val = now if now is not None else time.time()
         results, metas = {}, {}
+        first_probe = True  # first probe of the tick fires immediately
         for name, config in PROVIDERS.items():
             try:
                 ids, meta = providers.fetch_provider(config)
                 if config.get("detection") == "zero-credit-probe" and ids:
-                    def _probe(model_id):
+                    ids = list(ids)
+                    # Prune vanished models from state
+                    state = probe_state.drop_missing(state, name, ids)
+                    # Select this tick's probe queue
+                    queue = probe_select.select_queue(
+                        ids, state.get(name, {}), int(now_val))
+                    # Serial throttled probe loop
+                    for model_id in queue:
+                        if not first_probe:
+                            sleep(PROBE_INTERVAL_S)
+                        first_probe = False
                         try:
                             result, _ = probe_model(
                                 config["base_url"],
                                 config.get("_token", ""),
                                 model_id,
-                                timeout=PROBE_TIMEOUT_S
+                                timeout=PROBE_TIMEOUT_S,
                             )
-                            return model_id, result
                         except Exception:
-                            return model_id, None  # errors excluded
-                    with ThreadPoolExecutor(max_workers=MAX_PROBE_CONCURRENCY) as pool:
-                        outcomes = list(pool.map(_probe, ids))
-                    free_ids = [mid for mid, result in outcomes if result == Result.FREE]
-                    ids = sorted(free_ids)
+                            result = None  # treated as DEFER
+                        if result == Result.FREE:
+                            entry = {"verdict": "free", "epoch": int(now_val)}
+                        elif result == Result.PAID:
+                            entry = {"verdict": "paid", "epoch": int(now_val)}
+                        else:
+                            # DEFER or exception -> entry untouched
+                            entry = None
+                        if entry is not None:
+                            if not isinstance(state.get(name), dict):
+                                state[name] = {}
+                            state[name][model_id] = entry
+                    # Roster = only FREE-verdict models
+                    ids = sorted(
+                        m for m in ids
+                        if state.get(name, {}).get(m, {}).get("verdict") == "free"
+                    )
                 results[name] = ids
                 metas[name] = meta or {}
             except providers.FetchError:
                 results[name] = None
+        # Persist verdicts + prunes atomically once per tick
+        probe_state.save_probe_state(probe_state_path, state)
         return results, metas
 
     return fetch_all
 
 
-def build_fetch_one(env):
-    """Return fetch_one(name) -> (ids, meta_dict). Raises on failure."""
+def build_fetch_one(env, state_dir=None):
+    """Return fetch_one(name) -> (ids, meta_dict). Raises on failure.
+
+    For zero-credit-probe providers, returns the VERDICT-FILTERED list from
+    persisted probe state (no re-probing). The recheck must not re-fire probes.
+    """
+    state_dir = Path(state_dir) if state_dir else (Path(__file__).resolve().parent / "state")
+    probe_state_path = state_dir / "probe_state.json"
 
     def fetch_one(name):
         config = PROVIDERS[name]
         ids, meta = providers.fetch_provider(config)
+        if config.get("detection") == "zero-credit-probe":
+            # Recheck path: derive from persisted verdicts, do NOT re-probe
+            state = probe_state.load_probe_state(probe_state_path)
+            ids = sorted(
+                m for m in ids
+                if state.get(name, {}).get(m, {}).get("verdict") == "free"
+            )
         return ids, meta or {}
 
     return fetch_one
@@ -299,8 +349,9 @@ def main(argv=None):
         Path(__file__).resolve().parent / "state")
     env = parse_envfile()
     webhook = env.get("DISCORD_WEBHOOK_INFERENCE_WATCHDOG") or None
-    fetch_all = build_fetch_all(env)
-    fetch_one = build_fetch_one(env)
+    fetch_all = build_fetch_all(env, state_dir=state_dir, now=time.time(),
+                                 sleep=time.sleep)
+    fetch_one = build_fetch_one(env, state_dir=state_dir)
 
     if args.init:
         return run_tick(state_dir, PROVIDERS, fetch_all, fetch_one,

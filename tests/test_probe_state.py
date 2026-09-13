@@ -184,3 +184,41 @@ def test_get_verdict_junk_epoch_degrades(tmp_path, junk_epoch):
     verdict, epoch = probe_state.get_verdict(state, "bai", "m")
     assert verdict == "free"
     assert epoch is None
+
+
+def test_save_probe_state_writes_atomically(tmp_path):
+    # save_probe_state persists the full state dict atomically
+    path = tmp_path / "probe_state.json"
+    state = {
+        "bai": {
+            "glm-5.3-flash": {"verdict": "free", "epoch": 1000},
+            "gpt-5.6-sol": {"verdict": "paid", "epoch": 1001},
+        }
+    }
+    probe_state.save_probe_state(path, state)
+    loaded = probe_state.load_probe_state(path)
+    assert loaded == state
+
+
+def test_save_probe_state_no_temp_files_left(tmp_path):
+    # Atomic write must leave no .tmp files behind
+    path = tmp_path / "probe_state.json"
+    probe_state.save_probe_state(path,
+                                {"bai": {"m": {"verdict": "free", "epoch": 1}}})
+    assert path.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_save_probe_state_creates_parent_dirs(tmp_path):
+    # save_probe_state must mkdir -p the parent directory
+    path = tmp_path / "nested" / "dir" / "probe_state.json"
+    probe_state.save_probe_state(path, {})
+    assert path.exists()
+
+
+def test_save_probe_state_non_dict_input_writes_empty(tmp_path):
+    # Non-dict state degrades to {} (never fatal)
+    path = tmp_path / "probe_state.json"
+    probe_state.save_probe_state(path, "junk")
+    loaded = probe_state.load_probe_state(path)
+    assert loaded == {}

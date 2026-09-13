@@ -142,6 +142,15 @@ the repo stays agent-agnostic.
 All per-tick fields are **rebuilt** (never appended to). The only persistent
 counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 
+## State layout (state/, gitignored)
+
+- `roster.json`: providers + tick_epoch + stale_providers + transients + unconfirmed + nous_ratelimit. Never hand-edit — use --init.
+- `alive.json`: last_tick_epoch + last_output_epoch + dropped_alerts_total.
+- `cooldowns.json`: `provider|model|kind` epoch stamps, pruned at persist (12h TTL).
+- `pending_alerts.json`: bounded retry queue (MAX_ATTEMPTS 5 per alert).
+- `probe_state.json`: per-provider probe verdicts (`{provider: {model_id: {"verdict": "free"|"paid", "epoch": int}}}`). Written once per tick after the serial probe loop. Never hand-edit.
+- Lockfile recovery per README (state/monitor.lock; stale >30 min auto-broken).
+
 ## Drop-a-provider / managing providers
 
 Providers are plain JSON config files in `providers/`. The watchdog loads every
@@ -179,8 +188,10 @@ Detection methods (dispatched by string key, so a provider can pick any):
 - `id-suffix` — model id ends with `:free` / `-free`, or contains `free` (TokenRouter).
 - `all-free` — every model in the catalog is treated as free (AMD).
 - `zero-credit-probe` — fire a 1-token completion per model and classify by the
-  response (B.AI). This is slow, so probes run concurrently (3 workers, 30s
-  timeout) and results are deferred rather than blocking a tick.
+  response (B.AI). Probes run **serially with 10s spacing** (6 RPM) to avoid
+  b.ai's undocumented rate limits; verdicts are persisted to `probe_state.json`
+  and the roster is verdict-filtered (ONLY FREE-verdict models). A DEFER never
+  overwrites a prior verdict (sticky roster survives burst 429s).
 
 ### Modules
 
@@ -193,6 +204,12 @@ Detection methods (dispatched by string key, so a provider can pick any):
 - **`probe_zero_credit.py`** — the `zero-credit-probe` backend: fires a
   1-token completion per model and classifies it as `free` / `paid` / `defer`
   based on the HTTP response (a `403` mentioning "deposit" ⇒ paid).
+- **`probe_state.py`** — persisted zero-credit probe verdicts. Atomic write
+  pattern: `load_probe_state`, `record_verdict`, `get_verdict`,
+  `drop_missing`, `save_probe_state`. DEFER never recorded as a verdict.
+- **`probe_select.py`** — pure probe-queue selection: `select_queue(catalog_ids,
+  provider_state, now, stale_hours=24)` returns ordered list [new arrivals →
+  free (every tick) → stale paid (>=24h, oldest first)].
 
 To add a provider, drop in a JSON config (see `providers/README.md`); to change
 a detection strategy, edit the JSON — no Python changes required.

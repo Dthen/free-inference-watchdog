@@ -68,6 +68,18 @@ def record_verdict(path, provider, model_id, verdict, now, defer_epoch=None):
     _atomic_write_json(path, state)
 
 
+def save_probe_state(path, state):
+    """Persist the full probe-state dict atomically.
+
+    Used once per tick to persist verdicts AND prunes together. The
+    in-memory state dict is the single source of truth during the tick;
+    this function writes it atomically at the end.
+    """
+    if not isinstance(state, dict):
+        state = {}
+    _atomic_write_json(path, state)
+
+
 def get_verdict(state, provider, model_id):
     """Return ('free'|'paid'|None, epoch_or_None). None = never probed."""
     if not isinstance(state, dict):
