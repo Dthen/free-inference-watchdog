@@ -144,7 +144,8 @@ def save_alive(path, last_tick_epoch, last_output_epoch, dropped_alerts_total=0)
 
 # ---------- PID lockfile ----------
 
-LOCK_STALE_S = 30 * 60  # 30 min — worst tick is ~5 min, so 30 is generous
+LOCK_STALE_S = 30 * 60  # 30 min — worst tick is bounded by PROBE_PHASE_BUDGET_S
+                          # (900s) + fetches + recheck + margin, well under 1800s
 
 
 def acquire_lock(lock_path, now=None):

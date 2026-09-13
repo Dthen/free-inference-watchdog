@@ -2,14 +2,11 @@
 
 Covers: serial 10s-throttled loop, verdict persistence via
 probe_state.save_probe_state, probe_select-driven queue, verdict-filtered
-roster and fetch_one, prune on tick, burst-kill regression.
+roster and fetch_one, prune on tick, burst-kill regression, dry-run purity,
+junk-safe verdict reads, probe-phase budget cap, no-op save skip.
 """
 
-import json
 import time
-from pathlib import Path
-
-import pytest
 
 import inference_watchdog as im
 import probe_state
@@ -112,18 +109,16 @@ def test_probes_called_serially_with_10s_gaps(monkeypatch, tmp_path):
 
 
 def test_probes_no_overlap(monkeypatch, tmp_path):
-    """Serial loop: no concurrent probe execution."""
-    import threading
-    active = []
-    lock = threading.Lock()
+    """Serial loop: no concurrent probe execution — each probe starts only
+    after the previous finished (strict start/end alternation, max active 1).
+    P3 minor: the old version computed active-count machinery but never
+    asserted it."""
+    events = []
 
     def fake_probe(base_url, token, model_id, timeout=30):
-        with lock:
-            active.append(model_id)
-            current_active = len(active)
+        events.append(("start", model_id))
         time.sleep(0.05)  # simulate work
-        with lock:
-            active.pop()
+        events.append(("end", model_id))
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -135,6 +130,9 @@ def test_probes_no_overlap(monkeypatch, tmp_path):
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
     assert results["bai"] == ["a", "b", "c"]
+    kinds = [e[0] for e in events]
+    assert kinds == ["start", "end"] * 3, \
+        f"probes overlapped or mis-sequenced: {events}"
 
 
 # ---------- verdict-driven roster ----------
@@ -450,3 +448,256 @@ def test_metas_preserved(monkeypatch, tmp_path):
     results, metas = fetch_all_fn()
 
     assert metas["bai"] == {"ratelimit": {"remaining": "10"}}
+
+
+# ---------- dry-run purity (P3 IMPORTANT 1) ----------
+
+
+def test_dry_run_does_not_write_probe_state(monkeypatch, tmp_path):
+    """--dry-run must leave probe_state.json ABSENT on a fresh state-dir."""
+    def fake_probe(base_url, token, model_id, timeout=30):
+        return Result.FREE, {"http": 200}
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(["m1"]))
+
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None, dry_run=True)
+    fetch_all_fn()
+    assert not (tmp_path / "probe_state.json").exists()
+
+
+def test_dry_run_leaves_pre_existing_state_untouched(monkeypatch, tmp_path):
+    """--dry-run must NOT overwrite a pre-existing probe_state.json."""
+    state_path = tmp_path / "probe_state.json"
+    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        return Result.PAID, {"http": 403}
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(["m1"]))
+
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None, dry_run=True)
+    fetch_all_fn()
+
+    # Pre-existing state untouched
+    loaded = probe_state.load_probe_state(state_path)
+    assert loaded == {"bai": {"m1": {"verdict": "free", "epoch": 999_000_000}}}
+
+
+# ---------- junk-safe verdict reads (P3 IMPORTANT 2) ----------
+
+
+def test_junk_provider_degrades_to_empty_roster(monkeypatch, tmp_path):
+    """A junk provider value (non-dict) must NOT crash the tick — roster
+    degrades to [], verdict-recording still works (write path self-heals)."""
+    state_path = tmp_path / "probe_state.json"
+    # Write a junk provider value directly
+    state_path.write_text('{"bai": "junk"}', encoding="utf-8")
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        return Result.FREE, {"http": 200}
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(["m1"]))
+
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+    # Must not crash with AttributeError
+    results, _ = fetch_all_fn()
+    # Degraded roster
+    assert results["bai"] == []
+    # Verdict still recorded (write path self-heals via get_verdict)
+    loaded = probe_state.load_probe_state(state_path)
+    assert loaded.get("bai", {}).get("m1", {}).get("verdict") == "free"
+
+
+def test_junk_model_entry_excluded(monkeypatch, tmp_path):
+    """A junk model entry (non-dict) must NOT crash — excluded from roster
+    when the probe doesn't record a verdict (e.g. DEFER). P3 IMPORTANT 2:
+    get_verdict at the read boundary handles every junk shape."""
+    state_path = tmp_path / "probe_state.json"
+    # m1 is a list (junk), m2 is a valid free entry
+    state_path.write_text(
+        '{"bai": {"m1": [1, 2], "m2": {"verdict": "free", "epoch": 999}}}',
+        encoding="utf-8")
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        # DEFER — entry untouched, junk stays junk -> excluded via get_verdict
+        return Result.DEFER, {"http": 429}
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2"]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(["m1", "m2"]))
+
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+    # Must not crash
+    results, _ = fetch_all_fn()
+    # m2 free, m1 excluded (junk entry untouched by DEFER)
+    assert "m1" not in results["bai"]
+    assert "m2" in results["bai"]
+
+
+# ---------- probe-phase budget cap (P3 IMPORTANT 3) ----------
+
+
+def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
+    """Probe phase is wall-clock bounded — remaining queue items stay
+    unprobed when the budget would be exceeded."""
+    probe_calls = []
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        probe_calls.append(model_id)
+        return Result.FREE, {"http": 200}
+
+    # Inject a clock that advances by 100s per probe to consume the 900s budget
+    clock = {"t": 0}
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
+        [f"m{i}" for i in range(10)]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(
+                            [f"m{i}" for i in range(10)]))
+
+    # Patch time.time in the module to consume budget
+    import inference_watchdog
+    orig_time = inference_watchdog.time.time
+    def advancing_time():
+        val = clock["t"]
+        clock["t"] += 100  # each probe "takes" 100s of budget
+        return val
+    inference_watchdog.time.time = advancing_time
+
+    try:
+        fetch_all_fn = im.build_fetch_all(
+            {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        results, _ = fetch_all_fn()
+    finally:
+        inference_watchdog.time.time = orig_time
+
+    # Budget 900s, 100s per probe. The budget check fires BEFORE each probe
+    # (including the first), so when elapsed >= 900 the probe is skipped.
+    # probe_phase_start captures t=0, then clock advances to 100.
+    # Probe 1: elapsed=100 < 900, fires. ... Probe 8: elapsed=800 < 900, fires.
+    # Probe 9: elapsed=900 >= 900, SKIPPED. So 8 probes fire.
+    assert len(probe_calls) == 8, (
+        f"expected 8 probes (budget), got {len(probe_calls)}: {probe_calls}")
+    assert len(results["bai"]) == 8
+
+
+def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
+                                                      capsys):
+    """When budget truncates, a one-line stderr note names the provider and
+    count skipped."""
+    probe_calls = []
+    clock = {"t": 0}
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        probe_calls.append(model_id)
+        return Result.FREE, {"http": 200}
+
+    import inference_watchdog
+    orig_time = inference_watchdog.time.time
+    def advancing_time():
+        val = clock["t"]
+        clock["t"] += 500  # each probe "takes" 500s of budget
+        return val
+    inference_watchdog.time.time = advancing_time
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
+        [f"m{i}" for i in range(5)]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(
+                            [f"m{i}" for i in range(5)]))
+
+    try:
+        fetch_all_fn = im.build_fetch_all(
+            {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        fetch_all_fn()
+    finally:
+        inference_watchdog.time.time = orig_time
+
+    # 500s per probe: probe 1 at elapsed=500 < 900 fires, probe 2 at
+    # elapsed=1000 >= 900 skipped (4 remaining).
+    assert len(probe_calls) == 1
+    err = capsys.readouterr().err
+    assert "bai" in err
+    assert "4 remaining" in err
+
+
+# ---------- save skip when unchanged (P3 MINOR 8) ----------
+
+
+def test_save_skip_when_unchanged(monkeypatch, tmp_path):
+    """When the in-memory final state is byte-identical to what was loaded,
+    the save must be skipped (no redundant atomic write)."""
+    state_path = tmp_path / "probe_state.json"
+    # Pre-seed with m1 free at 999_000_000
+    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
+
+    write_count = {"n": 0}
+    orig_save = probe_state.save_probe_state
+
+    def counting_save(path, data):
+        write_count["n"] += 1
+        return orig_save(path, data)
+
+    monkeypatch.setattr(probe_state, "save_probe_state", counting_save)
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        # Returns FREE with same epoch — verdict entry unchanged
+        return Result.FREE, {"http": 200}
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(["m1"]))
+
+    # now matches the seeded epoch exactly so entry is byte-identical
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=999_000_000, sleep=lambda s: None)
+    fetch_all_fn()
+
+    # When state is unchanged, save_probe_state should not be called
+    assert write_count["n"] == 0, (
+        f"save called {write_count['n']} times when state unchanged")
+
+
+# ---------- empty catalog skips drop_missing (P3 MINOR 7) ----------
+
+
+def test_empty_catalog_skips_drop_missing(monkeypatch, tmp_path):
+    """Empty catalog: drop_missing must NOT prune (treat as anomalous fetch).
+    P3 minor: explicit assertion of the documented guard."""
+    state_path = tmp_path / "probe_state.json"
+    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
+
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers([]))
+
+    def fake_fetch_provider(config, getter=None):
+        if config.get("detection") == "zero-credit-probe":
+            return [], {}  # empty catalog (anomalous)
+        return [], {}
+
+    monkeypatch.setattr(providers, "fetch_provider", fake_fetch_provider)
+
+    fetch_all_fn = im.build_fetch_all(
+        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+    results, _ = fetch_all_fn()
+
+    # roster is [] for this provider, state NOT pruned
+    loaded = probe_state.load_probe_state(state_path)
+    assert "m1" in loaded.get("bai", {}), (
+        "empty catalog must NOT trigger drop_missing pruning")

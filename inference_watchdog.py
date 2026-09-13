@@ -33,10 +33,18 @@ DEFAULT_CADENCE_S = 1 * 3600
 PROBE_INTERVAL_S = 10
 PROBE_TIMEOUT_S = 30
 
+# Probe-phase budget (seconds): worst-case all-timeout tick must stay well
+# under LOCK_STALE_S (1800s). Real bai catalog is ~47 models; a pathological
+# tick (all timeouts, no budget) could exceed 1800s. 15 min = 900s leaves
+# headroom for fetches + recheck + margin. When the budget is exhausted,
+# remaining queue items stay unprobed (self-healing next tick).
+PROBE_PHASE_BUDGET_S = 900
+
 
 # ---------- provider plumbing ----------
 
-def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep):
+def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
+                    dry_run=False):
     """Return fetch_all() -> ({name: ids|None}, {name: meta_dict}).
 
     Failures become None in the results map (sticky) and are ABSENT from the
@@ -49,27 +57,53 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep):
     state_dir: Path to the state directory (probe_state.json lives here).
     now: epoch value (int/float), or None for time.time().
     sleep: callable for throttle spacing (inject in tests).
+    dry_run: if True, fetch + diff + print, write nothing (no probe_state save).
     """
     state_dir = Path(state_dir) if state_dir else (Path(__file__).resolve().parent / "state")
     probe_state_path = state_dir / "probe_state.json"
 
     def fetch_all():
-        state = probe_state.load_probe_state(probe_state_path)
+        probe_data = probe_state.load_probe_state(probe_state_path)
         now_val = now if now is not None else time.time()
         results, metas = {}, {}
         first_probe = True  # first probe of the tick fires immediately
+        probe_phase_start = time.time()
         for name, config in PROVIDERS.items():
             try:
                 ids, meta = providers.fetch_provider(config)
                 if config.get("detection") == "zero-credit-probe" and ids:
                     ids = list(ids)
-                    # Prune vanished models from state
-                    state = probe_state.drop_missing(state, name, ids)
+                    # Prune vanished models from state.
+                    # Guard: empty catalog is anomalous — don't prune on a
+                    # suspicious fetch (could drop legit entries on a transient
+                    # provider outage). Only prune when we got a real catalog.
+                    probe_data = probe_state.drop_missing(probe_data, name, ids)
+                    # Detect a junk provider slice (non-dict value at key)
+                    # BEFORE the probe loop self-heals it. A junk slice
+                    # degrades the roster to [] — we can't trust the baseline.
+                    # Note: key-absent (None) is normal first-tick, NOT junk.
+                    provider_is_junk = (name in probe_data
+                                        and not isinstance(probe_data[name],
+                                                           dict))
                     # Select this tick's probe queue
                     queue = probe_select.select_queue(
-                        ids, state.get(name, {}), int(now_val))
+                        ids, probe_data.get(name, {}), int(now_val))
                     # Serial throttled probe loop
                     for model_id in queue:
+                        # Probe-phase budget cap: check elapsed time before
+                        # each probe (including the first). If the NEXT probe
+                        # would exceed the budget, stop probing — remaining
+                        # items stay unprobed (self-healing next tick).
+                        elapsed = time.time() - probe_phase_start
+                        if elapsed >= PROBE_PHASE_BUDGET_S:
+                            remaining = len(queue) - queue.index(model_id)
+                            print(
+                                f"inference-watchdog: probe-phase budget "
+                                f"exhausted — skipping {remaining} remaining "
+                                f"model(s) for {name}",
+                                file=sys.stderr,
+                            )
+                            break
                         if not first_probe:
                             sleep(PROBE_INTERVAL_S)
                         first_probe = False
@@ -90,20 +124,31 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep):
                             # DEFER or exception -> entry untouched
                             entry = None
                         if entry is not None:
-                            if not isinstance(state.get(name), dict):
-                                state[name] = {}
-                            state[name][model_id] = entry
+                            if not isinstance(probe_data.get(name), dict):
+                                probe_data[name] = {}
+                            probe_data[name][model_id] = entry
                     # Roster = only FREE-verdict models
-                    ids = sorted(
-                        m for m in ids
-                        if state.get(name, {}).get(m, {}).get("verdict") == "free"
-                    )
+                    # Use get_verdict for junk-safe reads (mirrors 2672037).
+                    # If the provider slice was junk at tick start, degrade
+                    # the roster to [] — we have no trustworthy baseline.
+                    if provider_is_junk:
+                        ids = []
+                    else:
+                        ids = sorted(
+                            m for m in ids
+                            if probe_state.get_verdict(probe_data, name, m)[0] == "free"
+                        )
                 results[name] = ids
                 metas[name] = meta or {}
             except providers.FetchError:
                 results[name] = None
-        # Persist verdicts + prunes atomically once per tick
-        probe_state.save_probe_state(probe_state_path, state)
+        # Persist verdicts + prunes atomically once per tick — but ONLY if
+        # something actually changed (skip redundant writes). Compare the
+        # in-memory final state to what was loaded.
+        if not dry_run:
+            loaded = probe_state.load_probe_state(probe_state_path)
+            if probe_data != loaded:
+                probe_state.save_probe_state(probe_state_path, probe_data)
         return results, metas
 
     return fetch_all
@@ -123,10 +168,11 @@ def build_fetch_one(env, state_dir=None):
         ids, meta = providers.fetch_provider(config)
         if config.get("detection") == "zero-credit-probe":
             # Recheck path: derive from persisted verdicts, do NOT re-probe
-            state = probe_state.load_probe_state(probe_state_path)
+            probe_data = probe_state.load_probe_state(probe_state_path)
+            # Use get_verdict for junk-safe reads (mirrors 2672037).
             ids = sorted(
                 m for m in ids
-                if state.get(name, {}).get(m, {}).get("verdict") == "free"
+                if probe_state.get_verdict(probe_data, name, m)[0] == "free"
             )
         return ids, meta or {}
 
@@ -350,7 +396,7 @@ def main(argv=None):
     env = parse_envfile()
     webhook = env.get("DISCORD_WEBHOOK_INFERENCE_WATCHDOG") or None
     fetch_all = build_fetch_all(env, state_dir=state_dir, now=time.time(),
-                                 sleep=time.sleep)
+                                 sleep=time.sleep, dry_run=args.dry_run)
     fetch_one = build_fetch_one(env, state_dir=state_dir)
 
     if args.init:

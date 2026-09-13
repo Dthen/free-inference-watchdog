@@ -149,7 +149,7 @@ counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 - `cooldowns.json`: `provider|model|kind` epoch stamps, pruned at persist (12h TTL).
 - `pending_alerts.json`: bounded retry queue (MAX_ATTEMPTS 5 per alert).
 - `probe_state.json`: per-provider probe verdicts (`{provider: {model_id: {"verdict": "free"|"paid", "epoch": int}}}`). Written once per tick after the serial probe loop. Never hand-edit.
-- Lockfile recovery per README (state/monitor.lock; stale >30 min auto-broken).
+- `state/monitor.lock`: PID lockfile; stale locks (>30 min old) are auto-broken on the next invocation (crash recovery).
 
 ## Drop-a-provider / managing providers
 
