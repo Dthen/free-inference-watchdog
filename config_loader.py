@@ -197,6 +197,7 @@ def load_configs():
             print(f"config: skipping providers/{path.name}: {exc}",
                   file=sys.stderr)
             continue
+        config["_stem"] = path.stem
         config["_token"] = _resolve_auth_token(config, path.name)
         configs.append(config)
 
@@ -205,27 +206,29 @@ def load_configs():
 
 # ---------- provider key mapping ----------
 
-_PROVIDER_KEY_MAP = {
-    "Nous Portal": "nous",
-    "TokenRouter": "tokenrouter",
-    "Kilo Gateway": "kilo",
-    "OpenRouter": "openrouter",
-    "AMD Radeon": "amd",
-    "B.AI": "bai",
-    # NVIDIA NIM's name would fall back to "nvidia_nim"; the roster key the
-    # operator's tooling expects is exactly "nim".
-    "NVIDIA NIM": "nim",
-}
-
-
 def _provider_key(config):
-    """Map a config to its canonical provider key."""
-    return _PROVIDER_KEY_MAP.get(config["name"], config["name"].lower().replace(" ", "_"))
+    """Canonical provider key: the explicit "roster_key" field, else the
+    config file's stem (nim.json -> nim — the load-time convention), else
+    the slugified name (defensive: only hand-built dicts skip
+    load_configs)."""
+    return (config.get("roster_key")
+            or config.get("_stem")
+            or config["name"].lower().replace(" ", "_"))
 
 
 def build_providers():
-    """Build PROVIDERS dict mapping provider key -> config dict."""
-    return {_provider_key(cfg): cfg for cfg in load_configs()}
+    """Build PROVIDERS dict mapping provider key -> config dict.
+    A duplicate key (two files resolving to one key, e.g. an explicit
+    "roster_key" matching another stem) is a config bug: warn, later wins."""
+    providers = {}
+    for cfg in load_configs():
+        key = _provider_key(cfg)
+        if key in providers:
+            print(f"config: duplicate provider key {key!r} "
+                  f"({providers[key].get('name')!r} and {cfg.get('name')!r}) "
+                  f"- later display-order file wins", file=sys.stderr)
+        providers[key] = cfg
+    return providers
 
 
 def build_gateway_wiring():

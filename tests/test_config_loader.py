@@ -455,6 +455,53 @@ def test_roster_key_field_must_be_nonempty_string(tmp_path, monkeypatch, capsys,
     assert "roster_key must be a non-empty string" in capsys.readouterr().err
 
 
+def test_provider_key_falls_back_to_file_stem(tmp_path, monkeypatch):
+    """A multi-word name needs NO map entry: the config FILE STEM is the
+    roster key (nvidia-nim.json -> "nvidia-nim"), not the slugified name."""
+    providers_dir = tmp_path / "providers"; providers_dir.mkdir()
+    cfg = {"name": "NVIDIA NIM", "base_url": "https://x.com/v1",
+           "detection": "all-free", "auth": {"method": "none"}, "display": 0}
+    (providers_dir / "nvidia-nim.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert "nvidia-nim" in config_loader.build_providers()
+
+
+def test_roster_key_overrides_stem(tmp_path, monkeypatch):
+    cfg = {"name": "NVIDIA NIM", "base_url": "https://x.com/v1",
+           "detection": "all-free", "auth": {"method": "none"}, "display": 0,
+           "roster_key": "nim"}
+    providers_dir = tmp_path / "providers"; providers_dir.mkdir()
+    (providers_dir / "nvidia-nim.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert set(config_loader.build_providers()) == {"nim"}
+
+
+def test_roster_key_used_verbatim(tmp_path, monkeypatch):
+    """An explicit roster_key is used VERBATIM as the roster key — including
+    odd-but-valid characters (interior space). Operator's explicit override;
+    no normalization is applied (A1 rejects blank/non-string, that's all)."""
+    providers_dir = tmp_path / "providers"; providers_dir.mkdir()
+    cfg = {"name": "Weird Name", "base_url": "https://x.com/v1",
+           "detection": "all-free", "auth": {"method": "none"}, "display": 0,
+           "roster_key": "my key"}
+    (providers_dir / "weird.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert set(config_loader.build_providers()) == {"my key"}
+
+
+def test_duplicate_provider_keys_warn(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "providers"; d.mkdir()
+    base = {"base_url": "https://x.com/v1", "detection": "all-free",
+            "auth": {"method": "none"}}
+    (d / "a.json").write_text(json.dumps({**base, "name": "A", "display": 0}))
+    (d / "b.json").write_text(json.dumps({**base, "name": "B", "display": 1,
+                                          "roster_key": "a"}))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    providers = config_loader.build_providers()
+    assert set(providers) == {"a"} and providers["a"]["name"] == "B"
+    assert "duplicate provider key" in capsys.readouterr().err
+
+
 def test_env_example_documents_path_pointer_not_token_copy():
     """.env.example must document NOUS_AUTH_FILE (path pointer) and must not
     solicit a literal NOUS_ACCESS_TOKEN."""
@@ -593,13 +640,11 @@ def test_load_configs_token_file_oserror_degrades_not_crashes(tmp_path, monkeypa
 # ---------- NVIDIA NIM gateway (all-free, Sept-9 refresh spec plan gap) ----------
 
 
-def test_provider_key_derives_nim_from_name():
-    """The provider key for NIM MUST be exactly 'nim' (operator tooling keys
-    on nim). The fallback derivation (lowercase, spaces -> '_') would land
-    'NVIDIA NIM' as nvidia_nim, so the explicit _PROVIDER_KEY_MAP entry is
-    the mechanism that yields nim — pinned via _provider_key so neither the
-    map nor the name can drift without a red test."""
-    assert config_loader._provider_key({"name": "NVIDIA NIM"}) == "nim"
+def test_provider_key_map_deleted_stem_is_the_convention():
+    """The name->key _PROVIDER_KEY_MAP is deleted by design: file stems ARE
+    the roster keys (nim.json -> nim), with roster_key as the explicit
+    override. No map means no code edit when a gateway is added."""
+    assert not hasattr(config_loader, "_PROVIDER_KEY_MAP")
 
 
 def test_real_configs_include_nim_last_display():
