@@ -341,6 +341,8 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         # normal-tick partial-failure code (stale non-empty ⇒ 1).
         return 1 if stale else 0
 
+    # No candidates this tick => nothing confirmed (empty-diff path).
+    confirmed = {}
     if events:
         confirmation = diffing.confirm_diffs(
             candidates=events, prev_providers=prev_providers,
@@ -353,10 +355,6 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         # refetch becomes the persisted truth, unconfirmed keeps sticky-old.
         new_map = diffing.merge_corrected(new_map, confirmation, prev_providers)
 
-        survivors = confirmed
-    else:
-        survivors = {}
-
     # Crash-safe write order (R2-9): roster FIRST, then alert enqueue/send
     # (pending_alerts.json inside notify). A crash may delay a retry but
     # never silently swallows an alert.
@@ -366,10 +364,10 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
     if webhook_url and not dry_run:
         notify.drain_pending(webhook_url, paths["pending"])
 
-    if any(s["added"] or s["removed"] for s in survivors.values()):
+    if any(s["added"] or s["removed"] for s in confirmed.values()):
         tick_iso = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M")
         msg = notify.format_alert(
-            survivors, tick_iso=tick_iso, providers_polled=len(registry),
+            confirmed, tick_iso=tick_iso, providers_polled=len(registry),
             transients=transients, stale=stale,
             dropped_total=notify.get_dropped_total())
         _emit(msg, webhook_url, paths["pending"], dry_run)

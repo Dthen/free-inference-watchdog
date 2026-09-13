@@ -153,7 +153,7 @@ def test_structurally_empty_roster_boots_clean_no_add_storm(tmp_path, capsys):
     assert roster["providers"]["nous"] == ["a"]
 
 
-def test_confirmed_removal_alerts_once(tmp_path, capsys):
+def test_confirmed_removal_alerts(tmp_path, capsys):
     _run(tmp_path, [{"nous": ["a", "b"]}])                       # baseline
     code, _ = _run(tmp_path, [{"nous": ["a"]}],                  # b disappears
                    now=1_000_000_000 + 1 * 3600)
