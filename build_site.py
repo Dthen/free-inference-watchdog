@@ -486,7 +486,7 @@ def render_page(roster, logo_b64, header_meta=None):
   /* Text columns use minmax(0,1fr): a bare 1fr track can't shrink below its
      content, so long chat-completions URLs overflowed the cell (operator
      report 2026-09-13). Every span also breaks long words. */
-  tbody tr.expand .wire {{ display:grid; grid-template-columns: 92px minmax(0,1fr) minmax(0,1fr) 92px; gap:6px 14px; font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--nord4); }}
+  tbody tr.expand .wire {{ display:grid; grid-template-columns: 92px minmax(0,1fr) minmax(0,1fr) 128px; gap:6px 14px; font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--nord4); }}
   tbody tr.expand .wire-gw {{ color:var(--nord9); font-weight:600; overflow-wrap:anywhere; }}
   tbody tr.expand .wire-id {{ color:var(--nord6); overflow-wrap:anywhere; }}
   tbody tr.expand .wire-url {{ color:var(--nord8); word-break:break-all; }}
