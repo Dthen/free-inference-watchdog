@@ -114,9 +114,9 @@ def save_alive(path, last_tick_epoch, last_output_epoch, dropped_alerts_total=0)
 
 # ---------- PID lockfile ----------
 
-LOCK_STALE_S = 30 * 60  # 30 min — full-tick worst case: ~294s to the
+LOCK_STALE_S = 30 * 60  # 30 min — full-tick worst case: ~295s to the
                           # probe_state persist point (260s budget with
-                          # fetches INSIDE it, + ~34s last-probe overshoot)
+                          # fetches INSIDE it, + ~35s last-probe overshoot)
                           # + 180s recheck nap + re-fetches ≈ 9 min, well
                           # under 1800s. The lock window is the OUTER bound;
                           # the runner's kill (300s, restored 2026-09-13)

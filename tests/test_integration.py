@@ -464,7 +464,7 @@ def test_no_alive_ping_when_diff_emitted(tmp_path):
 
 
 def test_zero_credit_probe_serial_throttle(monkeypatch, tmp_path, capsys):
-    """P3: probes run serially with 4s spacing, not concurrently.
+    """P3: probes run serially with 5s spacing, not concurrently.
     Verifies burst-kill regression is fixed — no ThreadPoolExecutor."""
     import inference_watchdog as im
     from probe_zero_credit import Result
@@ -517,7 +517,7 @@ def test_zero_credit_probe_serial_throttle(monkeypatch, tmp_path, capsys):
 
     # 5 models: 4 sleeps between them (first fires immediately)
     assert len(sleep_log) == 4
-    assert all(s == 4 for s in sleep_log)
+    assert all(s == 5 for s in sleep_log)
 
     # State persisted
     state = im.probe_state.load_probe_state(tmp_path / "probe_state.json")

@@ -186,25 +186,29 @@ Detection methods (dispatched by string key, so a provider can pick any):
 - `id-suffix` — model id ends with `:free` / `-free`, or contains `free` (TokenRouter).
 - `all-free` — every model in the catalog is treated as free (AMD).
 - `zero-credit-probe` — fire a 1-token completion per model and classify by the
-  response (B.AI). Probes run **serially with 4s spacing** (15 RPM) to stay
-  under b.ai's undocumented rate limits; verdicts are persisted to
+  response (B.AI). Probes run **serially with 5s spacing** (12 RPM) to stay
+  under b.ai's undocumented rate limits (operator pacing choice
+  2026-09-13); verdicts are persisted to
   `probe_state.json` and the roster is verdict-filtered (ONLY FREE-verdict
   models). A DEFER never overwrites a prior verdict (sticky roster survives
   burst 429s). The probe phase is capped at 260s
   (`PROBE_PHASE_BUDGET_S`). The budget clock starts at the top of
   `fetch_all()`, so catalog fetches run INSIDE the 260s; worst case to the
-  `save_probe_state` persist point is ~294s (the last probe can start at
-  259.9s and overshoot by sleep(4) + 30s timeout). The cron runner SIGKILLs
+  `save_probe_state` persist point is ~295s (the last probe can start at
+  259.9s and overshoot by sleep(5) + 30s timeout). The cron runner SIGKILLs
   the wrapper at 300s (briefly raised to 1800s on 2026-09-13, then restored
-  to 300s the same day). 4s spacing + 260s is tuned so the FULL 47-model
-  b.ai re-probe pass clears in ONE tick: 46×4s sleeps + 47 fast probes ≈
-  200-230s inside the 260s budget, and even the pathological overshoot
-  (~294s) lands the spiral-critical persist under the 300s kill. The full
+  to 300s the same day). One tick carries ~45 of 47 models at 5s operator
+  pacing (46×5s sleeps + 47×~1s probes ≈ 280s exceeds the 260s budget);
+  the short tail self-heals next tick via `probe_state.json` persistence
+  (the deferred models re-queue as tier-1 arrivals). Even the pathological
+  overshoot (~295s) lands the spiral-critical persist under the 300s kill.
+  The full
   tick (persist + the unconditional 180s recheck nap) can exceed 300s — the
   invariant is that the persist precedes any kill: a kill during the
   recheck costs that tick's roster write (roster lags one tick), never
-  probe progress. A truncated pass (only if every probe burns its full 30s
-  timeout) persists its probed subset and the next tick resumes
+  probe progress. A truncated pass (the normal every-tick tail at 5s
+  pacing, or deeper if probes burn their 30s
+  timeouts) persists its probed subset and the next tick resumes
   (self-healing).
 
 ### Modules

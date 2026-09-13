@@ -28,13 +28,21 @@ from probe_zero_credit import probe_model, Result
 
 DEFAULT_CADENCE_S = 1 * 3600
 
-# Serial probe spacing (seconds) — 15 RPM. 10s (6 RPM) was a conservative
-# guess at b.ai's undocumented rate limit; 4s was chosen (operator decision
-# 2026-09-13) so the full 47-model re-probe pass fits PROBE_PHASE_BUDGET_S
-# in one tick. If b.ai does burst-kill at this rate, probes return DEFER and
-# the sticky-roster rule (a DEFER never overwrites a prior verdict) contains
-# the damage — do NOT go faster without watching a tick's DEFER pattern.
-PROBE_INTERVAL_S = 4
+# Serial probe spacing (seconds) — 12 RPM. History: 10s (6 RPM) was a
+# conservative guess at b.ai's undocumented rate limit; 4s (operator
+# decision 2026-09-13, morning) made the full 47-model re-probe pass fit
+# PROBE_PHASE_BUDGET_S in one tick; the operator then chose 5s pacing twice
+# ("Idk maybe 5s", "I did say 5") — rate-limit gentleness over one-tick
+# completion. Consequence, accepted knowingly: at 5s a full 47-model pass
+# costs 44×(5+~1) ≈ 280s realistic and EXCEEDS the 260s budget, so the
+# last few models are skipped each pass and resume the next tick as tier-1
+# queue items (no verdict yet) via probe_state persistence — the same
+# self-healing mechanism every truncation uses. The ONE-TICK-FULL-PASS
+# guarantee is superseded by this pacing choice; do NOT go faster (below
+# 5s) without the operator's say-so, and if b.ai burst-kills at this rate,
+# probes return DEFER and the sticky-roster rule (a DEFER never overwrites
+# a prior verdict) contains the damage — watch a tick's DEFER pattern.
+PROBE_INTERVAL_S = 5
 PROBE_TIMEOUT_S = 30
 
 # Probe-phase budget (seconds). The budget clock starts at the TOP of
@@ -42,20 +50,24 @@ PROBE_TIMEOUT_S = 30
 # serial catalog fetches (15s timeout each, providers.TIMEOUT_S) run INSIDE
 # the 260s, so do NOT add ~30s of fetches on top (that double-counts). The
 # check is "elapsed >= budget" before each probe, so the last probe can
-# start at 259.9s and run sleep(4) + 30s probe timeout ≈ 34s past it:
-# worst case ~294s from fetch_all() start to save_probe_state — the PERSIST
-# point.
+# start at 259.9s and run sleep(5) + 30s probe timeout ≈ 35s past it:
+# worst case ~295s from fetch_all() start to save_probe_state — the
+# PERSIST point.
 #
 # Why 260: the Hermes cron runner SIGKILLs the wrapper at 300s (the window
 # was briefly raised to 1800s on 2026-09-13 after the 07:17 tick ran 428s,
-# then RESTORED to 300s the same day — commit a8b61e9). The operator wants
-# the FULL 47-model b.ai pass in a single tick: at 10s spacing that pass
-# needs 46×10=460s of sleeps alone and could never fit, so spacing dropped
-# to 4s (see PROBE_INTERVAL_S) and the budget rose 240→260. Realistic pass
-# cost is 46×4s sleeps + 47×(sub-second probe) ≈ 200-230s — under 260 —
-# and the ~294s worst-case persist point stays under the restored 300s
-# kill with margin. That overshoot math is why 260 is the ceiling, not a
-# comfort number: budget + sleep(4) + PROBE_TIMEOUT_S must stay < 300.
+# then RESTORED to 300s the same day — commit a8b61e9). History of the
+# spacing/budget pair: originally 240s with 10s spacing, where a full
+# 47-model pass needed 46×10=460s of sleeps alone and could NEVER fit one
+# tick; the budget rose 240→260 when spacing dropped to 4s so the pass
+# nearly fit (46×4 + 47 fast probes ≈ 200-230s). The operator has since
+# set spacing to 5s (pacing choice, see PROBE_INTERVAL_S), so the pass
+# takes ~280s realistic and only NEARLY fits one tick now: the budget cuts
+# the last few models each pass and they resume next tick via probe_state
+# persistence. And the ~295s worst-case persist point stays under the
+# restored 300s kill with margin. That overshoot math is why 260 is the
+# ceiling, not a comfort number: budget + sleep(5) + PROBE_TIMEOUT_S must
+# stay < 300.
 #
 # The invariant is "save_probe_state precedes the kill": probe progress
 # always persists; a kill during confirm_diffs' unconditional 180s recheck
@@ -66,10 +78,11 @@ PROBE_TIMEOUT_S = 30
 # is unaffected. When the budget is exhausted, remaining queue items
 # stay unprobed but the probed subset still persists (save_probe_state
 # runs at the end of build_fetch_all) — the next tick resumes from
-# cached verdicts (self-healing, no death spiral). Only a pathological
-# tick — every probe burning its full 30s timeout — truncates a 47-model
-# pass below 260s; that spread across 2-3 hourly ticks is the designed
-# fallback, oldest-first priority preserved.
+# cached verdicts (self-healing, no death spiral). At the operator's 5s
+# pacing a tail cut is the NORMAL every-pass outcome (~4 models deferred,
+# ~43+ carried), not pathological; only a tick where every probe burns its
+# full 30s timeout cuts deep. Either way the spread across hourly ticks is
+# the designed fallback, oldest-first priority preserved.
 PROBE_PHASE_BUDGET_S = 260
 
 
