@@ -238,10 +238,9 @@ Black-box gateways with no free-tier metadata get probed, not parsed. The
 `zero-credit-probe` bullet above and the `probe_*.py` docstrings carry the
 rationale; this is the operator cheat-sheet.
 
-- **State file** — `state/probe_state.json`:
-  `{provider: {model_id: {"verdict": "free"|"paid", "epoch": int}}}` (plus an
-  optional `defer_epoch`). Corrupt/missing reads as `{}`; written atomically
-  (temp file + `os.replace`).
+- **State file** — `state/probe_state.json`; schema as in the State layout
+  above (verdict + epoch per model, optional `defer_epoch`); corrupt/missing
+  reads as `{}`, written atomically (temp file + `os.replace`).
 - **Verdicts** — HTTP 200 ⇒ `free`. `403` whose body mentions "deposit", or
   `400` carrying an insufficient-balance/quota marker ⇒ `paid`. Everything
   else — `429`, 404, 5xx, an unmarked `400`, network errors — ⇒ `DEFER`: no
@@ -260,7 +259,8 @@ rationale; this is the operator cheat-sheet.
   verdict-filtered roster is returned. `save_probe_state` persists verdicts
   and catalog prunes once per tick, before the unconditional 180s recheck
   nap — the invariant is "persist precedes the 300s cron kill", so a crash
-  costs at most one roster write, never probe progress.
+  costs at most one roster write, never probe progress. Note: `--dry-run`
+  skips this persist too (probe verdicts from a dry run are not saved).
 
 ## Cadence change
 

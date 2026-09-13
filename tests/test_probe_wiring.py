@@ -695,7 +695,7 @@ def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
 
     Realistic pacing: the injected sleep advances the same fake clock the
     budget check reads, and each probe "takes" 1s of wall time (b.ai
-    answers a 1-token completion well under 30s). NOTE the exact fired
+    answers a minimal 3-token completion well under 30s). NOTE the exact fired
     count is budget-dependent, not tail-identity-dependent: the fired
     count is pure loop arithmetic, fixed whatever the queue order —
     only WHICH models form the tail moves with ordering (with the
