@@ -89,8 +89,7 @@ any host.
 | Variable | Required | Purpose |
 |---|---|---|
 | `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | yes (for alerts) | Kennel/alerts channel webhook — the only delivery path. |
-| `NOUS_ACCESS_TOKEN` | yes (for Nous) | Nous Portal auth token (see [Nous auth](#nous-auth)). |
-| `TOKENROUTER_API_KEY` | no | TokenRouter fetcher — endpoint serves its roster keyless; a key buys higher limits. |
+| `NOUS_AUTH_FILE` | yes (for Nous) | Path to the auth JSON file Hermes refreshes; `providers.nous.access_token` is read from it at tick time (see [Nous auth](#nous-auth)). |
 | `KILOCODE_API_KEY` | no | Kilo fetcher — endpoint also serves its roster keyless; a key buys authenticated/higher-limit access. |
 | `AMD_API_KEY` | no | AMD Radeon gateway auth. |
 | `BAI_API_KEY` | no | B.AI gateway auth — required for the `zero-credit-probe` detection method. |
@@ -112,20 +111,22 @@ The queue auto-drains on the next successful tick.
 
 ### Nous auth
 
-Nous auth is configured via the `NOUS_ACCESS_TOKEN` environment variable
-(single-line token). The provider config can alternatively point at a **token
-file** via the `auth` object (`method: token_file` with a `path` — a JSON
-object from which a dot-separated `key` is resolved). Set whichever matches
-your deployment:
+Nous auth is a **path pointer, never a token copy**. The watchdog reads the
+token from a JSON file at tick time — the file Hermes keeps refreshed — so the
+token is always fresh and never stale-copied into this repo. Set the env var
+`NOUS_AUTH_FILE` to the path of that file (default the standard Hermes
+location), and the committed `providers/nous.json` resolves
+`providers.nous.access_token` from it:
 
 ```bash
 # in .env
-NOUS_ACCESS_TOKEN=<your nous token>
+NOUS_AUTH_FILE=~/.hermes/auth.json
 ```
 
-The monitor reads it at tick time, so a mid-token expiry just looks like a
+The pointer is read at tick time, so a mid-token expiry just looks like a
 provider failure (sticky carry-forward) — the next tick picks up the fresh
-token naturally.
+token naturally. A different deployment points `NOUS_AUTH_FILE` elsewhere and
+the repo stays agent-agnostic.
 
 ## Roster.json fields
 
@@ -166,6 +167,9 @@ loader validates at startup:
 | `detection` | Which free-model detection method to apply |
 | `auth.method` | `env_var`, `token_file`, or `none` |
 | `auth.env_key` | Env var name (when `auth.method` is `env_var`) |
+| `auth.path_env` | Env var holding a path to a JSON token file (when `auth.method` is `token_file`; takes precedence over `auth.path`) |
+| `auth.path` | Literal path to a JSON token file (legacy `token_file` alternative to `path_env`) |
+| `auth.key` | Dot-separated JSON path to the token inside the file (e.g. `providers.nous.access_token`) |
 | `display` | Column order (0 = first) |
 
 Detection methods (dispatched by string key, so a provider can pick any):

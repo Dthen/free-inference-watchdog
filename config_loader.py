@@ -3,6 +3,25 @@ import json
 import os
 from pathlib import Path
 
+def _lookup_env(key):
+    """Resolve an env var for auth: os.environ first, then the project-local
+    .env (same source the webhook uses).
+
+    The cron wrapper never sources .env into the process environment — it
+    stays a file read at tick time so the repo is agent-agnostic — so a
+    value that lives only in .env must still be resolvable here. REPO is read
+    at call time (tests point it at a tmp dir).
+    """
+    value = os.environ.get(key, "")
+    if value:
+        return value
+    try:
+        from envfile import parse_envfile
+        return parse_envfile(REPO / ".env").get(key, "")
+    except Exception:
+        return ""  # unreadable .env -> no fallback value; caller decides
+
+
 REPO = Path(__file__).resolve().parent
 
 
@@ -42,7 +61,16 @@ def load_configs():
                 raise ValueError(f"Config {path.name}: env_var auth requires env_key field")
             token = os.environ.get(env_key, "")
         elif method == "token_file":
-            token_path = os.path.expanduser(auth.get("path", ""))
+            path_env = auth.get("path_env")
+            if path_env:
+                token_path_raw = _lookup_env(path_env)
+                if not token_path_raw:
+                    raise ValueError(
+                        f"Config {path.name}: token_file auth requires env var "
+                        f"{path_env} to be set")
+            else:
+                token_path_raw = auth.get("path", "")
+            token_path = os.path.expanduser(token_path_raw)
             try:
                 with open(token_path, encoding="utf-8") as f:
                     token_data = json.load(f)
