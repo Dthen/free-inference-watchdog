@@ -188,21 +188,26 @@ Detection methods (dispatched by string key, so a provider can pick any):
 - `id-suffix` — model id ends with `:free` / `-free`, or contains `free` (TokenRouter).
 - `all-free` — every model in the catalog is treated as free (AMD).
 - `zero-credit-probe` — fire a 1-token completion per model and classify by the
-  response (B.AI). Probes run **serially with 10s spacing** (6 RPM) to avoid
-  b.ai's undocumented rate limits; verdicts are persisted to `probe_state.json`
-  and the roster is verdict-filtered (ONLY FREE-verdict models). A DEFER never
-  overwrites a prior verdict (sticky roster survives burst 429s). The probe
-  phase is capped at 240s (`PROBE_PHASE_BUDGET_S`). The budget clock starts at
-  the top of `fetch_all()`, so catalog fetches run INSIDE the 240s; worst case
-  to the `save_probe_state` persist point is ~280s (the last probe can start at
-  239.9s and overshoot by sleep(10) + 30s timeout). The cron runner killed the
-  wrapper at 300s until 2026-09-13, when the window was raised to 1800s (after
-  a 428s tick); 240s is kept as the conservative bound so the spiral-critical
-  persist fits even under the historical 300s kill. The full tick (persist +
-  the unconditional 180s recheck nap) can exceed 300s — the invariant is that
-  the persist precedes any kill: a kill during the recheck costs that tick's
-  roster write (roster lags one tick), never probe progress. A truncated
-  pass persists its probed subset and the next tick resumes (self-healing).
+  response (B.AI). Probes run **serially with 4s spacing** (15 RPM) to stay
+  under b.ai's undocumented rate limits; verdicts are persisted to
+  `probe_state.json` and the roster is verdict-filtered (ONLY FREE-verdict
+  models). A DEFER never overwrites a prior verdict (sticky roster survives
+  burst 429s). The probe phase is capped at 260s
+  (`PROBE_PHASE_BUDGET_S`). The budget clock starts at the top of
+  `fetch_all()`, so catalog fetches run INSIDE the 260s; worst case to the
+  `save_probe_state` persist point is ~294s (the last probe can start at
+  259.9s and overshoot by sleep(4) + 30s timeout). The cron runner SIGKILLs
+  the wrapper at 300s (briefly raised to 1800s on 2026-09-13, then restored
+  to 300s the same day). 4s spacing + 260s is tuned so the FULL 47-model
+  b.ai re-probe pass clears in ONE tick: 46×4s sleeps + 47 fast probes ≈
+  200-230s inside the 260s budget, and even the pathological overshoot
+  (~294s) lands the spiral-critical persist under the 300s kill. The full
+  tick (persist + the unconditional 180s recheck nap) can exceed 300s — the
+  invariant is that the persist precedes any kill: a kill during the
+  recheck costs that tick's roster write (roster lags one tick), never
+  probe progress. A truncated pass (only if every probe burns its full 30s
+  timeout) persists its probed subset and the next tick resumes
+  (self-healing).
 
 ### Modules
 

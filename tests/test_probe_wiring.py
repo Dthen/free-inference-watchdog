@@ -1,6 +1,6 @@
 """Tests for the serial throttled probe loop wiring (P3).
 
-Covers: serial 10s-throttled loop, verdict persistence via
+Covers: serial 4s-throttled loop, verdict persistence via
 probe_state.save_probe_state, probe_select-driven queue, verdict-filtered
 roster and fetch_one, prune on tick, burst-kill regression, dry-run purity,
 junk-safe verdict reads, probe-phase budget cap, no-op save skip.
@@ -75,8 +75,8 @@ def test_save_probe_state_creates_parent_dirs(tmp_path):
 
 # ---------- serial throttled loop ----------
 
-def test_probes_called_serially_with_10s_gaps(monkeypatch, tmp_path):
-    """Probes fire serially: first immediately, then 10s gap before each."""
+def test_probes_called_serially_with_4s_gaps(monkeypatch, tmp_path):
+    """Probes fire serially: first immediately, then 4s gap before each."""
     call_times = []
 
     def fake_probe(base_url, token, model_id, timeout=30):
@@ -100,9 +100,9 @@ def test_probes_called_serially_with_10s_gaps(monkeypatch, tmp_path):
     assert sorted(m for m, _ in call_times) == ["m1", "m2", "m3"]
 
     # First probe fires immediately (no sleep before it)
-    # Then sleep(10) before m2, sleep(10) before m3
+    # Then sleep(4) before m2, sleep(4) before m3
     assert len(sleep_calls) == 2
-    assert all(s == 10 for s in sleep_calls)
+    assert all(s == 4 for s in sleep_calls)
 
     # All FREE -> all on roster
     assert results["bai"] == ["m1", "m2", "m3"]
@@ -304,7 +304,7 @@ def test_throttle_uses_injected_sleep(monkeypatch, tmp_path):
     fetch_all_fn()
     # 2 models -> 1 sleep between them
     assert len(sleep_calls) == 1
-    assert sleep_calls[0] == 10
+    assert sleep_calls[0] == 4
 
 
 # ---------- fetch_one verdict filter ----------
@@ -560,7 +560,7 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
         probe_calls.append(model_id)
         return Result.FREE, {"http": 200}
 
-    # Inject a clock that advances by 30s per probe to consume the 240s budget
+    # Inject a clock that advances by 30s per probe to consume the 260s budget
     clock = {"t": 0}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -586,14 +586,14 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
     finally:
         inference_watchdog.time.time = orig_time
 
-    # Budget 240s, 30s per probe. The budget check fires BEFORE each probe
-    # (including the first), so when elapsed >= 240 the probe is skipped.
+    # Budget 260s, 30s per probe. The budget check fires BEFORE each probe
+    # (including the first), so when elapsed >= 260 the probe is skipped.
     # probe_phase_start captures t=0, then clock advances to 30.
-    # Probe 1: elapsed=30 < 240, fires. ... Probe 7: elapsed=210 < 240, fires.
-    # Probe 8: elapsed=240 >= 240, SKIPPED. So 7 probes fire.
-    assert len(probe_calls) == 7, (
-        f"expected 7 probes (budget), got {len(probe_calls)}: {probe_calls}")
-    assert len(results["bai"]) == 7
+    # Probe 1: elapsed=30 < 260, fires. ... Probe 8: elapsed=240 < 260, fires.
+    # Probe 9: elapsed=270 >= 260, SKIPPED. So 8 probes fire.
+    assert len(probe_calls) == 8, (
+        f"expected 8 probes (budget), got {len(probe_calls)}: {probe_calls}")
+    assert len(results["bai"]) == 8
 
 
 def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
@@ -629,44 +629,98 @@ def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
     finally:
         inference_watchdog.time.time = orig_time
 
-    # 120s per probe: probe 1 at elapsed=120 < 240 fires, probe 2 at
-    # elapsed=240 >= 240 skipped (4 remaining).
-    assert len(probe_calls) == 1
+    # 120s per probe: probe 1 at elapsed=120 < 260 fires, probe 2 at
+    # elapsed=240 < 260 fires, probe 3 at elapsed=360 >= 260 skipped
+    # (3 remaining).
+    assert len(probe_calls) == 2
     err = capsys.readouterr().err
     assert "bai" in err
-    assert "4 remaining" in err
+    assert "3 remaining" in err
 
 
 def test_probe_phase_budget_regression_pin():
-    """REGRESSION PIN: PROBE_PHASE_BUDGET_S must stay <= 240s.
+    """REGRESSION PIN: PROBE_PHASE_BUDGET_S must stay <= 260s and
+    PROBE_INTERVAL_S must stay >= 4s.
 
     The budget clock spans fetches + probes from the TOP of fetch_all()
     (probe_phase_start is captured BEFORE the fetch loop — catalog fetches
     run INSIDE the budget, so don't add ~30s on top). The check fires
-    before each probe, so the last probe can start at 239.9s and run
-    sleep(10) + 30s timeout ≈ 40s more: worst case ~280s from fetch_all()
-    start to save_probe_state (the PERSIST point).
+    before each probe, so the last probe can start at 259.9s and run
+    sleep(4) + 30s timeout ≈ 34s more: worst case ~294s from fetch_all()
+    start to save_probe_state (the PERSIST point) — under the restored
+    300s cron-kill window with ~6s margin.
 
-    The Hermes cron runner killed the wrapper at 300s (observed 3x
-    consecutively on 2026-09-13 — ticks died mid-probe-loop, before
-    save_probe_state, nothing persisted, death spiral). 240 keeps the
-    ~280s persist point under that historical kill; the window was since
-    raised to 1800s (2026-09-13, outside this repo) after the 07:17 tick
-    ran 428s. The invariant is NOT "full tick fits under the kill" (it
-    doesn't — recheck nap alone adds 180s after the save); it is
-    "save_probe_state precedes the kill": probe progress persists, a
-    mid-recheck kill costs that tick's roster write (roster lags one
-    tick), never probe_state — no spiral.
+    Why 260/4 (was 240/10): the runner's kill went back to 300s, and the
+    operator wants the FULL 47-model b.ai pass in one tick. At 4s spacing
+    (15 RPM) the pass costs 46×4=184s of sleeps plus probe latency; with
+    sub-1s probes that lands ~200-230s, inside 260 — while worst-case
+    overshoot still fits the 300s kill. At 10s spacing the pass cost
+    460s+ and could never clear one tick.
 
     If you need a bigger budget: first make the runner's kill window
     bigger, then bump this pin in the same change. A silent bump here
-    reintroduces the death spiral under any future 300s-class kill.
+    reintroduces the death spiral under any future 300s-class kill. Do
+    NOT drop the spacing below 4s either: b.ai's undocumented rate limit
+    burst-killed the probe loop at sustained >~20 RPM.
     """
-    assert im.PROBE_PHASE_BUDGET_S <= 240, (
-        f"PROBE_PHASE_BUDGET_S={im.PROBE_PHASE_BUDGET_S} exceeds 240s — "
-        "the Hermes cron runner SIGKILLs the wrapper at 300s; "
-        "fetches (~30s) + budget must fit under it. "
+    assert im.PROBE_PHASE_BUDGET_S <= 260, (
+        f"PROBE_PHASE_BUDGET_S={im.PROBE_PHASE_BUDGET_S} exceeds 260s — "
+        "the Hermes cron runner SIGKILLs the wrapper at 300s and the "
+        "worst-case persist point is budget + sleep(4) + 30s timeout; "
+        "260 keeps that at ~294s under the kill. "
         "See the comment on PROBE_PHASE_BUDGET_S in inference_watchdog.py.")
+    assert im.PROBE_INTERVAL_S >= 4, (
+        f"PROBE_INTERVAL_S={im.PROBE_INTERVAL_S} is below 4s — b.ai "
+        "burst-kills sustained probe rates above ~15 RPM. The 4s spacing "
+        "is also what lets the full 47-model pass fit the 260s budget.")
+
+
+def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
+    """THE point of 4s spacing + 260s budget: a FULL 47-model b.ai re-probe
+    pass completes inside ONE tick without the budget cutting it.
+
+    Realistic pacing: the injected sleep advances the same fake clock the
+    budget check reads, and each probe "takes" 1s of wall time (b.ai
+    answers a 1-token completion well under 30s; 1s is the observed
+    order of magnitude). 47 probes need 46×4s sleeps + 47×1s probes ≈
+    231s elapsed — inside 260, and the persist point lands ~235s, under
+    the restored 300s cron kill. If spacing climbs back to 10s (460s+)
+    or the budget drops below the pass cost, this fails.
+    """
+    probe_calls = []
+    clock = {"t": 0}
+
+    def fake_probe(base_url, token, model_id, timeout=30):
+        probe_calls.append(model_id)
+        clock["t"] += 1  # each probe "takes" 1s of budget
+        return Result.FREE, {"http": 200}
+
+    def fake_sleep(s):
+        clock["t"] += s  # spacing burns the same fake clock
+
+    import inference_watchdog
+    orig_time = inference_watchdog.time.time
+    inference_watchdog.time.time = lambda: clock["t"]
+
+    ids = [f"free-model-{i}" for i in range(47)]
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(ids))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(ids))
+    try:
+        fetch_all_fn = im.build_fetch_all(
+            {}, tmp_path, now=1_000_000_000, sleep=fake_sleep)
+        results, _ = fetch_all_fn()
+    finally:
+        inference_watchdog.time.time = orig_time
+
+    # No truncation: every model probed, the whole roster rebuilt in one tick.
+    assert len(probe_calls) == 47, (
+        f"full 47-model pass must clear one tick, got {len(probe_calls)} "
+        f"before the budget cut it (elapsed={clock['t']:.0f}s vs "
+        f"budget={im.PROBE_PHASE_BUDGET_S}s)")
+    assert results["bai"] == sorted(ids)
+    assert clock["t"] < im.PROBE_PHASE_BUDGET_S
 
 
 def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,

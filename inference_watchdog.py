@@ -29,42 +29,49 @@ from probe_zero_credit import probe_model, Result
 
 DEFAULT_CADENCE_S = 1 * 3600
 
-# Serial probe spacing (seconds) — 6 RPM avoids b.ai's undocumented rate-limit burst-kill.
-PROBE_INTERVAL_S = 10
+# Serial probe spacing (seconds) — 15 RPM. 10s (6 RPM) was a conservative
+# guess at b.ai's undocumented rate limit; 4s was chosen (operator decision
+# 2026-09-13) so the full 47-model re-probe pass fits PROBE_PHASE_BUDGET_S
+# in one tick. If b.ai does burst-kill at this rate, probes return DEFER and
+# the sticky-roster rule (a DEFER never overwrites a prior verdict) contains
+# the damage — do NOT go faster without watching a tick's DEFER pattern.
+PROBE_INTERVAL_S = 4
 PROBE_TIMEOUT_S = 30
 
 # Probe-phase budget (seconds). The budget clock starts at the TOP of
 # fetch_all() (probe_phase_start), BEFORE the provider fetch loop — the
 # serial catalog fetches (15s timeout each, providers.TIMEOUT_S) run INSIDE
-# the 240s, so do NOT add ~30s of fetches on top (that double-counts). The
+# the 260s, so do NOT add ~30s of fetches on top (that double-counts). The
 # check is "elapsed >= budget" before each probe, so the last probe can
-# start at 239.9s and run sleep(10) + 30s probe timeout ≈ 40s past it:
-# worst case ~280s from fetch_all() start to save_probe_state — the PERSIST
+# start at 259.9s and run sleep(4) + 30s probe timeout ≈ 34s past it:
+# worst case ~294s from fetch_all() start to save_probe_state — the PERSIST
 # point.
 #
-# Why 240: the Hermes cron runner SIGKILLed the wrapper at 300s (observed
-# 2026-09-13: 3 consecutive ticks died mid-probe-loop, before
-# save_probe_state, so nothing persisted and every tick restarted the full
-# pass — death spiral). 240 keeps the ~280s persist point under that kill
-# with margin. That 300s kill is HISTORY: the window was raised to 1800s
-# on 2026-09-13 (outside this repo) after the 07:17 tick ran 428s and only
-# completed because of the raise. The full tick (persist point ~280s +
-# confirm_diffs' unconditional 180s recheck nap + re-fetches) does NOT fit
-# under 300s and never did — the invariant is NOT "tick fits under the
-# kill" but "save_probe_state precedes the kill": probe progress always
-# persists; a kill during the recheck nap costs that tick's roster write
-# (roster lags one tick), never probe_state — no spiral. 240 stays as the
-# conservative bound so the spiral-critical save fits even under the
-# historical 300s kill.
+# Why 260: the Hermes cron runner SIGKILLs the wrapper at 300s (the window
+# was briefly raised to 1800s on 2026-09-13 after the 07:17 tick ran 428s,
+# then RESTORED to 300s the same day — commit a8b61e9). The operator wants
+# the FULL 47-model b.ai pass in a single tick: at 10s spacing that pass
+# needs 46×10=460s of sleeps alone and could never fit, so spacing dropped
+# to 4s (see PROBE_INTERVAL_S) and the budget rose 240→260. Realistic pass
+# cost is 46×4s sleeps + 47×(sub-second probe) ≈ 200-230s — under 260 —
+# and the ~294s worst-case persist point stays under the restored 300s
+# kill with margin. That overshoot math is why 260 is the ceiling, not a
+# comfort number: budget + sleep(4) + PROBE_TIMEOUT_S must stay < 300.
+#
+# The invariant is "save_probe_state precedes the kill": probe progress
+# always persists; a kill during confirm_diffs' unconditional 180s recheck
+# nap costs that tick's roster write (roster lags one tick), never
+# probe_state — no spiral.
 #
 # The 30-min lock window (LOCK_STALE_S=1800) is only the OUTER bound and
 # is unaffected. When the budget is exhausted, remaining queue items
 # stay unprobed but the probed subset still persists (save_probe_state
 # runs at the end of build_fetch_all) — the next tick resumes from
-# cached verdicts (self-healing, no death spiral). A 24h stale-paid
-# re-probe pass truncated at 240s/tick simply spreads across 2-3 hourly
-# ticks, oldest-first priority preserved.
-PROBE_PHASE_BUDGET_S = 240
+# cached verdicts (self-healing, no death spiral). Only a pathological
+# tick — every probe burning its full 30s timeout — truncates a 47-model
+# pass below 260s; that spread across 2-3 hourly ticks is the designed
+# fallback, oldest-first priority preserved.
+PROBE_PHASE_BUDGET_S = 260
 
 
 # ---------- provider plumbing ----------
