@@ -90,6 +90,7 @@ any host.
 |---|---|---|
 | `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | yes (for alerts) | Kennel/alerts channel webhook — the only delivery path. |
 | `NOUS_AUTH_FILE` | yes (for Nous) | Path to the auth JSON file Hermes refreshes; `providers.nous.access_token` is read from it at tick time (see [Nous auth](#nous-auth)). |
+| `TOKENROUTER_API_KEY` | no | TokenRouter gateway auth. |
 | `KILOCODE_API_KEY` | no | Kilo fetcher — endpoint also serves its roster keyless; a key buys authenticated/higher-limit access. |
 | `AMD_API_KEY` | no | AMD Radeon gateway auth. |
 | `BAI_API_KEY` | no | B.AI gateway auth — required for the `zero-credit-probe` detection method. |
@@ -114,8 +115,7 @@ The queue auto-drains on the next successful tick.
 Nous auth is a **path pointer, never a token copy**. The watchdog reads the
 token from a JSON file at tick time — the file Hermes keeps refreshed — so the
 token is always fresh and never stale-copied into this repo. Set the env var
-`NOUS_AUTH_FILE` to the path of that file (default the standard Hermes
-location), and the committed `providers/nous.json` resolves
+`NOUS_AUTH_FILE` to the path of that file, and the committed `providers/nous.json` resolves
 `providers.nous.access_token` from it:
 
 ```bash

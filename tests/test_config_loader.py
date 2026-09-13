@@ -132,10 +132,11 @@ def test_load_configs_token_file_path_env_nested_key(tmp_path, monkeypatch):
     assert configs[0]["_token"] == "nested-token"
 
 
-def test_load_configs_token_file_path_env_unset_raises(tmp_path, monkeypatch):
+def test_load_configs_token_file_path_env_unset_degrades(tmp_path, monkeypatch, capsys):
     """token_file + path_env with the env var unset (neither in os.environ nor
-    the project .env) must raise ValueError naming the missing env var —
-    fail loudly at load time, never silently fetch unauthenticated."""
+    the project .env) must NOT raise — it degrades the provider (_token=None)
+    and logs a warning to stderr. A broken env must never kill the watchdog
+    at import (the cron wrapper treats exit 1 as routine and stays silent)."""
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()
     monkeypatch.delenv("TEST_AUTH_FILE", raising=False)
@@ -144,8 +145,11 @@ def test_load_configs_token_file_path_env_unset_raises(tmp_path, monkeypatch):
                                     "key": "token"})
     # REPO points at tmp_path: no .env there, so no fallback can resolve it.
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    with pytest.raises(ValueError, match="TEST_AUTH_FILE"):
-        config_loader.load_configs()
+    configs = config_loader.load_configs()
+    assert len(configs) == 1
+    assert configs[0]["_token"] is None
+    stderr = capsys.readouterr().err
+    assert "degraded" in stderr.lower()
 
 
 def test_load_configs_token_file_path_env_falls_back_to_project_env(tmp_path, monkeypatch):
@@ -185,9 +189,9 @@ def test_load_configs_token_file_path_env_expands_user(tmp_path, monkeypatch):
     assert configs[0]["_token"] == "home-token"
 
 
-def test_load_configs_token_file_path_env_missing_file_raises(tmp_path, monkeypatch):
-    """path_env resolves but the file does not exist -> loud ValueError,
-    same contract as the legacy path field."""
+def test_load_configs_token_file_path_env_missing_file_degrades(tmp_path, monkeypatch, capsys):
+    """path_env resolves but the file does not exist -> degrade (_token=None)
+    + log to stderr. A broken env must not kill the watchdog at import."""
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()
     monkeypatch.setenv("TEST_AUTH_FILE", str(tmp_path / "nope.json"))
@@ -195,8 +199,10 @@ def test_load_configs_token_file_path_env_missing_file_raises(tmp_path, monkeypa
                                     "path_env": "TEST_AUTH_FILE",
                                     "key": "token"})
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    with pytest.raises(ValueError, match="token file not found"):
-        config_loader.load_configs()
+    configs = config_loader.load_configs()
+    assert configs[0]["_token"] is None
+    stderr = capsys.readouterr().err
+    assert "degraded" in stderr.lower()
 
 
 def test_load_configs_token_file_path_env_takes_precedence_over_path(tmp_path, monkeypatch):
@@ -242,3 +248,79 @@ def test_env_example_documents_path_pointer_not_token_copy():
     text = (repo / ".env.example").read_text(encoding="utf-8")
     assert "NOUS_AUTH_FILE=" in text
     assert "NOUS_ACCESS_TOKEN" not in text
+
+
+# ---------- degradation: a broken provider must not kill the watchdog ----------
+
+
+def test_load_configs_degrades_provider_with_broken_auth(tmp_path, monkeypatch):
+    """CRITICAL: if one provider's auth fails to resolve (e.g. NOUS_AUTH_FILE
+    unset on a broken env), load_configs must NOT raise — the watchdog dies
+    silently at import and the cron wrapper treats exit 1 as routine. Instead
+    it degrades that provider (_token=None) and loads the rest."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    # One healthy env_var provider
+    monkeypatch.setenv("HEALTHY_KEY", "ok-token")
+    healthy = {"name": "Healthy", "base_url": "https://example.com/v1",
+               "detection": "all-free",
+               "auth": {"method": "env_var", "env_key": "HEALTHY_KEY"},
+               "display": 0}
+    (providers_dir / "healthy.json").write_text(json.dumps(healthy))
+    # One broken token_file provider (path_env unset, no fallback .env)
+    broken = {"name": "Broken", "base_url": "https://broken.com/v1",
+              "detection": "all-free",
+              "auth": {"method": "token_file",
+                       "path_env": "UNSET_AUTH_FILE",
+                       "key": "token"},
+              "display": 1}
+    (providers_dir / "broken.json").write_text(json.dumps(broken))
+    monkeypatch.delenv("UNSET_AUTH_FILE", raising=False)
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    # Must not raise
+    configs = config_loader.load_configs()
+    names = [c["name"] for c in configs]
+    assert "Healthy" in names, "healthy provider should still load"
+    assert "Broken" in names, "broken provider should still be present (degraded)"
+    broken_cfg = next(c for c in configs if c["name"] == "Broken")
+    assert broken_cfg["_token"] is None, "degraded provider must have _token=None"
+    healthy_cfg = next(c for c in configs if c["name"] == "Healthy")
+    assert healthy_cfg["_token"] == "ok-token", "healthy provider unaffected"
+
+
+def test_load_configs_missing_dot_key_does_not_fetch_keyless(tmp_path, monkeypatch):
+    """If the dot-path key is missing in the token file, _resolve_json_path
+    returns None → _token=None (degraded), never a silent keyless fetch."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    token_file = tmp_path / "auth.json"
+    # File exists but does NOT contain the expected key
+    token_file.write_text(json.dumps({"other": "value"}))
+    monkeypatch.setenv("TEST_AUTH_FILE", str(token_file))
+    _write_provider(providers_dir, {"method": "token_file",
+                                    "path_env": "TEST_AUTH_FILE",
+                                    "key": "providers.nous.access_token"})
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()
+    assert configs[0]["_token"] is None, (
+        "missing dot-key must degrade to _token=None, not fetch keyless")
+
+
+def test_load_configs_degraded_provider_logs_warning(tmp_path, monkeypatch, capsys):
+    """Degrading a provider must log a warning to stderr so the operator can
+    see why a provider is silently absent without digging through code."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    broken = {"name": "Broken", "base_url": "https://broken.com/v1",
+              "detection": "all-free",
+              "auth": {"method": "token_file",
+                       "path_env": "UNSET_AUTH_FILE",
+                       "key": "token"},
+              "display": 0}
+    (providers_dir / "broken.json").write_text(json.dumps(broken))
+    monkeypatch.delenv("UNSET_AUTH_FILE", raising=False)
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    config_loader.load_configs()
+    stderr = capsys.readouterr().err
+    assert "degraded" in stderr.lower() or "broken" in stderr.lower(), (
+        "degradation should log a warning mentioning the failing provider")
