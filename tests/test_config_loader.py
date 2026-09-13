@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import config_loader
 
 
@@ -552,3 +554,121 @@ def test_env_example_documents_nvidia_api_key():
     repo = Path(config_loader.__file__).resolve().parent
     text = (repo / ".env.example").read_text(encoding="utf-8")
     assert "NVIDIA_API_KEY=" in text
+
+
+# ---------- f745288 quality follow-up: mis-typed fields must cost one file ----------
+
+
+def test_load_configs_non_integer_display_skips_file(tmp_path, monkeypatch, capsys):
+    """{"display": "one"} is a data error, not a code bug: it must cost ONLY
+    its own file. Left to reach load_configs' sort it raises TypeError and
+    takes every healthy gateway down — the exact import crash f745288
+    exists to prevent."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "bad_display.json").write_text(json.dumps(
+        {**_minimal_config("BadDisplay"), "display": "one"}))
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "bad_display.json" in stderr
+
+
+def test_load_configs_boolean_display_skips_file(tmp_path, monkeypatch, capsys):
+    """bool is an int subclass, so isinstance(x, int) alone lets True/False
+    through as a display value; it must be rejected explicitly."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "bool_display.json").write_text(json.dumps(
+        {**_minimal_config("BoolDisplay"), "display": True}))
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "bool_display.json" in stderr
+
+
+def test_load_configs_token_file_non_string_path_skips_file(tmp_path, monkeypatch, capsys):
+    """{"method": "token_file", "path": 123}: os.path.expanduser(int) raises
+    TypeError inside _resolve_auth_token, whose contract is never-raises.
+    The type error is a file-level data problem: skip + warn instead."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    _write_provider(providers_dir, {"method": "token_file", "path": 123,
+                                    "key": "token"})
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "test.json" in stderr
+
+
+def test_load_configs_token_file_non_string_path_env_skips_file(tmp_path, monkeypatch, capsys):
+    """{"method": "token_file", "path_env": 123}: os.environ.get(int) raises
+    TypeError inside the never-raises resolver — same class as `path`: skip
+    + warn the file."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    _write_provider(providers_dir, {"method": "token_file", "path_env": 123,
+                                    "key": "token"})
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "test.json" in stderr
+
+
+def test_load_configs_token_file_missing_path_fields_skips_file(tmp_path, monkeypatch, capsys):
+    """token_file with neither path nor path_env is a broken config: it can
+    never resolve a token, so it must cost its own file with a warning, not
+    load as a permanently-degraded ghost provider."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    _write_provider(providers_dir, {"method": "token_file", "key": "token"})
+    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"]
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "test.json" in stderr
+
+
+# ---------- I-2: the providers dir must never empty the roster silently ----------
+
+
+def test_load_configs_empty_providers_dir_warns(tmp_path, monkeypatch, capsys):
+    """providers/ exists but holds no *.json: zero configs must come with a
+    stderr warning — silent total roster loss is the failure being closed."""
+    (tmp_path / "providers").mkdir()
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert configs == []
+    stderr = capsys.readouterr().err
+    assert "no readable" in stderr and "degrading to zero providers" in stderr, (
+        "an empty providers dir must warn, not go silent")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")
+def test_load_configs_unreadable_providers_dir_warns(tmp_path, monkeypatch, capsys):
+    """A chmod-000 providers/ dir is a real, reviewer-verified silent-death
+    case: Path.glob swallows the PermissionError internally and returns []
+    while is_dir() stays True — neither existing branch fires. The empty-
+    glob guard must warn anyway."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "nous.json").write_text(json.dumps(_minimal_config("Nous Portal")))
+    providers_dir.chmod(0o000)
+    try:
+        monkeypatch.setattr(config_loader, "REPO", tmp_path)
+        configs = config_loader.load_configs()  # must not raise
+        assert configs == []
+        stderr = capsys.readouterr().err
+        assert "no readable" in stderr and "degrading to zero providers" in stderr, (
+            "a permission-denied providers dir must warn, not go silent")
+    finally:
+        providers_dir.chmod(0o755)  # restore so tmp cleanup works

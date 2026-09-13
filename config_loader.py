@@ -61,6 +61,29 @@ def _validate_and_read(path):
         raise ValueError(f"unknown auth method: {auth.get('method')!r}")
     if auth.get("method") == "env_var" and not auth.get("env_key"):
         raise ValueError("env_var auth requires env_key field")
+    if auth.get("method") == "token_file":
+        # _resolve_auth_token's contract is never-raises; a non-str path or
+        # path_env reaches os.path.expanduser/os.environ.get as a TypeError
+        # code bug, and token_file with neither field can never resolve.
+        # Both are file-level data errors: reject here so the skip+warn
+        # path in load_configs handles them.
+        path_env = auth.get("path_env")
+        path = auth.get("path")
+        if path_env is None and path is None:
+            raise ValueError("token_file auth requires path_env or path field")
+        if path_env is not None and not isinstance(path_env, str):
+            raise ValueError(
+                f"token_file path_env must be a string, "
+                f"got {type(path_env).__name__}")
+        if path is not None and not isinstance(path, str):
+            raise ValueError(
+                f"token_file path must be a string, got {type(path).__name__}")
+    display = config.get("display", 0)
+    if not isinstance(display, int) or isinstance(display, bool):
+        # bool is an int subclass; True/False would sort quietly wrong.
+        # A non-int display breaks load_configs' sort — reject per-file.
+        raise ValueError(
+            f"display must be an integer, got {type(display).__name__}")
     return config
 
 
@@ -113,10 +136,12 @@ def load_configs():
     missing/invalid fields, an auth method the loader does not implement)
     costs EXACTLY that file — it is skipped with a `config: skipping ...`
     warning on stderr and the rest load normally. A missing or unreadable
-    providers dir degrades to [] the same way. This function must never
-    raise for file/dir problems: PROVIDERS is built at import time, and
-    inference_watchdog/build_site/mcp_server all crash before doing
-    anything if the import raises, silently every hour.
+    providers dir likewise degrades to [] with a stderr warning — as does an
+    existing dir that yields no readable *.json (Path.glob swallows
+    PermissionError internally, so a chmod-000 dir looks empty). This
+    function must never raise for file/dir problems: PROVIDERS is built at
+    import time, and inference_watchdog/build_site/mcp_server all crash
+    before doing anything if the import raises, silently every hour.
     """
     configs = []
     providers_dir = REPO / "providers"
@@ -131,6 +156,14 @@ def load_configs():
         # instead of raising — warn explicitly so the degradation is visible.
         print(f"config: skipping providers dir {providers_dir}: "
               f"not a readable directory", file=sys.stderr)
+        return configs
+    if not paths:
+        # is_dir() True but the glob found nothing readable: a legitimately
+        # empty dir, or a permission-denied one whose OSError glob() swallows
+        # internally. Either way the whole roster just vanished silently —
+        # say so loudly; total roster loss must never go unannounced.
+        print("config: no readable *.json found in providers/ directory "
+              "— degrading to zero providers", file=sys.stderr)
         return configs
     for path in paths:
         try:
