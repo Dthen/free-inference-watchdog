@@ -440,7 +440,8 @@ def test_shipped_configs_declare_ignored_slugs():
 # ---------- roster_key: optional, validated non-empty string ----------
 
 
-@pytest.mark.parametrize("bad", [123, "", "   ", True])
+@pytest.mark.parametrize("bad", [123, "", "   ", True, None],
+                         ids=["int", "empty", "blank", "bool", "null"])
 def test_roster_key_field_must_be_nonempty_string(tmp_path, monkeypatch, capsys, bad):
     """Optional "roster_key" field: when present it must be a non-empty
     string — a bad value silently re-routes the provider's roster identity."""

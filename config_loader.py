@@ -101,13 +101,14 @@ def _validate_and_read(path):
                     "ignored_slugs entries must be non-empty strings, "
                     f"got {entry!r}")
     if "roster_key" in config:
-        rk = config["roster_key"]
+        roster_key = config["roster_key"]
         # Optional field: the explicit roster-key override (named roster_key,
         # not key — auth dicts already own a "key" JSON path). A non-string
         # or blank value would silently fall through to the stem fallback
         # and re-route the provider's roster identity — reject per-file.
-        if not isinstance(rk, str) or not rk.strip():
-            raise ValueError(f"roster_key must be a non-empty string, got {rk!r}")
+        if not isinstance(roster_key, str) or not roster_key.strip():
+            raise ValueError(
+                f"roster_key must be a non-empty string, got {roster_key!r}")
     return config
 
 
