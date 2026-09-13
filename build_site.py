@@ -57,7 +57,10 @@ from pathlib import Path
 # Probe-verified gateway wiring (single source of truth): see config_loader.py
 # GATEWAY_WIRING. We IMPORT rather than re-hardcode so a probed-URL fix
 # in config_loader.py reaches the dashboard on the next tick with no second
-# site to keep in sync.
+# site to keep in sync. config_loader is also held as a MODULE reference:
+# build_provider_header_meta() re-reads providers/*.json through it per
+# render, and degrade tests monkeypatch config_loader.load_configs.
+import config_loader  # noqa: E402
 from config_loader import GATEWAY_WIRING, PROVIDERS  # noqa: E402
 
 # Dthen's quality ranking, derived from config_loader.PROVIDERS (sorted by
@@ -181,6 +184,37 @@ def _natural_key(s):
             for p in re.split(r"(\d+)", s)]
 
 
+def build_provider_header_meta():
+    """gateway key -> {'signup_url': str, 'limits_note': str} (fields may be
+    absent — both are OPTIONAL operator-maintained facts in providers/*.json,
+    same file as everything else about a gateway).
+
+    Called ONCE per render. DEGRADE-SAFE by contract: if config loading
+    raises for ANY reason, return an empty map so headers render plain and
+    the site build still exits 0 (a site build failure must never page —
+    established wrapper rule). The scheme/XSS guard itself lives at render
+    time (only https:// signup_urls are ever linked).
+    """
+    try:
+        meta = {}
+        for cfg in config_loader.load_configs():
+            key = config_loader._provider_key(cfg)
+            entry = {}
+            for field in ("signup_url", "limits_note"):
+                value = cfg.get(field)
+                if isinstance(value, str) and value:
+                    entry[field] = value
+            if entry:
+                meta[key] = entry
+        return meta
+    except Exception as exc:
+        # Degrade, never die: broken/absent configs cost the dashboard its
+        # links, nothing more. stderr goes to state/site_build.log (log,
+        # never page).
+        print(f"build_site: provider header meta degraded: {exc}", file=sys.stderr)
+        return {}
+
+
 def build_groups(providers):
     """Group raw ids by their free-marker-stripped name, deterministically.
 
@@ -188,7 +222,6 @@ def build_groups(providers):
       - group_names: alphabetically sorted list of stripped names, one per row
       - groups: dict[stripped_name] -> {
             "gateways": set[str],                  # every gw carrying ANY variant
-            "raw_count": int,                      # # of distinct raw ids in the group
             "variants": list[(gateway, raw_id)],   # per-(gw,raw) wiring rows, in
                                                    # DISPLAY_ORDER then natural key
           }
@@ -211,11 +244,7 @@ def build_groups(providers):
     # `groups[].variants` so the byte-order in the HTML is stable.
     for mid in raw_ids:
         name = strip_free_marker(mid)
-        slot = groups.setdefault(
-            name,
-            {"gateways": set(), "raw_count": 0, "variants": []},
-        )
-        slot["raw_count"] += 1
+        slot = groups.setdefault(name, {"gateways": set(), "variants": []})
         for gw in DISPLAY_ORDER:
             if mid in providers.get(gw, []):
                 slot["gateways"].add(gw)
@@ -245,8 +274,13 @@ def build_counts(providers):
     return ids, counts
 
 
-def render_page(roster, logo_b64):
+def render_page(roster, logo_b64, header_meta=None):
     """Render the full HTML document as one string (byte-deterministic).
+
+    header_meta: gateway key -> {'signup_url', 'limits_note'} (see
+    build_provider_header_meta). None (default) = derive from the repo's
+    providers/*.json once per render; config load failure degrades to plain
+    headers, never a crash.
 
     Rows are GROUPED by stripped name: a model that ships as
     `vendor/x:free` on gateway A and `vendor/x-free` on gateway B renders
@@ -346,8 +380,29 @@ def render_page(roster, logo_b64):
         )
         return name_row + expand_rows
 
+    if header_meta is None:
+        header_meta = build_provider_header_meta()
+
+    def _head_cell(gw):
+        """Gateway column head: '<gateway> (N)' always visible; wrapped in a
+        signup anchor when providers/*.json carries an https:// signup_url,
+        with the dated limits_note as the native title tooltip. Missing /
+        non-https signup_url => plain <th> (scheme guard — XSS via a config
+        'javascript:' value must never become an href). Missing limits_note
+        => anchor without title attr. Static HTML only: no JS tooltips."""
+        count = len(providers.get(gw, []))
+        text = f"{escape(gw)} ({count})"
+        entry = header_meta.get(gw) or {}
+        url = entry.get("signup_url", "")
+        if not url.lower().startswith("https://"):
+            return f"<th>{text}</th>"
+        note = entry.get("limits_note")
+        title = f' title="{escape(note)}"' if note else ""
+        return (f'<th><a href="{escape(url)}" target="_blank"'
+                f' rel="noopener"{title}>{text}</a></th>')
+
     head_cells = "<th>model id</th><th>#</th>" + "".join(
-        f"<th>{escape(gw)}</th>" for gw in active_gateways
+        _head_cell(gw) for gw in active_gateways
     )
     # <tfoot> stays RAW per-gateway counts — that is the honest "ids
     # tracked per gateway" number and must not change meaning because
@@ -411,6 +466,7 @@ def render_page(roster, logo_b64):
   tfoot th {{ text-align:left; }}
   footer.note {{ margin-top:14px; color:var(--nord4); opacity:.55; font-size:11.5px; }}
   footer.note a {{ color:var(--nord8); text-decoration:none; }}
+  .footer-links {{ display:flex; gap:20px; justify-content:center; margin-bottom:12px; }}
   /* ---- expand rows: pure CSS, no JS ---- */
   /* Hide the native checkbox; the <label> is the visible click target. */
   tbody td > .row-expand, tbody th .row-expand {{ position:absolute; opacity:0; pointer-events:none; width:0; height:0; }}
@@ -452,7 +508,7 @@ def render_page(roster, logo_b64):
 {body_rows}</tbody>
 <tfoot><tr><th>tracked ids per gateway</th><td></td>{foot_cells}</tr></tfoot>
 </table>
-<footer class="note"><div style="display:flex;gap:20px;justify-content:center;margin-bottom:12px;"><a href="https://github.com/Dthen/free-inference-watchdog" target="_blank" rel="noopener">GitHub</a><a href="https://ko-fi.com/dthen" target="_blank" rel="noopener">Ko-fi</a></div>
+<footer class="note"><div class="footer-links"><a href="https://github.com/Dthen/free-inference-watchdog" target="_blank" rel="noopener">GitHub</a><a href="https://ko-fi.com/dthen" target="_blank" rel="noopener">Ko-fi</a></div>
 ids shown verbatim per gateway — the same underlying model can ship under different local ids.
 Static file, rebuilt each tick.</footer>
 </div></body></html>"""

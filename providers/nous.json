@@ -3,5 +3,7 @@
   "base_url": "https://inference-api.nousresearch.com/v1",
   "detection": "api-pricing",
   "auth": { "method": "token_file", "path_env": "NOUS_AUTH_FILE", "key": "providers.nous.access_token" },
-  "display": 0
+  "display": 0,
+  "signup_url": "https://portal.nousresearch.com/",
+  "limits_note": "Per-token rate limits, shared across all models (as of 2026-09)"
 }

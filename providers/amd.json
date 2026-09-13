@@ -3,5 +3,7 @@
   "base_url": "https://developer.amd.com.cn/radeon/api/v1",
   "detection": "all-free",
   "auth": { "method": "env_var", "env_key": "AMD_API_KEY" },
-  "display": 4
+  "display": 4,
+  "signup_url": "https://developer.amd.com.cn/register",
+  "limits_note": "~20 RPM, ~$10/day compute points (as of 2026-09)"
 }

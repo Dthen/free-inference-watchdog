@@ -3,5 +3,7 @@
   "base_url": "https://api.b.ai/v1",
   "detection": "zero-credit-probe",
   "auth": { "method": "env_var", "env_key": "BAI_API_KEY" },
-  "display": 5
+  "display": 5,
+  "signup_url": "https://b.ai/",
+  "limits_note": "Undocumented; burst-kills above ~20 RPM; per-model RPM shared globally (as of 2026-09-13)"
 }

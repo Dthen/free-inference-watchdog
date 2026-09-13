@@ -3,5 +3,7 @@
   "base_url": "https://api.tokenrouter.com/v1",
   "detection": "id-suffix",
   "auth": { "method": "env_var", "env_key": "TOKENROUTER_API_KEY" },
-  "display": 1
+  "display": 1,
+  "signup_url": "https://www.tokenrouter.com/login",
+  "limits_note": "RPM/RPD unpublished; concurrency by balance: $0-10 -> 5 concurrent (as of 2026-09-13)"
 }
