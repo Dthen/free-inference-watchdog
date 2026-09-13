@@ -163,7 +163,7 @@ def load_configs():
         # internally. Either way the whole roster just vanished silently —
         # say so loudly; total roster loss must never go unannounced.
         print("config: no readable *.json found in providers/ directory "
-              "— degrading to zero providers", file=sys.stderr)
+              "- degrading to zero providers", file=sys.stderr)
         return configs
     for path in paths:
         try:
