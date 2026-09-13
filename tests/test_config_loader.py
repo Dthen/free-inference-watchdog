@@ -324,3 +324,53 @@ def test_load_configs_degraded_provider_logs_warning(tmp_path, monkeypatch, caps
     stderr = capsys.readouterr().err
     assert "degraded" in stderr.lower() or "broken" in stderr.lower(), (
         "degradation should log a warning mentioning the failing provider")
+
+
+# ---------- OSError degradation: unreadable token files must not crash ----------
+
+
+def test_load_configs_missing_auth_file_degrades_not_crashes(tmp_path, monkeypatch, capsys):
+    """FileNotFoundError (an OSError) from a missing literal-`path` token file
+    must degrade the provider (_token=None, stderr warning), not raise — the
+    degrade-don't-die contract covers deleted/moved auth files too."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "all-free",
+              "auth": {"method": "token_file", "path": str(tmp_path / "nonexistent.json"), "key": "token"},
+              "display": 0}
+    (providers_dir / "test.json").write_text(json.dumps(config))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    # Must not raise — a deleted auth file is a degraded provider, not a
+    # dead watchdog (FileNotFoundError is an OSError, NOT a ValueError).
+    configs = config_loader.load_configs()
+    assert len(configs) == 1
+    assert configs[0]["_token"] is None
+    stderr = capsys.readouterr().err
+    assert "degraded" in stderr.lower()
+
+
+def test_load_configs_token_file_oserror_degrades_not_crashes(tmp_path, monkeypatch, capsys):
+    """Any OSError while opening the token file (e.g. IsADirectoryError when
+    the path points at a directory, PermissionError on an unreadable file)
+    must degrade the provider, not crash the watchdog at import. The outer
+    handler only caught ValueError, and the inner FileNotFoundError clause
+    only covers the missing-file case — the wider OSError family escaped
+    the degrade handler entirely."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    # Point the token path at a DIRECTORY: open() raises IsADirectoryError,
+    # an OSError that is neither a FileNotFoundError nor a ValueError.
+    dir_as_token = tmp_path / "auth_dir"
+    dir_as_token.mkdir()
+    config = {"name": "Test", "base_url": "https://example.com/v1",
+              "detection": "all-free",
+              "auth": {"method": "token_file", "path": str(dir_as_token), "key": "token"},
+              "display": 0}
+    (providers_dir / "test.json").write_text(json.dumps(config))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()  # must not raise
+    assert len(configs) == 1
+    assert configs[0]["_token"] is None
+    stderr = capsys.readouterr().err
+    assert "degraded" in stderr.lower()

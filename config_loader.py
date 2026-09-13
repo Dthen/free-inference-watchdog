@@ -84,11 +84,12 @@ def load_configs():
                 token = _resolve_json_path(token_data, auth.get("key", ""))
             else:
                 token = None
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             # Degrade, don't die: a broken env (e.g. NOUS_AUTH_FILE unset)
-            # must not kill the watchdog at import — the cron wrapper treats
-            # exit 1 as routine and stays silent. Log to stderr so the
-            # operator sees why a provider is degraded.
+            # or an unreadable token file (OSError: missing, permission
+            # denied, is-a-directory) must not kill the watchdog at import —
+            # the cron wrapper treats exit 1 as routine and stays silent.
+            # Log to stderr so the operator sees why a provider is degraded.
             print(f"config_loader: provider {config.get('name', path.name)} auth degraded: {exc}",
                   file=sys.stderr)
             token = None
