@@ -279,7 +279,8 @@ def list_endpoints(provider=None, root=None) -> dict:
     """All gateway wiring entries across the roster, or one gateway's.
 
     Returns every (gateway, raw id) pair in the roster with the gateway's
-    wiring (base URL, api_type). Optional provider=<name> filters to a
+    wiring (chat-completions URL, api_type). Optional
+    provider=<name> filters to a
     single gateway. Structured errors, no raises into the MCP layer.
     """
     r = Path(root).resolve() if root is not None else REPO
