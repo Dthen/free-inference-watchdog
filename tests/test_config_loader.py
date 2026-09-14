@@ -396,7 +396,11 @@ def test_load_configs_valid_ignored_slugs_passes_through(tmp_path, monkeypatch, 
     ["ok", None],               # non-string element
     ["ok", "  "],               # blank (whitespace-only) element
     [123],                      # int element
-], ids=["str", "null", "int", "dict", "empty-str", "none-elem", "blank-elem", "int-elem"])
+    [" padded "],               # padded element — passes strip-check, never exact-matches
+    ["lead "],                  # trailing-space padding
+    [" trail"],                 # leading-space padding
+], ids=["str", "null", "int", "dict", "empty-str", "none-elem", "blank-elem", "int-elem",
+        "padded", "lead-space", "trail-space"])
 def test_load_configs_invalid_ignored_slugs_skips_file(tmp_path, monkeypatch, capsys, bad):
     """A malformed ignored_slugs costs exactly that file: ValueError -> the
     existing per-file skip + stderr-warning contract."""

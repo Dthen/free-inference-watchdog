@@ -96,10 +96,14 @@ def _validate_and_read(path):
             raise ValueError(
                 f"ignored_slugs must be a list, got {type(ignored).__name__}")
         for entry in ignored:
-            if not isinstance(entry, str) or not entry.strip():
+            # Padded entries (" x ") survive a strip()-emptiness check yet
+            # never exact-match a real id downstream — the silent no-op
+            # this validation exists to kill. Reject loudly per-file.
+            if (not isinstance(entry, str) or not entry.strip()
+                    or entry != entry.strip()):
                 raise ValueError(
-                    "ignored_slugs entries must be non-empty strings, "
-                    f"got {entry!r}")
+                    "ignored_slugs entries must be non-empty, unpadded "
+                    f"strings, got {entry!r}")
     if "roster_key" in config:
         roster_key = config["roster_key"]
         # Optional field: the explicit roster-key override (named roster_key,
