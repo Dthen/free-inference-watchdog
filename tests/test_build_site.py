@@ -1106,7 +1106,7 @@ def test_header_links_anchor_with_count_and_tooltip():
     assert "<th>nim</th>" in head  # absent from map -> plain th
 
 
-def test_header_count_visible_in_text_never_only_in_attribute():
+def test_header_link_text_is_bare_name_and_title_is_escaped():
     """The bare gateway name lives in the visible link text (per-gateway
     counts moved to the tfoot — neater at the bottom) and the title is
     html-escaped through the existing escape()."""
@@ -1118,7 +1118,7 @@ def test_header_count_visible_in_text_never_only_in_attribute():
     assert 'title="note with &quot;quote&quot; &amp; &lt;angle&gt;"' in head
 
 
-def test_header_missing_signup_url_plain_th_with_count():
+def test_header_missing_signup_url_plain_th():
     """No signup_url -> plain th (no anchor)."""
     head = _render(HEADER_ROSTER, {"nous": {"limits_note": "no url here"}})
     assert "<th>nous</th>" in head
