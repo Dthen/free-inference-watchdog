@@ -68,7 +68,7 @@ def test_list_full_roster(state_dir):
     assert res["ok"] is True
     provs = res["providers"]
     # CANONICAL GATEWAY-KEY SEMANTIC (shared with watchdog_status): exactly
-    # the seven known gateways, always — unknown junk roster keys are ignored,
+    # the known gateways, always — unknown junk roster keys are ignored,
     # gateways missing from this tick degrade to empty lists.
     assert set(provs) == set(mcp_server.PROVIDERS)
     assert provs["nous"] == ["vendor-d/model-6:free", "vendor-z/zero-priced-model"]
@@ -78,9 +78,9 @@ def test_list_full_roster(state_dir):
     assert isinstance(res["tick_epoch"], int)
 
 
-def test_list_partial_roster_canonical_seven_shape(tmp_path):
+def test_list_partial_roster_canonical_shape(tmp_path):
     """One gateway-key semantic everywhere: a partial roster ({nous, tokenrouter}
-    plus a junk key) STILL yields all seven canonical gateways — kilo/openrouter/amd/bai/nim
+    plus a junk key) STILL yields all canonical gateways — kilo/openrouter/amd/bai/nim
     as empty lists, n_gateways==7 — and 'mysterygw' never leaks
     into the output."""
     (tmp_path / "state").mkdir()
@@ -165,7 +165,7 @@ def test_status_fields_present(state_dir):
     assert res["last_tick_age_s"] == 60
     assert res["tick_fresh"] is True
     assert res["stale_providers"] == []
-    # All seven DISPLAY_ORDER gateways always appear (stable shape), plus
+    # All DISPLAY_ORDER gateways always appear (stable shape), plus
     # any unknown roster keys.
     for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"):
         assert gw in res["provider_counts"]
@@ -299,7 +299,7 @@ def test_list_endpoints_totals_match_roster(state_dir):
     assert res["counts"]["models"] < res["counts"]["endpoints"]
     assert res["counts"]["gateways"] == 7
     assert res["provider"] is None
-    # All seven gateways present in the gateways map
+    # All gateways present in the gateways map
     assert set(res["gateways"]) == set(mcp_server.PROVIDERS)
 
 

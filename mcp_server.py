@@ -4,8 +4,8 @@
 Three read-only tools, no enrichment (none exists anywhere in the repo):
 
   list_free_models(provider=None)   full roster, or one provider's id list
-  get_model(model_id)               CROSS-GATEWAY PRESENCE LOOKUP: which of
-                                    the seven gateways track this id right now
+  get_model(model_id)               CROSS-GATEWAY PRESENCE LOOKUP: which of the
+                                    watched gateways track this id right now
   watchdog_status()                 tick freshness vs the 1h cadence, stale/
                                     failing providers, per-provider counts,
                                     pending-alert queue depth, last site publish
@@ -57,12 +57,9 @@ except ImportError:  # pragma: no cover - exercised only off the venv
 
 import state
 
-# Gateway names in Dthen's DISPLAY_ORDER. MUST match config_loader.PROVIDERS keys
-# (the seven canonical gateways). DUPLICATED from build_site.py:64
-# (cross-reference) rather than imported: importing build_site would drag the
-# site builder's module surface along just for seven strings, and display
-# order is curation, not implementation detail — if the canonical tuple ever
-# moves, grep for this comment.
+# Gateway names in Dthen's DISPLAY order, imported from config_loader (the
+# providers/*.json `display` fields are the single source — no duplicate
+# list lives anywhere in this repo). Dict-key order is display order.
 from config_loader import PROVIDERS as PROVIDER_KEYS
 PROVIDERS = PROVIDER_KEYS
 
@@ -184,10 +181,11 @@ def list_free_models(provider=None, root=None) -> dict:
         }
 
     # CANONICAL GATEWAY-KEY SEMANTIC (shared with watchdog_status's
-    # provider_counts): report exactly the seven known gateways, always.
-    # Unknown junk roster keys are ignored; a gateway missing from this tick
-    # degrades to an empty list. n_gateways is therefore a constant 7 — not
-    # a count of raw roster keys on partial state.
+    # provider_counts): report exactly the known gateways
+    # (config_loader.PROVIDERS), always. Unknown junk roster keys are
+    # ignored; a gateway missing from this tick degrades to an empty list.
+    # n_gateways is therefore a count of KNOWN gateways — not of raw roster
+    # keys on partial state.
     raw = roster["providers"]
     cleaned = {gw: _clean_ids(raw.get(gw, [])) for gw in PROVIDERS}
     union = {mid for ids in cleaned.values() for mid in ids}
@@ -384,12 +382,12 @@ def watchdog_status(now=None, root=None) -> dict:
 
 # ---------- MCP transport wiring ----------
 
-_WATCHED = ", ".join(PROVIDERS)
+_WATCHED_GATEWAYS = ", ".join(PROVIDERS)
 
 TOOL_DESCRIPTIONS = {
     "list_free_models":
         "List free-tier model ids across the watched gateways "
-        f"({_WATCHED}). Pass provider=<name> for one "
+        f"({_WATCHED_GATEWAYS}). Pass provider=<name> for one "
         "gateway's id list; omit it for the full roster with per-gateway "
         "counts. Read-only snapshot of the latest watchdog tick.",
     "get_model":
