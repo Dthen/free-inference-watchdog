@@ -441,10 +441,18 @@ def test_shipped_configs_declare_ignored_slugs():
     assert orouter["ignored_slugs"] == ["openrouter/free"]
 
 
+def test_provider_key_slug_fallback_for_hand_built_dicts():
+    """Defensive fallback: a hand-built dict (no roster_key, no _stem —
+    only possible when bypassing load_configs) slugifies its name."""
+    cfg = {"name": "NVIDIA NIM"}
+    assert config_loader._provider_key(cfg) == "nvidia_nim"
+
+
 def test_real_configs_keys_unchanged_by_stem_migration():
     """Migration safety net: the 7 shipped configs must resolve to the
     SAME roster keys as before the _PROVIDER_KEY_MAP deletion (they were
-    map values: nous, tokenrouter, kilo, openrouter, amd, bai, nim)."""
+    map values: nous, tokenrouter, kilo, openrouter, amd, bai, nim).
+    Update expected when a gateway file is legitimately added/removed."""
     expected = {"nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"}
     assert set(config_loader.PROVIDERS) == expected
 
@@ -470,7 +478,8 @@ def test_roster_key_field_must_be_nonempty_string(tmp_path, monkeypatch, capsys,
 def test_provider_key_falls_back_to_file_stem(tmp_path, monkeypatch):
     """A multi-word name needs NO map entry: the config FILE STEM is the
     roster key (nvidia-nim.json -> "nvidia-nim"), not the slugified name."""
-    providers_dir = tmp_path / "providers"; providers_dir.mkdir()
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
     cfg = {"name": "NVIDIA NIM", "base_url": "https://x.com/v1",
            "detection": "all-free", "auth": {"method": "none"}, "display": 0}
     (providers_dir / "nvidia-nim.json").write_text(json.dumps(cfg))
@@ -479,10 +488,12 @@ def test_provider_key_falls_back_to_file_stem(tmp_path, monkeypatch):
 
 
 def test_roster_key_overrides_stem(tmp_path, monkeypatch):
+    """The explicit roster_key field wins over the file stem."""
     cfg = {"name": "NVIDIA NIM", "base_url": "https://x.com/v1",
            "detection": "all-free", "auth": {"method": "none"}, "display": 0,
            "roster_key": "nim"}
-    providers_dir = tmp_path / "providers"; providers_dir.mkdir()
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
     (providers_dir / "nvidia-nim.json").write_text(json.dumps(cfg))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
     assert set(config_loader.build_providers()) == {"nim"}
@@ -492,7 +503,8 @@ def test_roster_key_used_verbatim(tmp_path, monkeypatch):
     """An explicit roster_key is used VERBATIM as the roster key — including
     odd-but-valid characters (interior space). Operator's explicit override;
     no normalization is applied (A1 rejects blank/non-string, that's all)."""
-    providers_dir = tmp_path / "providers"; providers_dir.mkdir()
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
     cfg = {"name": "Weird Name", "base_url": "https://x.com/v1",
            "detection": "all-free", "auth": {"method": "none"}, "display": 0,
            "roster_key": "my key"}
@@ -502,6 +514,7 @@ def test_roster_key_used_verbatim(tmp_path, monkeypatch):
 
 
 def test_duplicate_provider_keys_warn(tmp_path, monkeypatch, capsys):
+    """Two files resolving to one key warn on stderr; later display wins."""
     d = tmp_path / "providers"; d.mkdir()
     base = {"base_url": "https://x.com/v1", "detection": "all-free",
             "auth": {"method": "none"}}

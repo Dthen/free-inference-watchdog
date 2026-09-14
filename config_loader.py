@@ -230,7 +230,9 @@ def build_providers():
         if key in providers:
             print(f"config: duplicate provider key {key!r} "
                   f"({providers[key].get('name')!r} and {cfg.get('name')!r}) "
-                  f"- later display-order file wins", file=sys.stderr)
+                  f"- later display-order file wins; "
+                  "rename one file or set a unique roster_key",
+                  file=sys.stderr)
         providers[key] = cfg
     return providers
 
