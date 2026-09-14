@@ -277,8 +277,7 @@ def load_configs():
     return sorted(configs, key=lambda c: c.get("display", 0))
 
 
-# ---------- provider key mapping ----------
-
+# ---------- removal hold accessor ----------
 
 def removal_hold(config):
     """Positive hold in seconds, or None = removals alert instantly (default)."""
@@ -286,6 +285,8 @@ def removal_hold(config):
     return (hold if isinstance(hold, int) and not isinstance(hold, bool)
             and hold > 0 else None)
 
+
+# ---------- provider key mapping ----------
 
 def _provider_key(config):
     """Canonical provider key: the explicit "roster_key" field, else the

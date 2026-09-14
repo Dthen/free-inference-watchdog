@@ -947,11 +947,12 @@ def test_removal_hold_seconds_field_must_be_positive_int(tmp_path, monkeypatch,
     (providers_dir / "holdtest.json").write_text(json.dumps(cfg))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
     assert config_loader.load_configs() == []
-    assert ("removal_hold_seconds must be a positive integer"
-            in capsys.readouterr().err)
+    err = capsys.readouterr().err
+    assert "skipping" in err and "holdtest.json" in err
+    assert "removal_hold_seconds must be a positive integer" in err
 
 
-def test_removal_hold_seconds_valid_roundtrips(tmp_path, monkeypatch):
+def test_removal_hold_seconds_valid_roundtrips(tmp_path, monkeypatch, capsys):
     """A valid positive int survives load_configs verbatim."""
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()
@@ -959,6 +960,7 @@ def test_removal_hold_seconds_valid_roundtrips(tmp_path, monkeypatch):
     (providers_dir / "holdtest.json").write_text(json.dumps(cfg))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
     assert config_loader.load_configs()[0]["removal_hold_seconds"] == 1800
+    assert "skipping" not in capsys.readouterr().err
 
 
 def test_removal_hold_accessor():
@@ -966,4 +968,5 @@ def test_removal_hold_accessor():
     assert removal_hold({"removal_hold_seconds": 1800}) == 1800
     assert removal_hold({}) is None
     assert removal_hold({"removal_hold_seconds": True}) is None   # belt: never trusted raw
+    assert removal_hold({"removal_hold_seconds": "1800"}) is None  # belt: string arm
     assert removal_hold({"removal_hold_seconds": -1}) is None
