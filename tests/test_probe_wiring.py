@@ -23,6 +23,10 @@ def _bai_only_providers(model_ids):
             "base_url": "https://api.example.com",
             "_token": "test-token",
             "detection": "zero-credit-probe",
+            # A probe dialect so the call-site passthrough (config ->
+            # probe_model(probe_cfg=...)) has something to forward;
+            # test_probe_forwards_config_probe_block asserts it ARRIVES.
+            "probe": {"max_tokens": 7},
         }
     }
     for p in ["nous", "tokenrouter", "kilo", "openrouter", "amd"]:
@@ -134,6 +138,33 @@ def test_probes_no_overlap(monkeypatch, tmp_path):
     kinds = [e[0] for e in events]
     assert kinds == ["start", "end"] * 3, \
         f"probes overlapped or mis-sequenced: {events}"
+
+
+# ---------- probe_cfg forwarding ----------
+
+def test_probe_forwards_config_probe_block(monkeypatch, tmp_path):
+    """WIRING PIN: the provider config's \"probe\" block must ARRIVE at
+    probe_model as probe_cfg. probe_zero_credit's dialect tests cover the
+    consuming end; this covers the passthrough in build_fetch_all — a call
+    site that dropped probe_cfg= would silently revert every provider to
+    the DEFAULT_* dialect with the whole suite still green."""
+    captured = []
+
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
+        captured.append(probe_cfg)
+        return Result.FREE, {"http": 200}
+
+    monkeypatch.setattr(im, "probe_model", fake_probe)
+    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2"]))
+    monkeypatch.setattr(providers, "fetch_provider",
+                        _fake_fetch_provider_factory(["m1", "m2"]))
+
+    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+                                       sleep=lambda s: None)
+    fetch_all_fn()
+
+    # Both probes received the exact dialect from the config, not None.
+    assert captured == [{"max_tokens": 7}, {"max_tokens": 7}]
 
 
 # ---------- verdict-driven roster ----------

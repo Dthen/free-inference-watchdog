@@ -532,8 +532,9 @@ def test_invalid_probe_block_skips_file(tmp_path, monkeypatch, capsys, bad):
     assert "probe must be an object" in stderr
 
 
-@pytest.mark.parametrize("bad", [0, "3", True, -1, 1.5],
-                         ids=["zero", "str", "bool", "negative", "float"])
+@pytest.mark.parametrize("bad", [0, "3", True, -1, 1.5, None],
+                         ids=["zero", "str", "bool", "negative", "float",
+                              "null"])
 def test_invalid_probe_max_tokens_skips_file(tmp_path, monkeypatch, capsys, bad):
     """probe.max_tokens must be a positive integer (bool is an int-subclass
     — rejected like display). A non-int reaches json-serialized arithmetic
@@ -560,8 +561,13 @@ def test_invalid_probe_max_tokens_skips_file(tmp_path, monkeypatch, capsys, bad)
     [{}],                       # missing status
     [{"status": 400}],          # needs all_of or any_of
     [42],                       # entry not an object
+    None,                       # explicit null (present key, junk value)
+    [{"status": 400, "all_of": []}],    # empty all_of vacuously PAIDs any 400
+    [{"status": 400, "any_of": []}],    # same for any_of
+    [{"status": 400, "all_of": None}],  # explicit-null condition list
 ], ids=["str", "empty-list", "str-status", "bool-status", "all-of-str",
-        "blank-subs", "padded-sub", "no-status", "no-conditions", "int-elem"])
+        "blank-subs", "padded-sub", "no-status", "no-conditions", "int-elem",
+        "null", "empty-all-of", "empty-any-of", "null-all-of"])
 def test_invalid_paid_signals_skips_file(tmp_path, monkeypatch, capsys, bad):
     """probe.paid_signals must be a non-empty list of {status:int,
     all_of/any_of: list of non-empty unpadded strings} objects — a junk

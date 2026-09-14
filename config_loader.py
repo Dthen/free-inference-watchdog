@@ -121,17 +121,23 @@ def _validate_and_read(path):
         if not isinstance(probe, dict):
             raise ValueError(
                 f"probe must be an object, got {type(probe).__name__}")
-        max_tokens = probe.get("max_tokens")
-        if max_tokens is not None and (
-                not isinstance(max_tokens, int) or isinstance(max_tokens, bool)
-                or max_tokens <= 0):
-            # bool is an int subclass; True would sneak through as 1 token
-            # (rejected by b.ai) — same guard display applies.
-            raise ValueError(
-                f"probe.max_tokens must be a positive integer, "
-                f"got {max_tokens!r}")
-        signals = probe.get("paid_signals")
-        if signals is not None:
+        # Presence is the obligation, not key-not-None: an explicit JSON
+        # null must FAIL here, not sail through and defeat probe-time
+        # cfg.get(key, default) — a present-but-null key skips the default,
+        # shipping null max_tokens (permanent silent DEFER) or None
+        # paid_signals (TypeError swallowed into all-DEFER forever). Same
+        # boundary doctrine as ignored_slugs: present, even as null, valid.
+        if "max_tokens" in probe:
+            max_tokens = probe["max_tokens"]
+            if (not isinstance(max_tokens, int) or isinstance(max_tokens, bool)
+                    or max_tokens <= 0):
+                # bool is an int subclass; True would sneak through as 1 token
+                # (rejected by b.ai) — same guard display applies.
+                raise ValueError(
+                    f"probe.max_tokens must be a positive integer, "
+                    f"got {max_tokens!r}")
+        if "paid_signals" in probe:
+            signals = probe["paid_signals"]
             if not isinstance(signals, list) or not signals:
                 raise ValueError(
                     "probe.paid_signals must be a non-empty list, "
@@ -144,19 +150,23 @@ def _validate_and_read(path):
                         "probe.paid_signals entries need integer status, "
                         f"got {sig!r}")
                 for key in ("all_of", "any_of"):
-                    substrs = sig.get(key)
-                    if substrs is None:
+                    if key not in sig:
                         continue
-                    # Padded/blank substrings survive a strip() check yet
-                    # never match a lowered body — the silent-no-op class
-                    # ignored_slugs validation kills; same rule here.
-                    if (not isinstance(substrs, list)
+                    substrs = sig[key]
+                    # An empty list is as vacuous as its absence would be
+                    # PAID-classifying every response with that status —
+                    # the too-blunt outcome the no-conditions guard below
+                    # exists to kill. Padded/blank substrings survive a
+                    # strip() check yet never match a lowered body — the
+                    # silent-no-op class ignored_slugs validation kills;
+                    # same rule here.
+                    if (not isinstance(substrs, list) or not substrs
                             or not all(isinstance(s, str) and s.strip()
                                        and s == s.strip() for s in substrs)):
                         raise ValueError(
                             "probe.paid_signals "
-                            f"{key} must be a list of non-empty, unpadded "
-                            f"strings, got {substrs!r}")
+                            f"{key} must be a non-empty list of non-empty, "
+                            f"unpadded strings, got {substrs!r}")
                 if "all_of" not in sig and "any_of" not in sig:
                     # A status-only signal PAIDs every error of that code —
                     # too blunt to be a dialect; require a body condition.
