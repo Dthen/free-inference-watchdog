@@ -432,8 +432,8 @@ def test_load_configs_empty_ignored_slugs_list_ok(tmp_path, monkeypatch, capsys)
 
 
 def test_shipped_configs_declare_ignored_slugs():
-    """kilo/openrouter configs carry the exact router ids previously filtered
-    by hardcoded display logic (cross-checked against state/roster.json)."""
+    """Pins the shipped kilo.json and openrouter.json ignored_slugs literals
+    to the exact router ids previously filtered by hardcoded display logic."""
     repo = Path(config_loader.__file__).resolve().parent
     kilo = json.loads((repo / "providers" / "kilo.json").read_text(encoding="utf-8"))
     orouter = json.loads((repo / "providers" / "openrouter.json").read_text(encoding="utf-8"))

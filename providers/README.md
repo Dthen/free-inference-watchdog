@@ -21,6 +21,7 @@ costs exactly that provider — the rest of the roster still loads.
 | auth.path | string | if token_file | Literal path to a JSON token file (legacy alternative to `path_env`) |
 | auth.key | string | if token_file | Dot-separated JSON path to the token inside the file (e.g. `providers.nous.access_token`) |
 | display | int | yes | Column order (0 = first) |
+| roster_key | string | no | Explicit roster-key override; defaults to the config file's stem (see `config_loader._provider_key`) |
 | ignored_slugs | list of strings | no | Exact model ids to exclude from tracking (see below) |
 | probe | object | no | Zero-credit-probe dialect: `max_tokens` + `paid_signals` (see below) |
 

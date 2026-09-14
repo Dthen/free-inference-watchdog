@@ -1,6 +1,6 @@
 # free-inference-watchdog
 
-Zero-token cron watchdog for seven free-tier LLM gateways. Alerts Discord when a
+Zero-token cron watchdog for the free-tier LLM gateways in [`providers/`](providers/). Alerts Discord when a
 free model appears or disappears. Stdlib-only Python, one tick per invocation,
 no LLM calls ever.
 
@@ -14,8 +14,7 @@ Every hour (cadence comes from the cron schedule; `--recheck-delay` only
 sets the ~3-minute confirm nap before a diff is believed), the monitor:
 
 1. Loads every `providers/*.json` config and fetches free-model rosters from
-   **Nous**, **TokenRouter**, **Kilo**, **OpenRouter**, **AMD**, **B.AI**, and
-   **NVIDIA NIM** (in that display order). Which ids count as free is decided per provider by
+   every gateway configured in [`providers/`](providers/). Which ids count as free is decided per provider by
    its `detection` method (see [Architecture](#architecture)).
 2. Carries forward last-known-good IDs on provider failure (sticky silence —
    an outage never looks like a mass removal).
@@ -182,12 +181,12 @@ loader validates at startup:
 
 Detection methods (dispatched by string key, so a provider can pick any):
 
-- `api-pricing` — model is free when `pricing.prompt == "0"` AND `pricing.completion == "0"` (Nous, OpenRouter).
-- `api-flag` — model is free when `isFree == true` (Kilo).
-- `id-suffix` — model id ends with `:free` / `-free`, or contains `free` (TokenRouter).
-- `all-free` — every model in the catalog is treated as free (AMD, NVIDIA NIM).
+- `api-pricing` — model is free when `pricing.prompt == "0"` AND `pricing.completion == "0"`.
+- `api-flag` — model is free when `isFree == true`.
+- `id-suffix` — model id ends with `:free` / `-free`, or contains `free`.
+- `all-free` — every model in the catalog is treated as free.
 - `zero-credit-probe` — fire a minimal 3-token completion per model and classify by the
-  response (B.AI). Probes run **serially with 5s spacing** (12 RPM) to stay
+  response. Probes run **serially with 5s spacing** (12 RPM) to stay
   under b.ai's undocumented rate limits (operator pacing choice
   2026-09-13); verdicts are persisted to
   `probe_state.json` and the roster is verdict-filtered (ONLY FREE-verdict
