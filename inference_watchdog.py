@@ -39,7 +39,7 @@ DEFAULT_CADENCE_S = 1 * 3600
 # queue items (no verdict yet) via probe_state persistence — the same
 # self-healing mechanism every truncation uses. The ONE-TICK-FULL-PASS
 # guarantee is superseded by this pacing choice; do NOT go faster (below
-# 5s) without the operator's say-so, and if b.ai burst-kills at this rate,
+# 5s) without the operator's say-so. If a gateway burst-kills at this rate,
 # probes return DEFER and the sticky-roster rule (a DEFER never overwrites
 # a prior verdict) contains the damage — watch a tick's DEFER pattern.
 PROBE_INTERVAL_S = 5
@@ -80,8 +80,8 @@ PROBE_TIMEOUT_S = 30
 # stay unprobed but the probed subset still persists (save_probe_state
 # runs at the end of build_fetch_all) — the next tick resumes from
 # cached verdicts (self-healing, no death spiral). At the operator's 5s
-# pacing a tail cut is the NORMAL every-pass outcome (~45 of 47 carried,
-# short tail deferred), not pathological; only a tick where every probe burns its
+# pacing a tail cut is the NORMAL every-pass outcome (most of the catalog
+# carried, short tail deferred — the tail resumes next tick), not pathological; only a tick where every probe burns its
 # full 30s timeout cuts deep. Either way the spread across hourly ticks is
 # the designed fallback, oldest-first priority preserved.
 PROBE_PHASE_BUDGET_S = 260
