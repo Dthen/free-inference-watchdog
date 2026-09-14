@@ -16,9 +16,8 @@ Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
     `display` field in each provider's JSON config). This does NOT match
     the providers.PROVIDERS registry order, and must NOT be alphabetized.
   - Header copy is minimal: title + "updated hourly" + three chips
-    ("N unique models", "M endpoints",
-    "G gateways"). NO snapshot/alert/
-    stale wording anywhere.
+    ("N unique models", "M endpoints", "G gateways"). NO
+    snapshot/alert/stale wording anywhere.
   - Colors are Nord strictly: nord0 bg #2e3440, nord1 elevated/thead/chips
     #3b4252, nord2 hover #434c5e, nord6 text #eceff4, nord4 subtle
     #d8dee9 @ opacity .72, nord8 accent (counts) #88c0d0, nord9 column
@@ -287,13 +286,11 @@ def render_page(roster, logo_b64, header_meta=None):
     def _wire_cell(gw, raw_id):
         """Return the inner-HTML for one (gateway, raw_id) wiring row.
 
-        Imports from GATEWAY_WIRING; nous has no static URL (its base is
-        read from auth.json at runtime) so the URL column carries the
-        `base_url_source` prose instead so the reader still gets the
-        exact runtime path.
+        Imports from GATEWAY_WIRING: the URL column carries the gateway's
+        chat_completions_url, so the reader gets the exact endpoint.
         """
         w = GATEWAY_WIRING[gw]
-        url_text = w.get("chat_completions_url") or w.get("base_url_source") or ""
+        url_text = w["chat_completions_url"]
         # All visible strings: escaped, monospaced, copy-pasteable.
         return (
             f'<span class="wire-gw">{escape(gw)}</span>'

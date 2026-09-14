@@ -309,9 +309,6 @@ def list_endpoints(provider=None, root=None) -> dict:
             "api_type": wiring.get("api_type"),
             "model_ids": ids,
         }
-        # Include optional notes field if present
-        if "notes" in wiring:
-            gateways[gw]["notes"] = wiring["notes"]
         total_endpoints += len(ids)
         all_stripped.update(strip_free_marker(mid) for mid in ids)
 

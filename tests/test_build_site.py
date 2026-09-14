@@ -856,8 +856,8 @@ def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
         # We expect variant rows for: poolside:free on nous, poolside-free
         # on tokenrouter, poolside:free on kilo, poolside-free on kilo, standalone-1
         # on nous, standalone-2 on openrouter — 6 expansion rows total.
-        # Each MUST mention its gateway's URL (or the nous base_url_source
-        # for nous, which has no static URL).
+        # Each MUST mention its gateway's chat_completions_url (every
+        # gateway in GATEWAY_WIRING now carries a static URL).
         expand_rows = [r for r in _all_trs_in_tbody(html) if 'class="expand"' in r]
         assert len(expand_rows) == 6, (
             f"expected 6 expansion rows, got {len(expand_rows)}"
