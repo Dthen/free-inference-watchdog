@@ -929,3 +929,41 @@ def test_load_configs_unreadable_providers_dir_warns(tmp_path, monkeypatch, caps
             "a permission-denied providers dir must warn, not go silent")
     finally:
         providers_dir.chmod(0o755)  # restore so tmp cleanup works
+
+
+# ---------- removal_hold_seconds: optional, validated positive int ----------
+
+
+@pytest.mark.parametrize("bad", [123.5, 0, -5, "1800", True, None],
+                         ids=["float", "zero", "neg", "str", "bool", "null"])
+def test_removal_hold_seconds_field_must_be_positive_int(tmp_path, monkeypatch,
+                                                         capsys, bad):
+    """Optional "removal_hold_seconds" field: when present it must be a
+    positive integer — junk here would silently disable or crash the hold
+    comparison in pending_removals.settle."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {**_minimal_config("HoldTest"), "removal_hold_seconds": bad}
+    (providers_dir / "holdtest.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs() == []
+    assert ("removal_hold_seconds must be a positive integer"
+            in capsys.readouterr().err)
+
+
+def test_removal_hold_seconds_valid_roundtrips(tmp_path, monkeypatch):
+    """A valid positive int survives load_configs verbatim."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {**_minimal_config("HoldTest"), "removal_hold_seconds": 1800}
+    (providers_dir / "holdtest.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs()[0]["removal_hold_seconds"] == 1800
+
+
+def test_removal_hold_accessor():
+    from config_loader import removal_hold
+    assert removal_hold({"removal_hold_seconds": 1800}) == 1800
+    assert removal_hold({}) is None
+    assert removal_hold({"removal_hold_seconds": True}) is None   # belt: never trusted raw
+    assert removal_hold({"removal_hold_seconds": -1}) is None
