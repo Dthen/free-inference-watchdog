@@ -9,7 +9,8 @@ Four read-only tools, no enrichment (none exists anywhere in the repo):
   watchdog_status()                 tick freshness vs the 1h cadence, stale/
                                     failing providers, per-provider counts,
                                     pending-alert queue depth, last site publish
-  list_endpoints(provider=None)     per-gateway wiring entries (base URL,
+  list_endpoints(provider=None)     per-gateway wiring entries
+                                    (chat-completions URL,
                                     api_type) and raw tracked ids
 
 IMPORT CHOICE (corrected fact, probe-verified 2026-08-26 on this box): the
