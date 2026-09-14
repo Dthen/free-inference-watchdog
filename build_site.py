@@ -347,14 +347,15 @@ def render_page(roster, logo_b64, header_meta=None):
         header_meta = build_provider_header_meta()
 
     def _head_cell(gw):
-        """Gateway column head: '<gateway> (N)' always visible; wrapped in a
+        """Gateway column head: '<gateway>' always visible; wrapped in a
         signup anchor when providers/*.json carries an https:// signup_url,
         with the dated limits_note as the native title tooltip. Missing /
         non-https signup_url => plain <th> (scheme guard — XSS via a config
         'javascript:' value must never become an href). Missing limits_note
-        => anchor without title attr. Static HTML only: no JS tooltips."""
-        count = len(providers.get(gw, []))
-        text = f"{escape(gw)} ({count})"
+        => anchor without title attr. Per-gateway counts live in the tfoot
+        only (operator: neater at the bottom). Static HTML only: no JS
+        tooltips."""
+        text = escape(gw)
         entry = header_meta.get(gw) or {}
         url = entry.get("signup_url", "")
         if not url.lower().startswith("https://"):

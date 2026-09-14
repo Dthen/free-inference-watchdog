@@ -185,7 +185,7 @@ def test_presence_matrix_structure():
         # header column order pins the display order end-to-end
         # SEED_ROSTER has no bai models, so bai is hidden: 5 active gateways
         # Headers are gateway display keys (optionally wrapped in the signup
-        # anchor with a " (N)" count) — extract the bare gateway name.
+        # anchor) — extract the bare gateway name.
         head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
         cols = [c.strip() for c in re.findall(r"<th>(?:<a[^>]*>)?([^<(]*)", head)]
         assert cols == ["model id", "#", "nous", "tokenrouter", "kilo", "openrouter", "amd"]
@@ -995,8 +995,8 @@ def test_nim_gets_a_column_and_wiring_url(tmp_path):
         proc = _run_builder(NIM_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        # Header upgrade: nim carries a signup link + count in its column head.
-        assert ">nim (1)</a></th>" in html, "nim column header missing"
+        # Header upgrade: nim carries a signup link in its column head.
+        assert ">nim</a></th>" in html, "nim column header missing"
         assert 'href="https://build.nvidia.com/?modal=signin"' in html, (
             "nim header not linked to its signup URL")
         assert "integrate.api.nvidia.com/v1/chat/completions" in html, (
@@ -1028,13 +1028,13 @@ def test_expand_wire_cell_wraps_long_urls(tmp_path):
                 f"{cls} must break long words/URLs to stay inside the cell")
 
 
-# ---------- Gateway header upgrade: signup links + counts + limits tooltips --
+# ---------- Gateway header upgrade: signup links + limits tooltips -------
 #
 # Design (operator-locked): each gateway column head is
-#   <th><a href="{signup_url}" target="_blank" rel="noopener" title="{limits_note}">{gateway} ({count})</a></th>
+#   <th><a href="{signup_url}" target="_blank" rel="noopener" title="{limits_note}">{gateway}</a></th>
 # signup_url/limits_note are OPTIONAL fields in providers/*.json (operator-
 # maintained facts, same file as everything else about a gateway). Missing
-# signup_url (or a non-https scheme) => plain <th>name (N)</th>. Missing
+# signup_url (or a non-https scheme) => plain <th>name</th>. Missing
 # limits_note => anchor without title attr. Config load failure => empty map,
 # plain headers, exit 0 (site build failure must never page).
 
@@ -1095,32 +1095,33 @@ def _render(roster, meta):
 
 def test_header_links_anchor_with_count_and_tooltip():
     """signup_url + limits_note present -> anchored th, exact href/target/rel/
-    title, link text 'gateway (N)' with N from the live roster."""
+    title, link text the bare gateway name."""
     head = _render(HEADER_ROSTER, {"nous": {
         "signup_url": "https://portal.nousresearch.com/",
         "limits_note": "Per-token rate limits, shared across all models (as of 2026-09)"}})
     assert head.count("<th>") == 4  # model id, #, nous, nim (nim plain: no meta entry)
     assert ('<th><a href="https://portal.nousresearch.com/" target="_blank" '
             'rel="noopener" title="Per-token rate limits, shared across all models '
-            '(as of 2026-09)">nous (2)</a></th>') in head
-    assert "<th>nim (1)</th>" in head  # absent from map -> plain, count kept
+            '(as of 2026-09)">nous</a></th>') in head
+    assert "<th>nim</th>" in head  # absent from map -> plain th
 
 
 def test_header_count_visible_in_text_never_only_in_attribute():
-    """The (N) count lives in the visible link text (operator rule: no hover
-    needed) and the title is html-escaped through the existing escape()."""
+    """The bare gateway name lives in the visible link text (per-gateway
+    counts moved to the tfoot — neater at the bottom) and the title is
+    html-escaped through the existing escape()."""
     head = _render(HEADER_ROSTER, {"nous": {
         "signup_url": "https://x.example/signup",
         "limits_note": 'note with "quote" & <angle>'}})
     anchor = re.search(r'<th><a\b[^>]*>(.*?)</a></th>', head).group(1)
-    assert anchor == "nous (2)"
+    assert anchor == "nous"
     assert 'title="note with &quot;quote&quot; &amp; &lt;angle&gt;"' in head
 
 
 def test_header_missing_signup_url_plain_th_with_count():
-    """No signup_url -> plain th (no anchor), count still visible."""
+    """No signup_url -> plain th (no anchor)."""
     head = _render(HEADER_ROSTER, {"nous": {"limits_note": "no url here"}})
-    assert "<th>nous (2)</th>" in head
+    assert "<th>nous</th>" in head
     assert "<a " not in head
 
 
@@ -1129,7 +1130,7 @@ def test_header_missing_limits_note_anchor_without_title():
     head = _render(HEADER_ROSTER, {"nous": {"signup_url": "https://x.example/signup"}})
     assert 'href="https://x.example/signup"' in head
     assert "title=" not in head
-    assert ">nous (2)</a>" in head
+    assert ">nous</a>" in head
 
 
 @pytest.mark.parametrize("bad", [
@@ -1144,7 +1145,7 @@ def test_header_scheme_guard_rejects_non_https(bad):
     treated as missing — the XSS/scheme guard runs at render time."""
     head = _render(HEADER_ROSTER, {"nous": {"signup_url": bad,
                                             "limits_note": "note"}})
-    assert "<th>nous (2)</th>" in head, f"non-https {bad!r} must degrade to plain th"
+    assert "<th>nous</th>" in head, f"non-https {bad!r} must degrade to plain th"
     assert "<a " not in head
 
 
@@ -1152,12 +1153,12 @@ def test_header_scheme_guard_accepts_uppercase_https():
     """The https:// check is case-insensitive; the value renders verbatim."""
     head = _render(HEADER_ROSTER, {"nous": {"signup_url": "HTTPS://PORTAL.EXAMPLE.COM/"}})
     assert 'href="HTTPS://PORTAL.EXAMPLE.COM/"' in head
-    assert ">nous (2)</a>" in head
+    assert ">nous</a>" in head
 
 
 def test_config_load_failure_degrades_to_plain_headers(tmp_path, monkeypatch):
     """If loading provider configs raises for ANY reason the map is empty,
-    headers render plain (counts kept), and the builder still completes with
+    headers render plain, and the builder still completes with
     exit 0 and a written site — site-build failure must never page."""
     import build_site
     _seed_logo(tmp_path)
@@ -1171,7 +1172,7 @@ def test_config_load_failure_degrades_to_plain_headers(tmp_path, monkeypatch):
     build_site.main(["--root", str(tmp_path)])  # must NOT raise
     html = (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
     head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
-    assert "<th>nous (2)</th>" in head and "<th>nim (1)</th>" in head
+    assert "<th>nous</th>" in head and "<th>nim</th>" in head
     assert "<a " not in head
 
 
@@ -1181,7 +1182,7 @@ def test_render_page_header_map_is_optional_argument():
     in providers/nous.json)."""
     import build_site
     html = build_site.render_page(HEADER_ROSTER, "ZmFrZWxvZ28=")
-    assert '>nous (2)</a>' in html
+    assert '>nous</a>' in html
 
 
 def test_real_provider_configs_carry_verified_fields():
@@ -1205,16 +1206,16 @@ def test_provider_config_field_values(key):
 
 def test_cli_headers_link_real_provider_fields(tmp_path):
     """End-to-end through the real CLI + real providers/*.json: both fields
-    produce the fully-formed anchor with the live count."""
+    produce the fully-formed anchor."""
     _seed_logo(tmp_path)
     proc = _run_builder(HEADER_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
     assert ('<th><a href="https://portal.nousresearch.com/" target="_blank" '
             'rel="noopener" title="Per-token rate limits, shared across all models '
-            '(as of 2026-09)">nous (2)</a></th>') in html
+            '(as of 2026-09)">nous</a></th>') in html
     assert '<th><a href="https://build.nvidia.com/?modal=signin"' in html
-    assert ">nim (1)</a></th>" in html
+    assert ">nim</a></th>" in html
 
 
 def test_footer_links_use_class_not_inline_style(tmp_path):
