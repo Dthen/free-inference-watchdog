@@ -92,7 +92,7 @@ def enqueue(held, provider, ids, now):
     resets); only last_absent_seen advances. Empty `ids` creates no slice."""
     now_i = int(now)
     if not ids:
-        return  # amendment: no enqueue([]) dust — {"p": {}} never created
+        return  # no enqueue([]) dust — {"p": {}} never created
     slice_ = held.setdefault(provider, {})
     for model_id in ids:
         model_id = str(model_id)
@@ -118,7 +118,11 @@ def settle(held, fetches, holds, now):
     - id in fetches[p] -> recovered; else if now - gone_since >= hold ->
       expired (consumed); else last_absent_seen = int(now)
     A slice emptied during the pass is pruned (`del held[p]`) — no
-    {"p": {}} dust persists."""
+    {"p": {}} dust persists.
+    "changed" = providers with at least one ENTRY CONSUMED (recovered /
+    expired / released). Stamp-only refreshes (last_absent_seen) and dust
+    prunes are DELIBERATELY NOT marked; callers decide persistence on deep
+    map comparison (held != snapshot), never on changed-membership."""
     now_i = int(now)
     recovered = []
     expired = {}
@@ -138,8 +142,7 @@ def settle(held, fetches, holds, now):
             if entries:
                 changed.add(provider)
             entries.clear()
-            if not entries:
-                del held[provider]  # amendment: prune emptied slice
+            del held[provider]  # release-all prunes the slice entirely
             continue
         for model_id in sorted(entries):
             entry = entries[model_id]
@@ -154,7 +157,8 @@ def settle(held, fetches, holds, now):
             else:
                 entry["last_absent_seen"] = now_i
         if not entries:
-            del held[provider]  # amendment: prune emptied slice
+            # prune emptied slice — {"p": {}} dust must not persist
+            del held[provider]
     return {"recovered": sorted(recovered),
             "expired": expired,
             "released": sorted(released),
@@ -176,6 +180,6 @@ def with_expired(held, expired, stamps_from):
                 print(f"pending_removals: no pre-settle stamp for "
                       f"{provider}/{model_id} — expired entry not re-queued",
                       file=sys.stderr)
-                continue  # amendment: skip + note, never invent a stamp
+                continue  # skip + note, never invent a stamp
             merged.setdefault(provider, {})[model_id] = copy.deepcopy(stamp)
     return merged
