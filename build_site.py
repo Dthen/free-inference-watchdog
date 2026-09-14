@@ -290,6 +290,8 @@ def render_page(roster, logo_b64, header_meta=None):
         chat_completions_url, so the reader gets the exact endpoint.
         """
         w = GATEWAY_WIRING[gw]
+        # config_loader.build_gateway_wiring() always emits chat_completions_url
+        # and api_type for every provider -- the subscripts are safe.
         url_text = w["chat_completions_url"]
         # All visible strings: escaped, monospaced, copy-pasteable.
         return (
