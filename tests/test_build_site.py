@@ -1093,7 +1093,7 @@ def _render(roster, meta):
     return html.split("<thead>", 1)[1].split("</thead>", 1)[0]
 
 
-def test_header_links_anchor_with_count_and_tooltip():
+def test_header_links_anchor_with_tooltip():
     """signup_url + limits_note present -> anchored th, exact href/target/rel/
     title, link text the bare gateway name."""
     head = _render(HEADER_ROSTER, {"nous": {
