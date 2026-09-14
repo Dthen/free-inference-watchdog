@@ -7,8 +7,8 @@
 - Empty stdout = healthy-silent; diagnostics go to stderr. Exit codes: 0 normal, 1 partial provider failure / bootstrap refused, 2 fatal.
 
 ## Providers
-- Seven gateways in DISPLAY order `nous, tokenrouter, kilo, openrouter, amd, bai, nim` — canonical for UI/MCP surfaces (build_site.py `DISPLAY_ORDER`, mcp_server.py `PROVIDERS` tuple).
-- Provider order everywhere user-visible is DISPLAY order — the `display` number in providers/*.json, which is the canonical list above (nim last); there is no separate providers.py ordering to conflict with.
+- The roster is the set of `providers/*.json` files; user-visible order is each config's `display` field, surfaced via `config_loader.PROVIDERS` (build_site's `DISPLAY_ORDER` and mcp_server's `PROVIDERS` derive from it — no duplicate list lives in module code).
+- Provider order everywhere user-visible is DISPLAY order — the `display` number in providers/*.json (nim last); there is no separate providers.py ordering to conflict with.
 - Free-only rule per provider: an id is tracked iff `"free" in id.lower()`. No alias map, no allowlist, no normalized-name matching — exact ids only. A new stealth arrival ships under whatever id the gateway assigns; if that id doesn't contain "free", it's not tracked.
 - Ollama is gone BY DESIGN (GPU-time metering, no free-model concept) — do not re-add it.
 
@@ -20,7 +20,7 @@
 - Behavior-changing roster edits require a manual `python3 inference_watchdog.py --init` rebaseline (archives roster.json to roster.json.bak), then verify the next tick is SILENT.
 
 ## State layout (state/, gitignored)
-- roster.json: providers + tick_epoch + stale_providers + transients + unconfirmed + nous_ratelimit. Never hand-edit — use --init.
+- roster.json: providers + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
 - alive.json: last_tick_epoch + last_output_epoch + dropped_alerts_total.
 - pending_alerts.json: bounded retry queue (MAX_ATTEMPTS 5 per alert).
 - Lockfile recovery per README (state/monitor.lock; stale >30 min auto-broken).
