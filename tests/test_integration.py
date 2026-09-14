@@ -24,7 +24,9 @@ def _fetcher(scenarios):
         snap = dict(current())
         calls["n"] += 1
         # Tick now expects (results_map, meta_map); meta is passive telemetry.
-        metas = {name: {} for name in snap}
+        # Real build_fetch_all semantics: metas keyed ONLY on fetch SUCCESS —
+        # failed gateways (None) are ABSENT from metas, not present-with-{}.
+        metas = {name: {} for name, ids in snap.items() if ids is not None}
         return snap, metas
 
     def fetch_one(name):
@@ -344,28 +346,37 @@ def test_roster_persists_transients_from_flap(tmp_path, capsys):
     assert roster["providers"]["tokenrouter"] == ["a", "b"]   # recheck truth persisted
 
 
-def test_nous_ratelimit_persisted_from_meta(tmp_path):
-    """Item 5: nous_ratelimit is plumbed end-to-end into roster."""
-    # Scenario with meta payload
-    fetch_all, fetch_one, _ = _fetcher([{"nous": ["a"]}])
+def test_ratelimits_persisted_for_every_succeeded_gateway(tmp_path):
+    """R2-6 generalized: every gateway that succeeded carries its passive
+    ratelimit headers into roster['ratelimits']; failed gateways are
+    absent (not present-with-{})."""
+    fetch_all, fetch_one, _ = _fetcher([{"nous": ["a"], "kilo": ["b"],
+                                         "openrouter": None}])
     def fetch_all_with_meta():
-        results, _ = fetch_all()
-        return results, {"nous": {"ratelimit": {"x-ratelimit-remaining-requests": "99"}}}
+        results, metas = fetch_all()
+        # nous succeeded WITH ratelimit headers; kilo succeeded WITHOUT
+        # (empty meta); openrouter failed — the base harness already keeps
+        # it absent from metas, mirroring real build_fetch_all semantics.
+        metas["nous"] = {"ratelimit": {"x-ratelimit-remaining": "9"}}
+        return results, metas
     im.run_tick(
         tmp_path, REGISTRY, fetch_all_with_meta, fetch_one,
         webhook_url=None, sleep=lambda s: None, now=1_000_000_000,
         recheck_delay=0)
     roster = json.loads((tmp_path / "roster.json").read_text())
-    assert "nous_ratelimit" in roster
-    assert roster["nous_ratelimit"]["x-ratelimit-remaining-requests"] == "99"
+    assert roster["ratelimits"] == {"nous": {"x-ratelimit-remaining": "9"},
+                                    "kilo": {}}
+    assert "nous_ratelimit" not in roster
+    assert "openrouter" not in roster["ratelimits"]   # the failed gateway
 
 
-def test_nous_ratelimit_empty_when_nous_failed(tmp_path):
-    """Item 5: nous_ratelimit is {} when nous fetch failed."""
-    # Need at least one success to bypass bootstrap guard
+def test_ratelimits_empty_when_no_gateway_carries_headers(tmp_path):
+    """Succeeded gateways with no ratelimit headers land as {} entries;
+    a fully-failed gateway is absent (metas keyed only on success)."""
     _run(tmp_path, [{"nous": None, "openrouter": ["x"]}])
     roster = json.loads((tmp_path / "roster.json").read_text())
-    assert roster["nous_ratelimit"] == {}
+    assert roster["ratelimits"] == {"openrouter": {}}
+    assert "nous" not in roster["ratelimits"]
 
 
 def test_bootstrap_guard_zero_providers(tmp_path, capsys):

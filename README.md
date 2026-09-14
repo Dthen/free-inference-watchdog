@@ -136,7 +136,7 @@ the repo stays agent-agnostic.
 | `stale_providers` | Provider names whose fetch failed this tick (carried forward) |
 | `transients` | Rebuilt every tick. Diffs that appeared then vanished on recheck. |
 | `unconfirmed` | Rebuilt every tick. Diffs whose recheck itself failed (signal may resurface). |
-| `nous_ratelimit` | Passive x-ratelimit headers from Nous (`{}` if Nous failed) |
+| `ratelimits` | Per-gateway passive x-ratelimit headers from this tick (`{}` for succeeded gateways with none; absent = fetch failed) |
 | `tick_epoch` | Unix epoch of this tick |
 
 All per-tick fields are **rebuilt** (never appended to). The only persistent
@@ -144,7 +144,7 @@ counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 
 ## State layout (state/, gitignored)
 
-- `roster.json`: providers + tick_epoch + stale_providers + transients + unconfirmed + nous_ratelimit. Never hand-edit — use --init.
+- `roster.json`: providers + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
 - `alive.json`: last_tick_epoch + last_output_epoch + dropped_alerts_total.
 - `pending_alerts.json`: bounded retry queue (MAX_ATTEMPTS 5 per alert).
 - `probe_state.json`: per-provider probe verdicts (`{provider: {model_id: {"verdict": "free"|"paid", "epoch": int}}}`). Written once per tick after the serial probe loop. Never hand-edit.

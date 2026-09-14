@@ -102,7 +102,8 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
     """Return fetch_all() -> ({name: ids|None}, {name: meta_dict}).
 
     Failures become None in the results map (sticky) and are ABSENT from the
-    meta map. Meta is passive telemetry only (nous x-ratelimit headers, R2-6).
+    meta map. Meta is passive telemetry only (per-gateway x-ratelimit
+    headers, R2-6).
 
     Zero-credit-probe providers go through a SERIAL throttled probe loop:
     verdicts persist via probe_state; the queue is probe_select-driven; the
@@ -303,10 +304,15 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         # old baseline is archived only later, AFTER the bootstrap guard.
         events, first_run = {}, True
 
-    # Passive x-ratelimit telemetry (R2-6): {} whenever nous did not succeed.
-    nous_ratelimit = {}
-    if results.get("nous") is not None:
-        nous_ratelimit = (metas.get("nous") or {}).get("ratelimit") or {}
+    # Passive x-ratelimit telemetry (R2-6), generic: headers captured by
+    # providers.fetch_provider for EVERY gateway. metas is keyed ONLY on
+    # fetch success — iterate IT, not new_map (which also contains
+    # carried-forward FAILED gateways): a failed gateway must be ABSENT
+    # from ratelimits, not present-with-{}.
+    ratelimits = {
+        gw: meta.get("ratelimit", {})
+        for gw, meta in metas.items()
+    }
 
     # Per-tick field lifecycle: rebuilt EVERY tick, never appended (Task 4).
     transients, unconfirmed = {}, {}
@@ -323,7 +329,7 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
             "stale_providers": stale,          # rebuilt every tick
             "transients": transients,          # rebuilt every tick (R2-5)
             "unconfirmed": unconfirmed,        # rebuilt every tick (R2-5)
-            "nous_ratelimit": nous_ratelimit,  # passive headers (R2-6)
+            "ratelimits": ratelimits,  # passive headers (R2-6)
         })
 
     if first_run:

@@ -40,7 +40,7 @@ def state_dir(tmp_path):
         "stale_providers": [],
         "transients": {},
         "unconfirmed": {},
-        "nous_ratelimit": {},
+        "ratelimits": {},
     }
     (tmp_path / "state").mkdir()
     (tmp_path / "site").mkdir()
