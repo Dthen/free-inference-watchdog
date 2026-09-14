@@ -513,6 +513,101 @@ def test_roster_key_used_verbatim(tmp_path, monkeypatch):
     assert set(config_loader.build_providers()) == {"my key"}
 
 
+# ---------- probe: optional per-provider zero-credit-probe dialect ----------
+
+
+@pytest.mark.parametrize("bad", ["x", 42, None, [1]],
+                         ids=["str", "int", "null", "list"])
+def test_invalid_probe_block_skips_file(tmp_path, monkeypatch, capsys, bad):
+    """The optional "probe" block must be an object — anything else is a
+    file-level shape error: skip + warn, keep the rest of the roster."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {**_minimal_config("ProbeBlock"), "probe": bad}
+    (providers_dir / "probetest.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs() == []
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr and "probetest.json" in stderr
+    assert "probe must be an object" in stderr
+
+
+@pytest.mark.parametrize("bad", [0, "3", True, -1, 1.5],
+                         ids=["zero", "str", "bool", "negative", "float"])
+def test_invalid_probe_max_tokens_skips_file(tmp_path, monkeypatch, capsys, bad):
+    """probe.max_tokens must be a positive integer (bool is an int-subclass
+    — rejected like display). A non-int reaches json-serialized arithmetic
+    wrong and a <=0 value makes every probe a guaranteed 400: skip + warn."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {**_minimal_config("ProbeMaxTokens"), "probe": {"max_tokens": bad}}
+    (providers_dir / "maxtok.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs() == []
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr and "maxtok.json" in stderr
+    assert "probe.max_tokens must be a positive integer" in stderr
+
+
+@pytest.mark.parametrize("bad", [
+    "x",                        # not a list
+    [],                         # empty list (useless dialect)
+    [{"status": "400"}],        # status not an int
+    [{"status": True}],         # bool is an int-subclass
+    [{"status": 400, "all_of": "deposit"}],       # all_of bare string
+    [{"status": 400, "any_of": ["", "  "]}],      # empty/blank substrings
+    [{"status": 400, "all_of": [" padded "]}],    # padded substring
+    [{}],                       # missing status
+    [{"status": 400}],          # needs all_of or any_of
+    [42],                       # entry not an object
+], ids=["str", "empty-list", "str-status", "bool-status", "all-of-str",
+        "blank-subs", "padded-sub", "no-status", "no-conditions", "int-elem"])
+def test_invalid_paid_signals_skips_file(tmp_path, monkeypatch, capsys, bad):
+    """probe.paid_signals must be a non-empty list of {status:int,
+    all_of/any_of: list of non-empty unpadded strings} objects — a junk
+    signal silently misclassifies (or TypeErrors at probe time). Skip+warn."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {**_minimal_config("PaidSignals"), "probe": {"paid_signals": bad}}
+    (providers_dir / "signals.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs() == []
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr and "signals.json" in stderr
+    assert "paid_signals" in stderr
+
+
+@pytest.mark.parametrize("good", [
+    {},                                              # empty dict = no-op
+    {"max_tokens": 5},                               # dialect override only
+    {"max_tokens": 3, "paid_signals": [
+        {"status": 403, "all_of": ["deposit"]}]},    # full valid block
+    {"paid_signals": [{"status": 402, "any_of": ["top up"]}]},  # any_of alone
+], ids=["empty", "max-tokens-only", "full", "any-of-only"])
+def test_valid_probe_block_loads(tmp_path, monkeypatch, capsys, good):
+    """Well-formed probe blocks (including the vacuous {}) load untouched —
+    the block is optional and its keys are individually optional."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {**_minimal_config("ProbeGood"), "probe": good}
+    (providers_dir / "good.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    configs = config_loader.load_configs()
+    assert len(configs) == 1
+    assert configs[0]["probe"] == good
+    assert "skipping" not in capsys.readouterr().err
+
+
+def test_bai_config_carries_its_probe_dialect():
+    """Pin: b.ai's probe dialect (max_tokens 3 + its three paid signals)
+    lives in providers/bai.json, not only in probe_zero_credit.py defaults —
+    the config is its real home and the DEFAULT_* constants are just the
+    generic fallback for configs that omit the block."""
+    bai = config_loader.PROVIDERS["bai"]
+    assert bai["probe"]["max_tokens"] == 3
+    assert len(bai["probe"]["paid_signals"]) == 3
+
+
 def test_duplicate_provider_keys_warn(tmp_path, monkeypatch, capsys):
     """Two files resolving to one key warn on stderr; later display wins."""
     d = tmp_path / "providers"; d.mkdir()

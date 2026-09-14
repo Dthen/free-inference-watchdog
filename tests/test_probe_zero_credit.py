@@ -124,3 +124,75 @@ def test_probe_400_classification(body, expected):
         result, meta = probe_model("https://example.com/v1", "token", "glm-5.3-flash")
         assert result == expected
         assert meta["http"] == 400
+
+
+# ---------- config-driven probe dialect ----------
+
+
+def test_custom_paid_signal_from_config():
+    """A second zero-credit gateway can ship its own paid dialect in config:
+    matching (status, all_of, any_of) triples classify PAID; the rest DEFER.
+    A custom paid_signals list REPLACES the defaults — b.ai's "deposit" 403
+    is no longer PAID under this dialect — and max_tokens comes from the
+    config too."""
+    cfg = {"max_tokens": 5,
+           "paid_signals": [{"status": 402, "all_of": ["top_up"]},
+                            {"status": 400, "all_of": ["credit"],
+                             "any_of": ["exhausted", "empty"]}]}
+
+    def http_error(code, body):
+        error = HTTPError("url", code, "Error", {}, None)
+        error.read = MagicMock(return_value=body)
+        return error
+
+    # 402 + "please top_up" -> PAID (custom status the defaults never match)
+    with patch("urllib.request.urlopen",
+               side_effect=http_error(402, b"please top_up to continue")):
+        result, meta = probe_model("https://example.com/v1", "token", "m",
+                                   probe_cfg=cfg)
+        assert result == Result.PAID
+        assert meta["http"] == 402
+
+    # 400 + "credit exhausted" -> PAID (all_of + any_of both hit)
+    with patch("urllib.request.urlopen",
+               side_effect=http_error(400, b"credit exhausted")):
+        result, meta = probe_model("https://example.com/v1", "token", "m",
+                                   probe_cfg=cfg)
+        assert result == Result.PAID
+
+    # 400 + "credit missing" -> DEFER (all_of hits but no any_of substring)
+    with patch("urllib.request.urlopen",
+               side_effect=http_error(400, b"credit missing")):
+        result, meta = probe_model("https://example.com/v1", "token", "m",
+                                   probe_cfg=cfg)
+        assert result == Result.DEFER
+
+    # 403 + "deposit" -> DEFER: the custom dialect REPLACES the defaults
+    with patch("urllib.request.urlopen",
+               side_effect=http_error(403, b"Deposit required to unlock")):
+        result, meta = probe_model("https://example.com/v1", "token", "m",
+                                   probe_cfg=cfg)
+        assert result == Result.DEFER
+
+    # 200 -> FREE, and the request body carries the configured max_tokens
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+        result, meta = probe_model("https://example.com/v1", "token", "m",
+                                   probe_cfg=cfg)
+        assert result == Result.FREE
+        import json as json_mod
+        body = json_mod.loads(mock_urlopen.call_args[0][0].data)
+        assert body["max_tokens"] == 5
+
+
+def test_empty_probe_cfg_falls_back_to_defaults():
+    """probe_cfg={} (or absent) keeps b.ai's default dialect: "deposit" 403
+    is PAID and max_tokens stays 3 — the equivalence guard for every config
+    that omits the optional probe block."""
+    error = HTTPError("url", 403, "Forbidden", {}, None)
+    error.read = MagicMock(return_value=REAL_403_DEPOSIT)
+    with patch("urllib.request.urlopen", side_effect=error):
+        result, meta = probe_model("https://example.com/v1", "token", "m",
+                                   probe_cfg={})
+        assert result == Result.PAID

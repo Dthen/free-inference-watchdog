@@ -484,7 +484,7 @@ def test_zero_credit_probe_serial_throttle(monkeypatch, tmp_path, capsys):
     call_log = []
     sleep_log = []
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         call_log.append(model_id)
         return Result.FREE, {"http": 200}
 

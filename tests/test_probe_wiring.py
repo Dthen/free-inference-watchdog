@@ -80,7 +80,7 @@ def test_probes_called_serially_with_5s_gaps(monkeypatch, tmp_path):
     (operator pacing choice 2026-09-13: gentleness over one-tick speed)."""
     call_times = []
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         call_times.append((model_id, time.time()))
         return Result.FREE, {"http": 200}
 
@@ -116,7 +116,7 @@ def test_probes_no_overlap(monkeypatch, tmp_path):
     asserted it."""
     events = []
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         events.append(("start", model_id))
         time.sleep(0.05)  # simulate work
         events.append(("end", model_id))
@@ -140,7 +140,7 @@ def test_probes_no_overlap(monkeypatch, tmp_path):
 
 def test_free_verdict_on_roster(monkeypatch, tmp_path):
     """FREE verdict -> model on roster."""
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -156,7 +156,7 @@ def test_free_verdict_on_roster(monkeypatch, tmp_path):
 
 def test_paid_verdict_excluded(monkeypatch, tmp_path):
     """PAID verdict -> model excluded from roster."""
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.PAID, {"http": 403}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -176,7 +176,7 @@ def test_defer_keeps_last_known_verdict(monkeypatch, tmp_path):
     # Pre-seed: m1 was previously free
     probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.DEFER, {"http": 429}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -196,7 +196,7 @@ def test_probe_exception_treated_as_defer(monkeypatch, tmp_path):
     state_path = tmp_path / "probe_state.json"
     probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -221,7 +221,7 @@ def test_burst_kill_regression_no_defer_empties_roster(monkeypatch, tmp_path):
         probe_state.record_verdict(state_path, "bai", f"free-model-{i}", "free",
                                    999_000_000 + i)
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.DEFER, {"http": 429}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -245,7 +245,7 @@ def test_vanished_models_pruned_from_state(monkeypatch, tmp_path):
     probe_state.record_verdict(state_path, "bai", "kept", "free", 999_000_000)
     probe_state.record_verdict(state_path, "bai", "vanished", "free", 999_000_000)
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -268,7 +268,7 @@ def test_first_tick_full_catalog_queue(monkeypatch, tmp_path):
     """First tick: empty state -> all catalog models probed (new arrivals)."""
     call_log = []
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         call_log.append(model_id)
         return Result.FREE, {"http": 200}
 
@@ -292,7 +292,7 @@ def test_throttle_uses_injected_sleep(monkeypatch, tmp_path):
     """The sleep callable is injected; never time.sleep in tests."""
     sleep_calls = []
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -320,7 +320,7 @@ def test_fetch_one_returns_verdict_filtered_ids(monkeypatch, tmp_path):
 
     probe_called = []
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         probe_called.append(model_id)
         return Result.FREE, {"http": 200}
 
@@ -354,7 +354,7 @@ def test_fetch_one_verdict_gap_returns_empty(monkeypatch, tmp_path):
 
 def test_state_written_once_per_tick(monkeypatch, tmp_path):
     """Verdicts persisted to state file after the tick."""
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         if model_id == "m1":
             return Result.FREE, {"http": 200}
         return Result.PAID, {"http": 403}
@@ -411,7 +411,7 @@ def test_queue_respects_probe_select_order(monkeypatch, tmp_path):
 
     call_order = []
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         call_order.append(model_id)
         return Result.FREE, {"http": 200}
 
@@ -437,7 +437,7 @@ def test_metas_preserved(monkeypatch, tmp_path):
             return ["m1"], {"ratelimit": {"remaining": "10"}}
         return [], {}
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -456,7 +456,7 @@ def test_metas_preserved(monkeypatch, tmp_path):
 
 def test_dry_run_does_not_write_probe_state(monkeypatch, tmp_path):
     """--dry-run must leave probe_state.json ABSENT on a fresh state-dir."""
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -475,7 +475,7 @@ def test_dry_run_leaves_pre_existing_state_untouched(monkeypatch, tmp_path):
     state_path = tmp_path / "probe_state.json"
     probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.PAID, {"http": 403}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -502,7 +502,7 @@ def test_junk_provider_degrades_to_empty_roster(monkeypatch, tmp_path):
     # Write a junk provider value directly
     state_path.write_text('{"bai": "junk"}', encoding="utf-8")
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
@@ -531,7 +531,7 @@ def test_junk_model_entry_excluded(monkeypatch, tmp_path):
         '{"bai": {"m1": [1, 2], "m2": {"verdict": "free", "epoch": 999}}}',
         encoding="utf-8")
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         # DEFER — entry untouched, junk stays junk -> excluded via get_verdict
         return Result.DEFER, {"http": 429}
 
@@ -557,7 +557,7 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
     unprobed when the budget would be exceeded."""
     probe_calls = []
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         probe_calls.append(model_id)
         return Result.FREE, {"http": 200}
 
@@ -599,7 +599,7 @@ def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
     probe_calls = []
     clock = {"t": 0}
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         probe_calls.append(model_id)
         return Result.FREE, {"http": 200}
 
@@ -706,7 +706,7 @@ def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
     probe_calls = []
     clock = {"t": 0}
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         probe_calls.append(model_id)
         clock["t"] += 1  # each probe "takes" 1s of budget
         return Result.FREE, {"http": 200}
@@ -779,7 +779,7 @@ def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,
     probe_calls = []
     clock = {"t": 0}
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         probe_calls.append(model_id)
         # Odd models answer PAID so the persisted subset is mixed
         if model_id.endswith(("1", "3")):
@@ -843,7 +843,7 @@ def test_probe_phase_budget_immune_to_wall_clock_jumps(monkeypatch, tmp_path):
     probe_calls = []
     clock = {"t": 0}
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         probe_calls.append(model_id)
         clock["t"] += 1  # monotonic advances a normal 1s per probe
         return Result.FREE, {"http": 200}
@@ -899,7 +899,7 @@ def test_save_skip_when_unchanged(monkeypatch, tmp_path):
 
     monkeypatch.setattr(probe_state, "save_probe_state", counting_save)
 
-    def fake_probe(base_url, token, model_id, timeout=30):
+    def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         # Returns FREE with same epoch — verdict entry unchanged
         return Result.FREE, {"http": 200}
 

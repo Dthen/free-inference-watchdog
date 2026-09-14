@@ -169,6 +169,7 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
                                 config["base_url"],
                                 config.get("_token", ""),
                                 model_id,
+                                probe_cfg=config.get("probe"),
                                 timeout=PROBE_TIMEOUT_S,
                             )
                         except Exception:

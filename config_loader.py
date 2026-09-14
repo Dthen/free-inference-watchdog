@@ -113,6 +113,56 @@ def _validate_and_read(path):
         if not isinstance(roster_key, str) or not roster_key.strip():
             raise ValueError(
                 f"roster_key must be a non-empty string, got {roster_key!r}")
+    if "probe" in config:
+        probe = config["probe"]
+        # Optional block: per-provider zero-credit-probe dialect. Shape
+        # errors here would TypeError at probe time (max_tokens) or
+        # silently misclassify (paid_signals) — reject per-file.
+        if not isinstance(probe, dict):
+            raise ValueError(
+                f"probe must be an object, got {type(probe).__name__}")
+        max_tokens = probe.get("max_tokens")
+        if max_tokens is not None and (
+                not isinstance(max_tokens, int) or isinstance(max_tokens, bool)
+                or max_tokens <= 0):
+            # bool is an int subclass; True would sneak through as 1 token
+            # (rejected by b.ai) — same guard display applies.
+            raise ValueError(
+                f"probe.max_tokens must be a positive integer, "
+                f"got {max_tokens!r}")
+        signals = probe.get("paid_signals")
+        if signals is not None:
+            if not isinstance(signals, list) or not signals:
+                raise ValueError(
+                    "probe.paid_signals must be a non-empty list, "
+                    f"got {signals!r}")
+            for sig in signals:
+                if (not isinstance(sig, dict)
+                        or not isinstance(sig.get("status"), int)
+                        or isinstance(sig.get("status"), bool)):
+                    raise ValueError(
+                        "probe.paid_signals entries need integer status, "
+                        f"got {sig!r}")
+                for key in ("all_of", "any_of"):
+                    substrs = sig.get(key)
+                    if substrs is None:
+                        continue
+                    # Padded/blank substrings survive a strip() check yet
+                    # never match a lowered body — the silent-no-op class
+                    # ignored_slugs validation kills; same rule here.
+                    if (not isinstance(substrs, list)
+                            or not all(isinstance(s, str) and s.strip()
+                                       and s == s.strip() for s in substrs)):
+                        raise ValueError(
+                            "probe.paid_signals "
+                            f"{key} must be a list of non-empty, unpadded "
+                            f"strings, got {substrs!r}")
+                if "all_of" not in sig and "any_of" not in sig:
+                    # A status-only signal PAIDs every error of that code —
+                    # too blunt to be a dialect; require a body condition.
+                    raise ValueError(
+                        "probe.paid_signals entries need all_of or any_of, "
+                        f"got {sig!r}")
     return config
 
 

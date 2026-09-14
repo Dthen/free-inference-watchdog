@@ -2,6 +2,14 @@
   "name": "B.AI",
   "base_url": "https://api.b.ai/v1",
   "detection": "zero-credit-probe",
+  "probe": {
+    "max_tokens": 3,
+    "paid_signals": [
+      {"status": 403, "all_of": ["deposit"]},
+      {"status": 400, "all_of": ["insufficient_user_quota"]},
+      {"status": 400, "all_of": ["insufficient"], "any_of": ["balance", "quota"]}
+    ]
+  },
   "auth": { "method": "env_var", "env_key": "BAI_API_KEY" },
   "display": 5,
   "signup_url": "https://b.ai/",
