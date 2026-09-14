@@ -33,9 +33,9 @@ DEFAULT_CADENCE_S = 1 * 3600
 # decision 2026-09-13, morning) made the full 47-model re-probe pass fit
 # PROBE_PHASE_BUDGET_S in one tick; the operator then chose 5s pacing twice
 # ("Idk maybe 5s", "I did say 5") — rate-limit gentleness over one-tick
-# completion. Consequence, accepted knowingly: at 5s a full 47-model pass
-# costs 46×(5+~1) ≈ 280s realistic and EXCEEDS the 260s budget, so the
-# last few models are skipped each pass and resume the next tick as tier-1
+# completion. Consequence, accepted knowingly: at 5s a full-catalog pass
+# realistically EXCEEDS the 260s budget, so the last few models are skipped
+# each pass and resume the next tick as tier-1
 # queue items (no verdict yet) via probe_state persistence — the same
 # self-healing mechanism every truncation uses. The ONE-TICK-FULL-PASS
 # guarantee is superseded by this pacing choice; do NOT go faster (below
@@ -63,7 +63,7 @@ PROBE_TIMEOUT_S = 30
 # tick; the budget rose 240→260 when spacing dropped to 4s so the pass
 # nearly fit (46×4 + 47 fast probes ≈ 200-230s). The operator has since
 # set spacing to 5s (pacing choice, see PROBE_INTERVAL_S), so the pass
-# takes ~280s realistic and only NEARLY fits one tick now: the budget cuts
+# overshoots the budget and only NEARLY fits one tick now: the budget cuts
 # the last few models each pass and they resume next tick via probe_state
 # persistence. And the ~295s worst-case persist point stays under the
 # restored 300s kill with margin. That overshoot math is why 260 is the
@@ -81,7 +81,8 @@ PROBE_TIMEOUT_S = 30
 # runs at the end of build_fetch_all) — the next tick resumes from
 # cached verdicts (self-healing, no death spiral). At the operator's 5s
 # pacing a tail cut is the NORMAL every-pass outcome (most of the catalog
-# carried, short tail deferred — the tail resumes next tick), not pathological; only a tick where every probe burns its
+# carried, short tail deferred — the tail resumes next tick), not
+# pathological; only a tick where every probe burns its
 # full 30s timeout cuts deep. Either way the spread across hourly ticks is
 # the designed fallback, oldest-first priority preserved.
 PROBE_PHASE_BUDGET_S = 260
