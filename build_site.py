@@ -4,11 +4,10 @@
 Reads state/roster.json and renders site/index.html: a single dark page whose
 body is a PRESENCE MATRIX — one row per UNIQUE model id across the gateway
 union, one column per gateway, a green (nord14) dot where tracked, a `#`
-column counting the gateways each model reaches, rows sorted by
-availability-count desc then id, and a footer row of per-gateway totals.
-Roster keys OUTSIDE
-DISPLAY_ORDER are unknown gateways: they get NO column (their ids may still
-join the union rows). The full roster is INLINED
+column counting the gateways each model reaches, rows sorted alphabetically
+by stripped name, and a footer row of per-gateway totals. Roster keys
+OUTSIDE DISPLAY_ORDER are unknown gateways: they get NO column (their ids
+may still join the union rows). The full roster is INLINED
 as JSON in <script type="application/json" id="roster-data"> so the page is
 fully self-contained (works from file://, no external fetches).
 
