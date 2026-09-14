@@ -384,14 +384,16 @@ def watchdog_status(now=None, root=None) -> dict:
 
 # ---------- MCP transport wiring ----------
 
+_WATCHED = ", ".join(PROVIDERS)
+
 TOOL_DESCRIPTIONS = {
     "list_free_models":
         "List free-tier model ids across the watched gateways "
-        "(nous, tokenrouter, kilo, openrouter, amd, bai, nim). Pass provider=<name> for one "
+        f"({_WATCHED}). Pass provider=<name> for one "
         "gateway's id list; omit it for the full roster with per-gateway "
         "counts. Read-only snapshot of the latest watchdog tick.",
     "get_model":
-        "Cross-gateway PRESENCE lookup: which of the seven gateways track "
+        "Cross-gateway PRESENCE lookup: which of the watched gateways track "
         "this exact model id right now. Returns exact_matches per gateway "
         "(exact ids only — gateways rename inconsistently, so cross-gateway "
         "absence is unreliable; see the caveats attached to every result). "

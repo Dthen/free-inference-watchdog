@@ -343,3 +343,15 @@ def test_list_endpoints_hostile_roster_degrades(tmp_path):
     # Hostile value degrades to an empty list (same rule as _clean_ids)
     assert res["gateways"]["nous"]["model_ids"] == []
     assert res["gateways"]["tokenrouter"]["model_ids"] == []
+
+
+# ---------- tool descriptions ----------
+
+def test_tool_descriptions_derive_gateway_list():
+    """The gateway list in tool descriptions is DERIVED from PROVIDERS —
+    a dropped/added gateway must not leave stale prose shipped to MCP
+    clients."""
+    watched = ", ".join(mcp_server.PROVIDERS)
+    desc = mcp_server.TOOL_DESCRIPTIONS["list_free_models"]
+    assert f"({watched})" in desc
+    assert "the seven gateways" not in mcp_server.TOOL_DESCRIPTIONS["get_model"]
