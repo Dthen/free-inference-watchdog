@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mcp_server.py — MCP query surface over Free Inference Watchdog state.
 
-Three read-only tools, no enrichment (none exists anywhere in the repo):
+Four read-only tools, no enrichment (none exists anywhere in the repo):
 
   list_free_models(provider=None)   full roster, or one provider's id list
   get_model(model_id)               CROSS-GATEWAY PRESENCE LOOKUP: which of the
@@ -9,6 +9,8 @@ Three read-only tools, no enrichment (none exists anywhere in the repo):
   watchdog_status()                 tick freshness vs the 1h cadence, stale/
                                     failing providers, per-provider counts,
                                     pending-alert queue depth, last site publish
+  list_endpoints(provider=None)     per-gateway wiring entries (base URL,
+                                    api_type) and raw tracked ids
 
 IMPORT CHOICE (corrected fact, probe-verified 2026-08-26 on this box): the
 installed MCP SDK no longer ships `mcp.server.fastmcp.FastMCP`. The current
@@ -59,7 +61,8 @@ import state
 
 # Gateway names in Dthen's DISPLAY order, imported from config_loader (the
 # providers/*.json `display` fields are the single source — no duplicate
-# list lives anywhere in this repo). Dict-key order is display order.
+# list lives in module code; test pins are expectations, not sources).
+# Dict-key order is display order.
 from config_loader import PROVIDERS as PROVIDER_KEYS
 PROVIDERS = PROVIDER_KEYS
 
@@ -70,7 +73,8 @@ from config_loader import GATEWAY_WIRING
 from build_site import strip_free_marker
 
 # Tick cadence, duplicated from inference_watchdog.DEFAULT_CADENCE_S
-# (cross-reference) for the same decoupling reason.
+# (cross-reference): importing the watchdog module for one integer would
+# drag its whole runtime into the MCP server, so this stays a literal.
 CADENCE_S = 1 * 3600
 
 
@@ -412,7 +416,7 @@ TOOL_DESCRIPTIONS = {
 
 
 def build_server(root=None):
-    """MCPServer with the three tools closed over `root`.
+    """MCPServer with the four tools closed over `root`.
 
     Lambdas (not direct function refs) keep the exposed schemas clean:
     the transport-facing signatures carry only real tool arguments, while

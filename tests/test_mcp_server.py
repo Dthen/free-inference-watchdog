@@ -165,8 +165,8 @@ def test_status_fields_present(state_dir):
     assert res["last_tick_age_s"] == 60
     assert res["tick_fresh"] is True
     assert res["stale_providers"] == []
-    # All DISPLAY_ORDER gateways always appear (stable shape), plus
-    # any unknown roster keys.
+    # All DISPLAY_ORDER gateways always appear (stable shape); unknown
+    # roster keys never appear.
     for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"):
         assert gw in res["provider_counts"]
     assert res["provider_counts"]["kilo"] == 3
