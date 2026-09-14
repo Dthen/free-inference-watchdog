@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Point-in-time manual probe script (historical, not in the tick path).
+# Gateway URLs below reflect the roster as of 2026-08/09; the current
+# roster source of truth is providers/*.json.
 # Live endpoint probe for Free Inference Watchdog (plan Task 2).
 # Prints ONLY: provider name, HTTP status, id count, sample pricing SHAPE (type/truncated).
 # NEVER prints tokens or full response bodies.

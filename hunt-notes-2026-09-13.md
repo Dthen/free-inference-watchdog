@@ -1,5 +1,8 @@
 # Free-Inference Hunt Notes — 2026-09-13
 
+> Point-in-time field notes from the 2026-09-13 hunt. The roster since then
+> is providers/*.json — names below may be retired or not yet added.
+
 THE PROCESS (Dthen's own words, 2026-09-13, after Kimbo went off-piste twice):
 - Starting point: search NEWISH OPEN-WEIGHT MODEL NAMES + "free" in a bunch of places (web, redlib/Reddit).
 - Deliberately AVOID the big GitHub repo lists — they track steady-state free tiers, not what we hunt.
