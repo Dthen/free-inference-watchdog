@@ -323,15 +323,17 @@ def build_resolver(state_dir, fetch_one, registry):
             # (tick_epoch, stale_providers, transients, unconfirmed,
             # ratelimits and other providers' lists).
             doc = state.load_roster(roster_path)
-            if doc is None:
-                print("inference-watchdog: roster missing or corrupt — "
-                      "hold recoveries not applied (visible skip)",
-                      file=sys.stderr)
+            provs = doc.get("providers") if doc is not None else None
+            if not isinstance(provs, dict):
+                # Visible skip, NO save, for BOTH corrupt shapes (missing/
+                # unparseable file; providers not a dict). Rewriting a
+                # corrupt-providers roster down to recovered-only would make
+                # the next hourly tick diff every other id as ADDED instead
+                # of bootstrapping clean; the tick's own next write repairs
+                # the file. (Mirrors load_filtered_roster's None doctrine.)
+                print("inference-watchdog: roster unusable — hold recoveries "
+                      "not applied (visible skip)", file=sys.stderr)
             else:
-                provs = doc.get("providers")
-                if not isinstance(provs, dict):
-                    provs = {}
-                    doc["providers"] = provs
                 for provider, ids in recovered.items():
                     old = provs.get(provider)
                     old = ([i for i in old if isinstance(i, str)]
