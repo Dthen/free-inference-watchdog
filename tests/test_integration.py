@@ -795,3 +795,43 @@ def test_r5_expired_alerts_with_two_phase_at_least_once_persist(tmp_path,
     assert saves[0] == stamps                     # pre-emit: entry STILL queued
     assert saves[-1] == {}                        # post-emit: consumed
     assert roster.read_bytes() == b"PIN"          # expiry never touches roster
+
+
+def test_r10_webhook_drains_pending_queue_before_emit(tmp_path, capsys,
+                                                      monkeypatch):
+    """Behavior 10: with webhook_url set, notify.drain_pending runs BEFORE the
+    emit block — the queued alert posts first, the fresh alert second, and the
+    drain's writes are real."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 7000,
+                                      "last_absent_seen": RESOLVER_T0 + 7000}}})
+    alerts = tmp_path / "pending_alerts.json"
+    alerts.write_text(json.dumps(
+        [{"payload": {"content": "queued-1"}, "attempts": 1,
+         "first_queued_epoch": 123}]), encoding="utf-8")
+    posted = []
+
+    class Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=10):
+        posted.append(json.loads(req.data.decode()))
+        return Resp()
+
+    monkeypatch.setattr(notify, "_urlopen", fake_urlopen)
+    out, _ = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9000,
+                       webhook_url="https://example/hook")
+    assert out == {"fired": True, "changed": True}
+    assert len(posted) == 2
+    assert posted[0]["content"] == "queued-1"     # drained BEFORE the emit
+    fresh_msg = capsys.readouterr().out.rstrip("\n")
+    assert posted[1]["content"] == fresh_msg      # posted rows are decoded dicts
+    assert _load_q(tmp_path) == {}                # post-emit save still runs
+    assert json.loads(alerts.read_text()) == []   # drain flushed
