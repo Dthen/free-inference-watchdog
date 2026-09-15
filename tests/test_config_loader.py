@@ -929,3 +929,49 @@ def test_load_configs_unreadable_providers_dir_warns(tmp_path, monkeypatch, caps
             "a permission-denied providers dir must warn, not go silent")
     finally:
         providers_dir.chmod(0o755)  # restore so tmp cleanup works
+
+
+# ---------- removal_hold_seconds: optional, validated positive int ----------
+
+
+@pytest.mark.parametrize("bad", [123.5, 0, -5, "1800", True, None],
+                         ids=["float", "zero", "neg", "str", "bool", "null"])
+def test_removal_hold_seconds_field_must_be_positive_int(tmp_path, monkeypatch,
+                                                         capsys, bad):
+    """Optional "removal_hold_seconds" field: when present it must be a
+    positive integer — junk here would silently disable or crash the hold
+    comparison in pending_removals.settle — and it costs EXACTLY that file:
+    skip + stderr warning naming it, matching the sibling skip tests."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {**_minimal_config("HoldTest"), "removal_hold_seconds": bad}
+    (providers_dir / "holdtest.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs() == []
+    err = capsys.readouterr().err
+    assert "skipping" in err and "holdtest.json" in err
+    assert "removal_hold_seconds must be a positive integer" in err
+
+
+def test_removal_hold_seconds_valid_roundtrips(tmp_path, monkeypatch, capsys):
+    """A valid positive int survives load_configs verbatim, no skip warning."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {**_minimal_config("HoldTest"), "removal_hold_seconds": 1800}
+    (providers_dir / "holdtest.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs()[0]["removal_hold_seconds"] == 1800
+    assert "skipping" not in capsys.readouterr().err
+
+
+def test_removal_hold_accessor():
+    """Accessor semantics: positive int passes; bool/str/neg/None/missing all
+    return None. The accessor never trusts config raw — belt guard even
+    though the loader already rejects junk."""
+    from config_loader import removal_hold
+    assert removal_hold({"removal_hold_seconds": 1800}) == 1800
+    assert removal_hold({}) is None
+    assert removal_hold({"removal_hold_seconds": True}) is None   # belt: bool
+    assert removal_hold({"removal_hold_seconds": "1800"}) is None  # belt: str
+    assert removal_hold({"removal_hold_seconds": -1}) is None
+    assert removal_hold({"removal_hold_seconds": None}) is None   # belt: null

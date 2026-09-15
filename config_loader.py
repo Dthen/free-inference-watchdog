@@ -113,6 +113,16 @@ def _validate_and_read(path):
         if not isinstance(roster_key, str) or not roster_key.strip():
             raise ValueError(
                 f"roster_key must be a non-empty string, got {roster_key!r}")
+    if "removal_hold_seconds" in config:
+        hold = config["removal_hold_seconds"]
+        # Optional field, but PRESENT means VALID (same boundary doctrine as
+        # display/ignored_slugs/roster_key): junk here would silently disable
+        # or crash the hold comparison in pending_removals.settle — reject
+        # per-file so load_configs' skip+warn path handles it.
+        if not isinstance(hold, int) or isinstance(hold, bool) or hold <= 0:
+            raise ValueError(
+                f"removal_hold_seconds must be a positive integer, "
+                f"got {hold!r}")
     if "probe" in config:
         probe = config["probe"]
         # Optional block: per-provider zero-credit-probe dialect. Shape
@@ -266,6 +276,15 @@ def load_configs():
         configs.append(config)
 
     return sorted(configs, key=lambda c: c.get("display", 0))
+
+
+# ---------- removal hold accessor ----------
+
+def removal_hold(config):
+    """Positive hold in seconds, or None = removals alert instantly (default)."""
+    hold = config.get("removal_hold_seconds")
+    return (hold if isinstance(hold, int) and not isinstance(hold, bool)
+            and hold > 0 else None)
 
 
 # ---------- provider key mapping ----------
