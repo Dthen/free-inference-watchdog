@@ -974,12 +974,14 @@ def test_r9b_neutral_pass_writes_nothing(tmp_path):
     """A pass where every provider fetch-FAILS (settle fully neutral,
     held == snapshot) must NOT rewrite the queue file at all — the
     deep-compare gate must be real in the no-write direction too.
-    Byte-equality alone can't catch a redundant identical save; mtime does."""
+    Byte-equality AND mtime can't catch a redundant identical save (an
+    os.replace landing in the same clock tick leaves st_mtime_ns unchanged);
+    the inode does — every save replaces the file and changes st_ino."""
     path = _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
                                              "last_absent_seen": RESOLVER_T0 + 8000}}})
-    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    before = (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino)
     out, calls = _resolver(tmp_path, {"amd": None}, RESOLVER_T0 + 9000)
-    after = (path.read_bytes(), path.stat().st_mtime_ns)
+    after = (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino)
     assert out == {"fired": False, "changed": False}
     assert calls["one_n"] == 1                    # fetch attempted, raised
     assert after == before                        # zero rewrite on neutral pass
@@ -1020,3 +1022,43 @@ def test_r9d_dry_run_recovery_applies_nothing(tmp_path,
     assert cap.out == "" and cap.err == ""
     assert (path.read_bytes(), roster.read_bytes()) == before
     assert calls["one_n"] == 1
+
+
+def test_r9e_dry_run_with_webhook_never_drains(tmp_path, capsys,
+                                               monkeypatch):
+    """dry_run + webhook_url set: the retry queue must NEVER be drained —
+    pending_alerts.json bytes untouched (a drain would flush it to []).
+    The emit still prints the alert plus the would-POST marker."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 7000,
+                                      "last_absent_seen": RESOLVER_T0 + 7000}}})
+    alerts = tmp_path / "pending_alerts.json"
+    alerts.write_text(json.dumps([{"payload": {"content": "queued-1"},
+                                   "attempts": 1,
+                                   "first_queued_epoch": 123}]),
+                      encoding="utf-8")
+    before = alerts.read_bytes()
+    posted = []
+
+    class Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=10):
+        posted.append(json.loads(req.data.decode()))
+        return Resp()
+
+    monkeypatch.setattr(notify, "_urlopen", fake_urlopen)
+    out, _ = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9000,
+                       dry_run=True, webhook_url="https://example/hook")
+    cap = capsys.readouterr()
+    assert out == {"fired": True, "changed": True}
+    assert posted == []                           # nothing POSTED at all
+    assert alerts.read_bytes() == before          # queue not drained/flushed
+    assert "[dry-run] would POST to webhook" in cap.out
