@@ -1138,3 +1138,15 @@ def test_cli_resolve_and_init_rejected(capsys):
     assert ei.value.code == 2
     err = capsys.readouterr().err          # read once: readouterr drains
     assert "--resolve" in err and "--init" in err
+
+
+def test_hold_for_seam():
+    """T4-1: _hold_for is the one registry-shape seam — dict configs resolve
+    through config_loader.removal_hold; set-shaped registries (tests) and
+    junk values never hold."""
+    assert im._hold_for({"amd": {"removal_hold_seconds": 1800}}, "amd") == 1800
+    assert im._hold_for({"amd": {}}, "amd") is None
+    assert im._hold_for({"nous": {}}, "amd") is None
+    for member in REGISTRY:
+        assert im._hold_for(REGISTRY, member) is None
+    assert im._hold_for({"amd": {"removal_hold_seconds": "1800"}}, "amd") is None
