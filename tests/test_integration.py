@@ -835,3 +835,30 @@ def test_r10_webhook_drains_pending_queue_before_emit(tmp_path, capsys,
     assert posted[1]["content"] == fresh_msg      # posted rows are decoded dicts
     assert _load_q(tmp_path) == {}                # post-emit save still runs
     assert json.loads(alerts.read_text()) == []   # drain flushed
+
+
+def test_r8_fetches_parameter_short_circuits_fetch_one(tmp_path, capsys):
+    """Behavior 8: the evidence-injection seam — {p: ids} settles without a
+    fetch_one call; None/absent values stay NEUTRAL even when fetches is
+    given."""
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    roster = tmp_path / "roster.json"
+    roster.write_text(json.dumps({"tick_epoch": 777,
+                                  "providers": {"amd": []}}), encoding="utf-8")
+    out, calls = _resolver(tmp_path, {"amd": ["x"]}, RESOLVER_T0 + 9000,
+                           fetches={"amd": ["x"]})
+    assert out == {"fired": False, "changed": True}
+    assert calls["one_n"] == 0                    # short-circuited
+    assert json.loads(roster.read_text())["providers"]["amd"] == ["x"]
+    assert _load_q(tmp_path) == {}
+    # neutral: None value for a held provider -> clock frozen, nothing saved
+    _write_q(tmp_path, {"amd": {"y": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    q = pending_removals.path_in(tmp_path)
+    before = q.read_bytes()
+    out2, _ = _resolver(tmp_path, {}, RESOLVER_T0 + 9000,
+                        fetches={"amd": None})
+    assert out2 == {"fired": False, "changed": False}
+    assert q.read_bytes() == before
+    capsys.readouterr()
