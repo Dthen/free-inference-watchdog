@@ -423,6 +423,41 @@ def run_tick(state_dir, registry, fetch_all, fetch_one, webhook_url,
             state.release_lock(paths["lock"])
 
 
+def run_resolve(state_dir, registry, fetch_one, webhook_url, dry_run=False,
+                now=None):
+    """One resolver pass under monitor.lock (decision 7: never overlaps a
+    tick). Exit codes mirror run_tick: 0 normal (an alert is CONTENT, not an
+    error), 2 fatal; contention prints 'inference-watchdog: already running'
+    to stderr and exits 0; release happens ONLY if this process acquired
+    (F7-1 ownership gate).
+
+    ALIVE INVARIANT (T3b item 3): resolve passes deliberately never touch
+    alive.json, missed-tick, or 💚 ping — the hourly tick owns those clocks;
+    the 15-min job is not a tick and must not masquerade as one. Corollary
+    accepted: notify._dropped_total increments during a resolver's drain/emit
+    are lost at process exit (only the tick persists them) — drop accounting
+    is a tick-level metric; at-least-once queueing is unaffected."""
+    now = now if now is not None else time.time()
+    state_dir = Path(state_dir)
+    lock_path = state_dir / "monitor.lock"
+    acquired = False
+    try:
+        if not state.acquire_lock(lock_path):
+            print("inference-watchdog: already running", file=sys.stderr)
+            return 0
+        acquired = True
+        build_resolver(state_dir, fetch_one, registry)(
+            now, dry_run=dry_run, webhook_url=webhook_url)
+        return 0
+    except Exception as exc:  # fatal — cron captures stderr
+        print(f"inference-watchdog: FATAL {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 2
+    finally:
+        if acquired:
+            state.release_lock(lock_path)
+
+
 def _emit(message, webhook_url, pending_path, dry_run):
     """Delivery topology: stdout ALWAYS, webhook best-effort (never blocks)."""
     print(message)

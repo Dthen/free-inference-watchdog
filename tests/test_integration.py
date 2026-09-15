@@ -1062,3 +1062,46 @@ def test_r9e_dry_run_with_webhook_never_drains(tmp_path, capsys,
     assert posted == []                           # nothing POSTED at all
     assert alerts.read_bytes() == before          # queue not drained/flushed
     assert "[dry-run] would POST to webhook" in cap.out
+
+
+def test_resolve_lock_contention_exits_zero(tmp_path, capsys):
+    """Mirror of test_lock_contention_exits_zero for the resolve path: a LIVE
+    lock (1 min old) makes run_resolve print 'already running', exit 0, and
+    never fetch."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("123", encoding="utf-8")
+    old = time.time() - 60  # fresh live lock (1 min old)
+    os.utime(lock, (old, old))
+    # amd held, unexpired -> a real pass WOULD fetch_one (scenario amd: [])
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    _fetch_all, fetch_one, calls = _fetcher([{"amd": []}])
+    code = im.run_resolve(tmp_path, RESOLVER_REGISTRY, fetch_one, None,
+                          now=RESOLVER_T0 + 9000)
+    err = capsys.readouterr().err
+    assert code == 0                               # instant exit, no crash
+    assert "already running" in err
+    assert calls["one_n"] == 0                     # resolver body never ran
+
+
+def test_resolve_lock_contention_preserves_live_lockfile(tmp_path, capsys):
+    """F7-1 mirror for run_resolve: a contended resolve must NEVER delete the
+    LIVE lockfile owned by the other running process — lock bytes AND mtime
+    byte-identical, zero fetches."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("123", encoding="utf-8")
+    old = time.time() - 60  # fresh live lock (1 min old)
+    os.utime(lock, (old, old))
+    before_bytes = lock.read_bytes()
+    before_mtime = os.stat(lock).st_mtime
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    _fetch_all, fetch_one, calls = _fetcher([{"amd": []}])
+    code = im.run_resolve(tmp_path, RESOLVER_REGISTRY, fetch_one, None,
+                          now=RESOLVER_T0 + 9000)
+    capsys.readouterr()
+    assert code == 0                               # contention policy unchanged
+    assert lock.exists(), "live lockfile was DELETED by contended resolve"
+    assert lock.read_bytes() == before_bytes       # byte-identical
+    assert os.stat(lock).st_mtime == before_mtime  # untouched mtime
+    assert calls["one_n"] == 0                     # resolver body never ran
