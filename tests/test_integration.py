@@ -656,3 +656,41 @@ def test_r2_orphan_guard_drops_without_registry_fetch_or_roster_touch(
     assert calls["one_n"] == 1                    # fetched amd exactly once
     assert out == {"fired": False, "changed": True}
     assert roster.read_bytes() == b"PIN"
+
+
+def test_r3_recovery_unions_roster_and_preserves_every_other_field(tmp_path,
+                                                                   capsys):
+    """Behavior 3: recovery consumes the entry and restores the roster
+    whole-document read-modify-write — ONLY that provider's list is replaced
+    by sorted_ids(set(old) | set(recovered)); tick_epoch/stale_providers/
+    transients/unconfirmed/ratelimits and other providers survive byte-for-
+    byte (recovered twice to prove the union is idempotent)."""
+    roster = tmp_path / "roster.json"
+    seeded = {"tick_epoch": 777, "providers": {"amd": ["b"], "nous": ["keep"]},
+              "stale_providers": ["nous"],
+              "transients": {"nous": {"added": [], "removed": ["t"]}},
+              "unconfirmed": {"amd": {"added": [], "removed": ["u"]}},
+              "ratelimits": {"nous": {"x-ratelimit-remaining": "9"}}}
+    roster.write_text(json.dumps(seeded), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
+                                      "last_absent_seen": RESOLVER_T0 + 8500},
+                                "c": {"gone_since": RESOLVER_T0 + 8900,
+                                      "last_absent_seen": RESOLVER_T0 + 8900}}})
+    out, calls = _resolver(tmp_path, {"amd": ["a", "c"]}, RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": True}   # consumed -> changed
+    assert cap.out == ""                              # recovery is silent
+    assert calls["one_n"] == 1
+    r = json.loads(roster.read_text())
+    assert r["providers"]["amd"] == ["a", "b", "c"]  # union, sorted
+    assert r["tick_epoch"] == 777
+    assert r["stale_providers"] == ["nous"]
+    assert r["transients"] == seeded["transients"]
+    assert r["unconfirmed"] == seeded["unconfirmed"]
+    assert r["ratelimits"] == seeded["ratelimits"]
+    assert r["providers"]["nous"] == ["keep"]         # untouched provider
+    assert _load_q(tmp_path) == {}
+    # idempotent second pass over the same evidence
+    out2, _ = _resolver(tmp_path, {"amd": ["a", "c"]}, RESOLVER_T0 + 9060)
+    assert out2 == {"fired": False, "changed": False}
+    assert json.loads(roster.read_text()) == r        # bytes stable
