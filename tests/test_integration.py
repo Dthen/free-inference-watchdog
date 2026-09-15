@@ -15,7 +15,7 @@ REGISTRY = {"nous", "openrouter", "tokenrouter", "kilo", "amd", "bai"}
 def _fetcher(scenarios):
     """scenarios: list of {name: ids|None} consumed one per fetch_all call.
     fetch_one uses the CURRENT scenario."""
-    calls = {"n": 0}
+    calls = {"n": 0, "one_n": 0}
 
     def current():
         return scenarios[min(calls["n"], len(scenarios) - 1)]
@@ -30,6 +30,7 @@ def _fetcher(scenarios):
         return snap, metas
 
     def fetch_one(name):
+        calls["one_n"] += 1
         # confirm_diffs expects (ids, meta); None means "fetch failed" -> FetchError
         val = current()[name]
         if val is None:
@@ -565,3 +566,40 @@ def test_env_loaded_from_project_local_env_not_hermes(tmp_path, monkeypatch):
     monkeypatch.setattr(im, "run_tick", fake_tick)
     im.main([])
     assert captured["args"] == (), f"parse_envfile called with args {captured['args']}"
+
+
+# ---------------------------------------------------------------------------
+# Resolver path: build_resolver / resolve_pending (--resolve guts)
+# ---------------------------------------------------------------------------
+
+import pending_removals
+from datetime import datetime
+
+RESOLVER_T0 = 1_000_000_000
+RESOLVER_REGISTRY = {"amd": {"removal_hold_seconds": 1800}, "nous": {}}
+
+
+def _write_q(tmp, mapping):
+    """Write the hold queue verbatim (junk shapes allowed) at its canonical
+    path and return that path for before/after byte comparisons."""
+    path = pending_removals.path_in(tmp)
+    path.write_text(json.dumps(mapping), encoding="utf-8")
+    return path
+
+
+def _load_q(tmp):
+    return json.loads(pending_removals.path_in(tmp).read_text())
+
+
+def test_r1_empty_queue_zero_fetch_zero_write_silent(tmp_path, capsys):
+    """Behavior 1: nothing held -> no fetch, no writes, no output."""
+    _write_q(tmp_path, {})
+    _fetch_all, fetch_one, calls = _fetcher([{}])
+    res = im.build_resolver(tmp_path, fetch_one, RESOLVER_REGISTRY)
+    out = res(RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": False}
+    assert calls["n"] == 0 and calls.get("one_n", 0) == 0
+    assert _load_q(tmp_path) == {}
+    assert cap.out == "" and cap.err == ""
+    assert not (tmp_path / "roster.json").exists()

@@ -20,9 +20,10 @@ import diffing
 import probe_select
 import probe_state
 import notify
+import pending_removals
 import providers
 import state
-from config_loader import PROVIDERS
+from config_loader import PROVIDERS, removal_hold
 from envfile import parse_envfile
 from probe_zero_credit import probe_model, Result
 
@@ -236,6 +237,59 @@ def build_fetch_one(env, state_dir=None):
         return ids, meta or {}
 
     return fetch_one
+
+
+# ---------- removal-hold resolver (--resolve path) ----------
+
+def build_resolver(state_dir, fetch_one, registry):
+    """Build resolve_pending — the guts of the --resolve CLI path.
+
+    Injection style matches run_tick/build_fetch_*: everything arrives as a
+    parameter (no module-global PROVIDERS reads). This is EXPLICITLY the sole
+    user of pending_removals.settle on this path — the hourly tick does NOT
+    call resolve_pending (T4 shares settle() instead). Lock-free by design:
+    the resolve pass never touches monitor.lock.
+
+    state_dir: dir holding roster.json, pending_alerts.json and the hold
+        queue (pending_removals.path_in).
+    fetch_one: callable name -> (ids, meta); providers.FetchError = failure.
+    registry: dict provider-key -> config dict (production passes
+        config_loader.PROVIDERS); each hold read via removal_hold().
+
+    Returns resolve_pending(now, dry_run=False, webhook_url=None,
+    fetches=None) -> {"fired": bool, "changed": bool}:
+      fired   — expired removals alerted through the emit block this pass.
+      changed — the settled queue differs from the on-disk snapshot (entries
+        consumed, orphans dropped, or stamp refreshes). This deep comparison
+        (held != snapshot) is the SOLE write trigger — settle()'s "changed"
+        map marks only consumed entries by contract, so stamp refreshes would
+        be lost if persistence keyed off it.
+
+    fetches (evidence-injection seam, for tests and any future caller):
+        {p: ids} supplies fresh evidence and short-circuits fetch_one for p;
+        a None value or absent provider is NEUTRAL (settle waits the entry
+        out, clock frozen) even when fetches is passed. fetches=None runs one
+        fetch_one per held provider; FetchError makes that provider ABSENT
+        from the evidence map (neutral, nothing changes anywhere).
+    """
+    state_dir = Path(state_dir)
+    pending_path = pending_removals.path_in(state_dir)
+    roster_path = state_dir / "roster.json"
+    alerts_path = state_dir / "pending_alerts.json"
+
+    def resolve_pending(now, dry_run=False, webhook_url=None, fetches=None):
+        snapshot = pending_removals.load(pending_path)
+        if not snapshot:
+            # Empty queue: zero fetch, zero write, silent. Accepted knowingly:
+            # a file that is ENTIRELY junk loads to {} and lands here — no
+            # auto-heal write, load's stderr note re-fires every pass (file
+            # is operator-owned state). A partially-junk file self-heals via
+            # the normal save below once anything else changes.
+            return {"fired": False, "changed": False}
+        # PLACEHOLDER(T3A-2): non-empty queue settles in the next unit.
+        return {"fired": False, "changed": False}
+
+    return resolve_pending
 
 
 # ---------- the tick ----------
