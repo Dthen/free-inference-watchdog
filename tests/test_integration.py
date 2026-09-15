@@ -707,8 +707,8 @@ def test_r3_recovery_unions_roster_and_preserves_every_other_field(tmp_path,
 def test_r3b_missing_roster_is_visible_skip(tmp_path, capsys):
     """No roster file: recovery is skipped with the unified note and NOTHING
     is written as a roster; the queue still consumes via the normal save."""
-    q = _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
-                                          "last_absent_seen": RESOLVER_T0 + 8500}}})
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
+                                      "last_absent_seen": RESOLVER_T0 + 8500}}})
     out, calls = _resolver(tmp_path, {"amd": ["a"]}, RESOLVER_T0 + 9000)
     cap = capsys.readouterr()
     assert "inference-watchdog: roster unusable — hold recoveries not applied" in cap.err
@@ -733,3 +733,27 @@ def test_r3c_corrupt_providers_is_visible_skip(tmp_path, capsys):
     assert roster.read_bytes() == before
     assert _load_q(tmp_path) == {}
     assert out == {"fired": False, "changed": True}
+
+
+def test_r3d_union_only_extras_never_enter_roster(tmp_path, capsys):
+    """Behavior 3 (union only): an untracked id visible in the resolver's
+    fetch is NOT added to the roster — the next hourly tick still alerts it 🟢."""
+    roster = tmp_path / "roster.json"
+    seeded = {"tick_epoch": 777, "providers": {"amd": [], "nous": ["keep"]},
+              "stale_providers": [], "transients": {}, "unconfirmed": {},
+              "ratelimits": {}}
+    roster.write_text(json.dumps(seeded), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
+                                      "last_absent_seen": RESOLVER_T0 + 8500}}})
+    out, _ = _resolver(tmp_path, {"amd": ["a", "surprise"]}, RESOLVER_T0 + 9000)
+    assert out == {"fired": False, "changed": True}
+    r = json.loads(roster.read_text())
+    assert r["providers"]["amd"] == ["a"]             # no "surprise"
+    assert _load_q(tmp_path) == {}
+    capsys.readouterr()
+    # The hourly tick faces the same evidence: the extra is a fresh 🟢.
+    code, _ = _run(tmp_path, [{"amd": ["a", "surprise"], "nous": ["keep"]}],
+                   now=RESOLVER_T0 + 9600)
+    assert code == 0
+    out_tick = capsys.readouterr().out
+    assert "🟢 `surprise`" in out_tick
