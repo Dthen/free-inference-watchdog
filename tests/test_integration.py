@@ -931,3 +931,92 @@ def test_r4b_all_junk_queue_rides_empty_path_forever_and_partial_junk_self_heals
         "amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
                       "last_absent_seen": RESOLVER_T0 + 9000}}}
     capsys.readouterr()
+
+
+def test_r9_dry_run_prints_would_fire_alert_and_writes_nothing(tmp_path,
+                                                               capsys):
+    """Behavior 9: dry_run prints the alert the real pass would fire but
+    writes NOTHING — pending queue, roster and pending_alerts byte-compare
+    before/after; the retry queue is never drained."""
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 4000,
+                                      "last_absent_seen": RESOLVER_T0 + 4000},
+                                "y": {"gone_since": RESOLVER_T0 + 8900,
+                                      "last_absent_seen": RESOLVER_T0 + 8900}},
+                        "nous": {"n1": {"gone_since": RESOLVER_T0 + 5000,
+                                        "last_absent_seen": RESOLVER_T0 + 5000}}})
+    roster = tmp_path / "roster.json"
+    roster.write_text(json.dumps({"tick_epoch": 777, "providers": {}}),
+                      encoding="utf-8")
+    alerts = tmp_path / "pending_alerts.json"
+    alerts.write_text(json.dumps([{"payload": {"content": "stale"},
+                                   "attempts": 1,
+                                   "first_queued_epoch": 123}]),
+                      encoding="utf-8")
+    before = (pending_removals.path_in(tmp_path).read_bytes(),
+              roster.read_bytes(), alerts.read_bytes())
+    now = RESOLVER_T0 + 9000
+    import notify
+    expected = notify.format_alert(
+        {"amd": {"added": [], "removed": ["x"]}},
+        tick_iso=datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=len(RESOLVER_REGISTRY),
+        transients={}, stale=[], dropped_total=0)
+    out, _ = _resolver(tmp_path, {"amd": ["y"], "nous": ["n1"]}, now,
+                       dry_run=True)
+    cap = capsys.readouterr()
+    assert out == {"fired": True, "changed": True}
+    assert cap.out == expected + "\n"             # byte-identical to real pass
+    assert (pending_removals.path_in(tmp_path).read_bytes(),
+            roster.read_bytes(), alerts.read_bytes()) == before
+
+
+def test_r9b_neutral_pass_writes_nothing(tmp_path):
+    """A pass where every provider fetch-FAILS (settle fully neutral,
+    held == snapshot) must NOT rewrite the queue file at all — the
+    deep-compare gate must be real in the no-write direction too.
+    Byte-equality alone can't catch a redundant identical save; mtime does."""
+    path = _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                                             "last_absent_seen": RESOLVER_T0 + 8000}}})
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    out, calls = _resolver(tmp_path, {"amd": None}, RESOLVER_T0 + 9000)
+    after = (path.read_bytes(), path.stat().st_mtime_ns)
+    assert out == {"fired": False, "changed": False}
+    assert calls["one_n"] == 1                    # fetch attempted, raised
+    assert after == before                        # zero rewrite on neutral pass
+
+
+def test_r9c_ghost_drop_reports_changed_but_writes_nothing(tmp_path, capsys):
+    """dry_run must gate even the orphan-drop save: the note is printed,
+    changed reports the would-be rewrite, the queue file stays byte-equal,
+    and the ghost is never fetched (guard runs before the fetch loop)."""
+    path = _write_q(tmp_path, {"ghost": {"x": {"gone_since": RESOLVER_T0,
+                                               "last_absent_seen": RESOLVER_T0}}})
+    before = path.read_bytes()
+    out, calls = _resolver(tmp_path, {}, RESOLVER_T0 + 100, dry_run=True)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": True}
+    assert path.read_bytes() == before
+    assert ("inference-watchdog: dropped pending entries for ghost "
+            "(not in registry)") in cap.err
+    assert calls["one_n"] == 0
+
+
+def test_r9d_dry_run_recovery_applies_nothing(tmp_path,
+                                              capsys):
+    """dry_run must gate the recovery path too: with a queue entry whose id
+    is present in the fetch evidence, a dry_run pass reports changed=True,
+    prints nothing, and leaves BOTH roster bytes and queue bytes untouched
+    (no union applied, no consumption saved)."""
+    roster = tmp_path / "roster.json"
+    seeded = {"tick_epoch": 777, "providers": {"amd": ["b"]}}
+    roster.write_text(json.dumps(seeded), encoding="utf-8")
+    path = _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
+                                             "last_absent_seen": RESOLVER_T0 + 8500}}})
+    before = (path.read_bytes(), roster.read_bytes())
+    out, calls = _resolver(tmp_path, {"amd": ["a"]}, RESOLVER_T0 + 9000,
+                           dry_run=True)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": True}
+    assert cap.out == "" and cap.err == ""
+    assert (path.read_bytes(), roster.read_bytes()) == before
+    assert calls["one_n"] == 1
