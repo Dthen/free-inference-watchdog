@@ -1918,3 +1918,82 @@ def test_e2e_1_v41_flap_silent_both_directions(tmp_path, capsys):
     assert cap.out == ""                             # no diff, no ghost
     assert cap.err == ""
     assert _load_q(tmp_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# T6-3: E2E-2 — the 05:17 five-way removal. All five confirmed removals are
+# queued silently; resolver pass 1 sees four back (consumed, silent) and the
+# fifth still absent under 30 min -> waits; the pass at now+1860 force-fires
+# a byte-standard 🔴 for the one holdout and drains the queue; the hourly
+# tick that sees it back alerts a NORMAL 🟢 — rule 2 has nothing left to
+# strip, so a fired removal never suppresses its own recovery.
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_2_five_way_force_fire_then_normal_return(tmp_path, capsys):
+    """rev-4 verbatim: five ids removed -> queued; resolve 1: four back
+    (silent), one absent (<30 min -> waits); pass at >1800s: that one fires
+    a byte-standard 🔴; its later return: normal 🟢 (queue empty — no
+    suppression)."""
+    import notify
+    now = RESOLVER_T0 + 9000
+    five = ["m1", "m2", "m3", "m4", "m5"]
+    four = ["m1", "m2", "m3", "m4"]
+
+    # --- Act 0 (E2E discipline a): baseline drain ---
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": five, "nous": ["n"]}}), encoding="utf-8")
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": five, "nous": ["n"]}], now - 60)
+    assert code == 0
+    capsys.readouterr()                              # drain the baseline
+
+    # --- Act 1: tick N — five removals confirmed -> queued, silent ---
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]},
+                   {"amd": [], "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == "" and cap.err == ""           # rule 1: stripped + queued
+    assert _load_q(tmp_path) == {
+        "amd": {mid: {"gone_since": int(now),
+                      "last_absent_seen": int(now)} for mid in five}}
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["amd"] == []                    # roster reflects truth
+
+    # --- Act 2: resolver at now+60 — four back, m5 still absent (<hold) ---
+    out, calls = _resolver(tmp_path, {"amd": four, "nous": ["n"]}, now + 60)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": True}
+    assert calls["one_n"] == 1                       # held amd fetched once
+    assert cap.out == "" and cap.err == ""           # recoveries silent
+    assert _load_q(tmp_path) == {                    # m5 WAITS: clock frozen
+        "amd": {"m5": {"gone_since": int(now),
+                       "last_absent_seen": int(now) + 60}}}
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["amd"] == four                  # unioned back
+
+    # --- Act 3: resolver at now+1860 — m5 absent past the hold: force-fire ---
+    expected = notify.format_alert(
+        {"amd": {"added": [], "removed": ["m5"]}},
+        tick_iso=datetime.fromtimestamp(now + 1860).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=2, transients={}, stale=[], dropped_total=0)
+    out, calls = _resolver(tmp_path, {"amd": four, "nous": ["n"]}, now + 1860)
+    cap = capsys.readouterr()
+    assert out == {"fired": True, "changed": True}
+    assert cap.out == expected + "\n"                # BYTE-identical 🔴 (M3)
+    assert _load_q(tmp_path) == {}                   # queue consumed post-emit
+
+    # --- Act 4: hourly tick with m5 back — normal 🟢, no suppression ---
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": five, "nous": ["n"]},
+                   {"amd": five, "nous": ["n"]}], now + 3600)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert "🟢 `m5`" in cap.out                      # recovery alerts normally
+    assert cap.err == ""
+    assert _load_q(tmp_path) == {}                   # nothing re-held
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["amd"] == five
