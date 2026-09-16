@@ -1286,3 +1286,63 @@ def test_tick_unconfirmed_provider_is_neutral(tmp_path, capsys):
     q = _load_q(tmp_path)
     assert q == {"amd": {"y": {"gone_since": RESOLVER_T0 + 8000,
                                "last_absent_seen": RESOLVER_T0 + 8000}}}
+
+
+# ---------------------------------------------------------------------------
+# T4-4: flicker pins (rev-4 tests f+g) — a CONFIRMED re-appearance consumes
+# the held entry through the settle recovery branch; a transient flap
+# restores prev ids so settle HOLDS the still-absent entry (stamp-only
+# refresh, saved by the deep compare). D6 pinned-pass: zero prod change.
+# ---------------------------------------------------------------------------
+
+
+def test_tick_flicker_confirmed_recovery_consumes(tmp_path, capsys):
+    """rev-4 test f: x reappears (fetch AND recheck say ["x"]) -> the add is
+    CONFIRMED, merge_corrected keeps the refetch truth -> the settle source
+    carries x -> held entry is RECOVERED/consumed: pending {} AFTER the
+    settle step. (No stdout assert — the 🟢 recovery strip is T5-2.)"""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": [], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["x"], "nous": ["n"]},
+                   {"amd": ["x"], "nous": ["n"]}], now)
+    capsys.readouterr()       # the confirmed-add alert is T5's stdout contract
+    assert code == 0
+    assert _load_q(tmp_path) == {}                   # recovery consumed
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"]["amd"] == ["x"]       # restored, not re-held
+
+
+def test_tick_flicker_transient_holds(tmp_path, capsys):
+    """rev-4 test g: x flickers (fetch ["x"], recheck []) -> TRANSIENT,
+    merge_corrected restores prev (x absent) so amd still has FRESH evidence
+    [] -> settle sees y STILL absent under the hold -> HOLDS: y present,
+    last_absent_seen == now (deep compare saved the stamp refresh), gone_since
+    == 8000 frozen — the clock never resets."""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": [], "nous": ["n"]}}), encoding="utf-8")
+    path = _write_q(tmp_path, {"amd": {
+        "y": {"gone_since": RESOLVER_T0 + 8000,
+              "last_absent_seen": RESOLVER_T0 + 8000}}})
+    before = path.read_bytes()
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["x"], "nous": ["n"]},
+                   {"amd": [], "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == ""                             # transients never alert
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert "amd" in roster["transients"]             # really the transient path
+    assert "x" not in roster["providers"]["amd"]     # prev restored
+    assert path.read_bytes() != before               # deep compare -> stamp save
+    q = _load_q(tmp_path)
+    assert q == {"amd": {"y": {"gone_since": RESOLVER_T0 + 8000,
+                               "last_absent_seen": int(now)}}}
