@@ -2098,3 +2098,79 @@ def test_e2e_4_same_tick_recovery_no_resolver(tmp_path, capsys):
     assert _load_q(tmp_path) == {}                   # settle consumed it
     assert json.loads((tmp_path / "roster.json").read_text())[
         "providers"]["amd"] == ["v4"]                # roster honest again
+
+
+# ---------------------------------------------------------------------------
+# T6-5: E2E-5 — the resolver-dead fallback. NO build_resolver pass ever runs
+# (pinned: im.build_resolver itself is trapped). The hourly ticks alone
+# shepherd the queue: removal at tick N is held silently; the tick at
+# gone_since+1200 WAITS (stale-clock: gone_since frozen, last_absent_seen
+# advances); at gone_since+2400 the hold has elapsed, the tick's own inline
+# settle expires the entry, rule 3 folds it into confirmed removals and the
+# hourly tick fires — stdout pinned BYTE-identical to notify.format_alert
+# (M3 pattern), never just "🔴 in out".
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_5_hourly_fallback_fires_without_resolver(tmp_path, capsys,
+                                                      monkeypatch):
+    """rev-4 verbatim: NO resolver passes run; hourly ticks keep the entry
+    waiting; at gone_since+1800 the hourly tick itself fires — stdout ==
+    notify.format_alert(...) + "\\n" exact equality."""
+    import notify
+    now = RESOLVER_T0 + 9000
+
+    def _no_resolver(*a, **k):
+        raise AssertionError("E2E-5: no resolver pass may run")
+
+    monkeypatch.setattr(im, "build_resolver", _no_resolver)
+
+    # --- Act 0 (E2E discipline a): baseline drain ---
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["v4"], "nous": ["n"]}}), encoding="utf-8")
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["v4"], "nous": ["n"]}], now - 60)
+    assert code == 0
+    capsys.readouterr()                              # drain the baseline
+
+    # --- Act 1: tick N — removal queued, silent ---
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]},
+                   {"amd": [], "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == "" and cap.err == ""           # held removal is silent
+    assert _load_q(tmp_path) == {
+        "amd": {"v4": {"gone_since": int(now),
+                       "last_absent_seen": int(now)}}}
+
+    # --- Act 2: hourly tick at gone_since+1200 — waits (no resolver) ---
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]},
+                   {"amd": [], "nous": ["n"]}], now + 1200)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == "" and cap.err == ""           # below hold: silent
+    assert _load_q(tmp_path) == {                    # stale-clock WAITS:
+        "amd": {"v4": {"gone_since": int(now),       # gone_since frozen,
+                       "last_absent_seen": int(now) + 1200}}}
+
+    # --- Act 3: hourly tick at gone_since+2400 — hold elapsed: it fires ---
+    expected = notify.format_alert(
+        {"amd": {"added": [], "removed": ["v4"]}},
+        tick_iso=datetime.fromtimestamp(now + 2400).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=len(TICK_REGISTRY_DICT), transients={}, stale=[],
+        dropped_total=0)
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]},
+                   {"amd": [], "nous": ["n"]}], now + 2400)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == expected + "\n"                # BYTE-identical 🔴 (M3)
+    assert "🔴" in cap.out                           # sanity, never a substitute
+    assert cap.err == ""
+    assert _load_q(tmp_path) == {}                   # post-emit consume ran
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["amd"] == []                    # roster stays honest
