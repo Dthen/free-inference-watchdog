@@ -298,13 +298,17 @@ def build_resolver(state_dir, fetch_one, registry):
             print(f"inference-watchdog: dropped pending entries for "
                   f"{provider} (not in registry)", file=sys.stderr)
         holds = {p: removal_hold(registry[p]) for p in held}
-        fetch_map = {}
-        for provider in held:
-            try:
-                ids, _meta = fetch_one(provider)
-            except providers.FetchError:
-                continue  # absent from fetch_map => neutral in settle
-            fetch_map[provider] = ids
+        if fetches is None:
+            fetch_map = {}
+            for provider in held:
+                try:
+                    ids, _meta = fetch_one(provider)
+                except providers.FetchError:
+                    continue  # absent from fetch_map => neutral in settle
+                fetch_map[provider] = ids
+        else:
+            fetch_map = {p: ids for p, ids in fetches.items()
+                         if p in held and ids is not None}
         out = pending_removals.settle(held, fetch_map, holds, now)
         # Group recoveries per provider for the roster union (never
         # set(...) | {list} — lists are unhashable; sorted_ids is set-safe).
