@@ -80,3 +80,28 @@ def load(path):
               f"{'entry' if dropped == 1 else 'entries'} from {path}",
               file=sys.stderr)
     return clean
+
+
+def save(path, held):
+    """Atomically write the hold queue to `path` (state._atomic_write_json
+    semantics: tmp file + os.replace — readers never see a half-written map)."""
+    state._atomic_write_json(path, held)
+
+
+def enqueue(held, provider, ids, now):
+    """Stamp first confirmed absence. Mutates held. Mutates held entries
+    IN PLACE — shallow copies alias them; to fork a map use `copy.deepcopy`,
+    never `dict()`. Re-enqueue keeps the ORIGINAL gone_since (the clock never
+    resets); only last_absent_seen advances. Empty `ids` creates no slice."""
+    now_i = int(now)
+    if not ids:
+        return  # no enqueue([]) dust — {"p": {}} never created
+    slice_ = held.setdefault(provider, {})
+    for model_id in ids:
+        model_id = str(model_id)
+        entry = slice_.get(model_id)
+        if entry is None:
+            slice_[model_id] = {"gone_since": now_i,
+                                "last_absent_seen": now_i}
+        else:
+            entry["last_absent_seen"] = now_i

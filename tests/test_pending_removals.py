@@ -161,3 +161,40 @@ def test_load_valid_siblings_survive_alongside_junk(tmp_path):
     out = pr.load(p)
     assert out == {"nous": {"good": {"gone_since": 100,
                                      "last_absent_seen": 100}}}
+
+
+def test_save_load_roundtrip(tmp_path):
+    p = pr.path_in(tmp_path)
+    held = {"amd": {"m1": {"gone_since": 100, "last_absent_seen": 150}}}
+    pr.save(p, held)
+    assert pr.load(p) == held
+    # atomic write leaves no tmp debris
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_enqueue_creates_entry_and_merges_second_provider():
+    held = {}
+    pr.enqueue(held, "amd", ["x"], now=100.9)
+    assert held == {"amd": {"x": {"gone_since": 100,
+                                  "last_absent_seen": 100}}}
+    assert isinstance(held["amd"]["x"]["gone_since"], int)  # now int-coerced
+    pr.enqueue(held, "nous", ["y"], now=200)
+    assert held["nous"] == {"y": {"gone_since": 200, "last_absent_seen": 200}}
+    assert held["amd"] == {"x": {"gone_since": 100, "last_absent_seen": 100}}
+
+
+def test_enqueue_reenqueue_keeps_original_gone_since():
+    """The clock never resets: a re-confirmed absence only advances
+    last_absent_seen."""
+    held = {}
+    pr.enqueue(held, "amd", ["x"], now=100)
+    pr.enqueue(held, "amd", ["x"], now=500)
+    assert held["amd"]["x"]["gone_since"] == 100
+    assert held["amd"]["x"]["last_absent_seen"] == 500
+
+
+def test_enqueue_empty_ids_does_not_create_slice():
+    """enqueue([]) must not persist {"p": {}} dust."""
+    held = {}
+    pr.enqueue(held, "amd", [], now=100)
+    assert held == {}
