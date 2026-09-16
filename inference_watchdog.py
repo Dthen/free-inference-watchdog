@@ -563,6 +563,36 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         # refetch becomes the persisted truth, unconfirmed keeps sticky-old.
         new_map = diffing.merge_corrected(new_map, confirmation, prev_providers)
 
+    # --- removal-hold queue settle (unconditional; post-recheck truth) ---
+    pending_path = pending_removals.path_in(paths["roster"].parent)
+    snapshot = pending_removals.load(pending_path)
+    held = copy.deepcopy(snapshot)               # settle mutates IN PLACE
+    # Orphan guard mirrors the resolver (D8): a ghost provider is never in
+    # `fetches` below, so settle would skip it forever — the tick drops it
+    # itself, with the same note. Dict registries only (tests' sets pass
+    # through untouched).
+    for provider in [p for p in held
+                     if isinstance(registry, dict) and p not in registry]:
+        del held[provider]
+        print(f"inference-watchdog: dropped pending entries for "
+              f"{provider} (not in registry)", file=sys.stderr)
+    holds = {p: _hold_for(registry, p) for p in held}
+    # Settle source: providers with FRESH post-recheck evidence ONLY; failed
+    # and unconfirmed providers absent = neutral (double-evidence symmetry).
+    fetches = {p: new_map[p] for p, ids in results.items()
+               if ids is not None and p not in unconfirmed}
+    out = pending_removals.settle(held, fetches, holds, now)
+    recovered = {}
+    for provider, model_id in out["recovered"]:
+        recovered.setdefault(provider, []).append(model_id)
+    for provider, ids in recovered.items():
+        new_map[provider] = pending_removals.sorted_ids(
+            set(new_map.get(provider, ())) | set(ids))
+    # PROVISIONAL (T4): replaced by T5's with_expired pre-emit save +
+    # post-emit consume (T5-4 deletes this line — D2).
+    if held != snapshot and not dry_run:
+        pending_removals.save(pending_path, held)
+
     # Crash-safe write order (R2-9): roster FIRST, then alert enqueue/send
     # (pending_alerts.json inside notify). A crash may delay a retry but
     # never silently swallows an alert.

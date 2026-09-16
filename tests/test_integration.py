@@ -1149,3 +1149,79 @@ def test_hold_for_seam():
     for p in REGISTRY:
         assert im._hold_for(REGISTRY, p) is None
     assert im._hold_for({"amd": {"removal_hold_seconds": "1800"}}, "amd") is None
+
+
+# ---------------------------------------------------------------------------
+# T4-2: inline settle in _tick_locked (quiet-tick expiry + recovery +
+# provisional save; decisions D2/D4)
+# ---------------------------------------------------------------------------
+
+TICK_REGISTRY_DICT = {"amd": {"removal_hold_seconds": 1800}, "nous": {}}
+
+
+def _seed_alive_quiet(tmp, now):
+    """Seed alive.json so neither ⚠️ nor 💚 fires this tick (E2E silence
+    discipline — idiom from test_alive_ping_reports_prev_plus_this_tick_drops)."""
+    (tmp / "alive.json").write_text(json.dumps({
+        "last_tick_epoch": int(now) - 60,
+        "last_output_epoch": int(now) - 60,
+        "dropped_alerts_total": 0,
+    }), encoding="utf-8")
+
+
+def _tick_dict_registry(tmp, scenarios, now):
+    """One tick with the DICT registry (hold semantics) — the _run helper
+    hard-codes the SET-shaped REGISTRY, so units needing dict configs call
+    run_tick positionally per the decomposition-QA seam notes."""
+    fetch_all, fetch_one, calls = _fetcher(scenarios)
+    code = im.run_tick(tmp, TICK_REGISTRY_DICT, fetch_all, fetch_one,
+                       webhook_url=None, sleep=lambda s: None, now=now,
+                       recheck_delay=0)
+    return code, calls
+
+
+def test_tick_quiet_recovers_pending_silently(tmp_path, capsys):
+    """rev-4 test c: quiet tick (ZERO diff events) settles the hold queue —
+    a still-visible held id is RECOVERED (consumed, no-op roster union) with
+    stdout byte-empty."""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["x"], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    code, _ = _tick_dict_registry(tmp_path, [{"amd": ["x"], "nous": ["n"]}],
+                                  now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == ""
+    assert _load_q(tmp_path) == {}                   # recovery consumed
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"]["amd"] == ["x"]       # no-op union
+
+
+def test_tick_quiet_consumes_expired_entry(tmp_path, capsys):
+    """rev-4 test b (PLACEMENT pin) + h's ghost side: the settle block runs
+    with ZERO diff events (inside `if events:` this file would still hold x —
+    D2's interim swallow until T5 alerting), the expired entry is consumed by
+    the provisional save, and the pre-settle D8 orphan guard drops the ghost
+    provider with the resolver-identical stderr note."""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": [], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {
+        "amd": {"x": {"gone_since": RESOLVER_T0, "last_absent_seen": RESOLVER_T0}},
+        "ghost": {"g": {"gone_since": RESOLVER_T0, "last_absent_seen": RESOLVER_T0}},
+    })
+    code, _ = _tick_dict_registry(tmp_path, [{"amd": [], "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == ""                             # alerting comes at T5
+    assert ("inference-watchdog: dropped pending entries for ghost "
+            "(not in registry)\n") == cap.err        # exact D8 guard note
+    q = _load_q(tmp_path)
+    assert q == {}                                   # expiry consumed
+    assert "ghost" not in q                          # dropped pre-settle
