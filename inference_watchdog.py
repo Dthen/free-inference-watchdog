@@ -344,11 +344,32 @@ def build_resolver(state_dir, fetch_one, registry):
                     provs[provider] = pending_removals.sorted_ids(
                         set(old) | set(ids))
                 state.save_roster_atomic(roster_path, doc)
-        if held != snapshot and not dry_run:
+        fired = bool(out["expired"])
+        if fired:
+            events = {p: {"added": [], "removed": sorted(ids)}
+                      for p, ids in out["expired"].items()}
+            tick_iso = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M")
+            msg = notify.format_alert(
+                events, tick_iso=tick_iso, providers_polled=len(registry),
+                transients={}, stale=[], dropped_total=0)
+            if not dry_run:
+                # Two-phase persist (at-least-once), pending_removals map
+                # discipline: pre-emit save re-merges the expired entries
+                # with their ORIGINAL stamps (from the pre-settle snapshot)
+                # so a crash mid-emit re-alerts them next pass — recoveries
+                # stay consumed.
+                pending_removals.save(pending_path, pending_removals.with_expired(
+                    held, out["expired"], snapshot))
+            _emit(msg, webhook_url, alerts_path, dry_run)
+            if not dry_run:
+                # Post-emit: consumed state (expired released to the alert,
+                # recoveries gone) — queue self-heals toward empty.
+                pending_removals.save(pending_path, held)
+        elif held != snapshot and not dry_run:
             # Write/skip on the DEEP comparison, never on changed-membership:
             # a stamp-only refresh saves; a neutral pass writes nothing.
             pending_removals.save(pending_path, held)
-        return {"fired": False, "changed": held != snapshot}
+        return {"fired": fired, "changed": fired or held != snapshot}
 
     return resolve_pending
 

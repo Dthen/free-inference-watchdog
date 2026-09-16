@@ -757,3 +757,41 @@ def test_r3d_union_only_extras_never_enter_roster(tmp_path, capsys):
     assert code == 0
     out_tick = capsys.readouterr().out
     assert "🟢 `surprise`" in out_tick
+
+
+def test_r5_expired_alerts_with_two_phase_at_least_once_persist(tmp_path,
+                                                                capsys,
+                                                                monkeypatch):
+    """Behavior 5: expiry fires byte-identically AND persists two-phase: the
+    pre-emit save still holds the expired entry with ORIGINAL stamps (a crash
+    mid-emit re-alerts next pass); the post-emit save consumes it; the roster
+    is never touched by an expiry."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    roster = tmp_path / "roster.json"
+    roster.write_text("PIN", encoding="utf-8")
+    stamps = {"amd": {"x": {"gone_since": RESOLVER_T0 + 7000,
+                            "last_absent_seen": RESOLVER_T0 + 7000}}}
+    _write_q(tmp_path, stamps)
+    saves = []
+    real_save = pending_removals.save
+
+    def spy(path, held):
+        saves.append(json.loads(json.dumps(held)))
+        real_save(path, held)
+
+    monkeypatch.setattr(pending_removals, "save", spy)
+    now = RESOLVER_T0 + 9000          # 2000 >= hold 1800 -> EXPIRED
+    tick_iso = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M")
+    expected = notify.format_alert({"amd": {"added": [], "removed": ["x"]}},
+                                   tick_iso=tick_iso,
+                                   providers_polled=len(RESOLVER_REGISTRY),
+                                   transients={}, stale=[], dropped_total=0)
+    out, calls = _resolver(tmp_path, {"amd": []}, now)
+    cap = capsys.readouterr()
+    assert out == {"fired": True, "changed": True}
+    assert calls["one_n"] == 1
+    assert cap.out == expected + "\n"             # EXACT equality, no substring
+    assert saves[0] == stamps                     # pre-emit: entry STILL queued
+    assert saves[-1] == {}                        # post-emit: consumed
+    assert roster.read_bytes() == b"PIN"          # expiry never touches roster
