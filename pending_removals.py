@@ -14,6 +14,7 @@ Contract (anti-cooldown doctrine):
   CONSUMED on resolution; no stale stamps can silence anything forever.
 """
 from pathlib import Path
+import state
 
 PENDING_FILE = "pending_removals.json"
 
@@ -34,3 +35,24 @@ def sorted_ids(items):
 def pending_ids(held, provider):
     """Sorted ids held for one provider ([] when the provider is absent)."""
     return sorted_ids(held.get(provider, {}))
+
+
+def load(path):
+    """Validate hard, load_alive semantics: top-level dict; per-provider
+    dict slice; per-entry dict (stamp fields join the boundary check at the
+    next commit). Junk slices/entries are DROPPED, never crash settle, never
+    poison the resolve loop."""
+    data = state._load_json_or_default(path, {})
+    if not isinstance(data, dict):
+        data = {}
+    clean = {}
+    for provider, slice_ in data.items():
+        if not isinstance(slice_, dict):
+            continue  # junk provider slice — dropped, valid siblings survive
+        entries = {}
+        for model_id, entry in slice_.items():
+            if not isinstance(entry, dict):
+                continue  # junk entry — dropped
+            entries[model_id] = entry
+        clean[provider] = entries
+    return clean
