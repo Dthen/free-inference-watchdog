@@ -23,11 +23,13 @@
 - roster.json: providers + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
 - alive.json: last_tick_epoch + last_output_epoch + dropped_alerts_total.
 - pending_alerts.json: bounded retry queue (MAX_ATTEMPTS 5 per alert).
+- pending_removals.json: held provider removals waiting to settle (shared by both settle paths).
 - Lockfile recovery per README (state/monitor.lock; stale >30 min auto-broken).
 
 ## Alert hygiene — both exist so noise never reaches Discord; preserve them
 - Fetch failure = sticky carry-forward of last-known-good ids, never a mass removal.
 - Every diff is re-fetched after a ~3-minute delay (recheck_delay 180) before it is believed.
+- Held providers' confirmed removals wait in `state/pending_removals.json`; BOTH settle paths share `pending_removals.settle` — never fork the logic; resolve passes never touch alive.json.
 
 ## Delivery topology (operator decision 2026-08-26)
 - The Discord webhook `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in the project-local `.env` is the ONLY alert path.
@@ -39,3 +41,4 @@
 
 ## Update cadence
 - Cron schedule `"17 */1 * * *"` and `--cadence-hours` (default 1) must stay in step — the flag drives the ⚠️ missed-tick warning.
+- Second cron `*/15 * * * *` in step with the 3600s timeout.
