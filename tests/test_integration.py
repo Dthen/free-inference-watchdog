@@ -1225,3 +1225,64 @@ def test_tick_quiet_consumes_expired_entry(tmp_path, capsys):
     q = _load_q(tmp_path)
     assert q == {}                                   # expiry consumed
     assert "ghost" not in q                          # dropped pre-settle
+
+
+# ---------------------------------------------------------------------------
+# T4-3: settle-source neutrality pins (D6) — failed (stale) and unconfirmed
+# providers must be ABSENT from the tick's `fetches`, never fresh evidence.
+# ---------------------------------------------------------------------------
+
+
+def test_tick_failed_provider_is_neutral(tmp_path, capsys):
+    """rev-4 test d: a provider whose fetch FAILED this tick is excluded from
+    the settle source (key absence = neutral) — its held entry's clock must
+    NOT advance: pending file bytes unchanged, last_absent_seen frozen."""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["keep"], "nous": ["n"]}}), encoding="utf-8")
+    path = _write_q(tmp_path, {"amd": {
+        "x": {"gone_since": RESOLVER_T0 + 8000,
+              "last_absent_seen": RESOLVER_T0 + 8000}}})
+    before = path.read_bytes()
+    # amd fetch None -> sticky carry-forward ["keep"] == roster -> zero events;
+    # age(now - gone) = 1000 < hold 1800 -> a NON-neutral settle would stamp
+    # last_absent_seen = now and rewrite the queue.
+    code, _ = _tick_dict_registry(tmp_path, [{"amd": None, "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 1                                 # partial failure (stale)
+    assert cap.out == ""
+    assert path.read_bytes() == before               # bytes identical -> no save
+    q = _load_q(tmp_path)
+    assert q == {"amd": {"x": {"gone_since": RESOLVER_T0 + 8000,
+                               "last_absent_seen": RESOLVER_T0 + 8000}}}
+
+
+def test_tick_unconfirmed_provider_is_neutral(tmp_path, capsys):
+    """rev-4 test e: a provider that landed in `unconfirmed` (recheck raised)
+    is excluded from the settle source EVEN THOUGH new_map carries its sticky
+    old ids — the sticky map is not fresh evidence. Held entry untouched."""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": [], "nous": ["n"]}}), encoding="utf-8")
+    path = _write_q(tmp_path, {"amd": {
+        "y": {"gone_since": RESOLVER_T0 + 8000,
+              "last_absent_seen": RESOLVER_T0 + 8000}}})
+    before = path.read_bytes()
+    # scenario 1: initial fetch amd ["x"] -> added event; scenario 2: recheck
+    # raises FetchError -> amd UNCONFIRMED, sticky-[] merged into new_map.
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["x"], "nous": ["n"]},
+                   {"amd": None, "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 0                                 # fetch succeeded -> not stale
+    assert cap.out == ""                             # unconfirmed -> no alert
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert "amd" in roster["unconfirmed"]            # really the unconfirmed path
+    assert path.read_bytes() == before               # no save: held == snapshot
+    q = _load_q(tmp_path)
+    assert q == {"amd": {"y": {"gone_since": RESOLVER_T0 + 8000,
+                               "last_absent_seen": RESOLVER_T0 + 8000}}}
