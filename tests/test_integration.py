@@ -1861,3 +1861,60 @@ def test_no_webhook_skips_drain_and_preserves_alerts(tmp_path, capsys,
     assert posted == []                              # no drain, no emit POST
     assert alerts.read_bytes() == before             # untouched by the pass
     assert _load_q(tmp_path) == {}                   # expiry still consumed
+
+
+# ---------------------------------------------------------------------------
+# T6-2: E2E-1 — the 20:17/21:17 flap, black-box headline replay. Removal at
+# tick N is held silently; the 15-min resolver pass sees v4 back and restores
+# it silently; the hourly tick N+1 faces roster == evidence and prints
+# nothing — no ghost alert in either direction.
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_1_v41_flap_silent_both_directions(tmp_path, capsys):
+    """rev-4 verbatim: removal at tick N -> silent, queued; resolver pass
+    shows it back -> silent, queue empty, roster unioned; hourly tick N+1 ->
+    SILENT (no ghost ping)."""
+    now = RESOLVER_T0 + 9000
+
+    # --- Act 0 (E2E discipline a): baseline drain ---
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["v4"], "nous": ["n"]}}), encoding="utf-8")
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["v4"], "nous": ["n"]}], now - 60)
+    assert code == 0
+    capsys.readouterr()                              # drain the baseline
+
+    # --- Act 1: tick N — amd disappears (fetch + recheck agree) ---
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]},
+                   {"amd": [], "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == "" and cap.err == ""           # held removal is silent
+    assert _load_q(tmp_path) == {
+        "amd": {"v4": {"gone_since": int(now),
+                       "last_absent_seen": int(now)}}}
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["amd"] == []                    # roster reflects truth
+
+    # --- Act 2: resolver pass at now+60 — v4 is back ---
+    out, calls = _resolver(tmp_path, {"amd": ["v4"], "nous": ["n"]}, now + 60)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": True}
+    assert calls["one_n"] == 1                       # fetched amd exactly once
+    assert cap.out == "" and cap.err == ""           # recovery is silent
+    assert _load_q(tmp_path) == {}                   # queue emptied
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["amd"] == ["v4"]                # unioned back
+
+    # --- Act 3: hourly tick N+1 — no ghost ping either direction ---
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["v4"], "nous": ["n"]}], now + 3600)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == ""                             # no diff, no ghost
+    assert cap.err == ""
+    assert _load_q(tmp_path) == {}
