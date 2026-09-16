@@ -267,3 +267,61 @@ def test_settle_absent_provider_key_is_neutral():
     assert out["expired"] == {}
     assert out["released"] == []
     assert out["changed"] == {"nous"}
+
+
+def test_settle_unflagged_provider_releases_silently():
+    """holds.get(p) None — key absent from holds ({}) OR value None — every
+    entry consumed under 'released', changed marks p, slice pruned entirely,
+    nothing printed (settle is silent; callers note)."""
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100},
+                    "y": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"amd": []}, {}, now=200)
+    assert out["released"] == [("amd", "x"), ("amd", "y")]
+    assert out["recovered"] == [] and out["expired"] == {}
+    assert out["changed"] == {"amd"}
+    assert held == {}
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"amd": []}, {"amd": None}, now=200)
+    assert out["released"] == [("amd", "x")]
+    assert out["changed"] == {"amd"}
+    assert held == {}
+
+
+def test_settle_unflagged_release_even_when_fetch_absent():
+    """Absence outranks un-flagging: an unresolved provider keeps its entries
+    untouched even with no hold config, however old."""
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {}, {}, now=999999)
+    assert out["released"] == []
+    assert held == {"amd": {"x": {"gone_since": 100,
+                                  "last_absent_seen": 100}}}
+
+
+def test_settle_partial_recovery_expiry_and_hold_prunes_only_when_emptied():
+    held = {"amd": {
+        "x": {"gone_since": 100, "last_absent_seen": 100},
+        "y": {"gone_since": 100, "last_absent_seen": 100},
+        "z": {"gone_since": 1900, "last_absent_seen": 1900},
+    }}
+    out = pr.settle(held, {"amd": ["x"]}, {"amd": 1800}, now=2000)
+    assert out["recovered"] == [("amd", "x")]
+    assert out["expired"] == {"amd": ["y"]}
+    assert out["released"] == []
+    assert out["changed"] == {"amd"}
+    assert held == {"amd": {"z": {"gone_since": 1900,
+                                  "last_absent_seen": 2000}}}
+    # a two-way partial (recover + expire) that EMPTIES the slice prunes it
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100},
+                    "y": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"amd": ["x"]}, {"amd": 1800}, now=2000)
+    assert held == {}
+
+
+def test_settle_dust_prune_not_marked_in_changed():
+    """Consumption-only 'changed', prune side (carry-list item 4 landed at
+    the source): a pre-seeded empty slice is pruned with nothing consumed —
+    changed stays empty."""
+    held = {"amd": {}}
+    out = pr.settle(held, {"amd": []}, {"amd": 1800}, 200)
+    assert out["changed"] == set()
+    assert held == {}

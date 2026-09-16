@@ -115,6 +115,7 @@ def settle(held, fetches, holds, now):
     - provider absent from fetches -> skip (neutral): failure is signaled by
       KEY ABSENCE, never None.
     - id in fetches[p] -> recovered (entry consumed).
+    - holds.get(p) is None/absent -> release all entries (silent)
     - id absent and now - gone_since >= hold -> expired (consumed; >= so the
       boundary fires); else last_absent_seen = int(now).
     "changed" = providers with at least one ENTRY CONSUMED (recovered /
@@ -133,8 +134,18 @@ def settle(held, fetches, holds, now):
             continue  # fetch failure is neutral: entry waits, clock frozen
         fetched = fetches[provider]
         hold = holds.get(provider)
-        # PLACEHOLDER(T0-9): hold None = un-flagged release lands next unit;
-        # every test to date passes a numeric hold.
+        if hold is None:
+            # Un-flagged (or unknown) provider: release silently —
+            # neither recovered nor expired, never re-alerted. The absent-
+            # provider skip above already outranks this: release only
+            # applies to providers the caller resolved.
+            for model_id in sorted(entries):
+                released.append((provider, model_id))
+            if entries:
+                changed.add(provider)
+            entries.clear()
+            del held[provider]  # release-all prunes the slice entirely
+            continue
         for model_id in sorted(entries):
             entry = entries[model_id]
             if model_id in fetched:
