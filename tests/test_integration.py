@@ -603,3 +603,32 @@ def test_r1_empty_queue_zero_fetch_zero_write_silent(tmp_path, capsys):
     assert _load_q(tmp_path) == {}
     assert cap.out == "" and cap.err == ""
     assert not (tmp_path / "roster.json").exists()
+
+
+def _resolver(tmp, scenario, now, registry=RESOLVER_REGISTRY, **kw):
+    """Run one resolve pass on a _fetcher([scenario]) seam."""
+    _fetch_all, fetch_one, calls = _fetcher([scenario])
+    res = im.build_resolver(tmp, fetch_one, registry)
+    return res(now, **kw), calls
+
+
+def test_r4_unexpired_absent_refreshes_stamp_and_saves_silently(tmp_path,
+                                                                capsys):
+    """Behavior 4: still absent, hold unexpired -> last_absent_seen updated,
+    gone_since NEVER rewritten, roster untouched, stdout+stderr silent; the
+    save decision is the DEEP held != snapshot comparison, not settle's
+    changed-membership (a stamp refresh is absent from changed by contract —
+    this test would silently pass if persistence ever keyed off it)."""
+    roster = tmp_path / "roster.json"
+    roster.write_text("PIN", encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    out, calls = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": True}
+    assert cap.out == "" and cap.err == ""
+    assert calls["one_n"] == 1
+    e = _load_q(tmp_path)["amd"]["a"]
+    assert e == {"gone_since": RESOLVER_T0 + 8000,
+                 "last_absent_seen": RESOLVER_T0 + 9000}
+    assert roster.read_bytes() == b"PIN"

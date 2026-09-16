@@ -9,6 +9,7 @@ not a delivery path; stderr carries fatal diagnostics for the operator.
 """
 
 import argparse
+import copy
 import os
 import sys
 import time
@@ -286,8 +287,25 @@ def build_resolver(state_dir, fetch_one, registry):
             # is operator-owned state). A partially-junk file self-heals via
             # the normal save below once anything else changes.
             return {"fired": False, "changed": False}
-        # PLACEHOLDER(T3A-2): non-empty queue settles in the next unit.
-        return {"fired": False, "changed": False}
+        # settle() mutates entries IN PLACE — fork with deepcopy, never dict().
+        held = copy.deepcopy(snapshot)
+        holds = {p: removal_hold(registry[p]) for p in held}
+        fetch_map = {}
+        for provider in held:
+            try:
+                ids, _meta = fetch_one(provider)
+            except providers.FetchError:
+                continue  # absent from fetch_map => neutral in settle
+            fetch_map[provider] = ids
+        # The settle RESULT is unbound at this commit — pyflakes-clean by
+        # construction; T3A-4 binds it (`out = ...`) when recovery first
+        # consumes it.
+        pending_removals.settle(held, fetch_map, holds, now)
+        if held != snapshot and not dry_run:
+            # Write/skip on the DEEP comparison, never on changed-membership:
+            # a stamp-only refresh saves; a neutral pass writes nothing.
+            pending_removals.save(pending_path, held)
+        return {"fired": False, "changed": held != snapshot}
 
     return resolve_pending
 
