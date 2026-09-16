@@ -374,3 +374,62 @@ def test_with_expired_full_map_discipline_roundtrip(tmp_path):
                                         "last_absent_seen": 100}}}
     pr.save(p, held)
     assert pr.load(p) == {}  # settle pruned the emptied slice — no dust
+
+
+def test_with_expired_never_mutates_args():
+    """Purity contract (caller map discipline): smashing the returned dict
+    leaves held, expired, and stamps_from untouched — AND mutating a
+    snapshot stamp AFTER the merge must not leak into the merged result
+    (re-merged stamps are themselves deep-copied; carry-list item 5)."""
+    snapshot = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 150}}}
+    held = copy.deepcopy(snapshot)
+    expired = {"amd": ["x"]}
+    held_before = copy.deepcopy(held)
+    expired_before = copy.deepcopy(expired)
+    snapshot_before = copy.deepcopy(snapshot)
+    merged = pr.with_expired(held, expired, snapshot)
+    assert merged["amd"]["x"] == {"gone_since": 100, "last_absent_seen": 150}
+    snapshot["amd"]["x"]["gone_since"] = 999   # mutate AFTER the merge
+    assert merged["amd"]["x"]["gone_since"] == 100  # deep-copied stamp
+    snapshot["amd"]["x"]["gone_since"] = 100
+    merged.clear()
+    merged["ghost"] = {"boo": {"gone_since": 0, "last_absent_seen": 0}}
+    assert held == held_before
+    assert expired == expired_before
+    assert snapshot == snapshot_before
+
+
+def test_with_expired_accepts_none_for_both_maps():
+    """None-tolerant callers, one clear rule: None tolerated on expired AND
+    stamps_from."""
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    assert pr.with_expired(held, None, {"amd": {}}) == held
+    assert pr.with_expired(held, {}, None) == held
+    assert pr.with_expired(held, None, None) == held
+
+
+def test_with_expired_missing_stamp_skips_with_stderr_note(capsys):
+    """An expired id with NO stamp entry in stamps_from is NOT re-merged
+    (no invented stamps) and prints the visible-skip note — exact bytes.
+    (A stamped id re-merges silently — pinned in the next test; and
+    with_expired(held, {"amd": ["x"]}, None) notes like any missing stamp.)"""
+    merged = pr.with_expired({}, {"amd": ["x"]}, {"amd": {}})
+    assert merged == {}  # x not re-queued
+    err = capsys.readouterr().err
+    assert (err == "pending_removals: no pre-settle stamp for amd/x — "
+                   "expired entry not re-queued\n")
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    assert pr.with_expired(held, {"amd": ["x"]}, None) == held  # no stamps
+
+
+def test_with_expired_missing_provider_slice_notes_stamped_id_stays_silent(capsys):
+    merged = pr.with_expired({}, {"nous": ["m"]}, {"amd": {}})
+    assert merged == {}
+    assert "no pre-settle stamp for nous/m" in capsys.readouterr().err
+    # an id that DOES have a stamp re-merges silently
+    merged = pr.with_expired({}, {"amd": ["x"]},
+                             {"amd": {"x": {"gone_since": 100,
+                                            "last_absent_seen": 100}}})
+    assert merged == {"amd": {"x": {"gone_since": 100,
+                                    "last_absent_seen": 100}}}
+    assert capsys.readouterr().err == ""
