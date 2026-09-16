@@ -1382,3 +1382,46 @@ def test_tick_unflagged_release_is_silent_and_consumes(tmp_path, capsys):
     assert _load_q(tmp_path) == {}                   # release consumed
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"]["amd"] == []          # x not restored
+
+
+# ---------------------------------------------------------------------------
+# T5-1: enqueue + strip for held providers (rev-4 rule 1). A confirmed
+# removal on a hold-flagged provider moves to pending_removals.json (both
+# stamps = now) and is stripped from the alert; an instant provider still
+# alerts alone. Mixed: amd held + nous instant -> alert lists nous only;
+# pending file lists amd only.
+# ---------------------------------------------------------------------------
+
+
+def test_tick_held_removal_queues_instant_still_alerts(tmp_path, capsys,
+                                                       monkeypatch):
+    """rev-4 rule 1 (mixed case): roster amd ["gone-amd"], nous
+    ["gone-nous"], both fetches+rechecks [] -> removals confirmed. amd is
+    hold-flagged -> gone-amd enters the pending queue AND vanishes from the
+    alert; nous is instant -> alert is the byte-exact format_alert of the
+    STRIPPED map {nous only} (E2E discipline c), with no gone-amd anywhere."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["gone-amd"], "nous": ["gone-nous"]}}),
+        encoding="utf-8")
+    assert not pending_removals.path_in(tmp_path).exists()   # seed: absent
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": []}, {"amd": [], "nous": []}], now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.err == ""
+    expected = notify.format_alert(
+        {"nous": {"added": [], "removed": ["gone-nous"]}},
+        tick_iso=datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=2, transients={}, stale=[], dropped_total=0)
+    assert cap.out == expected + "\n"
+    assert "gone-amd" not in cap.out
+    assert _load_q(tmp_path) == {
+        "amd": {"gone-amd": {"gone_since": int(now),
+                             "last_absent_seen": int(now)}}}
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"] == {"amd": [], "nous": []}

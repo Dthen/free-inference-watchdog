@@ -593,6 +593,28 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
     if held != snapshot and not dry_run:
         pending_removals.save(pending_path, held)
 
+    # --- confirmed-event routing, rev-4 rule 1: enqueue + strip ---
+    # A held provider's removals join the queue (first absence = now) and
+    # are STRIPPED from the alert; empty section -> provider dropped from
+    # the alert map. Mixed: amd held + nous instant -> alert nous only.
+    enqueued = False
+    for provider in list(confirmed):
+        hold = _hold_for(registry, provider)
+        if not hold:
+            continue
+        removed = confirmed[provider].get("removed") or []
+        if removed:
+            pending_removals.enqueue(held, provider, removed, now)
+            enqueued = True
+        confirmed[provider]["removed"] = []
+        if not confirmed[provider]["added"]:
+            del confirmed[provider]
+    if enqueued and held != snapshot and not dry_run:
+        # Post-enqueue save: T4-2's provisional save ran BEFORE routing, so
+        # the freshly-queued ids would be lost. Provisional pair #2 — T5-4
+        # deletes BOTH provisional saves and folds this into persist_pending.
+        pending_removals.save(pending_path, held)
+
     # Crash-safe write order (R2-9): roster FIRST, then alert enqueue/send
     # (pending_alerts.json inside notify). A crash may delay a retry but
     # never silently swallows an alert.
