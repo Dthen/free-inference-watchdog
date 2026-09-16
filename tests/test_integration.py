@@ -632,3 +632,27 @@ def test_r4_unexpired_absent_refreshes_stamp_and_saves_silently(tmp_path,
     assert e == {"gone_since": RESOLVER_T0 + 8000,
                  "last_absent_seen": RESOLVER_T0 + 9000}
     assert roster.read_bytes() == b"PIN"
+
+
+def test_r2_orphan_guard_drops_without_registry_fetch_or_roster_touch(
+        tmp_path, capsys):
+    """Behavior 2: held provider absent from the registry is dropped from the
+    queue with the unified stderr note, zero fetch_one calls for it, roster
+    untouched; amd (in registry) just waits and its refresh saves."""
+    roster = tmp_path / "roster.json"
+    roster.write_text("PIN", encoding="utf-8")   # never re-read: bytes pin
+    _write_q(tmp_path, {"ghost": {"x": {"gone_since": RESOLVER_T0,
+                                        "last_absent_seen": RESOLVER_T0}},
+                        "amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    out, calls = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9000)
+    err = capsys.readouterr().err
+    assert ("inference-watchdog: dropped pending entries for ghost "
+            "(not in registry)") in err
+    q = _load_q(tmp_path)
+    assert "ghost" not in q                       # dropped from the file...
+    assert q["amd"]["a"] == {"gone_since": RESOLVER_T0 + 8000,
+                             "last_absent_seen": RESOLVER_T0 + 9000}
+    assert calls["one_n"] == 1                    # fetched amd exactly once
+    assert out == {"fired": False, "changed": True}
+    assert roster.read_bytes() == b"PIN"

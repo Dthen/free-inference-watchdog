@@ -289,6 +289,14 @@ def build_resolver(state_dir, fetch_one, registry):
             return {"fired": False, "changed": False}
         # settle() mutates entries IN PLACE — fork with deepcopy, never dict().
         held = copy.deepcopy(snapshot)
+        # Orphan guard BEFORE any fetch: a held provider evicted from the
+        # registry would make build_fetch_one's PROVIDERS[name] raise
+        # KeyError → the FATAL exit-2 loop. Drop it from the queue, note it,
+        # never fetch it, never touch the roster.
+        for provider in [p for p in held if p not in registry]:
+            del held[provider]
+            print(f"inference-watchdog: dropped pending entries for "
+                  f"{provider} (not in registry)", file=sys.stderr)
         holds = {p: removal_hold(registry[p]) for p in held}
         fetch_map = {}
         for provider in held:
