@@ -146,8 +146,21 @@ counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 - `roster.json`: providers + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
 - `alive.json`: last_tick_epoch + last_output_epoch + dropped_alerts_total.
 - `pending_alerts.json`: bounded retry queue (MAX_ATTEMPTS 5 per alert).
+- `pending_removals.json`: held provider removals waiting to settle (shared by both settle paths).
 - `probe_state.json`: per-provider probe verdicts (`{provider: {model_id: {"verdict": "free"|"paid", "epoch": int}}}`). Written once per tick after the serial probe loop. Never hand-edit.
 - `state/monitor.lock`: PID lockfile; stale locks (>30 min old) are auto-broken on the next invocation (crash recovery).
+
+## Held removals (opt-in per providers)
+
+A provider config may set `removal_hold_seconds`. When present, a confirmed removal is held that long in `state/pending_removals.json` before an alert is emitted — letting a transient fetch failure or a quick re-add self-silence. Absent, removals alert instantly.
+
+Two settle paths drain the queue; both share `pending_removals.settle` (never forked):
+- **Resolver accelerates**: an in-pass resolver resolves holds as soon as their deadline elapses within the tick.
+- **Hourly tick is the durable fallback**: if the resolver missed the window (crash, long fetch), the next hourly pass resolves the remaining holds.
+
+Recovery is silent in both directions: a model that returns before the hold expires settles as RECOVERED with no announcement. News alerts are bounded at `hold + 15 min` — a removal past its deadline cannot wait longer.
+
+Expiry is at-least-once. The one edge case: expiry fired-but-unconsumed (a crash between the two saves) combined with the model returning before the next pass → the return settles as RECOVERED, silently. An announced removal whose return goes unannounced. Accepted: bounded by one process crash in a ~emit-sized window.
 
 ## Drop-a-provider / managing providers
 
@@ -177,7 +190,8 @@ loader validates at startup:
 | `auth.path_env` | Env var holding a path to a JSON token file (when `auth.method` is `token_file`; takes precedence over `auth.path`) |
 | `auth.path` | Literal path to a JSON token file (legacy `token_file` alternative to `path_env`) |
 | `auth.key` | Dot-separated JSON path to the token inside the file (e.g. `providers.nous.access_token`) |
-| `display` | Column order (0 = first) |
+|| `display` | Column order (0 = first) |
+| `removal_hold_seconds` | Optional; when present, confirmed removals are held this many seconds before alerting. Absent = instant. Opt-in per provider. |
 
 Detection methods (dispatched by string key, so a provider can pick any):
 
