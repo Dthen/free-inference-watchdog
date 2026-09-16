@@ -1425,3 +1425,35 @@ def test_tick_held_removal_queues_instant_still_alerts(tmp_path, capsys,
                              "last_absent_seen": int(now)}}}
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"] == {"amd": [], "nous": []}
+
+
+# ---------------------------------------------------------------------------
+# T5-2: strip pending ids from confirmed adds (rev-4 rule 2; decision 5).
+# A recovery visible in BOTH the pending queue and the fresh fetch must not
+# double-signal: settle consumes the queue entry, and the 🟢add event for
+# that same id is stripped via the pre-settle snapshot — silent tick.
+# ---------------------------------------------------------------------------
+
+
+def test_tick_recovery_does_not_realert_as_add(tmp_path, capsys):
+    """rev-4 rule 2: roster amd [], pending {amd: {x}}, fetch shows x ->
+    confirm_diffs raises an ADD event for x, settle RECOVERS x (consumes the
+    queue entry, union restores the roster), and the add is STRIPPED against
+    the pre-settle snapshot: stdout byte-empty, pending {} , roster amd [x]."""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": [], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["x"], "nous": ["n"]},
+                   {"amd": ["x"], "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == ""                             # add stripped -> silent
+    assert cap.err == ""
+    assert _load_q(tmp_path) == {}                   # settle consumed x
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"]["amd"] == ["x"]       # restored via union

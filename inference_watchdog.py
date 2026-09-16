@@ -615,6 +615,20 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         # deletes BOTH provisional saves and folds this into persist_pending.
         pending_removals.save(pending_path, held)
 
+    # --- confirmed-event routing, rev-4 rule 2: strip pending adds ---
+    # An id recovered by settle was already in the queue; its 🟢add event is
+    # the same event twice. Drop adds matching the PRE-settle snapshot
+    # (finding 4), with the same empty-section cleanup as rule 1.
+    pending_snapshot = {p: set(models) for p, models in snapshot.items()}
+    for provider in list(confirmed):
+        pend = pending_snapshot.get(provider, set())
+        if not pend:
+            continue
+        added = confirmed[provider].get("added") or []
+        confirmed[provider]["added"] = [i for i in added if i not in pend]
+        if not confirmed[provider]["added"] and not confirmed[provider]["removed"]:
+            del confirmed[provider]
+
     # Crash-safe write order (R2-9): roster FIRST, then alert enqueue/send
     # (pending_alerts.json inside notify). A crash may delay a retry but
     # never silently swallows an alert.
