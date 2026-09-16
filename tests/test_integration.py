@@ -1062,3 +1062,42 @@ def test_r9e_dry_run_with_webhook_never_drains(tmp_path, capsys,
     assert posted == []                           # nothing POSTED at all
     assert alerts.read_bytes() == before          # queue not drained/flushed
     assert "[dry-run] would POST to webhook" in cap.out
+
+
+def test_resolve_lock_contention_exits_zero(tmp_path, capsys):
+    """A resolve pass under a LIVE lock is refused: exit 0, 'already running'
+    on stderr, and the resolver body never executes (zero fetch_one calls)."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("123", encoding="utf-8")
+    old = time.time() - 60  # fresh live lock (1 min old)
+    os.utime(lock, (old, old))
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    _fetch_all, fetch_one, calls = _fetcher([{"amd": []}])
+    code = im.run_resolve(tmp_path, RESOLVER_REGISTRY, fetch_one, None,
+                          now=RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert "already running" in cap.err
+    assert calls["one_n"] == 0
+
+
+def test_resolve_lock_contention_preserves_live_lockfile(tmp_path):
+    """F7-1 ownership gate mirrored on the resolve path: a contended resolve
+    must leave the OTHER process's live lock byte-and-mtime UNCHANGED."""
+    lock = tmp_path / "monitor.lock"
+    lock.write_text("123", encoding="utf-8")
+    old = time.time() - 60  # fresh live lock (1 min old)
+    os.utime(lock, (old, old))
+    before_bytes = lock.read_bytes()
+    before_mtime = os.stat(lock).st_mtime
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    _fetch_all, fetch_one, calls = _fetcher([{"amd": []}])
+    code = im.run_resolve(tmp_path, RESOLVER_REGISTRY, fetch_one, None,
+                          now=RESOLVER_T0 + 9000)
+    assert code == 0
+    assert lock.exists(), "live lockfile was DELETED by contended resolve"
+    assert lock.read_bytes() == before_bytes    # byte-identical
+    assert os.stat(lock).st_mtime == before_mtime  # untouched mtime
+    assert calls["one_n"] == 0                  # resolver body never ran
