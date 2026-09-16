@@ -162,6 +162,46 @@ Recovery is silent in both directions: a model that returns before the hold expi
 
 Expiry is at-least-once. The one edge case: expiry fired-but-unconsumed (crash between the two saves) + model returns before the next pass → the return settles as RECOVERED, silently. An announced removal whose return goes unannounced. Accepted: bounded by one process crash in a ~emit-sized window.
 
+## Removal resolver
+
+The hourly tick settles the hold queue itself, but a 15-min resolver (`--resolve`)
+accelerates it: holds whose deadline elapses between hourly passes drain on the
+next quarter-hour instead of waiting a full cadence. The resolver shares the
+same `pending_removals.settle` logic as the tick (never forked); it is a
+schedule accelerator, not a second source of truth.
+
+What `--resolve` does:
+- Drains `pending_removals.json`: expired removals alert via the webhook,
+  recovered models silently union back into the roster.
+- Takes `monitor.lock` so it never overlaps a tick (the tick is the durable
+  fallback — if the resolver crashes or misses a window, the next hourly pass
+  picks up the remainder).
+- Drops orphan providers (held entries for a provider no longer in `providers/`)
+  from the queue with a stderr note — never fetches them, never touches the
+  roster.
+
+What `--resolve` does NOT do:
+- Never touches `alive.json`, the 💚 alive ping, or the ⚠️ missed-tick warning
+  — the hourly tick owns those clocks; the 15-min job must not masquerade as
+  a tick.
+- Never rebaselines (mutually exclusive with `--init`).
+- Does not persist resolver-side `dropped_alerts_total` increments — drop
+  accounting is a tick-owned metric; resolver increments are lost at process
+  exit (at-least-once queueing in `pending_alerts.json` is unaffected).
+
+Orphan release notes go to stderr on both settle paths (resolver and hourly
+tick): a ghost provider's held entries are printed as dropped, then consumed.
+Un-flagged releases are silent on both paths — both end in the same consumed
+entry.
+
+Registration (uses the same wrapper pattern as the tick job above; the
+`*/15 * * * *` cadence matches the resolver's recheck rhythm):
+
+```bash
+hermes cron create --name inference-watchdog-resolve --no-agent \
+  --script inference-watchdog-resolve.sh --deliver local "*/15 * * * *"
+```
+
 ## Drop-a-provider / managing providers
 
 Providers are plain JSON config files in `providers/`. The watchdog loads every
@@ -210,20 +250,19 @@ Detection methods (dispatched by string key, so a provider can pick any):
   `fetch_all()`, so catalog fetches run INSIDE the 260s; worst case to the
   `save_probe_state` persist point is ~295s (the last probe can start at
   259.9s and overshoot by sleep(5) + 30s timeout). The cron runner SIGKILLs
-  the wrapper at 300s (briefly raised to 1800s on 2026-09-13, then restored
-  to 300s the same day). One tick carries ~45 of 47 models at 5s operator
-  pacing (46×5s sleeps + 47×~1s probes ≈ 280s exceeds the 260s budget);
-  the short tail self-heals next tick via `probe_state.json` persistence
-  (the deferred models re-queue as tier-1 arrivals). Even the pathological
-  overshoot (~295s) lands the spiral-critical persist under the 300s kill.
-  The full
-  tick (persist + the unconditional 180s recheck nap) can exceed 300s — the
-  invariant is that the persist precedes any kill: a kill during the
-  recheck costs that tick's roster write (roster lags one tick), never
-  probe progress. A truncated pass (the normal every-tick tail at 5s
-  pacing, or deeper if probes burn their 30s
-  timeouts) persists its probed subset and the next tick resumes
-  (self-healing).
+  the wrapper at 3600s (live `script_timeout_seconds`; historically 300s,
+  briefly raised to 1800s on 2026-09-13, then restored to 300s the same
+  day). One tick carries ~45 of 47 models at 5s operator pacing (46×5s
+  sleeps + 47×~1s probes ≈ 280s exceeds the 260s budget); the short tail
+  self-heals next tick via `probe_state.json` persistence (the deferred
+  models re-queue as tier-1 arrivals). Even the pathological overshoot
+  (~295s) lands the spiral-critical persist under the 3600s kill. The
+  full tick (persist + the unconditional 180s recheck nap) can exceed
+  300s — the invariant is that the persist precedes any kill: a kill
+  during the recheck costs that tick's roster write (roster lags one
+  tick), never probe progress. A truncated pass (the normal every-tick
+  tail at 5s pacing, or deeper if probes burn their 30s timeouts)
+  persists its probed subset and the next tick resumes (self-healing).
 
 ### Modules
 
