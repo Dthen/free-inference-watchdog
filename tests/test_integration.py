@@ -1346,3 +1346,39 @@ def test_tick_flicker_transient_holds(tmp_path, capsys):
     q = _load_q(tmp_path)
     assert q == {"amd": {"y": {"gone_since": RESOLVER_T0 + 8000,
                                "last_absent_seen": int(now)}}}
+
+
+# ---------------------------------------------------------------------------
+# T4-5: tick un-flagged release pin (rev-4 test h, un-flagged side; the ghost
+# + note side rides on T4-2's test b per D8). amd IN the registry with the
+# hold field removed -> settle releases silently; the "not in registry" note
+# must NOT appear. Zero prod change expected — if a note leaks, the D8 guard
+# is mis-keyed (fix the guard, not this test).
+# ---------------------------------------------------------------------------
+
+
+def test_tick_unflagged_release_is_silent_and_consumes(tmp_path, capsys):
+    """rev-4 test h (un-flagged side): amd in registry but config lost
+    removal_hold_seconds -> _hold_for None -> settle RELEASES silently:
+    pending {} (age 1000 < 1800, so ONLY the release branch can consume it —
+    a still-flagged settle would stamp-refresh and keep x), stdout "" AND
+    stderr "" (no D8 ghost note — amd was fetched, not missing from the
+    registry), roster content untouched (x neither recovered nor alerted)."""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": [], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    fetch_all, fetch_one, _ = _fetcher([{"amd": [], "nous": ["n"]}])
+    code = im.run_tick(tmp_path, {"amd": {}, "nous": {}}, fetch_all, fetch_one,
+                       webhook_url=None, sleep=lambda s: None, now=now,
+                       recheck_delay=0)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == ""                             # silent release
+    assert cap.err == ""                             # NOT-in-registry note absent
+    assert _load_q(tmp_path) == {}                   # release consumed
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["providers"]["amd"] == []          # x not restored
