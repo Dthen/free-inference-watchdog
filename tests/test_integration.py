@@ -1101,3 +1101,40 @@ def test_resolve_lock_contention_preserves_live_lockfile(tmp_path):
     assert lock.read_bytes() == before_bytes    # byte-identical
     assert os.stat(lock).st_mtime == before_mtime  # untouched mtime
     assert calls["one_n"] == 0                  # resolver body never ran
+
+
+def test_cli_resolve_routes_to_run_resolve(monkeypatch, tmp_path):
+    """T3B-2 wiring: --resolve must route to run_resolve (never run_tick) with
+    the shared state dir, registry, fetch_one, webhook and dry_run plumbed."""
+    import pytest
+    captured = {}
+
+    def fake_resolve(state_dir, registry, fetch_one, **kw):
+        captured["state_dir"] = state_dir
+        captured["registry"] = registry
+        captured["fetch_one"] = fetch_one
+        captured.update(kw)
+        return 7                                            # sentinel result
+
+    monkeypatch.setattr(im, "run_resolve", fake_resolve)
+    monkeypatch.setattr(im, "run_tick",
+                        lambda *a, **k: pytest.fail("--resolve must not tick"))
+    monkeypatch.setattr(im, "parse_envfile", lambda: {})    # webhook None
+    result = im.main(["--resolve", "--state-dir", str(tmp_path)])
+    assert result == 7                                      # returned verbatim
+    assert captured["state_dir"] == tmp_path
+    assert captured["registry"] is im.PROVIDERS
+    assert callable(captured["fetch_one"])
+    assert captured["webhook_url"] is None
+    assert captured["dry_run"] is False
+
+
+def test_cli_resolve_and_init_rejected(capsys):
+    """T3B-2: --resolve together with --init is an operator error — argparse
+    must error out with a usage message, never silently ignore one flag."""
+    import pytest
+    with pytest.raises(SystemExit) as ei:
+        im.main(["--resolve", "--init"])
+    assert ei.value.code == 2
+    err = capsys.readouterr().err          # read once: readouterr drains
+    assert "--resolve" in err and "--init" in err

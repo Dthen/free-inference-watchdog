@@ -249,7 +249,8 @@ def build_resolver(state_dir, fetch_one, registry):
     parameter (no module-global PROVIDERS reads). This is EXPLICITLY the sole
     user of pending_removals.settle on this path — the hourly tick does NOT
     call resolve_pending (T4 shares settle() instead). Lock-free by design:
-    the resolve pass never touches monitor.lock.
+    resolve_pending itself takes no lock — run_resolve (below) owns
+    monitor.lock.
 
     state_dir: dir holding roster.json, pending_alerts.json and the hold
         queue (pending_removals.path_in).
@@ -616,12 +617,18 @@ def main(argv=None):
     parser.add_argument("--cadence-hours", type=int, default=1,
                         help="tick cadence in hours — drives missed-tick "
                              "warning; keep in step with the cron schedule")
+    parser.add_argument("--resolve", action="store_true",
+                        help="settle the removal-hold queue now (15-min cron); "
+                             "never touches alive.json")
     parser.add_argument("--state-dir", default=None,
                         help="default: <this project>/state")
     args = parser.parse_args(argv)
     if args.init and args.dry_run:
         parser.error("--init and --dry-run are mutually exclusive "
                      "(--init writes a fresh baseline; --dry-run writes nothing)")
+    if args.resolve and args.init:
+        parser.error("--resolve and --init are mutually exclusive "
+                     "(--resolve never rebaselines)")
 
     state_dir = Path(args.state_dir) if args.state_dir else (
         Path(__file__).resolve().parent / "state")
@@ -635,6 +642,9 @@ def main(argv=None):
         return run_tick(state_dir, PROVIDERS, fetch_all, fetch_one,
                         webhook_url=None, sleep=lambda s: None, now=time.time(),
                         recheck_delay=0, dry_run=False, init=True)
+    if args.resolve:
+        return run_resolve(state_dir, PROVIDERS, fetch_one,
+                           webhook_url=webhook, dry_run=args.dry_run)
     return run_tick(state_dir, PROVIDERS, fetch_all, fetch_one,
                     webhook_url=webhook, sleep=time.sleep, now=time.time(),
                     recheck_delay=args.recheck_delay,
