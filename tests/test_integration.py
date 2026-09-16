@@ -1730,3 +1730,134 @@ def test_resolver_crash_mid_emit_refires_mixed_fixture(tmp_path, capsys,
     assert "x" in cap.out and "y" not in cap.out
     assert _load_q(tmp_path) == {}                   # post-emit consume ran
     assert (tmp_path / "roster.json").read_text() == roster_after_crash
+
+
+# ---------------------------------------------------------------------------
+# T5B-3: dead webhook + no-duplicate happy path (rev-4 T5B tests 3+4) and the
+# no-webhook drain-skip guard (T3A-7 quality review mutant-b pin). The dead
+# webhook hands delivery to the retry queue (at-least-once onward via
+# drain_pending) WITHOUT rolling back the post-emit consume; a happy emit
+# never re-alerts; and without webhook_url the resolver must not touch
+# pending_alerts.json at all — drain_pending(None, ...) would raise ValueError
+# and turn every expiry into a FATAL loop, so the `if webhook_url:` guard is
+# load-bearing and pinned here. Zero prod change.
+# ---------------------------------------------------------------------------
+
+
+def _dead_webhook_fixture(tmp_path):
+    """One expired amd entry (x: age 2000 >= hold 1800 at RESOLVER_T0+9000)."""
+    import notify
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 7000,
+                                      "last_absent_seen": RESOLVER_T0 + 7000}}})
+    return notify.format_alert(
+        {"amd": {"added": [], "removed": ["x"]}},
+        tick_iso=datetime.fromtimestamp(RESOLVER_T0 + 9000).strftime(
+            "%Y-%m-%d %H:%M"),
+        providers_polled=2, transients={}, stale=[], dropped_total=0)
+
+
+def test_dead_webhook_queues_alert_and_consumes_expired(tmp_path, capsys,
+                                                        monkeypatch):
+    """URLError from notify._urlopen -> send_webhook ENQUEUES the alert
+    (attempts=1, content byte-equal to the emitted message); the expiry is
+    still consumed post-emit — queue file ends {} (delivery is the retry
+    queue's problem now, at-least-once onward via drain_pending)."""
+    import notify
+    from urllib.error import URLError
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    expected = _dead_webhook_fixture(tmp_path)
+
+    def raiser(req, timeout=10):
+        raise URLError("webhook down")
+
+    monkeypatch.setattr(notify, "_urlopen", raiser)
+    out, _ = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9000,
+                       webhook_url="https://example/hook")
+    cap = capsys.readouterr()
+    assert out == {"fired": True, "changed": True}
+    assert cap.out == expected + "\n"                # stdout still carries it
+    rows = json.loads((tmp_path / "pending_alerts.json").read_text())
+    assert len(rows) == 1 and rows[0]["attempts"] == 1
+    assert rows[0]["payload"]["content"] == expected # queued for retry
+    assert _load_q(tmp_path) == {}                   # consume still ran
+
+
+def test_no_duplicate_after_happy_emit(tmp_path, capsys, monkeypatch):
+    """Expiry + successful emit -> post-emit save consumed; re-running
+    resolve_pending on the same evidence is silent and reports
+    {"fired": False, "changed": False} — nothing re-alerts, nothing re-posts."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    expected = _dead_webhook_fixture(tmp_path)
+    posted = []
+
+    class Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=10):
+        posted.append(json.loads(req.data.decode()))
+        return Resp()
+
+    monkeypatch.setattr(notify, "_urlopen", fake_urlopen)
+    out, _ = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9000,
+                       webhook_url="https://example/hook")
+    cap1 = capsys.readouterr()
+    assert out == {"fired": True, "changed": True}
+    assert cap1.out == expected + "\n"
+    assert len(posted) == 1 and posted[0]["content"] == expected
+    assert _load_q(tmp_path) == {}
+    assert json.loads((tmp_path / "pending_alerts.json").read_text()) == []
+    # Next pass, same evidence: the consumed queue holds nothing recoverable.
+    out2, _ = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9060,
+                        webhook_url="https://example/hook")
+    cap2 = capsys.readouterr()
+    assert out2 == {"fired": False, "changed": False}
+    assert cap2.out == "" and cap2.err == ""
+    assert len(posted) == 1                          # no duplicate POST
+
+
+def test_no_webhook_skips_drain_and_preserves_alerts(tmp_path, capsys,
+                                                     monkeypatch):
+    """Mutant-b pin: webhook_url=None + a non-empty pending_alerts.json (the
+    r10 one-row fixture) -> the `if webhook_url:` guard must skip the drain
+    entirely: no _urlopen call, alerts file bytes UNCHANGED (drain would
+    purge-save at minimum), fresh alert on stdout exactly once, queue
+    consumed, no exception."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    expected = _dead_webhook_fixture(tmp_path)
+    alerts = tmp_path / "pending_alerts.json"
+    alerts.write_text(json.dumps(
+        [{"payload": {"content": "queued-1"}, "attempts": 1,
+          "first_queued_epoch": 123}]), encoding="utf-8")
+    before = alerts.read_bytes()
+    posted = []
+
+    class Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def spy_urlopen(req, timeout=10):
+        posted.append(req)
+        return Resp()
+
+    monkeypatch.setattr(notify, "_urlopen", spy_urlopen)
+    out, _ = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert out == {"fired": True, "changed": True}
+    assert cap.out == expected + "\n"                # fresh alert, once only
+    assert "queued-1" not in cap.out
+    assert posted == []                              # no drain, no emit POST
+    assert alerts.read_bytes() == before             # untouched by the pass
+    assert _load_q(tmp_path) == {}                   # expiry still consumed
