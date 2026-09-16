@@ -975,3 +975,10 @@ def test_removal_hold_accessor():
     assert removal_hold({"removal_hold_seconds": "1800"}) is None  # belt: str
     assert removal_hold({"removal_hold_seconds": -1}) is None
     assert removal_hold({"removal_hold_seconds": None}) is None   # belt: null
+
+
+def test_amd_ships_removal_hold():
+    """Decision 8: real AMD config carries the 30-min hold; nous stays None."""
+    from config_loader import PROVIDERS, removal_hold
+    assert removal_hold(PROVIDERS["amd"]) == 1800
+    assert removal_hold(PROVIDERS["nous"]) is None
