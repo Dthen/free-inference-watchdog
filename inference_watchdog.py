@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import alive
+import config_loader
 import diffing
 import probe_select
 import probe_state
@@ -382,6 +383,13 @@ def build_resolver(state_dir, fetch_one, registry):
         return {"fired": fired, "changed": fired or held != snapshot}
 
     return resolve_pending
+
+
+def _hold_for(registry, provider):
+    """removal_hold_seconds for a provider, or None. Set-shaped registries
+    (tests) have no configs -> never hold. One tiny seam, pinned by a test."""
+    cfg = registry.get(provider) if isinstance(registry, dict) else None
+    return config_loader.removal_hold(cfg) if isinstance(cfg, dict) else None
 
 
 # ---------- the tick ----------
