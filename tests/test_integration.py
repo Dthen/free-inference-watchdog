@@ -1599,3 +1599,69 @@ def test_tick_roster_clears_rebuilt_fields_quiet(tmp_path, capsys):
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["transients"] == {}                # cleared by the rewrite
     assert roster["tick_epoch"] == int(now + 60)     # advanced every tick
+
+
+# ---------------------------------------------------------------------------
+# T5B-1: tick crash mid-emit re-fires expiry (rev-4 rule 4, at-least-once).
+# _emit raising AFTER the pre-emit persist_pending() is the crash window the
+# two-phase design exists for: the run dies as FATAL/exit-2, the expired id
+# is STILL in the pending file with its original gone_since (with_expired
+# re-merge), and the NEXT tick re-fires the alert exactly as if nothing had
+# been consumed. Zero prod change — this pins T5-4's crash guarantee.
+# ---------------------------------------------------------------------------
+
+
+def test_tick_crash_after_pre_emit_refires(tmp_path, capsys, monkeypatch):
+    """T5-3 mixed fixture with _emit replaced by a raiser: run_tick returns
+    2, stderr carries FATAL, and the queue on disk keeps expired `old`
+    (RESOLVER_T0 stamps) alongside fresh `fresh`. Re-running the tick with
+    the real _emit (after the patch context) re-alerts `old` byte-identically
+    and consumes it for good; `fresh` (age 60 < hold) stays queued."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["fresh"], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"old": {"gone_since": RESOLVER_T0,
+                                        "last_absent_seen": RESOLVER_T0}}})
+
+    def raiser(*args, **kwargs):
+        raise RuntimeError("simulated crash mid-emit")
+
+    with monkeypatch.context() as m:
+        m.setattr(im, "_emit", raiser)
+        code, _ = _tick_dict_registry(
+            tmp_path, [{"amd": [], "nous": ["n"]},
+                       {"amd": [], "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 2                                 # fatal handler
+    assert "FATAL RuntimeError: simulated crash mid-emit" in cap.err
+    assert cap.out == ""                             # died before printing
+    # The pre-emit save survived the crash: expired id STILL queued, stamps
+    # preserved, plus the same-tick fresh removal (at-least-once state).
+    assert _load_q(tmp_path) == {
+        "amd": {"old": {"gone_since": RESOLVER_T0,
+                        "last_absent_seen": RESOLVER_T0},
+                "fresh": {"gone_since": int(now),
+                          "last_absent_seen": int(now)}}}
+
+    # Re-fire: real _emit restored — the entry fires AGAIN, exactly the
+    # 🔴 old alert (fresh is 60s into its hold, silent, stays queued).
+    now2 = now + 60
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]}], now2)
+    cap = capsys.readouterr()
+    assert code == 0
+    expected = notify.format_alert(
+        {"amd": {"added": [], "removed": ["old"]}},
+        tick_iso=datetime.fromtimestamp(now2).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=2, transients={}, stale=[], dropped_total=0)
+    assert cap.out == expected + "\n"                # re-fired, byte-exact
+    assert "old" in cap.out and "fresh" not in cap.out
+    # Post-emit consume finally ran: old is GONE, fresh survives with its
+    # original gone_since and this tick's refreshed last_absent_seen.
+    assert _load_q(tmp_path) == {
+        "amd": {"fresh": {"gone_since": int(now),
+                          "last_absent_seen": int(now2)}}}
