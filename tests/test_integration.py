@@ -1665,3 +1665,68 @@ def test_tick_crash_after_pre_emit_refires(tmp_path, capsys, monkeypatch):
     assert _load_q(tmp_path) == {
         "amd": {"fresh": {"gone_since": int(now),
                           "last_absent_seen": int(now2)}}}
+
+
+# ---------------------------------------------------------------------------
+# T5B-2: resolver crash mid-emit re-fires expiry (at-least-once). MIXED
+# fixture per T3A-6 quality review: x expires while y RECOVERS in the same
+# pass, so the after-crash queue must equal EXACTLY {amd: {x}} — a missing
+# pre-emit save (mutant c) leaves y's stale entry, a snapshot-based pre-emit
+# save (mutant e) resurrects the consumed recovery; both die on the exact
+# assert. resolve_pending is lock-free; the exception escapes to run_resolve's
+# FATAL handler (exit 2).
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_crash_mid_emit_refires_mixed_fixture(tmp_path, capsys,
+                                                       monkeypatch):
+    """run_resolve with _emit raising returns 2 (FATAL on stderr, stdout
+    silent) and leaves ONLY expired x with its original T0+7000 stamps on
+    disk (y consumed into the roster union pre-crash). Second pass at now+60
+    with the real _emit re-alerts x alone byte-identically, drains the queue
+    to {}, and never rewrites the roster (idempotent union)."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    now = RESOLVER_T0 + 9000       # x age 2000 >= hold 1800: expired; y: recovers
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["x"], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"x": {"gone_since": RESOLVER_T0 + 7000,
+                                      "last_absent_seen": RESOLVER_T0 + 7000},
+                                "y": {"gone_since": RESOLVER_T0 + 8900,
+                                      "last_absent_seen": RESOLVER_T0 + 8900}}})
+    _fetch_all, fetch_one, calls = _fetcher([{"amd": ["y"]}])
+
+    def raiser(*args, **kwargs):
+        raise RuntimeError("simulated crash mid-emit")
+
+    with monkeypatch.context() as m:
+        m.setattr(im, "_emit", raiser)
+        code = im.run_resolve(tmp_path, RESOLVER_REGISTRY, fetch_one,
+                              None, now=now)
+    cap = capsys.readouterr()
+    assert code == 2                                 # fatal handler, exit 2
+    assert "FATAL RuntimeError: simulated crash mid-emit" in cap.err
+    assert cap.out == ""                             # died before printing
+    # EXACT post-crash queue: x re-merged with ORIGINAL stamps, y ABSENT.
+    assert _load_q(tmp_path) == {
+        "amd": {"x": {"gone_since": RESOLVER_T0 + 7000,
+                      "last_absent_seen": RESOLVER_T0 + 7000}}}
+    roster_after_crash = (tmp_path / "roster.json").read_text()
+    assert json.loads(roster_after_crash)["providers"]["amd"] == ["x", "y"]
+
+    # Re-fire: real _emit restored; y's extra fetch evidence must NOT
+    # resurrect anything (untracked ids never enter the roster).
+    now2 = now + 60
+    code = im.run_resolve(tmp_path, RESOLVER_REGISTRY, fetch_one,
+                          None, now=now2)
+    cap = capsys.readouterr()
+    assert code == 0 and cap.err == ""
+    expected = notify.format_alert(
+        {"amd": {"added": [], "removed": ["x"]}},
+        tick_iso=datetime.fromtimestamp(now2).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=2, transients={}, stale=[], dropped_total=0)
+    assert cap.out == expected + "\n"                # re-fired, byte-exact
+    assert "x" in cap.out and "y" not in cap.out
+    assert _load_q(tmp_path) == {}                   # post-emit consume ran
+    assert (tmp_path / "roster.json").read_text() == roster_after_crash
