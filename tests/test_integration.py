@@ -1506,3 +1506,96 @@ def test_tick_mixed_expired_and_fresh_removal(tmp_path, capsys, monkeypatch):
     assert _load_q(tmp_path) == {
         "amd": {"fresh": {"gone_since": int(now),
                           "last_absent_seen": int(now)}}}
+
+
+# ---------------------------------------------------------------------------
+# T5-4: two-phase pending persist on the tick (rev-4 rule 4; D2). Both
+# provisional saves are gone: ONE pre-emit save with_expired(held,
+# out["expired"], snapshot) (expired entry STILL in the file, stamps
+# preserved — a crash before the second save re-alerts next pass) and a
+# post-emit save of held (expired CONSUMED). Skip-redundant gate: the
+# pending save writes iff held != snapshot or enqueue ran — never on
+# settle's `changed` key; persist_roster keeps writing every tick.
+# ---------------------------------------------------------------------------
+
+
+def test_tick_expired_two_phase_and_no_redundant_write(tmp_path, capsys,
+                                                       monkeypatch):
+    """T5-3 mixed fixture + save spy (D5): saves[0] still holds expired
+    `old` with its RESOLVER_T0 stamps (with_expired re-merge) plus fresh
+    `fresh`; the last save == consumed-expired state (`old` gone, `fresh`
+    kept). Second tick on a drained queue with zero-diff evidence: ZERO
+    save calls (held == snapshot == {}, no enqueue)."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["fresh"], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"old": {"gone_since": RESOLVER_T0,
+                                        "last_absent_seen": RESOLVER_T0}}})
+    saves = []
+    real_save = pending_removals.save
+
+    def spy(path, held):
+        saves.append(json.loads(json.dumps(held)))
+        real_save(path, held)
+
+    monkeypatch.setattr(pending_removals, "save", spy)
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]}, {"amd": [], "nous": ["n"]}],
+        now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.err == ""
+    assert len(saves) == 2                               # exactly two phases
+    assert saves[0] == {"amd": {                         # pre-emit: expired
+        "old": {"gone_since": RESOLVER_T0,               # STILL queued,
+                "last_absent_seen": RESOLVER_T0},        # stamps preserved
+        "fresh": {"gone_since": int(now),
+                  "last_absent_seen": int(now)}}}
+    assert saves[-1] == {"amd": {"fresh": {"gone_since": int(now),
+                                           "last_absent_seen": int(now)}}}
+
+    # Second act: drained queue + zero-diff evidence -> skip-redundant gate.
+    _write_q(tmp_path, {})
+    saves.clear()
+    code, _ = _tick_dict_registry(tmp_path, [{"amd": [], "nous": ["n"]}],
+                                  now + 60)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == ""
+    assert saves == []                                   # no redundant write
+    assert _load_q(tmp_path) == {}
+
+
+def test_tick_roster_clears_rebuilt_fields_quiet(tmp_path, capsys):
+    """I4 pin (roster-writes-EVERY-tick, R2-5): a transient removal leaves
+    roster.transients non-empty; the NEXT quiet tick rewrites the roster with
+    transients == {} and an advanced tick_epoch. If persist_roster ever moved
+    behind a change-detection gate, the stale transients blob would survive —
+    the existing suite never asserted this before T5-4."""
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["x"], "nous": ["n"]}}), encoding="utf-8")
+    # Act 1: x flickers (fetch ["x"]... recheck []) -> transient recorded.
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]},
+                   {"amd": ["x"], "nous": ["n"]}], now)
+    capsys.readouterr()
+    assert code == 0
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["transients"] != {}                # blob written this tick
+    # Act 2: quiet tick (zero events, zero queue) must still rewrite.
+    _seed_alive_quiet(tmp_path, now + 60)
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["x"], "nous": ["n"]}], now + 60)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == ""
+    roster = json.loads((tmp_path / "roster.json").read_text())
+    assert roster["transients"] == {}                # cleared by the rewrite
+    assert roster["tick_epoch"] == int(now + 60)     # advanced every tick

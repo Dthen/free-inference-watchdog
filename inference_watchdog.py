@@ -523,6 +523,18 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
             "ratelimits": ratelimits,  # passive headers (R2-6)
         })
 
+    def persist_pending():
+        """Pre-emit pending save (rev-4 rule 4): expired entries are STILL
+        in the saved file with their stamps preserved (with_expired
+        re-merge) — a crash before the post-emit consume re-alerts next
+        pass. Skip-redundant on DEEP content only: write iff held changed
+        vs snapshot (including stamp-only refreshes) or enqueue ran;
+        NEVER on settle's `changed` key."""
+        if dry_run or (held == snapshot and not enqueued):
+            return
+        pending_removals.save(pending_path, pending_removals.with_expired(
+            held, out["expired"], snapshot))
+
     if first_run:
         # Bootstrap guard (R2-12): zero providers succeeded -> refuse to write
         # an empty baseline (it would emit the universe as "added" next tick).
@@ -588,11 +600,6 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
     for provider, ids in recovered.items():
         new_map[provider] = pending_removals.sorted_ids(
             set(new_map.get(provider, ())) | set(ids))
-    # PROVISIONAL (T4): replaced by T5's with_expired pre-emit save +
-    # post-emit consume (T5-4 deletes this line — D2).
-    if held != snapshot and not dry_run:
-        pending_removals.save(pending_path, held)
-
     # --- confirmed-event routing, rev-4 rule 1: enqueue + strip ---
     # A held provider's removals join the queue (first absence = now) and
     # are STRIPPED from the alert; empty section -> provider dropped from
@@ -609,11 +616,6 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         confirmed[provider]["removed"] = []
         if not confirmed[provider]["added"]:
             del confirmed[provider]
-    if enqueued and held != snapshot and not dry_run:
-        # Post-enqueue save: T4-2's provisional save ran BEFORE routing, so
-        # the freshly-queued ids would be lost. Provisional pair #2 — T5-4
-        # deletes BOTH provisional saves and folds this into persist_pending.
-        pending_removals.save(pending_path, held)
 
     # --- confirmed-event routing, rev-4 rule 2: strip pending adds ---
     # An id recovered by settle was already in the queue; its 🟢add event is
@@ -643,6 +645,7 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
     # (pending_alerts.json inside notify). A crash may delay a retry but
     # never silently swallows an alert.
     persist_roster()
+    persist_pending()
 
     # Drain the retry queue before handling new alerts (plan mandate).
     if webhook_url and not dry_run:
@@ -656,6 +659,12 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
             dropped_total=notify.get_dropped_total())
         _emit(msg, webhook_url, paths["pending"], dry_run)
         emitted_real = True
+        if out["expired"] and not dry_run:
+            # Post-emit consume (rev-4 rule 4): delivered-or-queued both
+            # count as fired, so the expired entries leave the queue now —
+            # `held` already lacks them (settle consumed; the pre-emit save
+            # only re-merged them into the FILE via with_expired).
+            pending_removals.save(pending_path, held)   # expired CONSUMED
 
     # --- alive self-watch (two clocks; critic round-3 R2-8) ---
     # The ⚠️ missed-tick warning is NOT a real emission: it must NOT suppress
