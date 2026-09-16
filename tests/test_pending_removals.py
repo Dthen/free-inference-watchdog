@@ -228,3 +228,42 @@ def test_settle_still_absent_holds_without_extending_clock():
     entry = held["amd"]["x"]
     assert entry["last_absent_seen"] == 200
     assert entry["gone_since"] == 100  # immutability pinned
+
+
+def test_settle_expired_consumes_entry():
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"amd": []}, {"amd": 1800}, now=2000)
+    assert out["expired"] == {"amd": ["x"]}
+    assert out["recovered"] == []
+    assert out["released"] == []
+    assert out["changed"] == {"amd"}
+    assert held == {}  # consumed slice emptied and pruned — no dust
+
+
+def test_settle_expiry_boundary_exactly_at_hold():
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"amd": []}, {"amd": 1800}, now=1900)
+    assert out["expired"] == {"amd": ["x"]}  # now - gone_since >= hold
+
+
+def test_settle_expired_ids_sorted():
+    held = {"amd": {"b": {"gone_since": 100, "last_absent_seen": 100},
+                    "a": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"amd": []}, {"amd": 1800}, now=2000)
+    assert out["expired"] == {"amd": ["a", "b"]}
+
+
+def test_settle_absent_provider_key_is_neutral():
+    """Provider ABSENT from fetches (fetch failure) -> entry untouched, both
+    stamps preserved, zero outputs for it — no expiry even though the hold
+    elapsed, no last_absent_seen rewrite. The clock does not move on failure.
+    (A None VALUE is a caller bug; settle may assume list-or-absent.)"""
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 150}},
+            "nous": {"y": {"gone_since": 50, "last_absent_seen": 50}}}
+    out = pr.settle(held, {"nous": ["y"]}, {"amd": 1800, "nous": 1800},
+                    now=5000)
+    assert held["amd"] == {"x": {"gone_since": 100, "last_absent_seen": 150}}
+    assert out["recovered"] == [("nous", "y")]
+    assert out["expired"] == {}
+    assert out["released"] == []
+    assert out["changed"] == {"nous"}

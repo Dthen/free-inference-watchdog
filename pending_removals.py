@@ -115,8 +115,8 @@ def settle(held, fetches, holds, now):
     - provider absent from fetches -> skip (neutral): failure is signaled by
       KEY ABSENCE, never None.
     - id in fetches[p] -> recovered (entry consumed).
-    - else -> still absent: PLACEHOLDER(T0-8) expiry; interim refreshes
-      last_absent_seen, gone_since NEVER rewritten.
+    - id absent and now - gone_since >= hold -> expired (consumed; >= so the
+      boundary fires); else last_absent_seen = int(now).
     "changed" = providers with at least one ENTRY CONSUMED (recovered /
     expired / released). Stamp-only refreshes and dust prunes are DELIBERATELY
     NOT marked; callers decide persistence on deep map comparison
@@ -132,12 +132,19 @@ def settle(held, fetches, holds, now):
         if provider not in fetches:
             continue  # fetch failure is neutral: entry waits, clock frozen
         fetched = fetches[provider]
+        hold = holds.get(provider)
+        # PLACEHOLDER(T0-9): hold None = un-flagged release lands next unit;
+        # every test to date passes a numeric hold.
         for model_id in sorted(entries):
             entry = entries[model_id]
             if model_id in fetched:
                 recovered.append((provider, model_id))
                 del entries[model_id]
                 changed.add(provider)
+            elif now_i - entry["gone_since"] >= hold:
+                expired.setdefault(provider, []).append(model_id)
+                del entries[model_id]
+                changed.add(provider)  # expiry is consumption too
             else:
                 entry["last_absent_seen"] = now_i
         if not entries:
