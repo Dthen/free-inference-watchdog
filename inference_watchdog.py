@@ -360,6 +360,11 @@ def build_resolver(state_dir, fetch_one, registry):
                 # stay consumed.
                 pending_removals.save(pending_path, pending_removals.with_expired(
                     held, out["expired"], snapshot))
+                if webhook_url:
+                    # Drain the retry queue BEFORE the emit block (run_tick
+                    # mandate): a stale queued alert must not starve behind
+                    # this fresh one. dry_run never drains — it writes nothing.
+                    notify.drain_pending(webhook_url, alerts_path)
             _emit(msg, webhook_url, alerts_path, dry_run)
             if not dry_run:
                 # Post-emit: consumed state (expired released to the alert,
