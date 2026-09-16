@@ -108,3 +108,56 @@ def test_load_numeric_stamps_survive_and_floats_coerce_to_int(tmp_path):
     out = pr.load(p)
     assert out == {"amd": {"m": {"gone_since": 100, "last_absent_seen": 150}}}
     assert isinstance(out["amd"]["m"]["gone_since"], int)
+
+
+def test_load_drops_note_with_count_and_plural(tmp_path, capsys):
+    """Drops are a visible skip, never silent — but only when N>0."""
+    p = tmp_path / "pending_removals.json"
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": "100"}}}))
+    assert pr.load(p) == {"amd": {}}
+    assert (capsys.readouterr().err
+            == f"pending_removals: dropped 1 junk entry from {p}\n")
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": "100"},
+                                      "n": 7}}))
+    assert pr.load(p) == {"amd": {}}
+    assert (capsys.readouterr().err
+            == f"pending_removals: dropped 2 junk entries from {p}\n")
+
+
+def test_load_junk_top_level_notes_visible_skip_singular(tmp_path, capsys):
+    """Whole payload a JSON list -> load returns {} AND a singular
+    'dropped 1 junk entry' note — top-level junk counts as ONE dropped
+    entry; wording pinned exactly."""
+    p = tmp_path / "pending_removals.json"
+    p.write_text(json.dumps(["junk"]))
+    assert pr.load(p) == {}
+    assert (capsys.readouterr().err
+            == f"pending_removals: dropped 1 junk entry from {p}\n")
+
+
+def test_load_healthy_and_missing_are_silent(tmp_path, capsys):
+    p = tmp_path / "pending_removals.json"
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": 100,
+                                           "last_absent_seen": 100}}}))
+    pr.load(p)
+    assert capsys.readouterr().err == ""
+    pr.load(tmp_path / "nope.json")
+    assert capsys.readouterr().err == ""
+
+
+def test_load_valid_siblings_survive_alongside_junk(tmp_path):
+    """The mixed-shape matrix in one file: every junk class dropped, the
+    one valid entry survives untouched."""
+    p = tmp_path / "pending_removals.json"
+    p.write_text(json.dumps({
+        "amd": "junk-slice",
+        "nous": {"bad-str": {"gone_since": "100",
+                             "last_absent_seen": 100},
+                 "bad-bool": {"gone_since": False,
+                              "last_absent_seen": 100},
+                 "not-dict": 7,
+                 "good": {"gone_since": 100, "last_absent_seen": 100}},
+    }))
+    out = pr.load(p)
+    assert out == {"nous": {"good": {"gone_since": 100,
+                                     "last_absent_seen": 100}}}

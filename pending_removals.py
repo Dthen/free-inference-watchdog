@@ -14,6 +14,7 @@ Contract (anti-cooldown doctrine):
   CONSUMED on resolution; no stale stamps can silence anything forever.
 """
 import math
+import sys
 from pathlib import Path
 import state
 
@@ -51,21 +52,31 @@ def load(path):
     """Validate hard, load_alive semantics: top-level dict; per-provider
     dict slice; per-entry dict whose gone_since/last_absent_seen are
     non-bool int/float (int()-coerced). Junk slices/entries are DROPPED,
-    never crash settle, never poison the resolve loop."""
+    never crash settle, never poison the resolve loop. Drops are a visible
+    skip: one stderr note when N>0 (healthy runs stay silent)."""
     data = state._load_json_or_default(path, {})
+    dropped = 0
     if not isinstance(data, dict):
+        dropped = 1  # whole payload was junk — one visible skip
         data = {}
     clean = {}
     for provider, slice_ in data.items():
         if not isinstance(slice_, dict):
+            dropped += 1
             continue  # junk provider slice — dropped, valid siblings survive
         entries = {}
         for model_id, entry in slice_.items():
             if not isinstance(entry, dict):
+                dropped += 1
                 continue
             if not all(f in entry and _valid_stamp(entry[f])
                        for f in _STAMPS):
+                dropped += 1
                 continue  # junk stamp (str/bool/None/NaN/Inf/missing) dropped
             entries[model_id] = {f: int(entry[f]) for f in _STAMPS}
         clean[provider] = entries
+    if dropped:
+        print(f"pending_removals: dropped {dropped} junk "
+              f"{'entry' if dropped == 1 else 'entries'} from {path}",
+              file=sys.stderr)
     return clean
