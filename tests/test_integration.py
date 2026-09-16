@@ -1997,3 +1997,104 @@ def test_e2e_2_five_way_force_fire_then_normal_return(tmp_path, capsys):
     assert _load_q(tmp_path) == {}                   # nothing re-held
     assert json.loads((tmp_path / "roster.json").read_text())[
         "providers"]["amd"] == five
+
+
+# ---------------------------------------------------------------------------
+# T6-4: E2E-3 — nim WITHOUT the flag. nim sits in the dict registry but its
+# config has no removal_hold_seconds: a mass removal on an unflagged provider
+# takes the old path — an instant, byte-standard 🔴 alert exactly as it
+# behaved pre-hold, and the pending file NEVER gains a `nim` key (whole-file
+# byte-compare: not even a rewrite).
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_3_unflagged_mass_removal_instant_and_never_queues(tmp_path, capsys):
+    """rev-4 verbatim: dict registry WITHOUT the field, mass removal ->
+    instant 🔴 (stdout byte-identical to notify.format_alert, M3 pattern);
+    pending file byte-identical before/after — no `nim` key, ever."""
+    import notify
+    now = RESOLVER_T0 + 9000
+    registry = {"nim": {}}                 # dict registry, un-flagged
+    three = ["x1", "x2", "x3"]
+
+    def tick(scenarios, at):
+        fetch_all, fetch_one, calls = _fetcher(scenarios)
+        code = im.run_tick(tmp_path, registry, fetch_all, fetch_one,
+                           webhook_url=None, sleep=lambda s: None, now=at,
+                           recheck_delay=0)
+        return code, calls
+
+    # --- Act 0 (E2E discipline a): baseline drain ---
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"nim": three}}), encoding="utf-8")
+    code, _ = tick([{"nim": three}], now - 60)
+    assert code == 0
+    capsys.readouterr()                              # drain the baseline
+
+    pending_path = pending_removals.path_in(tmp_path)
+    _write_q(tmp_path, {})
+    before = pending_path.read_bytes()
+
+    # --- Act 1: tick N — nim mass-removed (fetch + recheck agree) ---
+    code, _ = tick([{"nim": []}, {"nim": []}], now)
+    expected = notify.format_alert(
+        {"nim": {"added": [], "removed": three}},
+        tick_iso=datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=1, transients={}, stale=[], dropped_total=0)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == expected + "\n"                # instant 🔴 (M3 byte-id)
+    assert cap.err == ""
+    assert pending_path.read_bytes() == before       # zero queue activity
+    assert _load_q(tmp_path) == {}
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["nim"] == []                   # roster reflects truth
+
+
+# ---------------------------------------------------------------------------
+# T6-4: E2E-4 — same-tick recovery with NO resolver pass at all. The hourly
+# tick's inline settle covers it: a removal queued at tick N whose id is back
+# by tick N+1 is consumed silently by the tick itself (rule 2 strips the
+# duplicate 🟢) — BOTH directions stdout "" (D6), queue empty, roster honest.
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_4_same_tick_recovery_no_resolver(tmp_path, capsys):
+    """rev-4 verbatim: removal queued at tick N; id back by tick N+1 (no
+    resolver pass) -> tick settle recovers; BOTH directions silent."""
+    now = RESOLVER_T0 + 9000
+
+    # --- Act 0 (E2E discipline a): baseline drain ---
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["v4"], "nous": ["n"]}}), encoding="utf-8")
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["v4"], "nous": ["n"]}], now - 60)
+    assert code == 0
+    capsys.readouterr()                              # drain the baseline
+
+    # --- Act 1: tick N — removal queued, silent (silent direction #1) ---
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]},
+                   {"amd": [], "nous": ["n"]}], now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == "" and cap.err == ""           # held removal is silent
+    assert _load_q(tmp_path) == {
+        "amd": {"v4": {"gone_since": int(now),
+                       "last_absent_seen": int(now)}}}
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["amd"] == []                   # roster reflects truth
+
+    # --- Act 2: tick N+1 — id is back; NO resolver ran, settle recovers ---
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": ["v4"], "nous": ["n"]}], now + 3600)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.out == "" and cap.err == ""           # silent direction #2
+    assert _load_q(tmp_path) == {}                   # settle consumed it
+    assert json.loads((tmp_path / "roster.json").read_text())[
+        "providers"]["amd"] == ["v4"]                # roster honest again
