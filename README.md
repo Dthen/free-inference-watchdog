@@ -160,7 +160,7 @@ Two settle paths drain the queue; both share `pending_removals.settle` (never fo
 
 Recovery is silent in both directions: a model that returns before the hold expires settles as RECOVERED with no announcement. News alerts are bounded at `hold + 15 min` — a removal past its deadline cannot wait longer.
 
-Expiry is at-least-once. The one edge case: expiry fired-but-unconsumed (a crash between the two saves) combined with the model returning before the next pass → the return settles as RECOVERED, silently. An announced removal whose return goes unannounced. Accepted: bounded by one process crash in a ~emit-sized window.
+Expiry is at-least-once. The one edge case: expiry fired-but-unconsumed (crash between the two saves) + model returns before the next pass → the return settles as RECOVERED, silently. An announced removal whose return goes unannounced. Accepted: bounded by one process crash in a ~emit-sized window.
 
 ## Drop-a-provider / managing providers
 
@@ -190,7 +190,7 @@ loader validates at startup:
 | `auth.path_env` | Env var holding a path to a JSON token file (when `auth.method` is `token_file`; takes precedence over `auth.path`) |
 | `auth.path` | Literal path to a JSON token file (legacy `token_file` alternative to `path_env`) |
 | `auth.key` | Dot-separated JSON path to the token inside the file (e.g. `providers.nous.access_token`) |
-|| `display` | Column order (0 = first) |
+| `display` | Column order (0 = first) |
 | `removal_hold_seconds` | Optional; when present, confirmed removals are held this many seconds before alerting. Absent = instant. Opt-in per provider. |
 
 Detection methods (dispatched by string key, so a provider can pick any):
