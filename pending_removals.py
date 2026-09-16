@@ -13,6 +13,7 @@ Contract (anti-cooldown doctrine):
   Un-flagged providers release their entries silently. Entries are always
   CONSUMED on resolution; no stale stamps can silence anything forever.
 """
+import math
 from pathlib import Path
 import state
 
@@ -37,11 +38,20 @@ def pending_ids(held, provider):
     return sorted_ids(held.get(provider, {}))
 
 
+def _valid_stamp(value):
+    """Non-bool int/float, finite — same junk class as state.load_alive:
+    json.load happily parses NaN/Infinity, but int(nan) raises ValueError
+    and int(inf) OverflowError, which would FATAL the resolve loop."""
+    return (not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(value))
+
+
 def load(path):
     """Validate hard, load_alive semantics: top-level dict; per-provider
-    dict slice; per-entry dict (stamp fields join the boundary check at the
-    next commit). Junk slices/entries are DROPPED, never crash settle, never
-    poison the resolve loop."""
+    dict slice; per-entry dict whose gone_since/last_absent_seen are
+    non-bool int/float (int()-coerced). Junk slices/entries are DROPPED,
+    never crash settle, never poison the resolve loop."""
     data = state._load_json_or_default(path, {})
     if not isinstance(data, dict):
         data = {}
@@ -52,7 +62,10 @@ def load(path):
         entries = {}
         for model_id, entry in slice_.items():
             if not isinstance(entry, dict):
-                continue  # junk entry — dropped
-            entries[model_id] = entry
+                continue
+            if not all(f in entry and _valid_stamp(entry[f])
+                       for f in _STAMPS):
+                continue  # junk stamp (str/bool/None/NaN/Inf/missing) dropped
+            entries[model_id] = {f: int(entry[f]) for f in _STAMPS}
         clean[provider] = entries
     return clean

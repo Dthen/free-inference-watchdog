@@ -63,3 +63,48 @@ def test_load_non_dict_entry_dropped(tmp_path):
                                               "last_absent_seen": 100}}}))
     assert pr.load(p) == {"amd": {"good": {"gone_since": 100,
                                            "last_absent_seen": 100}}}
+
+
+def test_load_string_stamp_dropped_not_coerced(tmp_path):
+    """load_alive semantics: digit-strings are DROPPED, never int()-coerced
+    (the machine-written file has no string stamps)."""
+    p = tmp_path / "pending_removals.json"
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": "100",
+                                           "last_absent_seen": 100}}}))
+    out = pr.load(p)
+    assert out == {"amd": {}}  # entry dropped; load keeps the (empty) slice
+
+
+def test_load_bool_or_null_stamp_dropped(tmp_path):
+    p = tmp_path / "pending_removals.json"
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": True,
+                                           "last_absent_seen": 100}}}))
+    assert pr.load(p) == {"amd": {}}
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": None,
+                                           "last_absent_seen": 100}}}))
+    assert pr.load(p) == {"amd": {}}
+
+
+def test_load_nonfinite_literals_dropped(tmp_path):
+    """json.load parses NaN/Infinity — int(nan)/int(inf) would FATAL the
+    resolve loop, so the literals are junk like any other."""
+    p = tmp_path / "pending_removals.json"
+    p.write_text('{"amd": {"m": {"gone_since": Infinity, '
+                 '"last_absent_seen": 100}}}')
+    assert pr.load(p) == {"amd": {}}
+    p.write_text('{"amd": {"m": {"gone_since": NaN, '
+                 '"last_absent_seen": 100}}}')
+    assert pr.load(p) == {"amd": {}}
+
+
+def test_load_numeric_stamps_survive_and_floats_coerce_to_int(tmp_path):
+    p = tmp_path / "pending_removals.json"
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": 100,
+                                           "last_absent_seen": 100}}}))
+    assert pr.load(p) == {"amd": {"m": {"gone_since": 100,
+                                        "last_absent_seen": 100}}}
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": 100.7,
+                                           "last_absent_seen": 150.2}}}))
+    out = pr.load(p)
+    assert out == {"amd": {"m": {"gone_since": 100, "last_absent_seen": 150}}}
+    assert isinstance(out["amd"]["m"]["gone_since"], int)
