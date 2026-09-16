@@ -13,6 +13,7 @@ Contract (anti-cooldown doctrine):
   Un-flagged providers release their entries silently. Entries are always
   CONSUMED on resolution; no stale stamps can silence anything forever.
 """
+import copy
 import math
 import sys
 from pathlib import Path
@@ -162,3 +163,23 @@ def settle(held, fetches, holds, now):
             del held[provider]  # prune emptied slice — no {"p": {}} dust
     return {"recovered": sorted(recovered), "expired": expired,
             "released": released, "changed": changed}
+
+
+def with_expired(held, expired, stamps_from):
+    """Pure (never mutates any arg): NEW dict = deep-copied held plus expired
+    ids re-merged using the stamps from stamps_from (the full stamped
+    PRE-settle snapshot map load() returned before settle ran). None is
+    tolerated for expired and stamps_from; an expired id with no stamp in
+    stamps_from is NOT re-merged (no invented stamps) and prints a stderr
+    note — a visible skip, never silent."""
+    merged = copy.deepcopy(held)
+    for provider, ids in (expired or {}).items():
+        for model_id in ids:
+            stamp = (stamps_from or {}).get(provider, {}).get(model_id)
+            if stamp is None:
+                print(f"pending_removals: no pre-settle stamp for "
+                      f"{provider}/{model_id} — expired entry not re-queued",
+                      file=sys.stderr)
+                continue  # skip + note, never invent a stamp
+            merged.setdefault(provider, {})[model_id] = copy.deepcopy(stamp)
+    return merged

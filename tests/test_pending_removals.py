@@ -5,6 +5,7 @@ int() coercion, string digits and everything else are DROPPED — no
 "int-coercible strings" leniency.
 """
 
+import copy
 import json
 
 import pending_removals as pr
@@ -325,3 +326,51 @@ def test_settle_dust_prune_not_marked_in_changed():
     out = pr.settle(held, {"amd": []}, {"amd": 1800}, 200)
     assert out["changed"] == set()
     assert held == {}
+
+
+def test_with_expired_remerges_with_original_stamps():
+    """The at-least-once pre-emit save: the expired id rides again in a NEW
+    map with its ORIGINAL stamps from the pre-settle snapshot — including
+    last_absent_seen 150 (never re-stamped with 'now')."""
+    snapshot = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 150}}}
+    held = copy.deepcopy(snapshot)
+    out = pr.settle(held, {"amd": []}, {"amd": 1800}, now=2000)
+    assert out["expired"] == {"amd": ["x"]}
+    assert held == {}  # settle consumed it
+    merged = pr.with_expired(held, out["expired"], snapshot)
+    assert merged == {"amd": {"x": {"gone_since": 100,
+                                    "last_absent_seen": 150}}}
+
+
+def test_with_expired_empty_expired_is_equal_copy():
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    merged = pr.with_expired(held, {}, {})
+    assert merged == held
+    assert merged is not held
+
+
+def test_with_expired_result_is_deep_copy():
+    """Later mutation of held must not leak into an earlier merged dict."""
+    held = {"nous": {"y": {"gone_since": 100, "last_absent_seen": 100}}}
+    merged = pr.with_expired(held, {}, {})
+    held["nous"]["y"]["gone_since"] = 999
+    assert merged["nous"]["y"]["gone_since"] == 100
+
+
+def test_with_expired_full_map_discipline_roundtrip(tmp_path):
+    """The two-phase usage pattern T3A/T5 pin on the callers: snapshot ->
+    deepcopy -> settle consumes -> pre-emit save(with_expired(...)) ->
+    post-emit save(held). File-visible, full I/O path."""
+    p = pr.path_in(tmp_path)
+    snapshot = pr.load(p)  # missing file -> {}
+    assert snapshot == {}
+    pr.enqueue(snapshot, "amd", ["x"], now=100)
+    pr.save(p, snapshot)
+    snapshot = pr.load(p)
+    held = copy.deepcopy(snapshot)
+    out = pr.settle(held, {"amd": []}, {"amd": 1800}, now=2000)
+    pr.save(p, pr.with_expired(held, out["expired"], snapshot))
+    assert pr.load(p) == {"amd": {"x": {"gone_since": 100,
+                                        "last_absent_seen": 100}}}
+    pr.save(p, held)
+    assert pr.load(p) == {}  # settle pruned the emptied slice — no dust
