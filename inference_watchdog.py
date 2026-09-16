@@ -305,10 +305,45 @@ def build_resolver(state_dir, fetch_one, registry):
             except providers.FetchError:
                 continue  # absent from fetch_map => neutral in settle
             fetch_map[provider] = ids
-        # The settle RESULT is unbound at this commit — pyflakes-clean by
-        # construction; T3A-4 binds it (`out = ...`) when recovery first
-        # consumes it.
-        pending_removals.settle(held, fetch_map, holds, now)
+        out = pending_removals.settle(held, fetch_map, holds, now)
+        # Group recoveries per provider for the roster union (never
+        # set(...) | {list} — lists are unhashable; sorted_ids is set-safe).
+        recovered = {}
+        for provider, model_id in out["recovered"]:
+            recovered.setdefault(provider, []).append(model_id)
+        if recovered and not dry_run:
+            # Whole-document read-modify-write, roster FIRST (crash between
+            # here and the queue save re-runs an idempotent union next pass,
+            # never loses a recovery). state.load_roster, NOT
+            # diffing.load_filtered_roster: the filtered loader DROPS
+            # registry-external providers from the dict it returns, so
+            # re-saving through it would evict those providers from the file;
+            # the resolver's remit is narrower — replace ONLY the recovered
+            # providers' id lists, preserve every other key untouched
+            # (tick_epoch, stale_providers, transients, unconfirmed,
+            # ratelimits and other providers' lists).
+            doc = state.load_roster(roster_path)
+            provs = doc.get("providers") if doc is not None else None
+            if not isinstance(provs, dict):
+                # Visible skip, NO save, for BOTH corrupt shapes (missing/
+                # unparseable file; providers not a dict). Rewriting a
+                # corrupt-providers roster down to recovered-only would make
+                # the next hourly tick diff every other id as ADDED instead
+                # of bootstrapping clean; the tick's own next write repairs
+                # the file. (Mirrors load_filtered_roster's None doctrine.)
+                print("inference-watchdog: roster unusable — hold recoveries "
+                      "not applied (visible skip)", file=sys.stderr)
+            else:
+                for provider, ids in recovered.items():
+                    old = provs.get(provider)
+                    old = ([i for i in old if isinstance(i, str)]
+                           if isinstance(old, list) else [])
+                    # UNION ONLY: an extra id visible in this pass's fetch but
+                    # never tracked (not in the queue) must NOT enter the
+                    # roster — the next hourly tick alerts it as a real 🟢.
+                    provs[provider] = pending_removals.sorted_ids(
+                        set(old) | set(ids))
+                state.save_roster_atomic(roster_path, doc)
         if held != snapshot and not dry_run:
             # Write/skip on the DEEP comparison, never on changed-membership:
             # a stamp-only refresh saves; a neutral pass writes nothing.

@@ -656,3 +656,80 @@ def test_r2_orphan_guard_drops_without_registry_fetch_or_roster_touch(
     assert calls["one_n"] == 1                    # fetched amd exactly once
     assert out == {"fired": False, "changed": True}
     assert roster.read_bytes() == b"PIN"
+
+
+def test_r3_recovery_unions_roster_and_preserves_every_other_field(tmp_path,
+                                                                   capsys):
+    """Behavior 3: recovery consumes the entry and restores the roster
+    whole-document read-modify-write — ONLY that provider's list is replaced
+    by sorted_ids(set(old) | set(recovered)); tick_epoch/stale_providers/
+    transients/unconfirmed/ratelimits and other providers survive byte-for-
+    byte (crash re-run re-applies the union idempotently)."""
+    roster = tmp_path / "roster.json"
+    seeded = {"tick_epoch": 777, "providers": {"amd": [42, "b"], "nous": ["keep"]},
+              "stale_providers": ["nous"],
+              "transients": {"nous": {"added": [], "removed": ["t"]}},
+              "unconfirmed": {"amd": {"added": [], "removed": ["u"]}},
+              "ratelimits": {"nous": {"x-ratelimit-remaining": "9"}}}
+    roster.write_text(json.dumps(seeded), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
+                                      "last_absent_seen": RESOLVER_T0 + 8500},
+                                "c": {"gone_since": RESOLVER_T0 + 8900,
+                                      "last_absent_seen": RESOLVER_T0 + 8900}}})
+    out, calls = _resolver(tmp_path, {"amd": ["a", "c"]}, RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": True}   # consumed -> changed
+    assert cap.out == ""                              # recovery is silent
+    assert calls["one_n"] == 1
+    r = json.loads(roster.read_text())
+    assert r["providers"]["amd"] == ["a", "b", "c"]  # union, sorted
+    assert r["tick_epoch"] == 777
+    assert r["stale_providers"] == ["nous"]
+    assert r["transients"] == seeded["transients"]
+    assert r["unconfirmed"] == seeded["unconfirmed"]
+    assert r["ratelimits"] == seeded["ratelimits"]
+    assert r["providers"]["nous"] == ["keep"]         # untouched provider
+    assert _load_q(tmp_path) == {}
+    # crash re-run: queue still held (pre-save crash sim) -> union
+    # re-applies byte-identically (idempotent)
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
+                                      "last_absent_seen": RESOLVER_T0 + 8500},
+                                "c": {"gone_since": RESOLVER_T0 + 8900,
+                                      "last_absent_seen": RESOLVER_T0 + 8900}}})
+    out2, calls2 = _resolver(tmp_path, {"amd": ["a", "c"]},
+                             RESOLVER_T0 + 9060)
+    assert out2 == {"fired": False, "changed": True}
+    assert calls2["one_n"] == 1
+    assert json.loads(roster.read_text()) == r  # union byte-identical again
+    assert _load_q(tmp_path) == {}
+
+
+def test_r3b_missing_roster_is_visible_skip(tmp_path, capsys):
+    """No roster file: recovery is skipped with the unified note and NOTHING
+    is written as a roster; the queue still consumes via the normal save."""
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
+                                      "last_absent_seen": RESOLVER_T0 + 8500}}})
+    out, calls = _resolver(tmp_path, {"amd": ["a"]}, RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert "inference-watchdog: roster unusable — hold recoveries not applied" in cap.err
+    assert cap.out == ""
+    assert not (tmp_path / "roster.json").exists()
+    assert _load_q(tmp_path) == {}
+    assert out == {"fired": False, "changed": True}
+
+
+def test_r3c_corrupt_providers_is_visible_skip(tmp_path, capsys):
+    """providers not a dict: visible skip, roster bytes UNCHANGED (no
+    rewrite — the next tick bootstraps clean instead of added-storming)."""
+    roster = tmp_path / "roster.json"
+    corrupt = json.dumps({"tick_epoch": 1, "providers": "junk"})
+    roster.write_text(corrupt, encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0 + 8500,
+                                      "last_absent_seen": RESOLVER_T0 + 8500}}})
+    before = roster.read_bytes()
+    out, calls = _resolver(tmp_path, {"amd": ["a"]}, RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert "inference-watchdog: roster unusable — hold recoveries not applied" in cap.err
+    assert roster.read_bytes() == before
+    assert _load_q(tmp_path) == {}
+    assert out == {"fired": False, "changed": True}
