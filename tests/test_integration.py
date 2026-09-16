@@ -862,3 +862,72 @@ def test_r8_fetches_parameter_short_circuits_fetch_one(tmp_path, capsys):
     assert out2 == {"fired": False, "changed": False}
     assert q.read_bytes() == before
     capsys.readouterr()
+
+
+def test_r6_fetch_failure_changes_nothing(tmp_path, capsys):
+    """Behavior 6: fetch_one raising FetchError -> neutral: zero writes,
+    silent, nothing consumed."""
+    q = _write_q(tmp_path, {"amd": {"a": {"gone_since": RESOLVER_T0,
+                                          "last_absent_seen": RESOLVER_T0}}})
+    roster = tmp_path / "roster.json"
+    roster.write_text("PIN", encoding="utf-8")
+    before = q.read_bytes()
+    out, calls = _resolver(tmp_path, {"amd": None}, RESOLVER_T0 + 99_999)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": False}
+    assert calls["one_n"] == 1                    # attempted, failed
+    assert q.read_bytes() == before
+    assert _load_q(tmp_path) == {"amd": {"a": {"gone_since": RESOLVER_T0,
+                                               "last_absent_seen": RESOLVER_T0}}}
+    assert roster.read_bytes() == b"PIN"
+    assert cap.out == "" and cap.err == ""
+
+
+def test_r7_unflagged_provider_releases_silently_without_roster_rewrite(
+        tmp_path, capsys):
+    """Behavior 7: registry config lacks removal_hold_seconds -> entries are
+    consumed with no alert and the roster is NOT rewritten (released ids
+    never enter the union path)."""
+    roster = tmp_path / "roster.json"
+    seeded = {"tick_epoch": 777, "providers": {"nous": []}, "transients": {},
+              "unconfirmed": {}, "ratelimits": {}, "stale_providers": []}
+    roster.write_text(json.dumps(seeded), encoding="utf-8")
+    _write_q(tmp_path, {"nous": {"x": {"gone_since": RESOLVER_T0 + 8900,
+                                       "last_absent_seen": RESOLVER_T0 + 8900}}})
+    out, _ = _resolver(tmp_path, {"nous": ["x"]}, RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": True}
+    assert cap.out == "" and cap.err == ""
+    assert _load_q(tmp_path) == {}
+    assert json.loads(roster.read_text()) == seeded   # no release -> no write
+
+
+def test_r4b_all_junk_queue_rides_empty_path_forever_and_partial_junk_self_heals(
+        tmp_path, capsys):
+    """Behavior 4's accepted edges: an entirely-junk queue loads to {}, takes
+    the empty-queue rule (no fetch, NO write — load's stderr note re-fires
+    every pass, stdout stays silent, no page); a partially-junk file
+    self-heals via the normal save once anything else changes."""
+    q = _write_q(tmp_path, {"amd": "not-a-dict"})
+    out, calls = _resolver(tmp_path, {"amd": ["x"]}, RESOLVER_T0 + 9000)
+    cap = capsys.readouterr()
+    assert out == {"fired": False, "changed": False}
+    assert calls["one_n"] == 0
+    assert q.read_bytes() == json.dumps({"amd": "not-a-dict"}).encode()
+    assert cap.out == ""
+    assert "pending_removals: dropped 1 junk entry" in cap.err
+    # second pass: the note re-fires, still no write
+    _, _ = _resolver(tmp_path, {"amd": ["x"]}, RESOLVER_T0 + 9060)
+    assert "dropped 1 junk entry" in capsys.readouterr().err
+    assert q.read_bytes() == json.dumps({"amd": "not-a-dict"}).encode()
+    # partially junk: valid amd entry refreshes -> save purges the junk slice
+    _write_q(tmp_path, {"ghost": {"y": {"gone_since": RESOLVER_T0,
+                                        "last_absent_seen": RESOLVER_T0}},
+                        "amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                                      "last_absent_seen": RESOLVER_T0 + 8000}}})
+    out, _ = _resolver(tmp_path, {"amd": []}, RESOLVER_T0 + 9000)
+    assert out == {"fired": False, "changed": True}
+    assert _load_q(tmp_path) == {
+        "amd": {"a": {"gone_since": RESOLVER_T0 + 8000,
+                      "last_absent_seen": RESOLVER_T0 + 9000}}}
+    capsys.readouterr()
