@@ -629,6 +629,16 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
         if not confirmed[provider]["added"] and not confirmed[provider]["removed"]:
             del confirmed[provider]
 
+    # --- confirmed-event routing, rev-4 rule 3: fold expired into removals ---
+    # An entry that expired at settle (hold elapsed, still absent) is the
+    # removal confirmation the queue was waiting for: APPEND it to the
+    # provider's confirmed["removed"] AFTER rules 1-2, so only expired ids
+    # alert while same-tick fresh removals on the held provider queue.
+    for provider, ids in out["expired"].items():
+        section = confirmed.setdefault(provider, {"added": [], "removed": []})
+        section["removed"] = pending_removals.sorted_ids(
+            set(section["removed"]) | set(ids))
+
     # Crash-safe write order (R2-9): roster FIRST, then alert enqueue/send
     # (pending_alerts.json inside notify). A crash may delay a retry but
     # never silently swallows an alert.

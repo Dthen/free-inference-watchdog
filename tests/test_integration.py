@@ -1201,12 +1201,15 @@ def test_tick_quiet_recovers_pending_silently(tmp_path, capsys):
     assert roster["providers"]["amd"] == ["x"]       # no-op union
 
 
-def test_tick_quiet_consumes_expired_entry(tmp_path, capsys):
+def test_tick_quiet_consumes_expired_entry(tmp_path, capsys, monkeypatch):
     """rev-4 test b (PLACEMENT pin) + h's ghost side: the settle block runs
-    with ZERO diff events (inside `if events:` this file would still hold x —
-    D2's interim swallow until T5 alerting), the expired entry is consumed by
-    the provisional save, and the pre-settle D8 orphan guard drops the ghost
-    provider with the resolver-identical stderr note."""
+    with ZERO diff events (inside `if events:` this file would never settle —
+    T5-3's fold), the expired entry is CONSUMED by the provisional save AND
+    surfaced as the 🔴 removal alert (rev-4 rule 3 closes the D2 swallow),
+    while the pre-settle D8 orphan guard drops the ghost provider with the
+    resolver-identical stderr note."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
     now = RESOLVER_T0 + 9000
     _seed_alive_quiet(tmp_path, now)
     (tmp_path / "roster.json").write_text(json.dumps(
@@ -1219,7 +1222,11 @@ def test_tick_quiet_consumes_expired_entry(tmp_path, capsys):
     code, _ = _tick_dict_registry(tmp_path, [{"amd": [], "nous": ["n"]}], now)
     cap = capsys.readouterr()
     assert code == 0
-    assert cap.out == ""                             # alerting comes at T5
+    expected = notify.format_alert(
+        {"amd": {"added": [], "removed": ["x"]}},
+        tick_iso=datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=2, transients={}, stale=[], dropped_total=0)
+    assert cap.out == expected + "\n"                # 🔴 x (byte-standard, M3)
     assert ("inference-watchdog: dropped pending entries for ghost "
             "(not in registry)\n") == cap.err        # exact D8 guard note
     q = _load_q(tmp_path)
@@ -1457,3 +1464,45 @@ def test_tick_recovery_does_not_realert_as_add(tmp_path, capsys):
     assert _load_q(tmp_path) == {}                   # settle consumed x
     roster = json.loads((tmp_path / "roster.json").read_text())
     assert roster["providers"]["amd"] == ["x"]       # restored via union
+
+
+# ---------------------------------------------------------------------------
+# T5-3: fold expired into confirmed removals (rev-4 rule 3). An entry that
+# EXPIRED at settle (hold elapsed, still absent) is APPENDED to that
+# provider's confirmed["removed"] AFTER rules 1-2 — so only the expired id
+# alerts while a same-tick fresh removal on the held provider goes to the
+# queue silently. (At-least-once re-merge of the expired entry into the saved
+# queue is T5-4/D2; this commit's provisional save already consumed it.)
+# ---------------------------------------------------------------------------
+
+
+def test_tick_mixed_expired_and_fresh_removal(tmp_path, capsys, monkeypatch):
+    """rev-4 rule 3 (mixed case): roster amd ["fresh"] with pending
+    amd {old@RESOLVER_T0}; both ids absent this tick. Settle expires `old`
+    (age 9000 >= hold 1800); rule 1 enqueues the fresh removal `fresh` @ now
+    and strips it from the alert; rule 3 folds `old` back as the ONLY removed
+    id — alert lists 🔴 old and NOT fresh; queue holds ONLY fresh."""
+    import notify
+    monkeypatch.setattr(notify, "_dropped_total", 0)
+    now = RESOLVER_T0 + 9000
+    _seed_alive_quiet(tmp_path, now)
+    (tmp_path / "roster.json").write_text(json.dumps(
+        {"tick_epoch": now - 60,
+         "providers": {"amd": ["fresh"], "nous": ["n"]}}), encoding="utf-8")
+    _write_q(tmp_path, {"amd": {"old": {"gone_since": RESOLVER_T0,
+                                        "last_absent_seen": RESOLVER_T0}}})
+    code, _ = _tick_dict_registry(
+        tmp_path, [{"amd": [], "nous": ["n"]}, {"amd": [], "nous": ["n"]}],
+        now)
+    cap = capsys.readouterr()
+    assert code == 0
+    assert cap.err == ""
+    expected = notify.format_alert(
+        {"amd": {"added": [], "removed": ["old"]}},
+        tick_iso=datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M"),
+        providers_polled=2, transients={}, stale=[], dropped_total=0)
+    assert cap.out == expected + "\n"
+    assert "fresh" not in cap.out                    # fresh removal queued only
+    assert _load_q(tmp_path) == {
+        "amd": {"fresh": {"gone_since": int(now),
+                          "last_absent_seen": int(now)}}}
