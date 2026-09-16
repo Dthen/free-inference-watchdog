@@ -198,3 +198,33 @@ def test_enqueue_empty_ids_does_not_create_slice():
     held = {}
     pr.enqueue(held, "amd", [], now=100)
     assert held == {}
+
+
+def test_settle_recovery_consumes_prunes_and_marks_changed():
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"amd": ["x", "new"]}, {"amd": 1800}, now=200)
+    assert out["recovered"] == [("amd", "x")]  # untracked "new" is not held
+    assert out["expired"] == {}
+    assert out["released"] == []
+    assert out["changed"] == {"amd"}
+    assert held == {}  # emptied slice pruned — no {"amd": {}} dust
+
+
+def test_settle_recovered_sorted_by_provider_then_id():
+    held = {"zeta": {"b": {"gone_since": 100, "last_absent_seen": 100}},
+            "alpha": {"a": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"zeta": ["b"], "alpha": ["a"]},
+                    {"zeta": 1800, "alpha": 1800}, now=200)
+    assert out["recovered"] == [("alpha", "a"), ("zeta", "b")]
+
+
+def test_settle_still_absent_holds_without_extending_clock():
+    held = {"amd": {"x": {"gone_since": 100, "last_absent_seen": 100}}}
+    out = pr.settle(held, {"amd": []}, {"amd": 1800}, now=200)
+    assert out["recovered"] == []
+    assert out["expired"] == {}
+    assert out["released"] == []
+    assert out["changed"] == set()  # consumption-only contract, refresh side
+    entry = held["amd"]["x"]
+    assert entry["last_absent_seen"] == 200
+    assert entry["gone_since"] == 100  # immutability pinned

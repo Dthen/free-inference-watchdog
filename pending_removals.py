@@ -105,3 +105,42 @@ def enqueue(held, provider, ids, now):
                                 "last_absent_seen": now_i}
         else:
             entry["last_absent_seen"] = now_i
+
+
+def settle(held, fetches, holds, now):
+    """One settle pass. Mutates held — entries IN PLACE (shallow copies alias
+    them; fork with `copy.deepcopy`, never `dict()`). Returns
+    {"recovered": [(p,id)] sorted, "expired": {p: [ids] sorted}, "released":
+    [(p,id)] sorted, "changed": set(p)}.
+    - provider absent from fetches -> skip (neutral): failure is signaled by
+      KEY ABSENCE, never None.
+    - id in fetches[p] -> recovered (entry consumed).
+    - else -> still absent: PLACEHOLDER(T0-8) expiry; interim refreshes
+      last_absent_seen, gone_since NEVER rewritten.
+    "changed" = providers with at least one ENTRY CONSUMED (recovered /
+    expired / released). Stamp-only refreshes and dust prunes are DELIBERATELY
+    NOT marked; callers decide persistence on deep map comparison
+    (held != snapshot), never on changed-membership.
+    """
+    now_i = int(now)
+    recovered = []
+    expired = {}
+    released = []
+    changed = set()
+    for provider in sorted(held):
+        entries = held[provider]
+        if provider not in fetches:
+            continue  # fetch failure is neutral: entry waits, clock frozen
+        fetched = fetches[provider]
+        for model_id in sorted(entries):
+            entry = entries[model_id]
+            if model_id in fetched:
+                recovered.append((provider, model_id))
+                del entries[model_id]
+                changed.add(provider)
+            else:
+                entry["last_absent_seen"] = now_i
+        if not entries:
+            del held[provider]  # prune emptied slice — no {"p": {}} dust
+    return {"recovered": sorted(recovered), "expired": expired,
+            "released": released, "changed": changed}
