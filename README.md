@@ -132,6 +132,7 @@ the repo stays agent-agnostic.
 | Field | Meaning |
 |---|---|
 | `providers` | `{name: [ids]}` — current known-free model IDs per provider |
+| `provider_models` | `{name: {id: <raw API model object>}}` — full metadata for tracked ids only (passive; legacy rosters omit it) |
 | `stale_providers` | Provider names whose fetch failed this tick (carried forward) |
 | `transients` | Rebuilt every tick. Diffs that appeared then vanished on recheck. |
 | `unconfirmed` | Rebuilt every tick. Diffs whose recheck itself failed (signal may resurface). |
@@ -143,7 +144,7 @@ counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 
 ## State layout (state/, gitignored)
 
-- `roster.json`: providers + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
+- `roster.json`: providers + provider_models + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
 - `alive.json`: last_tick_epoch + last_output_epoch + dropped_alerts_total.
 - `pending_alerts.json`: bounded retry queue (MAX_ATTEMPTS 5 per alert).
 - `pending_removals.json`: held provider removals waiting to settle (shared by both settle paths).

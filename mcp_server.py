@@ -4,14 +4,18 @@
 Four read-only tools, no enrichment (none exists anywhere in the repo):
 
   list_free_models(provider=None)   full roster, or one provider's id list
+                                    plus raw per-model metadata (provider_models)
   get_model(model_id)               CROSS-GATEWAY PRESENCE LOOKUP: which of the
-                                    watched gateways track this id right now
+                                    watched gateways track this id right now;
+                                    each endpoint carries the raw metadata dict
   watchdog_status()                 tick freshness vs the 1h cadence, stale/
                                     failing providers, per-provider counts,
-                                    pending-alert queue depth, last site publish
+                                    metadata coverage, pending-alert queue
+                                    depth, last site publish
   list_endpoints(provider=None)     per-gateway wiring entries
                                     (chat-completions URL,
-                                    api_type) and raw tracked ids
+                                    api_type), raw tracked ids
+                                    and their raw metadata
 
 IMPORT CHOICE (corrected fact, probe-verified 2026-08-26 on this box): the
 installed MCP SDK no longer ships `mcp.server.fastmcp.FastMCP`. The current
@@ -114,6 +118,17 @@ def _clean_ids(models):
                   key=_natural_key)
 
 
+def _model_metadata(roster, provider, ids):
+    """Raw objects for tracked ids only; legacy/junk metadata degrades to {}."""
+    providers = roster.get("provider_models")
+    if not isinstance(providers, dict):
+        return {}
+    models = providers.get(provider)
+    if not isinstance(models, dict):
+        return {}
+    return {mid: models[mid] for mid in ids if isinstance(models.get(mid), dict)}
+
+
 def _clean_names(values):
     """String entries from a roster list field (stale_providers); a
     non-list value degrades to [] — same rule as _clean_ids, so a hostile
@@ -157,7 +172,11 @@ def _error(base: dict, message: str, **extra) -> dict:
 # ---------- tool: list_free_models ----------
 
 def list_free_models(provider=None, root=None) -> dict:
-    """Full roster, or one provider's id list. Structured errors, no raises."""
+    """Full roster, or one provider's id list. Structured errors, no raises.
+
+    Additive: also returns ``models`` — the raw API metadata objects for
+    exactly the tracked ids, per gateway ({} when the roster predates
+    metadata capture or the model carries none)."""
     r = Path(root).resolve() if root is not None else REPO
     base: dict = {"tool": "list_free_models", "state_root": str(r)}
 
@@ -181,6 +200,7 @@ def list_free_models(provider=None, root=None) -> dict:
             "ok": True,
             "provider": provider,
             "model_ids": ids,
+            "models": _model_metadata(roster, provider, ids),
             "count": len(ids),
             "tick_epoch": _epoch_or_none(roster),
         }
@@ -198,6 +218,8 @@ def list_free_models(provider=None, root=None) -> dict:
         **base,
         "ok": True,
         "providers": cleaned,
+        "models": {gw: _model_metadata(roster, gw, ids)
+                   for gw, ids in cleaned.items()},
         "counts": {gw: len(ids) for gw, ids in cleaned.items()},
         "total_ids": len(union),
         "n_gateways": len(PROVIDERS),
@@ -249,6 +271,7 @@ def get_model(model_id, root=None) -> dict:
                     "model_id": raw_id,
                     "chat_completions_url": wiring.get("chat_completions_url"),
                     "api_type": wiring.get("api_type"),
+                    "metadata": _model_metadata(roster, gw, [raw_id]).get(raw_id, {}),
                 })
     # Deduplicate while preserving order (a gateway carries a raw id once),
     # then sort by (PROVIDERS index, _natural_key(model_id)).
@@ -310,6 +333,7 @@ def list_endpoints(provider=None, root=None) -> dict:
             "chat_completions_url": wiring.get("chat_completions_url"),
             "api_type": wiring.get("api_type"),
             "model_ids": ids,
+            "models": _model_metadata(roster, gw, ids),
         }
         total_endpoints += len(ids)
         all_stripped.update(strip_free_marker(mid) for mid in ids)
@@ -376,6 +400,17 @@ def watchdog_status(now=None, root=None) -> dict:
         "stale_providers": _clean_names(roster.get("stale_providers", [])),
         "provider_counts": {
             gw: len(_clean_ids(provs.get(gw, []))) for gw in PROVIDERS
+        },
+        "metadata_summary": {
+            # Pair count (gateway, model), not unique-id union — gateways
+            # rename the same model, the raw objects still differ.
+            "models_with_metadata": sum(
+                len(_model_metadata(roster, gw, _clean_ids(provs.get(gw, []))))
+                for gw in PROVIDERS),
+            "provider_counts": {
+                gw: len(_model_metadata(roster, gw, _clean_ids(provs.get(gw, []))))
+                for gw in PROVIDERS
+            },
         },
         "pending_alerts": len(state.load_pending(pending_path)),
         "site_published": site_published,

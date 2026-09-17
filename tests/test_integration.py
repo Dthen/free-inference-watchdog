@@ -9,6 +9,63 @@ from pathlib import Path
 import inference_watchdog as im
 
 
+def test_raw_metadata_round_trips_through_tick_and_recheck(tmp_path, monkeypatch, capsys):
+    import providers
+    import state
+
+    config = {"base_url": "https://example.com/v1", "detection": "id-suffix"}
+    monkeypatch.setattr(im, "PROVIDERS", {"nous": config})
+    real_fetch = providers.fetch_provider
+    responses = []
+
+    def fetch(config):
+        items = responses.pop(0)
+        if items is None:
+            raise providers.FetchError("offline")
+        return real_fetch(config, getter=lambda *a, **kw: (
+            200, json.dumps({"data": items}), {"X-Ratelimit-Remaining": "42"}))
+
+    monkeypatch.setattr(providers, "fetch_provider", fetch)
+    first = {"id": "one-free", "architecture": {"inputs": ["text", "image"]}}
+    updated = {**first, "context_length": 128000}
+    second = {"id": "two-free", "pricing": {"prompt": "0"}, "future": None}
+
+    def tick(items, recheck=None):
+        responses.append(items)
+        if recheck is not None:
+            responses.extend(recheck)
+        return im.run_tick(
+            tmp_path, {"nous"}, im.build_fetch_all({}, state_dir=tmp_path),
+            im.build_fetch_one({}, state_dir=tmp_path), webhook_url=None,
+            sleep=lambda s: None, now=1000, recheck_delay=0)
+
+    assert tick([first]) == 0
+    assert state.load_roster(tmp_path / "roster.json")["provider_models"] == {
+        "nous": {"one-free": first}}
+    capsys.readouterr()
+    # Metadata changes alone are silent and never cause a recheck.
+    assert tick([updated]) == 0
+    assert capsys.readouterr().out == ""
+    assert responses == []
+    # Recheck's raw object wins, not the first fetch's obsolete snapshot.
+    assert tick([first, second], [[updated, second]]) == 0
+    doc = state.load_roster(tmp_path / "roster.json")
+    assert doc["provider_models"] == {"nous": {"one-free": updated, "two-free": second}}
+    assert doc["ratelimits"]["nous"] == {"X-Ratelimit-Remaining": "42"}
+    # Failed recheck carries the old ids AND their old metadata.
+    assert tick([first], [None]) == 0
+    assert state.load_roster(tmp_path / "roster.json")["provider_models"] == doc["provider_models"]
+    # Initial fetch failure is sticky too.
+    assert tick(None) == 1
+    assert state.load_roster(tmp_path / "roster.json")["provider_models"] == doc["provider_models"]
+    # Transient removal restores second with the recheck metadata.
+    assert tick([first], [[updated, second]]) == 0
+    assert state.load_roster(tmp_path / "roster.json")["provider_models"] == doc["provider_models"]
+    # Confirmed removal prunes metadata, including a genuinely empty catalog.
+    assert tick([], [[]]) == 0
+    assert state.load_roster(tmp_path / "roster.json")["provider_models"] == {"nous": {}}
+
+
 REGISTRY = {"nous", "openrouter", "tokenrouter", "kilo", "amd", "bai"}
 
 

@@ -236,6 +236,8 @@ def build_fetch_one(env, state_dir=None):
                 m for m in ids
                 if probe_state.get_verdict(probe_data, name, m)[0] == "free"
             )
+        # meta["models"] already covers only the returned ids: fetch_provider
+        # filtered it, and the verdict filter is a subset of the catalog.
         return ids, meta or {}
 
     return fetch_one
@@ -511,12 +513,42 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
     prev_alive = state.load_alive(paths["alive"])
     emitted_real = False   # ONLY diff alerts / 💚 ping count (R2-8)
 
+    # Metadata follows the same snapshot as the persisted ids. Failed fetches
+    # carry the old objects; successful fetches replace (not merge) them so
+    # fields removed by the API do not live forever. Legacy rosters have none.
+    previous_models = (prev_roster or {}).get("provider_models", {})
+    if not isinstance(previous_models, dict):
+        previous_models = {}
+    provider_models = {
+        name: (metas.get(name, {}).get("models", {})
+               if results.get(name) is not None else previous_models.get(name, {}))
+        for name in new_map
+    }
+
+    def fetch_one_with_metadata(name):
+        try:
+            ids, meta = fetch_one(name)
+        except providers.FetchError:
+            provider_models[name] = previous_models.get(name, {})
+            raise
+        provider_models[name] = (meta or {}).get("models", {})
+        return ids, meta
+
     def persist_roster():
         if dry_run:
             return
+        # Restrict metadata to the final roster (including probe verdicts and
+        # recheck corrections), never expose paid/unconfirmed catalog entries.
+        tracked_models = {
+            name: {mid: models[mid] for mid in ids
+                   if mid in models and isinstance(models[mid], dict)}
+            if isinstance(models := provider_models.get(name), dict) else {}
+            for name, ids in new_map.items()
+        }
         state.save_roster_atomic(paths["roster"], {
             "tick_epoch": int(now),
             "providers": new_map,
+            "provider_models": tracked_models,
             "stale_providers": stale,          # rebuilt every tick
             "transients": transients,          # rebuilt every tick (R2-5)
             "unconfirmed": unconfirmed,        # rebuilt every tick (R2-5)
@@ -566,7 +598,7 @@ def _tick_locked(paths, registry, fetch_all, fetch_one, webhook_url, sleep,
     if events:
         confirmation = diffing.confirm_diffs(
             candidates=events, prev_providers=prev_providers,
-            fetch_one=fetch_one, sleep=sleep, delay=recheck_delay)
+            fetch_one=fetch_one_with_metadata, sleep=sleep, delay=recheck_delay)
         confirmed = confirmation["confirmed"]
         transients = confirmation["transients"]
         unconfirmed = confirmation["unconfirmed"]

@@ -49,6 +49,11 @@ def _require_ok(status, url):
 def fetch_provider(config, getter=_default_getter):
     """Fetch free models for a provider config.
 
+    Returns (sorted ids, meta). meta carries PASSIVE extras only:
+      models     — {model_id: raw API model object} for exactly the ids
+                   returned (never a normalized schema)
+      ratelimit  — x-ratelimit response headers, when the gateway sends any
+
     Optional ignored_slugs: a list of exact model ids excluded AFTER
     detection — the free-marker rule itself is untouched; this is purely
     an exclusion layer for ids the operator does not want tracked.
@@ -71,10 +76,19 @@ def fetch_provider(config, getter=_default_getter):
     detection = config["detection"]
 
     if detection == "zero-credit-probe":
-        return sorted(i for i in _extract_ids(items) if i not in ignored), {}
-
-    free_ids = [i["id"] for i in items if detect_free(i, detection)]
+        free_ids = _extract_ids(items)
+    else:
+        free_ids = [i["id"] for i in items if detect_free(i, detection)]
     free_ids = [i for i in free_ids if i not in ignored]
-    # Capture ratelimit headers for passive telemetry
+    selected = set(free_ids)
+    # Preserve raw API objects; metadata never participates in detection.
+    meta = {"models": {
+        str(item["id"]): item for item in items
+        if isinstance(item, dict) and item.get("id") is not None
+        and str(item["id"]) in selected
+    }}
+    # Capture ratelimit headers for passive telemetry.
     ratelimit = {k: v for k, v in resp_headers.items() if "ratelimit" in k.lower()}
-    return sorted(free_ids), {"ratelimit": ratelimit} if ratelimit else {}
+    if ratelimit:
+        meta["ratelimit"] = ratelimit
+    return sorted(free_ids), meta

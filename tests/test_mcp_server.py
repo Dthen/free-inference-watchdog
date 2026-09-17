@@ -17,6 +17,53 @@ import pytest
 import mcp_server
 
 
+def test_tools_surface_raw_metadata_per_gateway(state_dir):
+    path = state_dir / "state" / "roster.json"
+    roster = json.loads(path.read_text())
+    mid = "vendor-z/zero-priced-model"
+    model = {"id": mid, "context_length": 128000,
+             "architecture": {"input_modalities": ["text", "image"]},
+             "pricing": {"prompt": "0"}, "unknown_field": [None, False]}
+    other = {**model, "context_length": 32000}
+    roster["provider_models"] = {
+        "nous": {mid: model, "not-tracked": {"id": "not-tracked"}},
+        "kilo": {mid: other}, "unknown-gateway": {mid: model}}
+    path.write_text(json.dumps(roster))
+
+    single = mcp_server.list_free_models("nous", root=state_dir)
+    assert single["models"] == {mid: model}
+    full = mcp_server.list_free_models(root=state_dir)
+    assert full["models"]["nous"] == {mid: model}
+    assert full["models"]["kilo"] == {mid: other}
+    assert set(full["models"]) == set(mcp_server.PROVIDERS)
+    lookup = mcp_server.get_model(mid, root=state_dir)
+    assert {ep["gateway"]: ep["metadata"] for ep in lookup["endpoints"]} == {
+        "nous": model, "kilo": other, "amd": {}}
+    endpoints = mcp_server.list_endpoints("nous", root=state_dir)
+    assert endpoints["gateways"]["nous"]["models"] == {mid: model}
+    summary = mcp_server.watchdog_status(root=state_dir)["metadata_summary"]
+    assert summary["models_with_metadata"] == 2  # gateway/model pairs, not union
+    assert summary["provider_counts"]["nous"] == 1
+    assert summary["provider_counts"]["amd"] == 0
+
+
+@pytest.mark.parametrize("metadata", [None, [], "junk", {"nous": []},
+                                      {"nous": {"vendor-z/zero-priced-model": 7}}])
+def test_tools_degrade_on_missing_or_malformed_metadata(state_dir, metadata):
+    path = state_dir / "state" / "roster.json"
+    roster = json.loads(path.read_text())
+    if metadata is not None:
+        roster["provider_models"] = metadata
+    path.write_text(json.dumps(roster))
+    assert mcp_server.list_free_models("nous", root=state_dir)["models"] == {}
+    assert all(not models for models in mcp_server.list_free_models(
+        root=state_dir)["models"].values())
+    assert all(ep["metadata"] == {} for ep in mcp_server.get_model(
+        "vendor-z/zero-priced-model", root=state_dir)["endpoints"])
+    assert mcp_server.list_endpoints("nous", root=state_dir)["gateways"]["nous"]["models"] == {}
+    assert mcp_server.watchdog_status(root=state_dir)["metadata_summary"]["models_with_metadata"] == 0
+
+
 # ---------- fixtures ----------
 
 @pytest.fixture()

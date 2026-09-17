@@ -228,8 +228,25 @@ def test_fetch_provider_captures_ratelimit_headers():
     assert meta.get("ratelimit", {}).get("x-ratelimit-remaining-requests") == "42"
 
 
-def test_fetch_provider_no_ratelimit_headers_empty_meta():
-    """No ratelimit headers -> empty meta, not a dict with empty ratelimit key."""
+@pytest.mark.parametrize("detection", ["id-suffix", "zero-credit-probe"])
+def test_fetch_provider_preserves_raw_metadata(detection):
+    model = {"id": "vendor/model:free", "context_length": 128000,
+             "architecture": {"modalities": ["text", "image"]},
+             "pricing": {"prompt": "0"}, "future_field": {"value": None}}
+    config = {"base_url": "https://example.com/v1", "detection": detection,
+              "ignored_slugs": ["ignored-free"]}
+    items = [model, {"id": "ignored-free"}, {"id": "paid"}]
+    ids, meta = providers.fetch_provider(
+        config, getter=lambda *a, **kw: ok(json.dumps({"data": items}),
+                                          {"X-Ratelimit-Remaining": "42"}))
+    assert meta["models"][model["id"]] == model
+    assert set(meta["models"]) == set(ids)
+    assert "ignored-free" not in meta["models"]
+    assert meta["ratelimit"] == {"X-Ratelimit-Remaining": "42"}
+
+
+def test_fetch_provider_no_ratelimit_headers_omits_ratelimit():
+    """No ratelimit headers -> model metadata only, no ratelimit key."""
     def getter(url, headers=None, timeout=15):
         body = json.dumps({"data": [{"id": "m1", "pricing": {"prompt": "0", "completion": "0"}}]})
         return 200, body, {}
@@ -237,7 +254,8 @@ def test_fetch_provider_no_ratelimit_headers_empty_meta():
               "detection": "api-pricing", "_token": None}
     ids, meta = providers.fetch_provider(config, getter=getter)
     assert ids == ["m1"]
-    assert meta == {}
+    assert "ratelimit" not in meta
+    assert meta["models"]["m1"]["pricing"] == {"prompt": "0", "completion": "0"}
 
 
 # ---------- ignored_slugs: config-driven exclusions at the detection layer ----------
