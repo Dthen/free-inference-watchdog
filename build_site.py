@@ -195,12 +195,13 @@ def build_provider_header_meta():
         return {}
 
 
-def build_groups(providers):
-    """Group raw ids by their free-marker-stripped name, deterministically.
+def build_groups(providers, provider_models):
+    """Group raw ids by their display `name` field, deterministically.
 
     Returns (group_names, groups, endpoints) where:
-      - group_names: alphabetically sorted list of stripped names, one per row
-      - groups: dict[stripped_name] -> {
+      - group_names: alphabetically sorted list of group names (the `name`
+        field from provider_models, or raw id as fallback), one per row
+      - groups: dict[group_name] -> {
             "gateways": set[str],                  # every gw carrying ANY variant
             "variants": list[(gateway, raw_id)],   # per-(gw,raw) wiring rows, in
                                                    # DISPLAY_ORDER then natural key
@@ -212,9 +213,9 @@ def build_groups(providers):
         per-gateway totals. The count of distinct raw ids across all
         providers is a third quantity nobody renders.
 
-    The grouping removes ONLY a free-marker we already know is present
-    (the same marker the free-roster rule tested for), so two genuinely
-    different models can never collide. No fuzzy match, no rename map.
+    Grouping key: the `name` field from each gateway's provider_models entry.
+    Fallback: if a model id has no entry in provider_models (e.g. gateway
+    fetch failed), use the raw id as the group name (don't crash).
     """
     raw_ids = sorted({mid for models in providers.values() for mid in models})
     groups: dict = {}
@@ -223,8 +224,16 @@ def build_groups(providers):
     # the natural key of the raw id. We keep this separate from
     # `groups[].variants` so the byte-order in the HTML is stable.
     for mid in raw_ids:
-        name = strip_free_marker(mid)
-        slot = groups.setdefault(name, {"gateways": set(), "variants": []})
+        # Find the group name by looking up the `name` field in provider_models
+        group_name = mid  # fallback: raw id
+        for gw in DISPLAY_ORDER:
+            if mid in providers.get(gw, []):
+                model_info = provider_models.get(gw, {}).get(mid, {})
+                name = model_info.get("name")
+                if name:
+                    group_name = name
+                    break  # first gateway with a name wins (stable)
+        slot = groups.setdefault(group_name, {"gateways": set(), "variants": []})
         for gw in DISPLAY_ORDER:
             if mid in providers.get(gw, []):
                 slot["gateways"].add(gw)
@@ -281,7 +290,8 @@ def render_page(roster, logo_b64, header_meta=None):
     providers = {gw: ids for gw, ids in providers.items() if ids}
     # Active gateways in display order: only providers with models.
     active_gateways = [gw for gw in DISPLAY_ORDER if gw in providers]
-    group_names, groups, endpoints = build_groups(providers)
+    provider_models = roster.get("provider_models", {})
+    group_names, groups, endpoints = build_groups(providers, provider_models)
 
     def _wire_cell(gw, raw_id):
         """Return the inner-HTML for one (gateway, raw_id) wiring row.
@@ -308,6 +318,22 @@ def render_page(roster, logo_b64, header_meta=None):
             '<td class="yes">&#9679;</td>' if gw in present_gws else '<td class="no"></td>'
             for gw in active_gateways
         ]
+        # Build hover title from the first variant's metadata (if available).
+        # A group may span multiple gateways; use the first gateway that has
+        # both context_length and input_modalities.
+        title_parts = []
+        for gw, mid in group["variants"]:
+            model_info = provider_models.get(gw, {}).get(mid, {})
+            context_length = model_info.get("context_length")
+            arch = model_info.get("architecture", {})
+            input_modalities = arch.get("input_modalities")
+            if context_length is not None:
+                title_parts.append(f"Context length: {context_length}")
+            if input_modalities:
+                title_parts.append(f"Input modalities: {', '.join(input_modalities)}")
+            if title_parts:
+                break  # first variant with metadata wins
+        title_attr = f' title="{escape(chr(10).join(title_parts))}"' if title_parts else ""
         # One <input type="checkbox"> per group, named with a stable
         # group_index so two groups can never share an id. The label
         # wraps both the checkbox and the stripped name, so clicking
@@ -317,7 +343,7 @@ def render_page(roster, logo_b64, header_meta=None):
         cb_id = f"row-{group_index}"
         name_row = (
             f'<tr class="name-row">'
-            f'<th>'
+            f'<th{title_attr}>'
             f'<label for="{cb_id}">'
             f'<input type="checkbox" id="{cb_id}" class="row-expand" aria-label="toggle wiring for {escape(name)}">'
             f'<span class="caret" aria-hidden="true">&#9656;</span> '

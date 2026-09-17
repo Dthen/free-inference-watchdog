@@ -417,11 +417,13 @@ def test_strip_free_marker_never_returns_empty():
     assert strip_free_marker("free") == "free"
 
 
-# ---------- Task 3: matrix rows grouped by stripped name ----------
+# ---------- Task 3: matrix rows grouped by display name ----------
 
 # Fixture with multi-variant groups: one model ships on two gateways under
 # different free-marker forms; another ships on the SAME gateway under both
 # forms (must not double-count in '#'); a third is single-variant (control).
+# provider_models provides the `name` field for grouping (simulating gateway
+# API responses). Name matches the stripped form so groups merge as expected.
 GROUP_ROSTER = {
     "tick_epoch": 1787721434,
     "providers": {
@@ -440,6 +442,51 @@ GROUP_ROSTER = {
         "openrouter": [
             "vendor-x/standalone-2-free",        # another single-variant
         ],
+    },
+    "provider_models": {
+        "nous": {
+            "vendor-x/poolside-s-2.1:free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+            "vendor-x/standalone-1:free": {
+                "name": "vendor-x/standalone-1",
+                "context_length": 131072,
+                "architecture": {"input_modalities": ["text"]},
+            },
+        },
+        "tokenrouter": {
+            "vendor-x/poolside-s-2.1-free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+        },
+        "kilo": {
+            "vendor-x/poolside-s-2.1-free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+            "vendor-x/poolside-s-2.1:free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+            "vendor-x/standalone-2:free": {
+                "name": "vendor-x/standalone-2",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text", "image"]},
+            },
+        },
+        "openrouter": {
+            "vendor-x/standalone-2-free": {
+                "name": "vendor-x/standalone-2",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text", "image"]},
+            },
+        },
     },
     "stale_providers": [],
 }
@@ -491,8 +538,8 @@ def test_grouped_row_dot_count_aggregates_across_variants(tmp_path):
     assert row is not None, "no row for vendor-x/poolside-s-2.1"
     # '#' is the first <td class="n"> after the <th>. Task 4 wraps the
     # name in a <label> for the expand toggle, so allow anything between
-    # <th> and <td class="n">.
-    m = re.search(r'<th>.{0,400}?</th><td class="n">(\d+)</td>', row)
+    # <th> and <td class="n">. Match full <th>...</th> then the # cell.
+    m = re.search(r'<th[^>]*>[\s\S]*?</th>\s*<td class="n">(\d+)</td>', row)
     assert m, f"could not find # cell in row: {row!r}"
     assert int(m.group(1)) == 3, (
         f"group's # must equal number of gateways it reaches "
@@ -531,7 +578,7 @@ def test_group_overlap_on_same_gateway_not_double_counted(tmp_path):
     html = _build_html(tmp_path)
     row = _row_for(html, "vendor-x/poolside-s-2.1")
     # Task 4 wraps the name in a <label> for the expand toggle.
-    m = re.search(r'<th>.{0,400}?</th><td class="n">(\d+)</td>', row)
+    m = re.search(r'<th[^>]*>[\s\S]*?</th>\s*<td class="n">(\d+)</td>', row)
     assert m, f"could not find # cell in row: {row!r}"
     # nous, tokenrouter, kilo — three distinct gateways reached
     assert int(m.group(1)) == 3, (
@@ -670,7 +717,8 @@ def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
     tbodies = re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
     names = []
     for tbody in tbodies:
-        names.extend(re.findall(r'<tr class="name-row"><th>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)', tbody))
+        # Match <th> with optional title attr, then label/input/span, then name
+        names.extend(re.findall(r'<tr class="name-row"><th[^>]*>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)', tbody))
     assert names == sorted(names), (
         f"groups must be alphabetically sorted by stripped name; got {names}"
     )
@@ -683,7 +731,8 @@ def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
 
 def test_live_roster_groups_match_plan_evidence(tmp_path):
     """Task 3 live-data guard: the live roster must render as exactly one
-    row per distinct stripped name. Pin the current group count so future
+    row per distinct display name (the `name` field from provider_models,
+    or raw id as fallback). Pin the current group count so future
     roster changes update the pin in the same commit."""
     _seed_logo(tmp_path)
     live_roster_path = REPO / "state" / "roster.json"
@@ -692,18 +741,34 @@ def test_live_roster_groups_match_plan_evidence(tmp_path):
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
     # Every raw id in the roster must be reachable from a group row's #.
-    # The strongest invariant: every unique stripped name appears as a
-    # row, and no raw id is a row itself.
+    # The strongest invariant: every unique display name (from provider_models
+    # name field, or raw id fallback) appears as a row.
     from build_site import strip_free_marker
     all_ids = sorted({m for models in live_roster["providers"].values() for m in models})
-    expected_groups = sorted({strip_free_marker(m) for m in all_ids})
+    # Compute expected groups: for each id, find its name from provider_models
+    # The builder uses DISPLAY_ORDER to pick the first gateway with a name
+    from build_site import DISPLAY_ORDER
+    provider_models = live_roster.get("provider_models", {})
+    expected_groups = set()
+    for mid in all_ids:
+        name = mid  # fallback: raw id
+        for gw in DISPLAY_ORDER:
+            if mid in live_roster["providers"].get(gw, []):
+                model_info = provider_models.get(gw, {}).get(mid, {})
+                n = model_info.get("name")
+                if n:
+                    name = n
+                    break
+        expected_groups.add(name)
+    expected_groups = sorted(expected_groups)
     # Each group is in its own <tbody>; collect name-row labels from all
     tbodies = re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
     names = []
     for tbody in tbodies:
-        names.extend(re.findall(r'<tr class="name-row"><th>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)', tbody))
+        # Match <th> with optional title attr, then label/input/span, then name
+        names.extend(re.findall(r'<tr class="name-row"><th[^>]*>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)', tbody))
     assert names == expected_groups, (
-        f"live roster: groups must equal sorted unique stripped names.\n"
+        f"live roster: groups must equal sorted unique display names.\n"
         f"  expected ({len(expected_groups)}): {expected_groups}\n"
         f"  got      ({len(names)}): {names}"
     )
@@ -720,7 +785,7 @@ def test_live_roster_groups_match_plan_evidence(tmp_path):
 # Fixture with two raw variants on different gateways AND a same-gateway
 # overlap. The poolside group must render ONE name row + per-(gateway,raw)
 # expansion rows; the single-variant group renders ONE name row + ONE
-# expansion row.
+# expansion row. provider_models provides the `name` field for grouping.
 EXPAND_ROSTER = {
     "tick_epoch": 1787721434,
     "providers": {
@@ -738,6 +803,46 @@ EXPAND_ROSTER = {
             "vendor-x/poolside-s-2.1-free",      # variant B (overlap on kilo!)
             "vendor-x/poolside-s-2.1:free",      # variant A (overlap on kilo!)
         ],
+    },
+    "provider_models": {
+        "nous": {
+            "vendor-x/poolside-s-2.1:free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+            "vendor-x/standalone-1:free": {
+                "name": "vendor-x/standalone-1",
+                "context_length": 131072,
+                "architecture": {"input_modalities": ["text"]},
+            },
+        },
+        "openrouter": {
+            "vendor-x/standalone-2-free": {
+                "name": "vendor-x/standalone-2",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text", "image"]},
+            },
+        },
+        "tokenrouter": {
+            "vendor-x/poolside-s-2.1-free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+        },
+        "kilo": {
+            "vendor-x/poolside-s-2.1-free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+            "vendor-x/poolside-s-2.1:free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+        },
     },
     "stale_providers": [],
 }
