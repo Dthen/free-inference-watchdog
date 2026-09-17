@@ -340,11 +340,12 @@ def render_page(roster, logo_b64, header_meta=None):
         # the name flips the checkbox (no onclick, no JS).
         # `tr:has(input:checked) ~ tr.expand` in the stylesheet reveals
         # the per-variant wiring rows when the user expands the name.
+        # Title goes on the label (the actual hover target), not the th.
         cb_id = f"row-{group_index}"
         name_row = (
             f'<tr class="name-row">'
-            f'<th{title_attr}>'
-            f'<label for="{cb_id}">'
+            f'<th>'
+            f'<label for="{cb_id}"{title_attr}>'
             f'<input type="checkbox" id="{cb_id}" class="row-expand" aria-label="toggle wiring for {escape(name)}">'
             f'<span class="caret" aria-hidden="true">&#9656;</span> '
             f'{escape(name)}'
@@ -391,7 +392,7 @@ def render_page(roster, logo_b64, header_meta=None):
         return (f'<th><a href="{escape(url)}" target="_blank"'
                 f' rel="noopener"{title}>{text}</a></th>')
 
-    head_cells = "<th>model id</th><th>#</th>" + "".join(
+    head_cells = "<th>model</th><th>#</th>" + "".join(
         _head_cell(gw) for gw in active_gateways
     )
     # <tfoot> stays RAW per-gateway counts — that is the honest "ids
