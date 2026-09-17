@@ -340,15 +340,17 @@ def render_page(roster, logo_b64, header_meta=None):
         # the name flips the checkbox (no onclick, no JS).
         # `tr:has(input:checked) ~ tr.expand` in the stylesheet reveals
         # the per-variant wiring rows when the user expands the name.
-        # Title goes on the label (the actual hover target), not the th.
+        # Title goes on a span wrapping just the name text — the visible
+        # hover target. Browser tooltips on <label> can be inconsistent;
+        # a <span title="…"> wrapping the text is reliable across browsers.
         cb_id = f"row-{group_index}"
         name_row = (
             f'<tr class="name-row">'
             f'<th>'
-            f'<label for="{cb_id}"{title_attr}>'
+            f'<label for="{cb_id}">'
             f'<input type="checkbox" id="{cb_id}" class="row-expand" aria-label="toggle wiring for {escape(name)}">'
             f'<span class="caret" aria-hidden="true">&#9656;</span> '
-            f'{escape(name)}'
+            f'<span{title_attr}>{escape(name)}</span>'
             f'</label>'
             f'</th>'
             f'<td class="n">{len(present_gws)}</td>'
