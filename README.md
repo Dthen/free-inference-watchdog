@@ -212,8 +212,10 @@ Providers are plain JSON config files in `providers/`. The watchdog loads every
 - **To remove a provider**: delete its JSON file — it silently disappears on
   the next tick (the loader only materializes configs that exist on disk).
 
-See [`providers/README.md`](providers/README.md) for the full schema and
-detection-method reference.
+A file the loader cannot use (invalid JSON, missing required fields, an auth
+method it does not implement) is skipped with a
+`config: skipping providers/<name>.json: <reason>` warning on stderr and costs
+exactly that provider — the rest of the roster still loads.
 
 ## Architecture
 
@@ -221,18 +223,51 @@ The watchdog is **config-driven**: none of the gateways are hard-coded in the
 monitor logic. Each provider is a `providers/*.json` file whose schema the
 loader validates at startup:
 
-| Field | Meaning |
-|---|---|
-| `name` | Human-readable name |
-| `base_url` | API base URL (no trailing `/`) |
-| `detection` | Which free-model detection method to apply |
-| `auth.method` | `env_var`, `token_file`, or `none` |
-| `auth.env_key` | Env var name (when `auth.method` is `env_var`) |
-| `auth.path_env` | Env var holding a path to a JSON token file (when `auth.method` is `token_file`; takes precedence over `auth.path`) |
-| `auth.path` | Literal path to a JSON token file (legacy `token_file` alternative to `path_env`) |
-| `auth.key` | Dot-separated JSON path to the token inside the file (e.g. `providers.nous.access_token`) |
-| `display` | Column order (0 = first) |
-| `removal_hold_seconds` | Optional; when present, confirmed removals are held this many seconds before alerting. Absent = instant. Opt-in per provider. |
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `name` | string | yes | Human-readable name |
+| `base_url` | string | yes | API base URL (no trailing `/`) |
+| `detection` | string | yes | Which free-model detection method to apply |
+| `auth` | object | yes | Authentication config |
+| `auth.method` | string | yes | `env_var`, `token_file`, or `none` |
+| `auth.env_key` | string | if `env_var` | Env var name |
+| `auth.path_env` | string | if `token_file` | Env var holding a path to a JSON token file (takes precedence over `auth.path`) |
+| `auth.path` | string | if `token_file` | Literal path to a JSON token file (legacy `token_file` alternative to `path_env`) |
+| `auth.key` | string | if `token_file` | Dot-separated JSON path to the token inside the file (e.g. `providers.nous.access_token`) |
+| `display` | int | yes | Column order (0 = first) |
+| `roster_key` | string | no | Explicit roster-key override; defaults to the config file's stem (see `config_loader._provider_key`) |
+| `ignored_slugs` | list of strings | no | Exact model ids to exclude from tracking (see below) |
+| `probe` | object | no | Zero-credit-probe dialect: `max_tokens` + `paid_signals` (see below) |
+| `removal_hold_seconds` | int | no | When present, confirmed removals are held this many seconds before alerting. Absent = instant. Opt-in per provider. |
+
+### Ignored slugs (`ignored_slugs`)
+
+Optional per-provider list of **exact-match** model ids dropped after detection
+so they never enter the roster — e.g. auto-router endpoints like
+`kilo-auto/free` or `openrouter/free`, which pass the free-id rule but are not
+real models. Excluded ids drop silently. A value that is not a list of
+non-empty, unpadded strings breaks validation: the whole config file is skipped
+with the standard `config: skipping ...` stderr warning.
+
+### Probe dialect (`probe`)
+
+Optional block for `zero-credit-probe` gateways: it moves the prober's
+gateway-specific assumptions out of code and into the provider's JSON, so a
+second zero-credit gateway needs no code edit. Two keys, both optional:
+
+- `max_tokens` — positive integer, the completion size the probe fires.
+  Defaults to 3 because b.ai rejects values of 2 or less.
+- `paid_signals` — non-empty list of error bodies that mean "this key has no
+  credit". Each entry is `{"status": <int>, "all_of": [<substrs>],
+  "any_of": [<substrs>]}`: it matches when the HTTP status equals `status`,
+  every `all_of` substring appears in the lower-cased body, and either there is
+  no `any_of` key or at least one `any_of` substring appears. A matching signal
+  verdicts the model PAID; anything else DEFERs and self-heals next tick.
+  Supplying `paid_signals` REPLACES the built-in defaults rather than adding.
+
+`providers/bai.json` carries b.ai's dialect explicitly — the built-in defaults
+are only the fallback for a config that omits the block. A block of the wrong
+shape costs exactly its own file with the standard `config: skipping ...` warning.
 
 Detection methods (dispatched by string key, so a provider can pick any):
 
@@ -283,7 +318,7 @@ Detection methods (dispatched by string key, so a provider can pick any):
   provider_state, now, stale_hours=24)` returns ordered list [new arrivals →
   free (every tick) → stale paid (>=24h, oldest first)].
 
-To add a provider, drop in a JSON config (see `providers/README.md`); to change
+To add a provider, drop in a JSON config (see the schema table above); to change
 a detection strategy, edit the JSON — no Python changes required.
 
 ### Zero-credit probe (B.AI)

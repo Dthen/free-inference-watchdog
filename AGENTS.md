@@ -12,9 +12,16 @@
 - Free-only rule per provider: an id is tracked iff `"free" in id.lower()`. No alias map, no allowlist, no normalized-name matching — exact ids only. A new stealth arrival ships under whatever id the gateway assigns; if that id doesn't contain "free", it's not tracked.
 - Ollama is gone BY DESIGN (GPU-time metering, no free-model concept) — do not re-add it.
 
+## Config gotchas (read before adding a field to providers/*.json)
+- The full field list lives in README.md's schema table. The traps below are what that table cannot say.
+- Optional fields are validated PER-FILE and the type is STRICT: present means valid, and valid means exactly that type. A bad value skips that one config with a `config: skipping ...` stderr warning — it never takes the roster with it. Follow the existing `display` / `removal_hold_seconds` guards.
+- bools must be real JSON booleans. `bool("false")` is `True` and `bool(0)` is `False`, so a quoted `"false"` or a bare `0` silently inverts the operator's intent with no error anywhere. If you add a boolean field, reject anything that is not `isinstance(x, bool)`.
+- Model metadata is stored as the RAW API object under `roster.json` → `provider_models`, nested per gateway. Do not assume a field is top-level on the model object: `max_completion_tokens`, `context_length` and `is_moderated` all arrive under `top_provider`, and the hover tooltip reads them from there. `context_length` and `architecture.input_modalities` are the only two currently rendered; everything else is stored but unrendered.
+
 ## Tests & README
 - `python3 -m pytest tests/ -q` fully green before ANY commit.
 - tests/test_readme.py PINS README wording (cron wrapper block, --init/.bak language, silent-cron `--deliver local`). Editing README.md is a code change.
+- One README, not two. providers/README.md was folded into the root README's schema section; the repo carries exactly README.md, AGENTS.md and LICENSE.md.
 
 ## Deploy ritual
 - Behavior-changing roster edits require a manual `python3 inference_watchdog.py --init` rebaseline (archives roster.json to roster.json.bak), then verify the next tick is SILENT.
