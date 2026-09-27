@@ -25,6 +25,7 @@
 
 ## Deploy ritual
 - Behavior-changing roster edits require a manual `python3 inference_watchdog.py --init` rebaseline (archives roster.json to roster.json.bak), then verify the next tick is SILENT.
+- EXCEPTION (operator ruling 2026-09-27): a registry change that only ADDS or REMOVES a provider — adding `providers/*.json`, deleting one, or setting `"enabled": false` — needs NO `--init`. Such a change is already silent: `load_filtered_roster` drops keys outside the registry and `compute_events` only walks the fetched map, so no removal alert is produced. Running `--init` anyway would rebaseline all seven providers and suppress their real diffs for a tick. Re-enabling a provider repopulates the roster and surfaces its models as additions, which is correct and self-healing.
 
 ## State layout (state/, gitignored)
 - roster.json: providers + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
