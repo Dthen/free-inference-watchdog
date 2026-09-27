@@ -38,6 +38,18 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 BUILDER = REPO / "build_site.py"
 
+# Extracts a group's display name from its name-row. The name lives INSIDE the
+# last span: the builder emits a caret span, then the name span (dddb44a wrapped
+# the name in a span for reliable browser tooltips). A single optional generic
+# `<span>` group is greedy — it swallows the caret span and captures only the
+# separating space — so the caret is consumed explicitly and the name span is
+# matched as REQUIRED, which is what makes the capture the name and not a space.
+_NAME_ROW_RE = (
+    r'<tr class="name-row"><th[^>]*>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?'
+    r'(?:<span class="caret"[^>]*>[^<]*</span>\s*)?'
+    r'<span[^>]*>([^<]*)</span>'
+)
+
 # Canonical seeded fixture used by every test below.
 SEED_ROSTER = {
     "tick_epoch": 1787721434,
@@ -188,7 +200,8 @@ def test_presence_matrix_structure():
         # anchor) — extract the bare gateway name.
         head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
         cols = [c.strip() for c in re.findall(r"<th>(?:<a[^>]*>)?([^<(]*)", head)]
-        assert cols == ["model id", "#", "nous", "tokenrouter", "kilo", "openrouter", "amd"]
+        # Header reads "model", not "model id" (14a442b renamed it for width).
+        assert cols == ["model", "#", "nous", "tokenrouter", "kilo", "openrouter", "amd"]
         # unique ids: vendor-z/zero-priced-model + stepfun + vendor-x/preview-free = 3 rows
         # Each group is in its own <tbody>; count name-rows across all
         name_rows = re.findall(r'<tr class="name-row">', html)
@@ -717,8 +730,12 @@ def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
     tbodies = re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
     names = []
     for tbody in tbodies:
-        # Match <th> with optional title attr, then label/input/span, then name
-        names.extend(re.findall(r'<tr class="name-row"><th[^>]*>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)', tbody))
+        # The name is the LAST span's text: a caret span then the name span
+        # (dddb44a wrapped the name in a span for reliable browser tooltips),
+        # so the name span must be matched explicitly — an optional generic
+        # span group is greedy and swallows the caret, capturing only the
+        # space before the name.
+        names.extend(re.findall(_NAME_ROW_RE, tbody))
     assert names == sorted(names), (
         f"groups must be alphabetically sorted by stripped name; got {names}"
     )
@@ -765,8 +782,8 @@ def test_live_roster_groups_match_plan_evidence(tmp_path):
     tbodies = re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
     names = []
     for tbody in tbodies:
-        # Match <th> with optional title attr, then label/input/span, then name
-        names.extend(re.findall(r'<tr class="name-row"><th[^>]*>(?:<label[^>]*>)?(?:<input[^>]*>\s*)?(?:<span[^>]*>[^<]*</span>\s*)?([^<]+)', tbody))
+        # See _NAME_ROW_RE: the name is the last span's text, not bare markup.
+        names.extend(re.findall(_NAME_ROW_RE, tbody))
     assert names == expected_groups, (
         f"live roster: groups must equal sorted unique display names.\n"
         f"  expected ({len(expected_groups)}): {expected_groups}\n"
@@ -864,13 +881,7 @@ def _all_trs_for(html, stripped_name):
         rows = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", tbody, re.S)
         out, take = [], False
         for row in rows:
-            m = re.match(
-                r'<tr class="name-row"><th>'
-                r"(?:<label[^>]*>)?(?:<input[^>]*>\s*)?"
-                r'(?:<span[^>]*>[^<]*</span>\s*)?'
-                r"([^<]+)",
-                row,
-            )
+            m = re.match(_NAME_ROW_RE, row)
             if m:
                 take = (m.group(1) == stripped_name)
                 if take:
