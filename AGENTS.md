@@ -16,7 +16,7 @@
 - The full field list lives in README.md's schema table. The traps below are what that table cannot say.
 - Optional fields are validated PER-FILE and the type is STRICT: present means valid, and valid means exactly that type. A bad value skips that one config with a `config: skipping ...` stderr warning — it never takes the roster with it. Follow the existing `display` / `removal_hold_seconds` guards.
 - bools must be real JSON booleans. `bool("false")` is `True` and `bool(0)` is `False`, so a quoted `"false"` or a bare `0` silently inverts the operator's intent with no error anywhere. If you add a boolean field, reject anything that is not `isinstance(x, bool)`.
-- Model metadata is stored as the RAW API object under `roster.json` → `provider_models`, nested per gateway. Do not assume a field is top-level on the model object: `max_completion_tokens`, `context_length` and `is_moderated` all arrive under `top_provider`, and the hover tooltip reads them from there. `context_length` and `architecture.input_modalities` are the only two currently rendered; everything else is stored but unrendered.
+- Model metadata is stored as the RAW API object under `roster.json` → `provider_models`, nested per gateway. Only three of its fields are ever read: `name` (dashboard row labels), and `context_length` + `architecture.input_modalities` (hover tooltip).
 
 ## Tests & README
 - `python3 -m pytest tests/ -q` fully green before ANY commit.
