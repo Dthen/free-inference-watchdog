@@ -196,7 +196,7 @@ def _resolve_auth_token(config, fname):
     method = auth.get("method")
     try:
         if method == "env_var":
-            return os.environ.get(auth["env_key"], "")
+            return _lookup_env(auth["env_key"])
         if method == "token_file":
             path_env = auth.get("path_env")
             if path_env:
