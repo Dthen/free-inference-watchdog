@@ -318,22 +318,43 @@ def render_page(roster, logo_b64, header_meta=None):
             '<td class="yes">&#9679;</td>' if gw in present_gws else '<td class="no"></td>'
             for gw in active_gateways
         ]
-        # Build hover title from the first variant's metadata (if available).
-        # A group may span multiple gateways; use the first gateway that has
-        # both context_length and input_modalities.
-        title_parts = []
+        # Build hover title from ALL variants' metadata.
+        # A group may span multiple gateways; collect context_length and
+        # input_modalities from each provider, then show per-provider values
+        # when they differ.
+        ctx_by_val = {}  # {value: set of providers}
+        mod_by_val = {}  # {tuple_of_modalities: set of providers}
         for gw, mid in group["variants"]:
             model_info = provider_models.get(gw, {}).get(mid, {})
-            context_length = model_info.get("context_length")
+            cl = model_info.get("context_length")
             arch = model_info.get("architecture", {})
-            input_modalities = arch.get("input_modalities")
-            if context_length is not None:
-                title_parts.append(f"Context length: {context_length}")
-            if input_modalities:
-                title_parts.append(f"Input modalities: {', '.join(input_modalities)}")
-            if title_parts:
-                break  # first variant with metadata wins
-        title_attr = f' title="{escape(chr(10).join(title_parts))}"' if title_parts else ""
+            im = arch.get("input_modalities")
+            if cl is not None:
+                ctx_by_val.setdefault(cl, set()).add(gw)
+            if im:
+                mod_by_val.setdefault(tuple(im), set()).add(gw)
+        title_parts = []
+        if ctx_by_val:
+            if len(ctx_by_val) == 1:
+                title_parts.append(f"Context length: {next(iter(ctx_by_val))}")
+            else:
+                items = sorted(
+                    ((val, sorted(gws)) for val, gws in ctx_by_val.items()),
+                    key=lambda x: x[0],
+                )
+                prov_parts = [f"{val} ({', '.join(gws)})" for val, gws in items]
+                title_parts.append(f"Context length: {', '.join(prov_parts)}")
+        if mod_by_val:
+            if len(mod_by_val) == 1:
+                title_parts.append(f"Input modalities: {', '.join(next(iter(mod_by_val)))}")
+            else:
+                items = sorted(
+                    ((mods, sorted(gws)) for mods, gws in mod_by_val.items()),
+                    key=lambda x: x[0],
+                )
+                prov_parts = [f"{', '.join(mods)} ({', '.join(gws)})" for mods, gws in items]
+                title_parts.append(f"Input modalities: {', '.join(prov_parts)}")
+        title_attr = f' title="{"&#10;".join(escape(part) for part in title_parts)}"' if title_parts else ""
         # One <input type="checkbox"> per group, named with a stable
         # group_index so two groups can never share an id. The label
         # wraps both the checkbox and the stripped name, so clicking
