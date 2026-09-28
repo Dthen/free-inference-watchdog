@@ -1052,3 +1052,64 @@ def test_enabled_false_is_valid_but_not_yet_gated(tmp_path, monkeypatch, capsys)
     captured = capsys.readouterr()
     assert "enabled must be a boolean" not in captured.err
     assert "skipping" not in captured.err
+
+
+# ---------- enabled: the gate — a validated false is dropped from the roster ----------
+
+
+def test_disabled_provider_excluded_from_registry(tmp_path, monkeypatch, capsys):
+    """enabled:false drops the provider from load_configs() -> PROVIDERS
+    and GATEWAY_WIRING, so the tick never fetches it, the dashboard
+    never renders a column, and the MCP server never lists it. The
+    config FILE stays on disk, so re-enabling is a one-character edit."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "on.json").write_text(json.dumps(
+        {"name": "On", "base_url": "https://on.com/v1", "detection": "all-free",
+         "auth": {"method": "none"}, "display": 0, "enabled": True}))
+    (providers_dir / "off.json").write_text(json.dumps(
+        {"name": "Off", "base_url": "https://off.com/v1", "detection": "all-free",
+         "auth": {"method": "none"}, "display": 1, "enabled": False}))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert set(config_loader.build_providers()) == {"on"}
+    # GATEWAY_WIRING is gated by the same load_configs() call — a
+    # disabled provider must not leave a dangling wiring entry.
+    assert set(config_loader.build_gateway_wiring()) == {"on"}
+    assert "off" in capsys.readouterr().err       # visible, not silent
+
+
+def test_absent_enabled_defaults_to_on(tmp_path, monkeypatch):
+    """The field is OPTIONAL: every config predating it keeps working.
+    Absent must mean enabled, or adding this field would switch off
+    every provider in the repo."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "legacy.json").write_text(json.dumps(
+        {"name": "Legacy", "base_url": "https://l.com/v1",
+         "detection": "all-free", "auth": {"method": "none"}, "display": 0}))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert set(config_loader.build_providers()) == {"legacy"}
+
+
+def test_disabling_is_silent_no_mass_removal(tmp_path, monkeypatch):
+    """Regression guard for the property this whole feature rests on:
+    a provider leaving the registry must NOT produce a 🔴 removal
+    alert. load_filtered_roster drops non-registry keys and
+    compute_events only walks the fetched map, so the tick is quiet."""
+    import diffing
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "on.json").write_text(json.dumps(
+        {"name": "On", "base_url": "https://on.com/v1", "detection": "all-free",
+         "auth": {"method": "none"}, "display": 0}))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    reg = config_loader.build_providers()            # only "on"
+    roster = {"tick_epoch": 0, "providers": {"on": ["a"], "off": ["x", "y"]}}
+    roster_path = tmp_path / "roster.json"
+    roster_path.write_text(json.dumps(roster), encoding="utf-8")
+    loaded = diffing.load_filtered_roster(roster_path, set(reg))
+    assert loaded is not None
+    assert "off" not in loaded["providers"]
+    new_map, stale = diffing.apply_sticky(loaded["providers"], {"on": ["a"]})
+    events, first_run = diffing.compute_events(loaded, new_map, registry=set(reg))
+    assert events == {} and stale == [] and first_run is False

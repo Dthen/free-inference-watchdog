@@ -287,6 +287,16 @@ def load_configs():
             continue
         config["_stem"] = path.stem
         config["_token"] = _resolve_auth_token(config, path.name)
+        if config.get("enabled") is False:
+            # Strict identity check, not truthiness: the validator above has
+            # already guaranteed a real bool-or-absent, so `is False` can
+            # only be reached by a deliberate operator opt-out. Note it on
+            # stderr — a provider that silently stops being polled looks
+            # identical to one that broke, and the operator must be able to
+            # tell "I turned this off" from "this fell over".
+            print(f"config: provider {path.name} is disabled "
+                  f"(enabled: false) — not tracked", file=sys.stderr)
+            continue
         configs.append(config)
 
     return sorted(configs, key=lambda c: c.get("display", 0))
