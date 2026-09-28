@@ -4,6 +4,7 @@
   "detection": "all-free",
   "auth": { "method": "env_var", "env_key": "NVIDIA_API_KEY" },
   "display": 6,
+  "enabled": false,
   "signup_url": "https://build.nvidia.com/?modal=signin",
   "limits_note": "No published limits; ~40 RPM community baseline, per-model, not SLA (as of 2026-09-13)"
 }

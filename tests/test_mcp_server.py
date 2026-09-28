@@ -120,16 +120,17 @@ def test_list_full_roster(state_dir):
     assert set(provs) == set(mcp_server.PROVIDERS)
     assert provs["nous"] == ["vendor-d/model-6:free", "vendor-z/zero-priced-model"]
     assert res["counts"]["nous"] == 2
-    assert res["n_gateways"] == len(mcp_server.PROVIDERS) == 7
+    assert res["n_gateways"] == len(mcp_server.PROVIDERS) == 6
     assert res["total_ids"] > 0
     assert isinstance(res["tick_epoch"], int)
 
 
 def test_list_partial_roster_canonical_shape(tmp_path):
     """One gateway-key semantic everywhere: a partial roster ({nous, tokenrouter}
-    plus a junk key) STILL yields all canonical gateways — kilo/openrouter/amd/bai/nim
-    as empty lists, n_gateways==7 — and 'mysterygw' never leaks
-    into the output."""
+    plus a junk key) STILL yields all canonical gateways — kilo/openrouter/amd/bai
+    as empty lists, n_gateways==6 — and 'mysterygw' never leaks
+    into the output. nim is absent: providers/nim.json is on disk but
+    carries enabled:false, so it is not in the registry."""
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "roster.json").write_text(json.dumps({
         "tick_epoch": 100,
@@ -143,11 +144,11 @@ def test_list_partial_roster_canonical_shape(tmp_path):
     assert res["ok"] is True
     assert set(res["providers"]) == set(mcp_server.PROVIDERS)
     assert res["providers"]["nous"] == ["vendor-z/zero-priced-model"]
-    for gw in ("tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"):
+    for gw in ("tokenrouter", "kilo", "openrouter", "amd", "bai"):
         assert res["providers"][gw] == []
     assert res["counts"] == {"nous": 1, "tokenrouter": 0, "kilo": 0,
-                             "openrouter": 0, "amd": 0, "bai": 0, "nim": 0}
-    assert res["n_gateways"] == 7
+                             "openrouter": 0, "amd": 0, "bai": 0}
+    assert res["n_gateways"] == 6
     assert "mysterygw" not in res["providers"]
     assert "mysterygw" not in res["counts"]
 
@@ -214,7 +215,7 @@ def test_status_fields_present(state_dir):
     assert res["stale_providers"] == []
     # All DISPLAY_ORDER gateways always appear (stable shape); unknown
     # roster keys never appear.
-    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"):
+    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"):
         assert gw in res["provider_counts"]
     assert res["provider_counts"]["kilo"] == 3
     assert res["provider_counts"]["nous"] == 2
@@ -238,7 +239,7 @@ def test_status_reports_stale_providers(tmp_path):
     }))
     res = mcp_server.watchdog_status(now=200, root=tmp_path)
     assert res["stale_providers"] == ["tokenrouter", "kilo"]
-    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"):
+    for gw in ("nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"):
         assert res["provider_counts"][gw] == 0
 
 
@@ -344,7 +345,7 @@ def test_list_endpoints_totals_match_roster(state_dir):
     # -> cohere/north-mini-code, vendor-f/model-5:free -> vendor-f/model-5)
     assert res["counts"]["models"] == 7
     assert res["counts"]["models"] < res["counts"]["endpoints"]
-    assert res["counts"]["gateways"] == 7
+    assert res["counts"]["gateways"] == 6
     assert res["provider"] is None
     # All gateways present in the gateways map
     assert set(res["gateways"]) == set(mcp_server.PROVIDERS)

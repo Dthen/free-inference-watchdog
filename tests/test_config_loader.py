@@ -449,12 +449,25 @@ def test_provider_key_slug_fallback_for_hand_built_dicts():
 
 
 def test_real_configs_keys_unchanged_by_stem_migration():
-    """Migration safety net: the 7 shipped configs must resolve to the
-    SAME roster keys as before the _PROVIDER_KEY_MAP deletion (they were
-    map values: nous, tokenrouter, kilo, openrouter, amd, bai, nim).
-    Update expected when a gateway file is legitimately added/removed."""
-    expected = {"nous", "tokenrouter", "kilo", "openrouter", "amd", "bai", "nim"}
+    """Migration safety net: the 7 shipped configs resolve to the SAME
+    roster keys as before the _PROVIDER_KEY_MAP deletion. nim.json is
+    still ON DISK but carries enabled:false, so it is absent from the
+    registry — 6 tracked. Update when a gateway is legitimately
+    added/removed OR enabled/disabled."""
+    expected = {"nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"}
     assert set(config_loader.PROVIDERS) == expected
+
+
+def test_disabled_provider_config_file_survives_on_disk():
+    """The point of the flag: untracking must NOT delete the config.
+    nim.json exists, is valid, and is simply gated out — so re-enabling
+    is a one-character edit with no code change and no re-registration."""
+    from pathlib import Path
+    nim = Path(config_loader.REPO) / "providers" / "nim.json"
+    assert nim.is_file(), "providers/nim.json must survive being disabled"
+    cfg = json.loads(nim.read_text(encoding="utf-8"))
+    assert cfg["enabled"] is False
+    assert cfg["auth"]["env_key"] == "NVIDIA_API_KEY"   # credential intact
 
 
 # ---------- roster_key: optional, validated non-empty string ----------
@@ -776,8 +789,9 @@ def test_provider_key_map_deleted_stem_is_the_convention():
 def test_real_configs_include_nim_last_display():
     """providers/nim.json exists in the real repo config dir: all-free
     detection against https://integrate.api.nvidia.com/v1 with NVIDIA_API_KEY
-    env_var auth, and display 6 so NIM sorts AFTER bai in every user-visible
-    surface."""
+    env_var auth, and display 6. The file survives being disabled, but
+    enabled:false keeps it out of load_configs(), so bai now sorts last
+    in every user-visible surface."""
     repo = Path(config_loader.__file__).resolve().parent
     cfg = json.loads((repo / "providers" / "nim.json").read_text(encoding="utf-8"))
     assert cfg["name"] == "NVIDIA NIM"
@@ -786,21 +800,17 @@ def test_real_configs_include_nim_last_display():
     assert cfg["auth"] == {"method": "env_var", "env_key": "NVIDIA_API_KEY"}
     assert cfg["display"] == 6
     configs = config_loader.load_configs()
-    assert len(configs) == 7, "real providers/ dir must hold seven configs"
-    assert configs[-1]["name"] == "NVIDIA NIM", "nim must sort last"
+    assert len(configs) == 6, "real providers/ dir must hold six enabled configs"
 
 
-def test_build_gateway_wiring_shape_and_nim():
+def test_build_gateway_wiring_shape_excludes_disabled():
     """GATEWAY_WIRING has one entry per gateway; the 'auth' field is GONE
     (operator: 'Bearer <your API key>' read the same for every gateway — it
     was dropped from all site/MCP surfaces), and only the two remaining
-    fields survive."""
+    fields survive. nim.json is on disk but enabled:false, so it must
+    leave no dangling wiring entry."""
     wiring = config_loader.build_gateway_wiring()
-    assert "nim" in wiring
-    assert wiring["nim"] == {
-        "chat_completions_url": "https://integrate.api.nvidia.com/v1/chat/completions",
-        "api_type": "openai_compatible",
-    }
+    assert "nim" not in wiring
     for gw, w in wiring.items():
         assert set(w) == {"chat_completions_url", "api_type"}, f"{gw} wiring fields drifted"
 

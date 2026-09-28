@@ -137,11 +137,13 @@ def test_deterministic_output():
 def test_display_order_constant():
     """DISPLAY_ORDER is Dthen's quality ranking, derived dynamically from
     config_loader.PROVIDERS (sorted by `display` field). Must produce
-    [nous, tokenrouter, kilo, openrouter, amd, bai, nim] — NOT providers.py
-    registry order and NOT alphabetical. nim is last (display 6)."""
+    [nous, tokenrouter, kilo, openrouter, amd, bai] — NOT providers.py
+    registry order and NOT alphabetical. nim is absent: providers/nim.json
+    is still on disk but carries enabled:false, so the loader gates it
+    out of the registry. bai is last (display 5)."""
     from build_site import DISPLAY_ORDER
     assert DISPLAY_ORDER == ["nous", "tokenrouter", "kilo", "openrouter",
-                             "amd", "bai", "nim"]
+                             "amd", "bai"]
     # Confirm it's sourced from config_loader (dynamic), not a hardcoded list.
     src = BUILDER.read_text(encoding="utf-8")
     assert "PROVIDERS" in src and "config_loader" in src, \
@@ -1088,35 +1090,41 @@ def test_expand_via_css_sibling_selector(tmp_path):
         # (or any of: input[type=checkbox]:checked + .expand, etc.)
 
 
-# ---------- NIM column + expand-row overflow (operator fixes, 2026-09-13) ----------
+# ---------- Gateway column + expand-row overflow (operator fixes, 2026-09-13) ----------
+#
+# Retargeted from nim to bai on 2026-09-28: nim.json carries enabled:false
+# and no longer loads into the registry, so DISPLAY_ORDER has no nim column
+# to render. The coverage being protected — "a gateway in the roster gets a
+# column, carries its wiring URL in the expand row, and links its signup_url
+# in the column head" — is about ANY gateway, not nim.
 
-NIM_ROSTER = {
+BAI_ROSTER = {
     "tick_epoch": 1787721434,
     "providers": {
         "nous": ["vendor-z/zero-priced-model"],
-        "nim": ["meta/llama-3.3-70b-instruct"],
+        "bai": ["meta/llama-3.3-70b-instruct"],
     },
     "stale_providers": [],
 }
 
 
-def test_nim_gets_a_column_and_wiring_url(tmp_path):
-    """A roster carrying nim renders a nim column, and its expand row shows
-    the NVIDIA chat-completions URL — the full all-free catalog joins every
+def test_bai_gets_a_column_and_wiring_url(tmp_path):
+    """A roster carrying bai renders a bai column, and its expand row shows
+    the B.AI chat-completions URL — the full catalog joins every
     user-visible surface with zero per-gateway special-casing."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         _seed_logo(tmp)
-        proc = _run_builder(NIM_ROSTER, tmp)
+        proc = _run_builder(BAI_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        # Header upgrade: nim carries a signup link in its column head.
-        assert ">nim</a></th>" in html, "nim column header missing"
-        assert 'href="https://build.nvidia.com/?modal=signin"' in html, (
-            "nim header not linked to its signup URL")
-        assert "integrate.api.nvidia.com/v1/chat/completions" in html, (
-            "nim chat-completions URL missing from the expand row")
+        # Header upgrade: bai carries a signup link in its column head.
+        assert ">bai</a></th>" in html, "bai column header missing"
+        assert 'href="https://b.ai/"' in html, (
+            "bai header not linked to its signup URL")
+        assert "api.b.ai/v1/chat/completions" in html, (
+            "bai chat-completions URL missing from the expand row")
         assert "Bearer" not in html
 
 
@@ -1158,7 +1166,10 @@ HEADER_ROSTER = {
     "tick_epoch": 1787721434,
     "providers": {
         "nous": ["vendor-z/zero-priced-model", "vendor-g/model-7:free"],
-        "nim": ["meta/llama-3.3-70b-instruct"],
+        # bai, not nim: nim.json carries enabled:false, so DISPLAY_ORDER has
+        # no nim column. bai stays in the registry and keeps the "gateway with
+        # no header meta renders a bare <th>" coverage alive.
+        "bai": ["meta/llama-3.3-70b-instruct"],
     },
     "stale_providers": [],
 }
@@ -1215,11 +1226,11 @@ def test_header_links_anchor_with_tooltip():
     head = _render(HEADER_ROSTER, {"nous": {
         "signup_url": "https://portal.nousresearch.com/",
         "limits_note": "Per-token rate limits, shared across all models (as of 2026-09)"}})
-    assert head.count("<th>") == 4  # model id, #, nous, nim (nim plain: no meta entry)
+    assert head.count("<th>") == 4  # model id, #, nous, bai (bai plain: no meta entry)
     assert ('<th><a href="https://portal.nousresearch.com/" target="_blank" '
             'rel="noopener" title="Per-token rate limits, shared across all models '
             '(as of 2026-09)">nous</a></th>') in head
-    assert "<th>nim</th>" in head  # absent from map -> plain th
+    assert "<th>bai</th>" in head  # absent from map -> plain th
 
 
 def test_header_link_text_is_bare_name_and_title_is_escaped():
@@ -1288,7 +1299,7 @@ def test_config_load_failure_degrades_to_plain_headers(tmp_path, monkeypatch):
     build_site.main(["--root", str(tmp_path)])  # must NOT raise
     html = (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
     head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
-    assert "<th>nous</th>" in head and "<th>nim</th>" in head
+    assert "<th>nous</th>" in head and "<th>bai</th>" in head
     assert "<a " not in head
 
 
@@ -1330,8 +1341,8 @@ def test_cli_headers_link_real_provider_fields(tmp_path):
     assert ('<th><a href="https://portal.nousresearch.com/" target="_blank" '
             'rel="noopener" title="Per-token rate limits, shared across all models '
             '(as of 2026-09)">nous</a></th>') in html
-    assert '<th><a href="https://build.nvidia.com/?modal=signin"' in html
-    assert ">nim</a></th>" in html
+    assert '<th><a href="https://b.ai/"' in html
+    assert ">bai</a></th>" in html
 
 
 def test_footer_links_use_class_not_inline_style(tmp_path):
