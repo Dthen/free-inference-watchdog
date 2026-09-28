@@ -84,6 +84,20 @@ def _validate_and_read(path):
         # A non-int display breaks load_configs' sort — reject per-file.
         raise ValueError(
             f"display must be an integer, got {type(display).__name__}")
+    if "enabled" in config:
+        enabled = config["enabled"]
+        # Optional field; ABSENT means enabled (every shipped config is
+        # pre-field, so the default must be "on"). PRESENT means VALID,
+        # and valid means a real bool — nothing else. bool("false") is
+        # True in Python, so a quoted "false" would silently keep the
+        # provider TRACKED; 0/None/"no" would silently disable it. Both
+        # are invisible until someone checks the dashboard, which is
+        # exactly the class of silent misconfiguration per-file
+        # validation exists to kill. Reject per-file so load_configs'
+        # skip+warn path handles it.
+        if not isinstance(enabled, bool):
+            raise ValueError(
+                f"enabled must be a boolean, got {type(enabled).__name__}")
     if "ignored_slugs" in config:
         ignored = config["ignored_slugs"]
         # Optional field: when the key is present (even as explicit JSON

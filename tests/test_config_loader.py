@@ -982,3 +982,73 @@ def test_amd_ships_removal_hold():
     from config_loader import PROVIDERS, removal_hold
     assert removal_hold(PROVIDERS["amd"]) == 1800
     assert removal_hold(PROVIDERS["nous"]) is None
+
+
+# ---------- enabled: optional, strict bool, present-means-valid ----------
+
+
+@pytest.mark.parametrize("bad", ["false", "no", 0, 1, None, [], {}],
+                         ids=["str-false", "str-no", "int-0", "int-1",
+                              "null", "list", "obj"])
+def test_enabled_field_must_be_bool(tmp_path, monkeypatch, capsys, bad):
+    """Optional "enabled": when present it must be a real bool. A JSON
+    "false" string is truthy in Python and would silently keep the
+    provider ON — the opposite of intent, invisible until someone
+    notices the dashboard."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {"name": "X", "base_url": "https://x.com/v1",
+           "detection": "all-free", "auth": {"method": "none"},
+           "display": 0, "enabled": bad}
+    (providers_dir / "x.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert config_loader.load_configs() == []
+    assert "enabled must be a boolean" in capsys.readouterr().err
+
+
+def test_enabled_true_loads(tmp_path, monkeypatch):
+    """`enabled: true` is a well-formed bool and is accepted: the config
+    loads and stays tracked. This test deliberately covers ONLY the true
+    case — a false case here would assert the pre-gate behaviour and then
+    break the moment Task 2's gate lands (see the note below)."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {"name": "X", "base_url": "https://x.com/v1",
+           "detection": "all-free", "auth": {"method": "none"},
+           "display": 0, "enabled": True}
+    (providers_dir / "x.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    assert len(config_loader.load_configs()) == 1
+
+
+def test_enabled_false_is_valid_but_not_yet_gated(tmp_path, monkeypatch, capsys):
+    """The VALIDATOR accepts `enabled: false` — it is a real bool, so the
+    config must NOT be skipped with a type warning. Whether it is then
+    EXCLUDED from the roster is Task 2's gate, which lands after this
+    task; asserting exclusion here would make this test fail in Task 1
+    and pass in Task 2, i.e. a test that changes meaning mid-plan.
+
+    This asserts only what Task 1 owns: no type-validation error.
+    """
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    cfg = {"name": "X", "base_url": "https://x.com/v1",
+           "detection": "all-free", "auth": {"method": "none"},
+           "display": 0, "enabled": False}
+    (providers_dir / "x.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+    config_loader.load_configs()
+    # The validator accepted it — no skip-with-warning. The config is then
+    # loaded (pre-gate) or dropped by the gate (post-gate); Task 1 asserts
+    # neither, because both are Task 2's business.
+    #
+    # CORRECTED 2026-09-28 (review finding, BLOCKING). This test previously
+    # called capsys.readouterr() twice. The first call DRAINS the capture
+    # buffer; the second returns CaptureResult(out='', err='') whatever
+    # happened, so the "skipping" assertion could never fail — the test
+    # asserted nothing about its stated purpose. Proven by execution: a
+    # control asserting the message IS present in the second read fails,
+    # while a single-read variant passes. Capture ONCE, assert against it.
+    captured = capsys.readouterr()
+    assert "enabled must be a boolean" not in captured.err
+    assert "skipping" not in captured.err
