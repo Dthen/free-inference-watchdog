@@ -209,8 +209,12 @@ Providers are plain JSON config files in `providers/`. The watchdog loads every
 `*.json` at startup.
 
 - **To add a provider**: drop a new JSON config file into `providers/`.
-- **To remove a provider**: delete its JSON file — it silently disappears on
-  the next tick (the loader only materializes configs that exist on disk).
+- **To untrack a provider**: set `"enabled": false` in its JSON. The config
+  file stays put — no code change, no re-registration to reverse it. It
+  disappears from the dashboard, the alerts, and the MCP provider list on
+  the next tick, and is noted on stderr each run.
+- **To remove a provider for good**: delete its JSON file. A file the
+  loader cannot use is skipped with a `config: skipping ...` warning.
 
 A file the loader cannot use (invalid JSON, missing required fields, an auth
 method it does not implement) is skipped with a
@@ -239,6 +243,7 @@ loader validates at startup:
 | `ignored_slugs` | list of strings | no | Exact model ids to exclude from tracking (see below) |
 | `probe` | object | no | Zero-credit-probe dialect: `max_tokens` + `paid_signals` (see below) |
 | `removal_hold_seconds` | int | no | When present, confirmed removals are held this many seconds before alerting. Absent = instant. Opt-in per provider. |
+| `enabled` | bool | no | `false` untracks the provider while keeping its config file on disk. Absent = enabled. Must be a real JSON boolean — a quoted `"false"` is a string and is rejected. |
 
 ### Ignored slugs (`ignored_slugs`)
 
