@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+  "tick_epoch": 1759200000,
+  "cadence_s": 3600,
+  "provider_order": [
+    "synthetic-a",
+    "synthetic-b"
+  ],
+  "providers": {
+    "synthetic-a": {
+      "display_name": "Synthetic Alpha",
+      "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [
+        "vendor/known-context",
+        "vendor/unknown-context",
+        "vendor/unknown-description",
+        "vendor/zero-context"
+      ],
+      "models": {
+        "vendor/known-context": {
+          "id": "vendor/known-context",
+          "name": "Vendor Known Context",
+          "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
+          "context_length": 65536,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": 0
+          }
+        },
+        "vendor/unknown-context": {
+          "id": "vendor/unknown-context",
+          "name": "Vendor Unknown Context",
+          "description": "Synthetic unknown-context scenario: a reasoning model whose context length is not reported.",
+          "context_length": null,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": null
+        },
+        "vendor/unknown-description": {
+          "id": "vendor/unknown-description",
+          "name": "Vendor Unknown Description",
+          "description": null,
+          "context_length": 65536,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": null,
+            "completion": null
+          }
+        },
+        "vendor/zero-context": {
+          "id": "vendor/zero-context",
+          "name": "Vendor Zero Context",
+          "description": "Synthetic zero-context scenario: a reasoning model reporting a known zero context length.",
+          "context_length": 0,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": null,
+            "completion": "0"
+          }
+        }
+      },
+      "stale": false
+    },
+    "synthetic-b": {
+      "display_name": "Synthetic Beta",
+      "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [],
+      "models": {},
+      "stale": true
+    }
+  },
+  "warnings": [
+    "metadata_missing"
+  ]
+}

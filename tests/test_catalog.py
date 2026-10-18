@@ -41,6 +41,18 @@ and canonical hash were recomputed, and in-memory mutation probes prove
 the checker rejects both wrong-provider copies/swaps and merged
 capabilities. This remains fixture/integrity work — no query
 implementation behaviour is added here.
+
+Unit 1c-a adds metadata-edge-cases.json, a small valid synthetic
+snapshot that distinguishes UNKNOWN optional metadata (null) from a
+KNOWN zero: an unreported context length versus a reported 0, a
+whole-null pricing object versus individually-null scalars, and a null
+description, plus a stale zero-ID second provider. Four complete,
+literal get_model goldens pin one endpoint each and prove optional
+degradation is unknown, never loss of the endpoint. The focused
+positive controls and in-memory mutation probes below pin the actual
+scenario values and the checker's sensitivity to conflating unknown with
+zero. Search/normalization goldens follow in unit 1c-b and the
+fixed-clock status contract in 1c-c.
 """
 
 import copy
@@ -977,6 +989,267 @@ def test_shared_raw_id_integrity_rejects_merged_capabilities(cases_document):
     assert endpoint["metadata"] != \
         snap["providers"]["synthetic-a"]["models"]["vendor/shared"]
     with pytest.raises(AssertionError, match=METADATA_ATTACHMENT_MARKER):
+        _assert_get_model_payload(case, snap)
+
+
+# ---------- unit 1c-a: unknown versus known-zero optional metadata ----------
+#
+# metadata-edge-cases.json is a small valid synthetic snapshot whose
+# provider `synthetic-a` tracks four models that deliberately distinguish
+# UNKNOWN optional metadata (null) from a KNOWN zero (0): an unreported
+# context length versus a reported 0, a whole-null pricing object versus
+# individually-null scalars, and a null description. `synthetic-b` tracks
+# zero IDs but is stale, so a correct payload must still carry it in the
+# exact-membership and staleness maps. The four get_model goldens below
+# are complete, literal, hand-authored payloads (never generated from an
+# implementation or from the fixture at run time) — this is fixture/oracle
+# work only; the oracle's search behaviour is pinned separately in 1c-b and
+# fixed-clock status in 1c-c.
+
+METADATA_FIXTURE_NAME = "metadata-edge-cases.json"
+METADATA_FIXTURE = FIXTURE_DIR / METADATA_FIXTURE_NAME
+
+METADATA_UNKNOWN_CONTEXT = "vendor/unknown-context"
+METADATA_KNOWN_CONTEXT = "vendor/known-context"
+METADATA_ZERO_CONTEXT = "vendor/zero-context"
+METADATA_UNKNOWN_DESCRIPTION = "vendor/unknown-description"
+# Sorted raw-ID order, matching the snapshot's sorted+deduplicated list.
+METADATA_TRACKED_IDS = (
+    METADATA_KNOWN_CONTEXT,
+    METADATA_UNKNOWN_CONTEXT,
+    METADATA_UNKNOWN_DESCRIPTION,
+    METADATA_ZERO_CONTEXT,
+)
+METADATA_CASE_IDS = {
+    METADATA_UNKNOWN_CONTEXT: "get_model_metadata_unknown_context_null",
+    METADATA_KNOWN_CONTEXT: "get_model_metadata_known_context_inclusive_boundary",
+    METADATA_ZERO_CONTEXT: "get_model_metadata_zero_context_known_zero",
+    METADATA_UNKNOWN_DESCRIPTION: "get_model_metadata_unknown_description_null",
+}
+
+# The one word every non-null scenario description must carry: the oracle
+# text-search case later matches on exactly this word.
+REASONING_WORD = "reasoning"
+# Positive-control pins — the actual scenario values, restated so a helper
+# that merely "passes" cannot hide a dropped or conflated value.
+METADATA_INCLUSIVE_CONTEXT = 65536
+METADATA_ARCHITECTURE = {
+    "input_modalities": ["text"],
+    "output_modalities": ["text"],
+}
+METADATA_SUPPORTED_PARAMETERS = ["temperature"]
+
+
+@pytest.fixture(scope="module")
+def metadata_snapshot():
+    return _load_strict(METADATA_FIXTURE)
+
+
+def _metadata_case(cases_document, case_id):
+    case = next(c for c in _iter_get_model_cases(cases_document)
+                if c["id"] == case_id)
+    return case, _case_fixture(case, cases_document)
+
+
+def _metadata_endpoint(case):
+    endpoints = case["expect"]["endpoints"]
+    assert len(endpoints) == 1, \
+        f"{case['id']}: expected exactly one a-provider endpoint"
+    return endpoints[0]
+
+
+def _metadata_entry(snap, raw_id):
+    return snap["providers"]["synthetic-a"]["models"][raw_id]
+
+
+def test_metadata_fixture_matches_snapshot_contract(metadata_snapshot):
+    _assert_snapshot_contract(metadata_snapshot)
+
+
+def test_metadata_fixture_shape_is_frozen(metadata_snapshot):
+    assert metadata_snapshot["schema_version"] == 1
+    assert metadata_snapshot["tick_epoch"] == 1759200000
+    assert metadata_snapshot["cadence_s"] == 3600
+    assert metadata_snapshot["warnings"] == ["metadata_missing"]
+    assert metadata_snapshot["provider_order"] == ["synthetic-a", "synthetic-b"]
+    a = metadata_snapshot["providers"]["synthetic-a"]
+    b = metadata_snapshot["providers"]["synthetic-b"]
+    assert a["stale"] is False and b["stale"] is True
+    assert a["model_ids"] == list(METADATA_TRACKED_IDS)
+    assert sorted(a["models"]) == list(METADATA_TRACKED_IDS)
+    assert b["model_ids"] == [] and b["models"] == {}
+
+
+def test_metadata_fixture_snapshot_id_is_canonical(metadata_snapshot):
+    body = {k: v for k, v in metadata_snapshot.items() if k != "snapshot_id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    assert metadata_snapshot["snapshot_id"] == \
+        hashlib.sha256(canonical).hexdigest()
+
+
+def test_metadata_goldens_use_new_fixture_and_pass_complete_checkers(
+        cases_document):
+    expected_id = _load_strict(METADATA_FIXTURE)["snapshot_id"]
+    for raw_id in METADATA_TRACKED_IDS:
+        case, snap = _metadata_case(cases_document, METADATA_CASE_IDS[raw_id])
+        # Explicit fixture override — never the cases.json default.
+        assert case["fixture"] == METADATA_FIXTURE_NAME
+        assert case["args"]["model_id"] == raw_id
+        assert snap["snapshot_id"] == expected_id
+        # Reuse the frozen snapshot + get_model payload checkers verbatim.
+        _assert_snapshot_contract(snap)
+        _assert_get_model_payload(case, snap)
+
+
+def test_metadata_goldens_pin_envelope_and_zero_id_stale_provider(
+        cases_document):
+    for raw_id in METADATA_TRACKED_IDS:
+        case, snap = _metadata_case(cases_document, METADATA_CASE_IDS[raw_id])
+        expect = case["expect"]
+        assert expect["exact_matches"] == {
+            "synthetic-a": True, "synthetic-b": False}
+        assert expect["exact_gateways"] == ["synthetic-a"]
+        # `synthetic-b` tracks zero ids yet must still appear, stale.
+        assert expect["provider_staleness"] == {
+            "synthetic-a": False, "synthetic-b": True}
+        assert expect["counts"] == {
+            "exact_matches": 1, "endpoints": 1,
+            "distinct_raw_ids": 1, "marker_group_labels": 1}
+        endpoint = _metadata_endpoint(case)
+        assert endpoint["provider"] == "synthetic-a"
+        assert endpoint["stale"] is False
+        # The endpoint survives with metadata attached to THIS exact pair.
+        assert endpoint["metadata"] == _metadata_entry(snap, raw_id)
+
+
+def test_metadata_unknown_context_is_null_not_known_zero(cases_document):
+    case, snap = _metadata_case(cases_document,
+                                METADATA_CASE_IDS[METADATA_UNKNOWN_CONTEXT])
+    meta = _metadata_endpoint(case)["metadata"]
+    assert meta["context_length"] is None
+    assert meta["context_length"] != 0
+    assert _metadata_entry(snap, METADATA_UNKNOWN_CONTEXT)[
+        "context_length"] is None
+    assert REASONING_WORD in meta["description"]
+    # Whole-object pricing is unknown here, never an invented zero.
+    assert meta["pricing"] is None
+
+
+def test_metadata_known_context_pins_inclusive_boundary_and_scalar_types(
+        cases_document):
+    case, snap = _metadata_case(cases_document,
+                                METADATA_CASE_IDS[METADATA_KNOWN_CONTEXT])
+    meta = _metadata_endpoint(case)["metadata"]
+    assert meta["context_length"] == METADATA_INCLUSIVE_CONTEXT == 65536
+    assert REASONING_WORD in meta["description"]
+    pricing = meta["pricing"]
+    # Provider-returned scalar TYPES are preserved: string "0" and int 0.
+    assert pricing["prompt"] == "0"
+    assert isinstance(pricing["prompt"], str)
+    assert pricing["completion"] == 0
+    assert isinstance(pricing["completion"], int) \
+        and not isinstance(pricing["completion"], bool)
+    assert meta == _metadata_entry(snap, METADATA_KNOWN_CONTEXT)
+
+
+def test_metadata_zero_context_is_known_zero_not_unknown(cases_document):
+    case, snap = _metadata_case(cases_document,
+                                METADATA_CASE_IDS[METADATA_ZERO_CONTEXT])
+    meta = _metadata_endpoint(case)["metadata"]
+    assert meta["context_length"] == 0
+    assert meta["context_length"] is not None
+    assert REASONING_WORD in meta["description"]
+    # Known zero context with individually-null / known pricing scalars.
+    assert meta["pricing"]["prompt"] is None
+    assert meta["pricing"]["completion"] == "0"
+    assert isinstance(meta["pricing"]["completion"], str)
+    assert meta == _metadata_entry(snap, METADATA_ZERO_CONTEXT)
+
+
+def test_metadata_unknown_description_is_null(cases_document):
+    case, snap = _metadata_case(
+        cases_document, METADATA_CASE_IDS[METADATA_UNKNOWN_DESCRIPTION])
+    meta = _metadata_endpoint(case)["metadata"]
+    assert meta["description"] is None
+    assert meta["context_length"] == METADATA_INCLUSIVE_CONTEXT
+    assert meta["pricing"] == {"prompt": None, "completion": None}
+    assert meta == _metadata_entry(snap, METADATA_UNKNOWN_DESCRIPTION)
+
+
+def test_metadata_all_four_ids_survive_with_known_architecture(
+        cases_document):
+    _, snap = _metadata_case(cases_document,
+                             METADATA_CASE_IDS[METADATA_KNOWN_CONTEXT])
+    a = snap["providers"]["synthetic-a"]
+    assert a["model_ids"] == list(METADATA_TRACKED_IDS)
+    for raw_id in METADATA_TRACKED_IDS:
+        case, _ = _metadata_case(cases_document, METADATA_CASE_IDS[raw_id])
+        endpoint = _metadata_endpoint(case)
+        assert endpoint["model_id"] == raw_id
+        meta = endpoint["metadata"]
+        assert meta["id"] == raw_id
+        assert isinstance(meta["name"], str) and meta["name"]
+        assert meta["architecture"] == METADATA_ARCHITECTURE
+        assert meta["supported_parameters"] == METADATA_SUPPORTED_PARAMETERS
+        # The tracked id reaches its endpoint; nothing is dropped.
+        assert meta == a["models"][raw_id]
+
+
+def test_metadata_integrity_rejects_unknown_context_zeroed(cases_document):
+    case, snap = _copy_case(
+        cases_document, METADATA_CASE_IDS[METADATA_UNKNOWN_CONTEXT])
+    endpoint = _metadata_endpoint(case)
+    assert endpoint["metadata"]["context_length"] is None
+    endpoint["metadata"]["context_length"] = 0  # unknown -> invented zero
+    with pytest.raises(AssertionError, match=METADATA_ATTACHMENT_MARKER):
+        _assert_get_model_payload(case, snap)
+
+
+def test_metadata_integrity_rejects_known_zero_as_unknown(cases_document):
+    case, snap = _copy_case(
+        cases_document, METADATA_CASE_IDS[METADATA_ZERO_CONTEXT])
+    endpoint = _metadata_endpoint(case)
+    assert endpoint["metadata"]["context_length"] == 0
+    endpoint["metadata"]["context_length"] = None  # known zero -> unknown
+    with pytest.raises(AssertionError, match=METADATA_ATTACHMENT_MARKER):
+        _assert_get_model_payload(case, snap)
+
+
+def test_metadata_integrity_rejects_dropped_endpoint(cases_document):
+    case, snap = _copy_case(
+        cases_document, METADATA_CASE_IDS[METADATA_UNKNOWN_CONTEXT])
+    endpoint = _metadata_endpoint(case)
+    assert endpoint["model_id"] == METADATA_UNKNOWN_CONTEXT
+    case["expect"]["endpoints"] = []  # endpoint loss, counts/ids untouched
+    with pytest.raises(AssertionError):
+        _assert_get_model_payload(case, snap)
+
+
+def test_metadata_integrity_rejects_altered_pricing_scalar_type(
+        cases_document):
+    case, snap = _copy_case(
+        cases_document, METADATA_CASE_IDS[METADATA_KNOWN_CONTEXT])
+    endpoint = _metadata_endpoint(case)
+    assert endpoint["metadata"]["pricing"]["completion"] == 0
+    # Change the numeric scalar's TYPE in BOTH the golden and the snapshot
+    # copy, so attachment still matches and the pricing contract itself
+    # must reject the boolean.
+    endpoint["metadata"]["pricing"]["completion"] = True
+    _metadata_entry(snap, METADATA_KNOWN_CONTEXT)[
+        "pricing"]["completion"] = True
+    with pytest.raises(AssertionError, match="pricing scalars"):
+        _assert_get_model_payload(case, snap)
+
+
+def test_metadata_integrity_rejects_missing_zero_id_stale_provider(
+        cases_document):
+    case, snap = _copy_case(
+        cases_document, METADATA_CASE_IDS[METADATA_UNKNOWN_CONTEXT])
+    staleness = case["expect"]["provider_staleness"]
+    assert staleness["synthetic-b"] is True
+    del staleness["synthetic-b"]  # drop the zero-ID stale provider
+    with pytest.raises(AssertionError):
         _assert_get_model_payload(case, snap)
 
 
