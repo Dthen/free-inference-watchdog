@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "997d9e5e576f4c328063856d91266827a494dbddbdca35e0a0f4ba48c8927661",
+  "tick_epoch": null,
+  "cadence_s": 3600,
+  "provider_order": [
+    "synthetic-a",
+    "synthetic-b"
+  ],
+  "providers": {
+    "synthetic-a": {
+      "display_name": "Synthetic Alpha",
+      "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [
+        "vendor/known-empty-capabilities",
+        "vendor/unknown-capabilities"
+      ],
+      "models": {
+        "vendor/known-empty-capabilities": {
+          "id": "vendor/known-empty-capabilities",
+          "name": "Vendor Known Empty Capabilities",
+          "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
+          "context_length": 0,
+          "architecture": {
+            "input_modalities": [],
+            "output_modalities": []
+          },
+          "supported_parameters": [],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/unknown-capabilities": {
+          "id": "vendor/unknown-capabilities",
+          "name": "Vendor Unknown Capabilities",
+          "description": null,
+          "context_length": null,
+          "architecture": {
+            "input_modalities": null,
+            "output_modalities": null
+          },
+          "supported_parameters": null,
+          "pricing": null
+        }
+      },
+      "stale": false
+    },
+    "synthetic-b": {
+      "display_name": "Synthetic Beta",
+      "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [],
+      "models": {},
+      "stale": true
+    }
+  },
+  "warnings": [
+    "tick_epoch_unknown",
+    "metadata_missing"
+  ]
+}

@@ -448,6 +448,118 @@ Worked examples (complete payloads live as literal goldens in
   which is never searched); and `query=" REASONING "` yields nothing because
   identifiers and queries are never trimmed.
 
+### Success envelope — `watchdog_status` (frozen field sets)
+
+`watchdog_status()` reports **published catalogue health**, not private
+operator health. It is the **whole-catalogue** status of the consumed
+snapshot: like `get_model` and `search_models` the pure payload exposes no
+local filesystem path, no `state_root`/tool path, no source retrieval/cache
+timestamp and no operator diagnostics — those belong to a separate,
+explicitly labelled local adapter OUTSIDE this payload. `ok: true` means the
+valid snapshot was queried successfully — **not** that its observations are
+fresh or that every provider is healthy. The fixed test clock is a case-level
+`now` epoch injected into the core; it is **never** a tool argument and never a
+wall-clock lookup. Exact top-level fields:
+
+| Field | Type | Definition |
+|---|---|---|
+| `ok` | bool | Exactly `true` on success — the snapshot was queried successfully, not that its observations are fresh. |
+| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`. |
+| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`, echoed literally (a future epoch is **never** repaired); `null` means unknown, never fresh. |
+| `cadence_s` | int | The consumed snapshot's cadence, echoed: this is **snapshot data, never a hardcoded `3600`**. |
+| `last_tick_age_s` | int or null | `now - tick_epoch` as a strict non-negative int for a known non-future tick; `null` when the tick is `null` or in the future — **never clamped to a healthy zero**. |
+| `tick_fresh` | bool | The **inclusive one-cadence boundary**: `true` exactly when `last_tick_age_s` is a known age and `last_tick_age_s <= cadence_s` (age `0` and age `== cadence_s` are both fresh); `false` for a null or future tick. Always a strict bool. |
+| `provider_staleness` | map of bool | **Every** configured provider in `provider_order`, including zero-ID providers; each value is that gateway's carried-forward stale flag, **unchanged by the clock** — this is **provider staleness, never tick age**. Provider staleness may be `true` during a fresh tick and all providers may be `false` during an old tick. |
+| `provider_counts` | map of strict non-negative int | **Every** configured provider, each its tracked `(provider, raw ID)` pair count (`len(model_ids)`), **zero included**. |
+| `metadata_coverage` | object | Coverage of the stated metadata fields over the global tracked-pair denominator; exact set below. |
+| `counts` | object | **Whole-catalogue** cardinalities; exact set below. |
+| `pending_alerts` | null | Unobservable on the published/browser sources: **strictly `null`**. |
+| `site_published` | null | Unobservable on the published/browser sources: **strictly `null`**. |
+| `site_publish_age_s` | null | Unobservable on the published/browser sources: **strictly `null`**. |
+| `warnings` | list of string | Snapshot warnings plus derived status codes, deduplicated in the frozen status order below; stable strings, never paths or exceptions. |
+
+`counts` object — exact fields (each a strict non-negative int; booleans are
+invalid). Unlike `search_models`' PAGE-scoped counts, a status `counts` object
+describes the **whole catalogue** and never a filtered page:
+
+| Field | Definition |
+|---|---|
+| `gateways` | **All** configured snapshot providers in `provider_order`, **including zero-ID providers** (whole-catalogue, not a page). |
+| `endpoints` | **All** tracked `(provider, raw ID)` pairs. |
+| `distinct_raw_ids` | The **literal union** of raw IDs: a raw id shared by two gateways is one distinct raw id. |
+| `marker_group_labels` | Distinct delimiter-stripped labels — labels, **never** verified underlying model identities. |
+
+`metadata_coverage` object — exact fields (each a strict non-negative int at
+most the `endpoints` denominator):
+
+| Field | Definition |
+|---|---|
+| `endpoints` | The **global tracked-pair denominator** (equal to `counts.endpoints`). |
+| `context_length_known` | Tracked pairs with a non-null **valid** context; a known `0` counts, `null` (unknown) does not. |
+| `input_modalities_known` | Tracked pairs with a non-null valid input-modality array; a known empty `[]` counts, `null` does not. |
+| `output_modalities_known` | As above for output modalities. |
+| `supported_parameters_known` | As above for supported parameters. |
+| `description_known` | Tracked pairs with a non-null description string. |
+
+Coverage is of these stated metadata fields only — **never provider health or
+price availability** — and a present metadata object is never counted as
+complete metadata, because projection always supplies an object even when its
+fields are unknown.
+
+**Status warning order and the status/snapshot vocabulary split.** The
+snapshot warning vocabulary stays the frozen THREE codes (`tick_epoch_unknown`,
+`metadata_missing`, `metadata_invalid`) — the only codes a snapshot document
+may carry. A status payload adds two **status-only** codes after them, so the
+full status order is `tick_epoch_unknown`, `metadata_missing`,
+`metadata_invalid`, `tick_epoch_future`, `tick_stale`:
+
+- `tick_epoch_unknown` is added for a `null` epoch (normally already a snapshot
+  warning).
+- `tick_epoch_future` is added when `tick_epoch` is in the future; the raw
+  epoch is echoed unchanged.
+- `tick_stale` is added when the **known** age is strictly greater than
+  `cadence_s`.
+
+A fresh known epoch adds no status warning. A null or future epoch is **NOT a
+stale known observation** and never carries `tick_stale`.
+
+Compact complete example — `watchdog_status()` over a snapshot with
+`synthetic-a` tracking two models (one all-known, one all-unknown) and a stale
+zero-ID `synthetic-b`, at the fixed clock `now = 1759200000` (tick `1759200000`,
+cadence `3600`):
+
+```json
+{
+  "ok": true,
+  "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+  "tick_epoch": 1759200000,
+  "cadence_s": 3600,
+  "last_tick_age_s": 0,
+  "tick_fresh": true,
+  "provider_staleness": {"synthetic-a": false, "synthetic-b": true},
+  "provider_counts": {"synthetic-a": 2, "synthetic-b": 0},
+  "metadata_coverage": {"endpoints": 2, "context_length_known": 1,
+    "input_modalities_known": 1, "output_modalities_known": 1,
+    "supported_parameters_known": 1, "description_known": 1},
+  "counts": {"gateways": 2, "endpoints": 2, "distinct_raw_ids": 2,
+    "marker_group_labels": 2},
+  "pending_alerts": null,
+  "site_published": null,
+  "site_publish_age_s": null,
+  "warnings": ["metadata_missing"]
+}
+```
+
+Worked examples (complete payloads live as literal fixed-clock goldens in
+`tests/fixtures/catalog/cases.json`, one `watchdog_status` case per scenario,
+each with a case-level `now` and `args: {}`): at `now == tick_epoch` the age is
+`0` and the tick is fresh; age `== cadence_s` is still fresh, and one second
+more is `tick_stale`; a `null` epoch yields `last_tick_age_s: null`,
+`tick_fresh: false` and `tick_epoch_unknown`; a future epoch yields the same
+null age and `tick_epoch_future`, never `tick_stale`; and a snapshot whose
+cadence is `120` (not `3600`) proves the freshness boundary uses the snapshot's
+own cadence.
+
 ## State layout (state/, gitignored)
 
 - `roster.json`: providers + provider_models + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.

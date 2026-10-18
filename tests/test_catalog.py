@@ -301,8 +301,18 @@ def _assert_snapshot_contract(snap):
     assert snapshot_id == hashlib.sha256(canonical).hexdigest()
 
     tick = snap["tick_epoch"]
-    assert isinstance(tick, int) and not isinstance(tick, bool)
-    assert tick >= 0
+    if tick is None:
+        # Documented nullable observation epoch (unit 1c-c): an unknown tick
+        # must be flagged, so a null can never be mistaken for a healthy tick.
+        assert "tick_epoch_unknown" in snap["warnings"], \
+            "a null tick_epoch requires the tick_epoch_unknown warning"
+    else:
+        # A non-null tick stays a strict safe non-negative integer; bool/float/
+        # string coercion is never accepted.
+        assert isinstance(tick, int) and not isinstance(tick, bool), \
+            "tick_epoch must be a strict nonnegative int or null"
+        assert 0 <= tick <= MAX_SAFE_INT, \
+            "tick_epoch must be a safe nonnegative int"
 
     cadence = snap["cadence_s"]
     assert isinstance(cadence, int) and not isinstance(cadence, bool)
@@ -2919,6 +2929,764 @@ def test_search_positive_control_consistent_stale_mutation_passes(
     _assert_search_payload(case, snap)
 
 
+# ---------- unit 1c-c: fixed-clock published catalogue status contract ----------
+#
+# `watchdog_status` is the whole-catalogue health half of the frozen tool
+# surface. Its successful PURE payload is frozen here as an executable
+# specification: observation age/cadence/freshness, per-provider staleness and
+# tracked pair counts, whole-catalogue counts and metadata coverage, the strict
+# nulls for the unobservable operator fields, and the deduplicated STATUS
+# warning order. A case-level fixed `now` epoch (never a tool argument, never a
+# wall-clock lookup) makes every age and freshness value deterministic. The
+# committed goldens are LITERAL and hand-authored; the helpers below are a
+# clearly-labelled TEST-LOCAL restatement of the age/freshness/coverage/count
+# rules over snapshot data (a fixture checker, never production status and
+# never an authoring oracle). No implementation module is imported and no
+# source/cache/operator field appears in the pure payload.
+
+STATUS_FIXTURE_NAME = "status-unknown-time.json"
+STATUS_FIXTURE = FIXTURE_DIR / STATUS_FIXTURE_NAME
+STATUS_SHORT_CADENCE_FIXTURE_NAME = "status-short-cadence.json"
+STATUS_SHORT_CADENCE_FIXTURE = FIXTURE_DIR / STATUS_SHORT_CADENCE_FIXTURE_NAME
+
+# Exact PURE watchdog_status success payload fields (source/cache/operator
+# state stay OUTSIDE the pure payload).
+STATUS_RESPONSE_FIELDS = frozenset({
+    "ok", "snapshot_id", "tick_epoch", "cadence_s", "last_tick_age_s",
+    "tick_fresh", "provider_staleness", "provider_counts",
+    "metadata_coverage", "counts", "pending_alerts", "site_published",
+    "site_publish_age_s", "warnings",
+})
+# Exact whole-catalogue count fields (never a filtered page: the status scope
+# deliberately differs from a search page's counts).
+STATUS_COUNT_FIELDS = frozenset({
+    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
+})
+# Exact metadata-coverage fields; `endpoints` is the global tracked-pair
+# denominator, each `*_known` is the count carrying a non-null VALID value.
+STATUS_COVERAGE_FIELDS = frozenset({
+    "endpoints", "context_length_known", "input_modalities_known",
+    "output_modalities_known", "supported_parameters_known",
+    "description_known",
+})
+# The status-only warning ORDER: the frozen snapshot THREE first, then the two
+# STATUS-ONLY derived codes. Snapshot documents never carry the last two.
+STATUS_WARNING_ORDER = (
+    "tick_epoch_unknown", "metadata_missing", "metadata_invalid",
+    "tick_epoch_future", "tick_stale",
+)
+STATUS_STATUS_ONLY_CODES = frozenset({"tick_epoch_future", "tick_stale"})
+# The snapshot three, in order, are exactly the frozen snapshot vocabulary.
+assert tuple(code for code in STATUS_WARNING_ORDER
+             if code not in STATUS_STATUS_ONLY_CODES) == WARNING_ORDER
+
+# Every hand-authored status scenario that must exist, so an empty status-case
+# set can never make the suite pass vacuously.
+STATUS_REQUIRED_CASE_IDS = (
+    "status_capability_unknown_epoch_now_fresh",
+    "status_metadata_age_below_cadence_fresh",
+    "status_metadata_age_at_cadence_fresh",
+    "status_metadata_age_just_over_cadence_stale",
+    "status_lookup_old_tick_stale_healthy_providers",
+    "status_lookup_future_epoch_not_stale",
+    "status_unknown_time_missing_epoch",
+    "status_short_cadence_age_at_cadence_fresh",
+    "status_short_cadence_age_just_over_stale",
+)
+STATUS_UNOBSERVABLE_FIELDS = ("pending_alerts", "site_published",
+                              "site_publish_age_s")
+
+
+@pytest.fixture(scope="module")
+def status_unknown_snapshot():
+    return _load_strict(STATUS_FIXTURE)
+
+
+@pytest.fixture(scope="module")
+def status_short_cadence_snapshot():
+    return _load_strict(STATUS_SHORT_CADENCE_FIXTURE)
+
+
+def _iter_status_cases(cases_doc):
+    return [c for c in cases_doc["cases"] if c["tool"] == "watchdog_status"]
+
+
+def _status_case(cases_document, case_id):
+    case = next(c for c in _iter_status_cases(cases_document)
+                if c["id"] == case_id)
+    return case, _case_fixture(case, cases_document)
+
+
+def _copy_status_case(cases_document, case_id):
+    """Deep-copied status golden + its snapshot, for in-memory mutation
+    positive controls. No committed fixture is ever corrupted."""
+    case = next(c for c in _iter_status_cases(cases_document)
+                if c["id"] == case_id)
+    return copy.deepcopy(case), _case_fixture(case, cases_document)
+
+
+# -- test-local status rule restatement (FIXTURE CHECKER) --
+
+def _status_tracked_pairs(snap):
+    """Every tracked (provider, raw ID) pair, in provider display order."""
+    return [(key, raw_id)
+            for key in snap["provider_order"]
+            for raw_id in snap["providers"][key]["model_ids"]]
+
+
+def _status_reference_age_fresh(snap, now):
+    """TEST-LOCAL restatement of the age/freshness rule. A known non-future
+    tick gives `age = now - tick_epoch` with an INCLUSIVE one-cadence boundary
+    (`fresh == age <= cadence_s`); a null OR future tick gives `(None, False)`,
+    never a clamped healthy zero. `now` is a fixed case-level epoch."""
+    tick = snap["tick_epoch"]
+    if tick is None or tick > now:
+        return None, False
+    age = now - tick
+    return age, age <= snap["cadence_s"]
+
+
+def _status_reference_warnings(snap, now):
+    """TEST-LOCAL restatement of the derived STATUS warning list: the snapshot
+    warnings plus tick_epoch_unknown (null), tick_epoch_future (future) or
+    tick_stale (known age strictly greater than cadence), deduplicated in the
+    frozen STATUS order. Future and null ticks are never marked stale."""
+    present = set(snap["warnings"])
+    tick = snap["tick_epoch"]
+    if tick is None:
+        present.add("tick_epoch_unknown")
+    elif tick > now:
+        present.add("tick_epoch_future")
+    elif now - tick > snap["cadence_s"]:
+        present.add("tick_stale")
+    return [code for code in STATUS_WARNING_ORDER if code in present]
+
+
+def _status_valid_context(value):
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and 0 <= value <= MAX_SAFE_INT)
+
+
+def _status_valid_array(value):
+    return (isinstance(value, list)
+            and all(isinstance(item, str) and item for item in value))
+
+
+def _status_valid_description(value):
+    return isinstance(value, str)
+
+
+def _status_reference_counts(snap):
+    """TEST-LOCAL restatement of the WHOLE-CATALOGUE counts: gateways counts
+    every configured provider (including zero-ID ones), endpoints every tracked
+    (provider, raw ID) pair, distinct_raw_ids the literal raw-ID union, and
+    marker_group_labels the distinct delimiter-stripped labels."""
+    pairs = _status_tracked_pairs(snap)
+    return {
+        "gateways": len(snap["provider_order"]),
+        "endpoints": len(pairs),
+        "distinct_raw_ids": len({raw_id for _, raw_id in pairs}),
+        "marker_group_labels": len(
+            {_strip_marker_contract(raw_id) for _, raw_id in pairs}),
+    }
+
+
+def _status_reference_coverage(snap):
+    """TEST-LOCAL restatement of the metadata-coverage rule over the global
+    tracked-pair denominator. A known zero context and a known empty `[]`
+    COUNT; a null (unknown) value does not; a non-null description string
+    counts. An absent feature is a distinct decision from a zero count."""
+    pairs = _status_tracked_pairs(snap)
+    coverage = {
+        "endpoints": len(pairs),
+        "context_length_known": 0,
+        "input_modalities_known": 0,
+        "output_modalities_known": 0,
+        "supported_parameters_known": 0,
+        "description_known": 0,
+    }
+    for key, raw_id in pairs:
+        model = snap["providers"][key]["models"][raw_id]
+        if _status_valid_context(model["context_length"]):
+            coverage["context_length_known"] += 1
+        if _status_valid_array(model["architecture"]["input_modalities"]):
+            coverage["input_modalities_known"] += 1
+        if _status_valid_array(model["architecture"]["output_modalities"]):
+            coverage["output_modalities_known"] += 1
+        if _status_valid_array(model["supported_parameters"]):
+            coverage["supported_parameters_known"] += 1
+        if _status_valid_description(model["description"]):
+            coverage["description_known"] += 1
+    return coverage
+
+
+def _assert_status_payload(case, snap):
+    """Every integrity assertion of the frozen successful PURE watchdog_status
+    payload. Validates the hand-authored golden against its own snapshot with
+    stdlib data operations only — no status implementation is imported and the
+    expected result is never generated by a future implementation."""
+    expect = case["expect"]
+    cid = case["id"]
+
+    # Exact top-level field set: a stray, source or legacy key is corruption.
+    assert set(expect) == STATUS_RESPONSE_FIELDS, (
+        f"{cid}: unexpected response fields "
+        f"{sorted(set(expect) ^ STATUS_RESPONSE_FIELDS)}")
+
+    # Success is explicit — never an error envelope.
+    assert expect["ok"] is True
+
+    # The fixed clock is a case-level epoch, never a tool argument.
+    assert case["args"] == {}, f"{cid}: watchdog_status takes no arguments"
+    now = case["now"]
+    assert (isinstance(now, int) and not isinstance(now, bool)
+            and 0 <= now <= MAX_SAFE_INT), \
+        f"{cid}: the fixed test clock must be a safe nonnegative int"
+
+    # Observation provenance mirrors the consumed snapshot; a future tick is
+    # echoed literally, never repaired or clamped.
+    assert expect["snapshot_id"] == snap["snapshot_id"]
+    assert expect["tick_epoch"] == snap["tick_epoch"]
+    assert expect["cadence_s"] == snap["cadence_s"]
+    assert _counts_are_strict_int(expect["cadence_s"])
+
+    # Age / freshness: inclusive one-cadence boundary; null and future ticks
+    # are age-null / not-fresh.
+    age, fresh = _status_reference_age_fresh(snap, now)
+    assert expect["last_tick_age_s"] == age, (
+        f"{cid}: last_tick_age_s must be now-tick_epoch, or null when the "
+        "tick is null/future")
+    assert isinstance(expect["tick_fresh"], bool), \
+        f"{cid}: tick_fresh must be a strict bool"
+    assert expect["tick_fresh"] is fresh, \
+        f"{cid}: tick_fresh must be the inclusive one-cadence comparison"
+    if expect["last_tick_age_s"] is not None:
+        assert _counts_are_strict_int(expect["last_tick_age_s"])
+
+    # Provider staleness and tracked counts cover EVERY configured provider,
+    # including zero-ID ones; staleness is never derived from tick freshness.
+    assert set(expect["provider_staleness"]) == set(snap["provider_order"]), \
+        f"{cid}: provider_staleness must cover every configured provider"
+    assert set(expect["provider_counts"]) == set(snap["provider_order"]), \
+        f"{cid}: provider_counts must cover every configured provider"
+    for key in snap["provider_order"]:
+        assert isinstance(expect["provider_staleness"][key], bool)
+        assert expect["provider_staleness"][key] is \
+            snap["providers"][key]["stale"], \
+            f"{cid}: provider staleness mismatch for {key}"
+        assert _counts_are_strict_int(expect["provider_counts"][key]), \
+            f"{cid}: provider_counts.{key} must be a strict non-negative int"
+        assert expect["provider_counts"][key] == \
+            len(snap["providers"][key]["model_ids"]), \
+            f"{cid}: provider_counts.{key} must be the tracked pair count"
+
+    # Whole-catalogue counts.
+    counts = expect["counts"]
+    assert set(counts) == STATUS_COUNT_FIELDS, (
+        f"{cid}: unexpected count fields "
+        f"{sorted(set(counts) ^ STATUS_COUNT_FIELDS)}")
+    for name, value in counts.items():
+        assert _counts_are_strict_int(value), \
+            f"{cid}: counts.{name} must be a strict non-negative int"
+    assert counts == _status_reference_counts(snap), (
+        f"{cid}: whole-catalogue counts violate the frozen definitions")
+    assert counts["gateways"] == len(snap["provider_order"])
+
+    # Metadata coverage over the global tracked-pair denominator.
+    coverage = expect["metadata_coverage"]
+    assert set(coverage) == STATUS_COVERAGE_FIELDS, (
+        f"{cid}: unexpected coverage fields "
+        f"{sorted(set(coverage) ^ STATUS_COVERAGE_FIELDS)}")
+    for name, value in coverage.items():
+        assert _counts_are_strict_int(value), \
+            f"{cid}: metadata_coverage.{name} must be a strict non-negative int"
+    assert coverage == _status_reference_coverage(snap), (
+        f"{cid}: metadata coverage violates the frozen definitions")
+    assert coverage["endpoints"] == counts["endpoints"], \
+        f"{cid}: coverage denominator must equal counts.endpoints"
+    for name in sorted(STATUS_COVERAGE_FIELDS - {"endpoints"}):
+        assert coverage[name] <= coverage["endpoints"], \
+            f"{cid}: coverage {name} exceeds the denominator"
+
+    # Unobservable operator fields are strictly null — never false or zero.
+    for field in STATUS_UNOBSERVABLE_FIELDS:
+        assert expect[field] is None, \
+            f"{cid}: {field} is unobservable and must be strictly null"
+
+    # Warnings: stable strings, deduplicated in the frozen STATUS order.
+    warnings = expect["warnings"]
+    assert isinstance(warnings, list)
+    assert all(isinstance(w, str) for w in warnings)
+    assert warnings == _status_reference_warnings(snap, now), \
+        f"{cid}: status warnings violate the derived rule or order"
+    assert warnings == [c for c in STATUS_WARNING_ORDER if c in set(warnings)], \
+        f"{cid}: status warnings must be deduplicated in frozen order"
+
+
+# -- fixture integrity --
+
+def test_status_unknown_fixture_matches_snapshot_contract(status_unknown_snapshot):
+    _assert_snapshot_contract(status_unknown_snapshot)
+
+
+def test_status_short_cadence_fixture_matches_snapshot_contract(
+        status_short_cadence_snapshot):
+    _assert_snapshot_contract(status_short_cadence_snapshot)
+
+
+def test_status_new_fixtures_are_capability_unknown_copies(
+        capability_snapshot, status_unknown_snapshot, status_short_cadence_snapshot):
+    # The two new valid snapshots differ from capability-unknown.json ONLY in
+    # the documented fields; every other field (model IDs, optional values,
+    # wiring, staleness) is identical.
+    for new, changed in ((status_unknown_snapshot, ("tick_epoch", "warnings")),
+                         (status_short_cadence_snapshot, ("cadence_s",))):
+        for field in new:
+            if field in changed or field == "snapshot_id":
+                continue
+            assert new[field] == capability_snapshot[field], \
+                f"{field} must be unchanged from capability-unknown.json"
+    # status-unknown-time: ONLY tick_epoch=null and the warnings changed.
+    assert status_unknown_snapshot["tick_epoch"] is None
+    assert status_unknown_snapshot["cadence_s"] == 3600
+    assert status_unknown_snapshot["warnings"] == [
+        "tick_epoch_unknown", "metadata_missing"]
+    # status-short-cadence: ONLY cadence_s=120 changed.
+    assert status_short_cadence_snapshot["tick_epoch"] == 1759200000
+    assert status_short_cadence_snapshot["cadence_s"] == 120
+    assert status_short_cadence_snapshot["warnings"] == ["metadata_missing"]
+
+
+def test_status_fixture_snapshot_ids_are_canonical(
+        status_unknown_snapshot, status_short_cadence_snapshot):
+    for snap in (status_unknown_snapshot, status_short_cadence_snapshot):
+        body = {k: v for k, v in snap.items() if k != "snapshot_id"}
+        canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=True).encode("utf-8")
+        assert snap["snapshot_id"] == hashlib.sha256(canonical).hexdigest()
+
+
+def test_status_null_tick_requires_unknown_warning():
+    # The shared snapshot checker accepts a documented nullable tick, but a
+    # null tick MUST carry tick_epoch_unknown.
+    snap = _load_strict(STATUS_FIXTURE)
+    assert snap["tick_epoch"] is None
+    assert "tick_epoch_unknown" in snap["warnings"]
+    _assert_snapshot_contract(snap)
+
+
+# -- envelope / case-set integrity --
+
+def test_status_response_envelope_field_sets_are_frozen(cases_document):
+    assert set(STATUS_RESPONSE_FIELDS) == {
+        "ok", "snapshot_id", "tick_epoch", "cadence_s", "last_tick_age_s",
+        "tick_fresh", "provider_staleness", "provider_counts",
+        "metadata_coverage", "counts", "pending_alerts", "site_published",
+        "site_publish_age_s", "warnings"}
+    assert set(STATUS_COUNT_FIELDS) == {
+        "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels"}
+    assert set(STATUS_COVERAGE_FIELDS) == {
+        "endpoints", "context_length_known", "input_modalities_known",
+        "output_modalities_known", "supported_parameters_known",
+        "description_known"}
+    # The status vocabulary begins with the frozen snapshot three, then the two
+    # status-only codes; a snapshot document never carries the status-only ones.
+    assert STATUS_WARNING_ORDER[:3] == WARNING_ORDER
+    for case in _iter_status_cases(cases_document):
+        _assert_status_payload(case, _case_fixture(case, cases_document))
+
+
+def test_status_goldens_present_unique_and_use_explicit_fixtures(
+        cases_document):
+    cases = _iter_status_cases(cases_document)
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids)), "duplicate status case id"
+    missing = [cid for cid in STATUS_REQUIRED_CASE_IDS if cid not in ids]
+    assert not missing, f"missing hand-authored status scenarios: {missing}"
+    for case in cases:
+        assert "fixture" in case, f"{case['id']}: needs an explicit fixture"
+        assert case["args"] == {}, f"{case['id']}: status takes no arguments"
+        assert isinstance(case["now"], int) and not isinstance(case["now"], bool)
+        assert "expect" in case and isinstance(case["expect"], dict)
+
+
+def test_status_goldens_pass_complete_checker(cases_document):
+    for case in _iter_status_cases(cases_document):
+        snap = _case_fixture(case, cases_document)
+        _assert_snapshot_contract(snap)
+        _assert_status_payload(case, snap)
+
+
+# -- scenario pins (positive controls: the actual values, not self-consistency) --
+
+def test_status_clock_boundary_and_inclusive_cadence_pins(cases_document):
+    # metadata-edge-cases.json, tick 1759200000, cadence 3600.
+    below, _ = _status_case(cases_document,
+                            "status_metadata_age_below_cadence_fresh")
+    assert below["now"] == 1759203599
+    assert below["expect"]["last_tick_age_s"] == 3599
+    assert below["expect"]["tick_fresh"] is True
+    assert below["expect"]["warnings"] == ["metadata_missing"]
+
+    at, _ = _status_case(cases_document,
+                         "status_metadata_age_at_cadence_fresh")
+    assert at["now"] == 1759203600
+    assert at["expect"]["last_tick_age_s"] == 3600
+    # INCLUSIVE boundary: age == cadence is still fresh.
+    assert at["expect"]["tick_fresh"] is True
+    assert at["expect"]["warnings"] == ["metadata_missing"]
+
+    over, _ = _status_case(cases_document,
+                           "status_metadata_age_just_over_cadence_stale")
+    assert over["now"] == 1759203601
+    assert over["expect"]["last_tick_age_s"] == 3601
+    assert over["expect"]["tick_fresh"] is False
+    assert over["expect"]["warnings"] == ["metadata_missing", "tick_stale"]
+
+    # Same snapshot, same flags/provenance regardless of the clock.
+    for case in (below, at, over):
+        assert case["fixture"] == METADATA_FIXTURE_NAME
+        assert case["expect"]["tick_epoch"] == 1759200000
+        assert case["expect"]["cadence_s"] == 3600
+        assert case["expect"]["provider_staleness"] == {
+            "synthetic-a": False, "synthetic-b": True}
+        assert case["expect"]["provider_counts"] == {
+            "synthetic-a": 4, "synthetic-b": 0}
+        assert case["expect"]["counts"] == {
+            "gateways": 2, "endpoints": 4, "distinct_raw_ids": 4,
+            "marker_group_labels": 4}
+        assert case["expect"]["metadata_coverage"] == {
+            "endpoints": 4, "context_length_known": 3,
+            "input_modalities_known": 4, "output_modalities_known": 4,
+            "supported_parameters_known": 4, "description_known": 3}
+        for field in STATUS_UNOBSERVABLE_FIELDS:
+            assert case["expect"][field] is None
+
+
+def test_status_short_cadence_distinguishes_snapshot_cadence(cases_document):
+    # status-short-cadence.json: cadence 120 differs from the 3600 default, so
+    # a hardcoded-3600 runtime would wrongly call the 121 s round fresh.
+    at, _ = _status_case(cases_document,
+                         "status_short_cadence_age_at_cadence_fresh")
+    assert at["fixture"] == STATUS_SHORT_CADENCE_FIXTURE_NAME
+    assert at["now"] == 1759200120
+    assert at["expect"]["cadence_s"] == 120
+    assert at["expect"]["last_tick_age_s"] == 120
+    assert at["expect"]["tick_fresh"] is True
+    assert at["expect"]["warnings"] == ["metadata_missing"]
+
+    over, _ = _status_case(cases_document,
+                           "status_short_cadence_age_just_over_stale")
+    assert over["now"] == 1759200121
+    assert over["expect"]["cadence_s"] == 120
+    assert over["expect"]["last_tick_age_s"] == 121
+    assert over["expect"]["tick_fresh"] is False
+    assert over["expect"]["warnings"] == ["metadata_missing", "tick_stale"]
+    # counts/coverage mirror the capability-unknown copy (2 pairs).
+    assert over["expect"]["counts"] == {
+        "gateways": 2, "endpoints": 2, "distinct_raw_ids": 2,
+        "marker_group_labels": 2}
+    assert over["expect"]["metadata_coverage"] == {
+        "endpoints": 2, "context_length_known": 1,
+        "input_modalities_known": 1, "output_modalities_known": 1,
+        "supported_parameters_known": 1, "description_known": 1}
+
+
+def test_status_capability_unknown_coverage_and_provider_pins(cases_document):
+    case, snap = _status_case(cases_document,
+                              "status_capability_unknown_epoch_now_fresh")
+    assert case["fixture"] == CAPABILITY_FIXTURE_NAME
+    assert case["now"] == 1759200000
+    expect = case["expect"]
+    assert expect["tick_epoch"] == 1759200000
+    assert expect["last_tick_age_s"] == 0
+    assert expect["tick_fresh"] is True
+    # A zero-ID provider is retained, stale, in BOTH maps.
+    assert expect["provider_staleness"] == {
+        "synthetic-a": False, "synthetic-b": True}
+    assert expect["provider_counts"] == {"synthetic-a": 2, "synthetic-b": 0}
+    assert expect["counts"] == {
+        "gateways": 2, "endpoints": 2, "distinct_raw_ids": 2,
+        "marker_group_labels": 2}
+    # Known-zero context and known-empty arrays COUNT; the null model does not.
+    assert expect["metadata_coverage"] == {
+        "endpoints": 2, "context_length_known": 1,
+        "input_modalities_known": 1, "output_modalities_known": 1,
+        "supported_parameters_known": 1, "description_known": 1}
+    assert expect["warnings"] == ["metadata_missing"]
+    # Non-vacuous: the tracked pair really is a known-zero and a null.
+    known = snap["providers"]["synthetic-a"]["models"][
+        "vendor/known-empty-capabilities"]
+    unknown = snap["providers"]["synthetic-a"]["models"][
+        "vendor/unknown-capabilities"]
+    assert known["context_length"] == 0
+    assert unknown["context_length"] is None
+
+
+def test_status_lookup_old_tick_and_future_epoch_pins(cases_document):
+    # Old known tick: age > cadence -> not fresh + tick_stale, while EVERY
+    # provider stale flag is false (staleness is independent of tick freshness).
+    old, snap = _status_case(cases_document,
+                             "status_lookup_old_tick_stale_healthy_providers")
+    assert old["fixture"] == "lookup.json"
+    expect = old["expect"]
+    assert old["now"] == 1759203601
+    assert expect["tick_epoch"] == 1759200000
+    assert expect["cadence_s"] == 3600
+    assert expect["last_tick_age_s"] == 3601
+    assert expect["tick_fresh"] is False
+    assert expect["provider_staleness"] == {
+        "synthetic-a": False, "synthetic-b": False, "synthetic-c": False}
+    assert expect["provider_counts"] == {
+        "synthetic-a": 3, "synthetic-b": 2, "synthetic-c": 0}
+    assert expect["counts"] == {
+        "gateways": 3, "endpoints": 5, "distinct_raw_ids": 4,
+        "marker_group_labels": 3}
+    assert expect["metadata_coverage"] == {
+        "endpoints": 5, "context_length_known": 5,
+        "input_modalities_known": 5, "output_modalities_known": 5,
+        "supported_parameters_known": 5, "description_known": 4}
+    assert expect["warnings"] == ["tick_stale"]
+    assert "tick_epoch_future" not in expect["warnings"]
+
+    # Future tick: age null / not fresh + tick_epoch_future, NOT tick_stale;
+    # the future epoch is echoed literally, never repaired.
+    future, _ = _status_case(cases_document,
+                             "status_lookup_future_epoch_not_stale")
+    fexpect = future["expect"]
+    assert future["now"] == 1759199999
+    assert fexpect["tick_epoch"] == 1759200000
+    assert fexpect["last_tick_age_s"] is None
+    assert fexpect["tick_fresh"] is False
+    assert fexpect["warnings"] == ["tick_epoch_future"]
+    assert "tick_stale" not in fexpect["warnings"]
+    assert fexpect["provider_staleness"] == old["expect"]["provider_staleness"]
+    assert fexpect["counts"] == old["expect"]["counts"]
+    assert fexpect["metadata_coverage"] == old["expect"]["metadata_coverage"]
+
+
+def test_status_unknown_time_missing_epoch_pins(cases_document):
+    case, snap = _status_case(cases_document,
+                              "status_unknown_time_missing_epoch")
+    assert case["fixture"] == STATUS_FIXTURE_NAME
+    assert case["now"] == 1759203600
+    expect = case["expect"]
+    assert expect["tick_epoch"] is None
+    assert expect["last_tick_age_s"] is None
+    assert expect["tick_fresh"] is False
+    # tick_epoch_unknown appears ONCE, before metadata_missing; never stale.
+    assert expect["warnings"] == ["tick_epoch_unknown", "metadata_missing"]
+    assert "tick_stale" not in expect["warnings"]
+    # Complete counts/staleness/coverage preserved, unobservables null.
+    assert expect["cadence_s"] == 3600
+    assert expect["provider_staleness"] == {
+        "synthetic-a": False, "synthetic-b": True}
+    assert expect["provider_counts"] == {"synthetic-a": 2, "synthetic-b": 0}
+    assert expect["counts"] == {
+        "gateways": 2, "endpoints": 2, "distinct_raw_ids": 2,
+        "marker_group_labels": 2}
+    assert expect["metadata_coverage"] == {
+        "endpoints": 2, "context_length_known": 1,
+        "input_modalities_known": 1, "output_modalities_known": 1,
+        "supported_parameters_known": 1, "description_known": 1}
+    for field in STATUS_UNOBSERVABLE_FIELDS:
+        assert expect[field] is None
+
+
+# -- positive controls: the rule set is clock/data-driven, not constant --
+
+def test_status_positive_control_epoch_zero_is_valid_fresh():
+    # epoch 0 with now 0 is a VALID fresh observation, never "missing".
+    age, fresh = _status_reference_age_fresh(
+        {"tick_epoch": 0, "cadence_s": 3600}, 0)
+    assert age == 0 and fresh is True
+    # ...whereas a null epoch is unknown and never fresh...
+    assert _status_reference_age_fresh(
+        {"tick_epoch": None, "cadence_s": 3600}, 0) == (None, False)
+    # ...and a future epoch is never fresh nor stale.
+    assert _status_reference_age_fresh(
+        {"tick_epoch": 10, "cadence_s": 3600}, 5) == (None, False)
+
+
+def test_status_positive_control_consistent_stale_mutation_passes(
+        cases_document):
+    # A CONSISTENT snapshot+golden mutation keeps the checker honest: flip
+    # synthetic-b's stale flag everywhere and re-seal, then require PASS.
+    case, snap = _copy_status_case(
+        cases_document, "status_capability_unknown_epoch_now_fresh")
+    assert case["expect"]["provider_staleness"]["synthetic-b"] is True
+    snap["providers"]["synthetic-b"]["stale"] = False
+    _reseal_snapshot(snap)
+    case["expect"]["snapshot_id"] = snap["snapshot_id"]
+    case["expect"]["provider_staleness"]["synthetic-b"] = False
+    _assert_snapshot_contract(snap)
+    _assert_status_payload(case, snap)
+
+
+def test_status_positive_control_consistent_tick_mutation_passes(
+        cases_document):
+    # Move the snapshot's tick and re-derive the golden for the SAME fixed
+    # clock: the age/freshness rule is data-driven, not pinned to 3600/1759200000.
+    case, snap = _copy_status_case(
+        cases_document, "status_metadata_age_at_cadence_fresh")
+    now = case["now"]
+    snap["tick_epoch"] = now - 100
+    _reseal_snapshot(snap)
+    case["expect"]["snapshot_id"] = snap["snapshot_id"]
+    case["expect"]["tick_epoch"] = snap["tick_epoch"]
+    case["expect"]["last_tick_age_s"] = 100
+    case["expect"]["tick_fresh"] = True
+    _assert_snapshot_contract(snap)
+    _assert_status_payload(case, snap)
+
+
+# -- semantic corruption matrix (deep-copied scratch; committed data intact) --
+
+def _status_mut_boundary_exclusive(case, snap):
+    # `<=` changed to `<` at the exact cadence boundary.
+    case["expect"]["tick_fresh"] = False
+
+
+def _status_mut_hardcoded_3600(case, snap):
+    # A runtime hardcoding 3600 calls the 121 s short-cadence round fresh.
+    case["expect"]["tick_fresh"] = True
+    case["expect"]["warnings"] = [
+        w for w in case["expect"]["warnings"] if w != "tick_stale"]
+
+
+def _status_mut_future_epoch_clamped_fresh(case, snap):
+    # Missing/future epoch clamped to age 0 / fresh instead of unknown.
+    case["expect"]["last_tick_age_s"] = 0
+    case["expect"]["tick_fresh"] = True
+
+
+def _status_mut_old_tick_imagined_fresh(case, snap):
+    # An old known tick treated as fresh from an imagined recent retrieval.
+    case["expect"]["tick_fresh"] = True
+    case["expect"]["warnings"] = [
+        w for w in case["expect"]["warnings"] if w != "tick_stale"]
+
+
+def _status_mut_staleness_aliased_to_freshness(case, snap):
+    # Provider staleness aliased to tick freshness: an old tick flips every
+    # provider stale even though the snapshot flags are all false.
+    for key in case["expect"]["provider_staleness"]:
+        case["expect"]["provider_staleness"][key] = True
+
+
+def _status_mut_known_zero_excluded_from_coverage(case, snap):
+    case["expect"]["metadata_coverage"]["context_length_known"] -= 1
+
+
+def _status_mut_unknown_counted_as_known(case, snap):
+    case["expect"]["metadata_coverage"]["context_length_known"] += 1
+
+
+def _status_mut_shared_ids_counted_unique(case, snap):
+    case["expect"]["counts"]["distinct_raw_ids"] += 1
+
+
+def _status_mut_zero_id_provider_dropped(case, snap):
+    del case["expect"]["provider_staleness"]["synthetic-b"]
+
+
+def _status_mut_unobservable_fabricated(case, snap):
+    case["expect"]["pending_alerts"] = 0
+
+
+def _status_mut_bool_count(case, snap):
+    case["expect"]["counts"]["gateways"] = True
+
+
+def _status_mut_warnings_out_of_order(case, snap):
+    case["expect"]["warnings"] = list(reversed(case["expect"]["warnings"]))
+
+
+def _status_mut_wrong_epoch(case, snap):
+    case["expect"]["tick_epoch"] = 1759199999
+
+
+def _status_mut_wrong_snapshot_hash(case, snap):
+    case["expect"]["snapshot_id"] = "0" * 64
+
+
+STATUS_CORRUPTIONS = (
+    ("exclusive boundary at exact cadence",
+     "status_metadata_age_at_cadence_fresh", _status_mut_boundary_exclusive),
+    ("hardcoded 3600 on a short-cadence case",
+     "status_short_cadence_age_just_over_stale", _status_mut_hardcoded_3600),
+    ("future epoch clamped to age 0 / fresh",
+     "status_lookup_future_epoch_not_stale",
+     _status_mut_future_epoch_clamped_fresh),
+    ("old tick treated fresh from imagined retrieval",
+     "status_lookup_old_tick_stale_healthy_providers",
+     _status_mut_old_tick_imagined_fresh),
+    ("provider staleness aliased to tick freshness",
+     "status_lookup_old_tick_stale_healthy_providers",
+     _status_mut_staleness_aliased_to_freshness),
+    ("known-zero context excluded from coverage",
+     "status_capability_unknown_epoch_now_fresh",
+     _status_mut_known_zero_excluded_from_coverage),
+    ("unknown (null) counted as known",
+     "status_capability_unknown_epoch_now_fresh",
+     _status_mut_unknown_counted_as_known),
+    ("shared raw id counted as extra unique id",
+     "status_lookup_old_tick_stale_healthy_providers",
+     _status_mut_shared_ids_counted_unique),
+    ("zero-ID provider dropped from staleness",
+     "status_capability_unknown_epoch_now_fresh",
+     _status_mut_zero_id_provider_dropped),
+    ("unobservable pending_alerts fabricated as 0",
+     "status_capability_unknown_epoch_now_fresh",
+     _status_mut_unobservable_fabricated),
+    ("bool count",
+     "status_capability_unknown_epoch_now_fresh", _status_mut_bool_count),
+    ("warnings out of frozen order",
+     "status_metadata_age_just_over_cadence_stale",
+     _status_mut_warnings_out_of_order),
+    ("wrong tick_epoch echo",
+     "status_capability_unknown_epoch_now_fresh", _status_mut_wrong_epoch),
+    ("wrong snapshot hash",
+     "status_capability_unknown_epoch_now_fresh",
+     _status_mut_wrong_snapshot_hash),
+)
+
+
+@pytest.mark.parametrize(
+    "label,case_id,mutate", STATUS_CORRUPTIONS,
+    ids=[c[0] for c in STATUS_CORRUPTIONS])
+def test_status_integrity_rejects_semantic_corruption(
+        cases_document, label, case_id, mutate):
+    case, snap = _copy_status_case(cases_document, case_id)
+    # The unmutated golden is well-formed before corruption.
+    _assert_status_payload(case, snap)
+    mutate(case, snap)
+    with pytest.raises(AssertionError):
+        _assert_status_payload(case, snap)
+
+
+def test_status_integrity_rejects_bool_tick_fresh_and_extra_keys(
+        cases_document):
+    case, snap = _copy_status_case(
+        cases_document, "status_capability_unknown_epoch_now_fresh")
+    case["expect"]["tick_fresh"] = 1  # int, not a strict bool
+    with pytest.raises(AssertionError, match="strict bool"):
+        _assert_status_payload(case, snap)
+
+    case, snap = _copy_status_case(
+        cases_document, "status_capability_unknown_epoch_now_fresh")
+    case["expect"]["source"] = {"mode": "file"}
+    with pytest.raises(AssertionError, match="unexpected response fields"):
+        _assert_status_payload(case, snap)
+
+    # A fabricated unobservable as False (not null) must be rejected.
+    case, snap = _copy_status_case(
+        cases_document, "status_capability_unknown_epoch_now_fresh")
+    case["expect"]["site_published"] = False
+    with pytest.raises(AssertionError, match="strictly null"):
+        _assert_status_payload(case, snap)
+
+
 # ---------- README contract-draft pins ----------
 
 
@@ -3067,3 +3835,47 @@ def test_readme_contract_freezes_search_semantics():
     ):
         assert phrase in text, \
             f"contract section missing search rule: {phrase}"
+
+
+def test_readme_contract_freezes_status_envelope_field_sets():
+    text = _contract_section_text()
+    for field in sorted(STATUS_RESPONSE_FIELDS | STATUS_COUNT_FIELDS
+                        | STATUS_COVERAGE_FIELDS):
+        assert f"`{field}`" in text, \
+            f"contract section missing status field {field}"
+
+
+def test_readme_contract_freezes_status_freshness_and_health_rules():
+    text = _contract_section_text()
+    for phrase in (
+            "published catalogue health",
+            "inclusive one-cadence boundary",
+            "snapshot data, never a hardcoded `3600`",
+            "never clamped to a healthy zero",
+            "provider staleness, never tick age",
+            "provider health",
+            "whole catalogue",
+            "tracked-pair denominator",
+            "fixed test clock",
+            "Unobservable on the published/browser sources",
+            "strictly `null`",
+            "never a filtered page",
+    ):
+        assert phrase in text, \
+            f"contract section missing status rule: {phrase}"
+
+
+def test_readme_contract_separates_status_and_snapshot_warning_vocabularies():
+    text = _contract_section_text()
+    for phrase in (
+            "status-only",
+            "the only codes a snapshot document",
+            "tick_epoch_future",
+            "tick_stale",
+            "NOT a\nstale known observation",
+    ):
+        assert phrase in text, \
+            f"contract section missing status warning rule: {phrase}"
+    # The two status-only codes stay OUT of the frozen snapshot vocabulary.
+    for code in sorted(STATUS_STATUS_ONLY_CODES):
+        assert code not in WARNING_CODES
