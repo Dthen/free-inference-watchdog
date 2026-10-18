@@ -1,0 +1,499 @@
+{
+  "description": "Hand-authored upstream capability-fragment table for the unit 1c-b1 nullability and normalization rules. NOT a catalogue snapshot and NOT a public query response: it carries no top-level snapshot fields. Each row names a raw upstream capability fragment (`raw`), the literal expected public capability projection (`projected`), the literal expected normalized capability data (`normalized`, including `unknown_fields`), and the deduplicated warning codes (`warnings`). A key absent from `raw` means the field was missing upstream; an explicit JSON `null` means the field was present but null. The values here are illustrative fixture data — no real upstream or private data is included. The test-local restatement of the projection/normalization rules is a fixture checker, never production normalization.",
+  "kind": "upstream-capability-fragment-table",
+  "not_a_snapshot": true,
+  "capability_fields": [
+    "context_length",
+    "input_modalities",
+    "output_modalities",
+    "supported_parameters"
+  ],
+  "warning_vocabulary": [
+    "tick_epoch_unknown",
+    "metadata_missing",
+    "metadata_invalid"
+  ],
+  "rows": [
+    {
+      "id": "context_missing",
+      "note": "context length absent upstream: unknown (null), metadata_missing.",
+      "raw": {
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": null,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["context_length"]
+      },
+      "warnings": ["metadata_missing"]
+    },
+    {
+      "id": "context_explicit_null",
+      "note": "context length explicitly null: unknown, metadata_missing (same as absent).",
+      "raw": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": null,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["context_length"]
+      },
+      "warnings": ["metadata_missing"]
+    },
+    {
+      "id": "context_numeric_string",
+      "note": "context length a numeric string: NOT coerced; unknown, metadata_invalid.",
+      "raw": {
+        "context_length": "65536",
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": null,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["context_length"]
+      },
+      "warnings": ["metadata_invalid"]
+    },
+    {
+      "id": "context_boolean",
+      "note": "context length a boolean: unknown (bool is not an int), metadata_invalid.",
+      "raw": {
+        "context_length": true,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": null,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["context_length"]
+      },
+      "warnings": ["metadata_invalid"]
+    },
+    {
+      "id": "context_negative",
+      "note": "context length negative: unknown, metadata_invalid.",
+      "raw": {
+        "context_length": -1,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": null,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["context_length"]
+      },
+      "warnings": ["metadata_invalid"]
+    },
+    {
+      "id": "context_unsafe",
+      "note": "context length 2^53 = 9007199254740992, one above the safe ceiling: unknown, metadata_invalid.",
+      "raw": {
+        "context_length": 9007199254740992,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": null,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["context_length"]
+      },
+      "warnings": ["metadata_invalid"]
+    },
+    {
+      "id": "context_safe_max_known",
+      "note": "context length 2^53-1 = 9007199254740991, the inclusive safe ceiling: KNOWN.",
+      "raw": {
+        "context_length": 9007199254740991,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": 9007199254740991,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": 9007199254740991,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": []
+      },
+      "warnings": []
+    },
+    {
+      "id": "context_zero_known",
+      "note": "context length zero: KNOWN zero, never unknown.",
+      "raw": {
+        "context_length": 0,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": 0,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": 0,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": []
+      },
+      "warnings": []
+    },
+    {
+      "id": "context_inclusive_boundary_known",
+      "note": "context length 65536: KNOWN; the minimum-context comparison is inclusive.",
+      "raw": {
+        "context_length": 65536,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": 65536,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": 65536,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": []
+      },
+      "warnings": []
+    },
+    {
+      "id": "arrays_missing",
+      "note": "architecture and supported_parameters absent upstream: all three arrays unknown, metadata_missing.",
+      "raw": {
+        "context_length": 4096
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": null, "output_modalities": null},
+        "supported_parameters": null
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": null,
+        "output_modalities": null,
+        "supported_parameters": null,
+        "unknown_fields": ["input_modalities", "output_modalities", "supported_parameters"]
+      },
+      "warnings": ["metadata_missing"]
+    },
+    {
+      "id": "arrays_explicit_null",
+      "note": "architecture children and supported_parameters explicitly null: all unknown, metadata_missing.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": null, "output_modalities": null},
+        "supported_parameters": null
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": null, "output_modalities": null},
+        "supported_parameters": null
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": null,
+        "output_modalities": null,
+        "supported_parameters": null,
+        "unknown_fields": ["input_modalities", "output_modalities", "supported_parameters"]
+      },
+      "warnings": ["metadata_missing"]
+    },
+    {
+      "id": "array_string_not_list",
+      "note": "supported_parameters a bare string, not a list: malformed, rejected whole, metadata_invalid.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": "temperature"
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": null
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": null,
+        "unknown_fields": ["supported_parameters"]
+      },
+      "warnings": ["metadata_invalid"]
+    },
+    {
+      "id": "array_mixed_types",
+      "note": "input_modalities mixes a string and a number: malformed, rejected whole (not partially salvaged).",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text", 5], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": null, "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": null,
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["input_modalities"]
+      },
+      "warnings": ["metadata_invalid"]
+    },
+    {
+      "id": "array_contains_empty_string",
+      "note": "output_modalities contains an empty string: malformed, rejected whole, metadata_invalid.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text", ""]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": null},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": ["text"],
+        "output_modalities": null,
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["output_modalities"]
+      },
+      "warnings": ["metadata_invalid"]
+    },
+    {
+      "id": "array_invalid_architecture_parent",
+      "note": "architecture is a list, not an object: both children unknown, metadata_invalid.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": ["text"],
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": null, "output_modalities": null},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": null,
+        "output_modalities": null,
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["input_modalities", "output_modalities"]
+      },
+      "warnings": ["metadata_invalid"]
+    },
+    {
+      "id": "array_known_empty",
+      "note": "all three arrays reported empty: KNOWN empty [], no unknown flag, no warning.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": [], "output_modalities": []},
+        "supported_parameters": []
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": [], "output_modalities": []},
+        "supported_parameters": []
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": [],
+        "output_modalities": [],
+        "supported_parameters": [],
+        "unknown_fields": []
+      },
+      "warnings": []
+    },
+    {
+      "id": "array_valid_retained_ordering_duplicates",
+      "note": "exact-duplicate retained strings: public fragment preserves order and duplicates; normalized dedups first occurrence.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature", "temperature", "max_tokens"]
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature", "temperature", "max_tokens"]
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature", "max_tokens"],
+        "unknown_fields": []
+      },
+      "warnings": []
+    },
+    {
+      "id": "array_mixed_ascii_case_duplicates",
+      "note": "mixed ASCII case duplicates: public fragment keeps TEXT/text/Text; normalized folds to a single 'text'.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["TEXT", "text", "Text"]
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": ["TEXT", "text", "Text"]
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["text"],
+        "unknown_fields": []
+      },
+      "warnings": []
+    },
+    {
+      "id": "array_non_ascii_case_pair_not_folded",
+      "note": "non-ASCII case pair (E acute upper/lower): ASCII-only folding leaves both literal; Unicode casefolding is NOT applied.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["É", "é"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["É", "é"], "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"]
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": ["É", "é"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature"],
+        "unknown_fields": []
+      },
+      "warnings": []
+    },
+    {
+      "id": "array_whitespace_not_trimmed",
+      "note": "token with surrounding whitespace: not trimmed (and not rejected); ASCII case still folds.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": [" Text "]
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": [" Text "]
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": [" text "],
+        "unknown_fields": []
+      },
+      "warnings": []
+    },
+    {
+      "id": "warnings_missing_then_invalid_dedup",
+      "note": "absent context (missing) plus malformed supported_parameters (invalid): codes dedup in frozen order.",
+      "raw": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": "temperature"
+      },
+      "projected": {
+        "context_length": null,
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        "supported_parameters": null
+      },
+      "normalized": {
+        "context_length": null,
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "supported_parameters": null,
+        "unknown_fields": ["context_length", "supported_parameters"]
+      },
+      "warnings": ["metadata_missing", "metadata_invalid"]
+    },
+    {
+      "id": "warnings_invalid_dedup_multiple",
+      "note": "two malformed arrays collapse to ONE metadata_invalid code; unknown_fields keeps canonical order.",
+      "raw": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": "text", "output_modalities": ["text"]},
+        "supported_parameters": "temperature"
+      },
+      "projected": {
+        "context_length": 4096,
+        "architecture": {"input_modalities": null, "output_modalities": ["text"]},
+        "supported_parameters": null
+      },
+      "normalized": {
+        "context_length": 4096,
+        "input_modalities": null,
+        "output_modalities": ["text"],
+        "supported_parameters": null,
+        "unknown_fields": ["input_modalities", "supported_parameters"]
+      },
+      "warnings": ["metadata_invalid"]
+    }
+  ]
+}

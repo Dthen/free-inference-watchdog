@@ -190,10 +190,48 @@ test — arbitrary upstream objects are never exposed automatically.
 | `id` | string | The raw model ID; equals the enclosing map key. |
 | `name` | string | Display name. |
 | `description` | string or null | `null` when unknown. |
-| `context_length` | int or null | Non-negative integer; `null` when unknown. |
-| `architecture` | object | Exactly `input_modalities` + `output_modalities`, each a list of strings. |
-| `supported_parameters` | list of string | e.g. `temperature`, `max_tokens`. |
+| `context_length` | int or null | Non-negative safe integer (at most 2^53-1; booleans excluded); `null` when missing, malformed or otherwise unknown. `0` is a KNOWN zero. |
+| `architecture` | object | Exactly `input_modalities` + `output_modalities`, each a list of nonempty strings or `null` when unknown. |
+| `supported_parameters` | list of nonempty string or null | e.g. `temperature`, `max_tokens`; `null` when unknown. |
 | `pricing` | object or null | `null` as the **whole object** when pricing is unknown overall. Otherwise **exactly** `prompt` + `completion`, each a finite scalar preserved as returned (number or numeric string) or `null` when that scalar is **individually unknown**. Booleans and non-finite numbers are invalid. |
+
+### Optional capability nullability and normalization (unit 1c-b1 amendment)
+
+This deliberately amends the optional capability types before publication:
+`architecture.input_modalities`, `architecture.output_modalities` and
+`supported_parameters` are each a list of nonempty strings or `null`.
+Null means UNKNOWN, never empty: unknown, missing or malformed optional
+upstream metadata projects to `null`; a valid empty upstream array projects
+to `[]` and is KNOWN empty; and `[]` is never used to conceal unknown data or
+to drop an endpoint. The snapshot/model/provider field sets and the
+`get_model` success envelope are unchanged; no schema-version bump is needed
+for this unpublished draft, and this nullable-type clarification is recorded
+here so future code cannot silently revert it.
+
+- **Context** — a valid context is a safe non-negative integer (at most
+  2^53-1), booleans excluded; `0` is known. Missing, `null`, numeric-string,
+  boolean, negative and unsafe-integer contexts all project to `null`
+  (unknown), never coerced to a number.
+- **Arrays** — a missing or `null` array is unknown. A bare string, a
+  mixed-type array, or an array containing an empty string is malformed and
+  rejected whole (never partially salvaged) and becomes `null`. An invalid
+  `architecture` parent (not an object) makes both its `input_modalities` and
+  `output_modalities` children unknown. Valid retained array strings keep
+  their original casing, order and duplicates in public metadata; normalized
+  query values attach separately.
+- **Warnings** — absent or explicit-`null` optional capability data uses
+  `metadata_missing`; malformed non-`null` data uses `metadata_invalid`;
+  codes are deduplicated in frozen vocabulary order (`tick_epoch_unknown`,
+  `metadata_missing`, `metadata_invalid`).
+- **Normalization** — normalized capability fields are `context_length`, `input_modalities`, `output_modalities`, `supported_parameters` plus `unknown_fields`. Unknown values stay `null`, never `0` or `[]`. Known arrays are ASCII-only lowercased and first-occurrence deduplicated after folding; non-ASCII code points remain literal — neither whitespace trimming nor Unicode casefolding repairs a token. `unknown_fields` lists only these four capability fields (in that stated order) whose normalized value is `null`; it does not enumerate description or pricing metadata, and a known empty `[]` produces no unknown flag.
+- **Filter semantics** — an empty FILTER array applies no constraint; a
+  known empty upstream array satisfies no nonempty requested capability list.
+
+`tests/fixtures/catalog/metadata-normalization.json` is the independent
+raw-input to expected-projection to expected-normalized data table for these
+rules (an upstream capability fragment, never a valid snapshot or public
+query response); `tests/fixtures/catalog/capability-unknown.json` is the
+valid synthetic snapshot that distinguishes unknown from known-empty.
 
 ### Warning codes (frozen vocabulary)
 

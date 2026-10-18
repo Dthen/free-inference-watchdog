@@ -53,6 +53,25 @@ positive controls and in-memory mutation probes below pin the actual
 scenario values and the checker's sensitivity to conflating unknown with
 zero. Search/normalization goldens follow in unit 1c-b and the
 fixed-clock status contract in 1c-c.
+
+Unit 1c-b1 resolves the remaining public-metadata ambiguity: an UNKNOWN
+capability is now distinguishable from a KNOWN EMPTY one. `architecture`
+stays an exact object, but each `input_modalities`/`output_modalities`
+child and `supported_parameters` is now a list of nonempty strings OR
+`null` (unknown); a valid empty array stays `[]` and is KNOWN empty.
+`capability-unknown.json` is the valid synthetic snapshot that carries one
+all-null-capability model next to one known-empty model (plus a stale
+zero-ID second provider), pinned by two complete literal get_model goldens.
+`metadata-normalization.json` is the independent
+raw-input-to-expected-projection-to-expected-normalized data table — an
+upstream capability fragment, explicitly NOT a snapshot or query response —
+hand-authored and cross-checked by a clearly-labelled test-local rule
+restatement (a fixture checker, never production normalization). JSON
+Schema confirms the type model this rests on: `null` is a distinct type from
+an absent property, and an empty array is always a valid array; those facts
+explain the types, not this project's null-means-unknown semantics. Still
+fixture/contract work only — no query/projection/validation implementation
+is imported or exercised.
 """
 
 import copy
@@ -70,6 +89,10 @@ FIXTURE_DIR = REPO / "tests" / "fixtures" / "catalog"
 FIXTURE = FIXTURE_DIR / "basic.json"
 LOOKUP_FIXTURE = FIXTURE_DIR / "lookup.json"
 CASES_DOC = FIXTURE_DIR / "cases.json"
+CAPABILITY_FIXTURE_NAME = "capability-unknown.json"
+CAPABILITY_FIXTURE = FIXTURE_DIR / CAPABILITY_FIXTURE_NAME
+NORMALIZATION_FIXTURE_NAME = "metadata-normalization.json"
+NORMALIZATION_FIXTURE = FIXTURE_DIR / NORMALIZATION_FIXTURE_NAME
 
 CONTRACT_SECTION = "Published catalogue snapshot (v1)"
 
@@ -103,6 +126,24 @@ COUNT_FIELDS = frozenset({
 WARNING_CODES = frozenset({
     "tick_epoch_unknown", "metadata_missing", "metadata_invalid",
 })
+# Frozen warning vocabulary ORDER (unit 1c-b1): warning codes are
+# deduplicated in this order, so a payload never carries a permuted or
+# duplicated code list.
+WARNING_ORDER = ("tick_epoch_unknown", "metadata_missing", "metadata_invalid")
+assert set(WARNING_ORDER) == WARNING_CODES
+
+# The four normalized capability fields, in their frozen order (unit
+# 1c-b1); `unknown_fields` names exactly these, in exactly this order.
+CAPABILITY_FIELDS = (
+    "context_length", "input_modalities", "output_modalities",
+    "supported_parameters",
+)
+
+# JavaScript-safe integer ceiling: a context above this is unsafe and so
+# projects to unknown (unit 1c-b1). Computed, never guessed.
+MAX_SAFE_INT = 2 ** 53 - 1
+UNSAFE_INT = 2 ** 53
+assert MAX_SAFE_INT + 1 == UNSAFE_INT
 # Keys that must never appear anywhere in the public snapshot: config
 # dicts, auth/token material, roster internals, probe internals.
 FORBIDDEN_KEYS = frozenset({
@@ -176,6 +217,19 @@ def _counts_are_strict_int(value):
     """Counts are non-negative ints; bool is NOT an integer here."""
     return (isinstance(value, int) and not isinstance(value, bool)
             and value >= 0)
+
+
+def _assert_string_list_or_null(value):
+    """Unit 1c-b1 nullable-array contract: an optional capability array is
+    a list of nonempty strings OR `null` (unknown). Any other non-null
+    type — a bare string, a dict, a number — and any list element that is
+    not a nonempty string are rejected. `[]` is accepted as KNOWN empty."""
+    if value is None:
+        return
+    assert isinstance(value, list), \
+        "optional capability array must be a list or null"
+    assert all(isinstance(item, str) and item for item in value), \
+        "array elements must be nonempty strings"
 
 
 def _assert_pricing_contract(pricing):
@@ -276,16 +330,14 @@ def _assert_snapshot_contract(snap):
             assert model["description"] is None or \
                 isinstance(model["description"], str)
             ctx = model["context_length"]
-            assert ctx is None or (isinstance(ctx, int)
-                                   and not isinstance(ctx, bool) and ctx >= 0)
+            assert ctx is None or (
+                isinstance(ctx, int) and not isinstance(ctx, bool)
+                and 0 <= ctx <= MAX_SAFE_INT), \
+                "context_length must be a safe non-negative int or null"
             assert set(model["architecture"]) == ARCHITECTURE_FIELDS
             for modality in ("input_modalities", "output_modalities"):
-                values = model["architecture"][modality]
-                assert isinstance(values, list)
-                assert all(isinstance(v, str) and v for v in values)
-            params = model["supported_parameters"]
-            assert isinstance(params, list)
-            assert all(isinstance(p, str) and p for p in params)
+                _assert_string_list_or_null(model["architecture"][modality])
+            _assert_string_list_or_null(model["supported_parameters"])
             _assert_pricing_contract(model["pricing"])
 
     warnings = snap["warnings"]
@@ -1253,6 +1305,559 @@ def test_metadata_integrity_rejects_missing_zero_id_stale_provider(
         _assert_get_model_payload(case, snap)
 
 
+# ---------- unit 1c-b1: capability-unknown.json fixture integrity ----------
+#
+# capability-unknown.json is a valid synthetic snapshot whose provider
+# `synthetic-a` tracks an all-null-capability model next to a known-empty
+# model, and whose `synthetic-b` tracks zero IDs but is stale (so a correct
+# payload must still carry it in the exact-membership and staleness maps).
+# The two complete get_model goldens are literal, hand-authored payloads
+# (never generated from an implementation or from the fixture at run time).
+# This pins UNKNOWN (null) versus KNOWN EMPTY ([] / 0) with no runtime
+# normalization: the normalization table below is separate fixture data.
+
+CAPABILITY_UNKNOWN_ID = "vendor/unknown-capabilities"
+CAPABILITY_KNOWN_EMPTY_ID = "vendor/known-empty-capabilities"
+CAPABILITY_TRACKED_IDS = (CAPABILITY_KNOWN_EMPTY_ID, CAPABILITY_UNKNOWN_ID)
+CAPABILITY_CASE_IDS = {
+    CAPABILITY_UNKNOWN_ID: "get_model_capability_unknown_all_null",
+    CAPABILITY_KNOWN_EMPTY_ID: "get_model_capability_known_empty_lists",
+}
+# Positive-control pins: the actual scenario values, restated so a helper
+# that merely "passes" cannot hide a dropped or conflated value.
+CAPABILITY_UNKNOWN_NAME = "Vendor Unknown Capabilities"
+CAPABILITY_KNOWN_EMPTY_NAME = "Vendor Known Empty Capabilities"
+
+
+@pytest.fixture(scope="module")
+def capability_snapshot():
+    return _load_strict(CAPABILITY_FIXTURE)
+
+
+def _capability_case(cases_document, case_id):
+    case = next(c for c in _iter_get_model_cases(cases_document)
+                if c["id"] == case_id)
+    return case, _case_fixture(case, cases_document)
+
+
+def _capability_entry(snap, raw_id):
+    return snap["providers"]["synthetic-a"]["models"][raw_id]
+
+
+def _capability_endpoint(case):
+    endpoints = case["expect"]["endpoints"]
+    assert len(endpoints) == 1, \
+        f"{case['id']}: expected exactly one a-provider endpoint"
+    return endpoints[0]
+
+
+def _reseal_snapshot(snap):
+    """Recompute a snapshot copy's canonical `snapshot_id` from its (mutated)
+    body, so a CONSISTENT mutation keeps the hash check honest and the
+    scenario pin — not the hash — is what must bite."""
+    body = {k: v for k, v in snap.items() if k != "snapshot_id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    snap["snapshot_id"] = hashlib.sha256(canonical).hexdigest()
+    return snap
+
+
+def _assert_capability_unknown_semantics(snap):
+    """Scenario pin: the all-null model's capabilities are UNKNOWN — exactly
+    null, never a known zero or an empty list."""
+    entry = _capability_entry(snap, CAPABILITY_UNKNOWN_ID)
+    assert entry["name"] == CAPABILITY_UNKNOWN_NAME
+    assert entry["description"] is None
+    assert entry["context_length"] is None
+    assert entry["architecture"]["input_modalities"] is None
+    assert entry["architecture"]["output_modalities"] is None
+    assert entry["supported_parameters"] is None
+    assert entry["pricing"] is None
+
+
+def _assert_capability_known_empty_semantics(snap):
+    """Scenario pin: the known-empty model's capabilities are KNOWN empty —
+    exactly [] and 0, never null."""
+    entry = _capability_entry(snap, CAPABILITY_KNOWN_EMPTY_ID)
+    assert entry["name"] == CAPABILITY_KNOWN_EMPTY_NAME
+    assert entry["context_length"] == 0
+    assert entry["architecture"]["input_modalities"] == []
+    assert entry["architecture"]["output_modalities"] == []
+    assert entry["supported_parameters"] == []
+    assert entry["pricing"] == {"prompt": "0", "completion": "0"}
+
+
+def test_capability_fixture_matches_snapshot_contract(capability_snapshot):
+    _assert_snapshot_contract(capability_snapshot)
+
+
+def test_capability_fixture_shape_is_frozen(capability_snapshot):
+    assert capability_snapshot["schema_version"] == 1
+    assert capability_snapshot["tick_epoch"] == 1759200000
+    assert capability_snapshot["cadence_s"] == 3600
+    assert capability_snapshot["warnings"] == ["metadata_missing"]
+    assert capability_snapshot["provider_order"] == [
+        "synthetic-a", "synthetic-b"]
+    a = capability_snapshot["providers"]["synthetic-a"]
+    b = capability_snapshot["providers"]["synthetic-b"]
+    assert a["stale"] is False and b["stale"] is True
+    assert a["model_ids"] == list(CAPABILITY_TRACKED_IDS)
+    assert sorted(a["models"]) == list(CAPABILITY_TRACKED_IDS)
+    assert b["model_ids"] == [] and b["models"] == {}
+
+
+def test_capability_fixture_snapshot_id_is_canonical(capability_snapshot):
+    body = {k: v for k, v in capability_snapshot.items()
+            if k != "snapshot_id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    assert capability_snapshot["snapshot_id"] == \
+        hashlib.sha256(canonical).hexdigest()
+
+
+def test_capability_goldens_use_new_fixture_and_pass_complete_checkers(
+        cases_document):
+    expected_id = _load_strict(CAPABILITY_FIXTURE)["snapshot_id"]
+    for raw_id in CAPABILITY_TRACKED_IDS:
+        case, snap = _capability_case(cases_document,
+                                      CAPABILITY_CASE_IDS[raw_id])
+        # Explicit fixture override — never the cases.json default.
+        assert case["fixture"] == CAPABILITY_FIXTURE_NAME
+        assert case["args"]["model_id"] == raw_id
+        assert snap["snapshot_id"] == expected_id
+        _assert_snapshot_contract(snap)
+        _assert_get_model_payload(case, snap)
+
+
+def test_capability_goldens_pin_envelope_and_zero_id_stale_provider(
+        cases_document):
+    for raw_id in CAPABILITY_TRACKED_IDS:
+        case, snap = _capability_case(cases_document,
+                                      CAPABILITY_CASE_IDS[raw_id])
+        expect = case["expect"]
+        assert expect["exact_matches"] == {
+            "synthetic-a": True, "synthetic-b": False}
+        assert expect["exact_gateways"] == ["synthetic-a"]
+        # `synthetic-b` tracks zero ids yet must still appear, stale.
+        assert expect["provider_staleness"] == {
+            "synthetic-a": False, "synthetic-b": True}
+        assert expect["counts"] == {
+            "exact_matches": 1, "endpoints": 1,
+            "distinct_raw_ids": 1, "marker_group_labels": 1}
+        endpoint = _capability_endpoint(case)
+        assert endpoint["provider"] == "synthetic-a"
+        assert endpoint["stale"] is False
+        assert endpoint["metadata"] == _capability_entry(snap, raw_id)
+
+
+def test_capability_unknown_model_is_all_null_not_empty(cases_document):
+    case, snap = _capability_case(cases_document,
+                                  CAPABILITY_CASE_IDS[CAPABILITY_UNKNOWN_ID])
+    assert case["fixture"] == CAPABILITY_FIXTURE_NAME
+    meta = _capability_endpoint(case)["metadata"]
+    assert meta["context_length"] is None and meta["context_length"] != 0
+    assert meta["architecture"]["input_modalities"] is None
+    assert meta["architecture"]["output_modalities"] is None
+    assert meta["supported_parameters"] is None
+    assert isinstance(meta["name"], str) and meta["name"]
+    assert meta["description"] is None
+    assert meta["pricing"] is None
+    assert meta == _capability_entry(snap, CAPABILITY_UNKNOWN_ID)
+    _assert_capability_unknown_semantics(snap)
+
+
+def test_capability_known_empty_model_is_known_empty_not_unknown(
+        cases_document):
+    case, snap = _capability_case(
+        cases_document, CAPABILITY_CASE_IDS[CAPABILITY_KNOWN_EMPTY_ID])
+    meta = _capability_endpoint(case)["metadata"]
+    assert meta["context_length"] == 0
+    assert meta["architecture"]["input_modalities"] == []
+    assert meta["architecture"]["output_modalities"] == []
+    assert meta["supported_parameters"] == []
+    assert isinstance(meta["name"], str) and meta["name"]
+    assert isinstance(meta["description"], str) and meta["description"]
+    assert meta["pricing"] == {"prompt": "0", "completion": "0"}
+    assert meta == _capability_entry(snap, CAPABILITY_KNOWN_EMPTY_ID)
+    _assert_capability_known_empty_semantics(snap)
+
+
+def test_capability_unknown_and_empty_are_distinguishable(cases_document):
+    _, snap = _capability_case(cases_document,
+                               CAPABILITY_CASE_IDS[CAPABILITY_UNKNOWN_ID])
+    unknown = _capability_entry(snap, CAPABILITY_UNKNOWN_ID)
+    known = _capability_entry(snap, CAPABILITY_KNOWN_EMPTY_ID)
+    assert unknown["context_length"] is None
+    assert known["context_length"] == 0
+    assert unknown["supported_parameters"] is None
+    assert known["supported_parameters"] == []
+    assert unknown["architecture"]["input_modalities"] is None
+    assert known["architecture"]["input_modalities"] == []
+    # The shared snapshot checker accepts BOTH distinct forms.
+    _assert_snapshot_contract(snap)
+
+
+def test_capability_integrity_rejects_null_capability_replaced_by_empty(
+        cases_document):
+    case, snap = _copy_case(cases_document,
+                            CAPABILITY_CASE_IDS[CAPABILITY_UNKNOWN_ID])
+    # CONSISTENT fixture+golden mutation: every null capability becomes a
+    # known zero/empty in BOTH the snapshot copy and the golden, and the
+    # hash is re-sealed, so the generic integrity checkers still pass...
+    entry = _capability_entry(snap, CAPABILITY_UNKNOWN_ID)
+    meta = _capability_endpoint(case)["metadata"]
+    for target in (entry, meta):
+        target["context_length"] = 0
+        target["architecture"]["input_modalities"] = []
+        target["architecture"]["output_modalities"] = []
+        target["supported_parameters"] = []
+    _reseal_snapshot(snap)
+    case["expect"]["snapshot_id"] = snap["snapshot_id"]
+    _assert_snapshot_contract(snap)
+    _assert_get_model_payload(case, snap)
+    assert _capability_entry(snap, CAPABILITY_UNKNOWN_ID)[
+        "context_length"] == 0
+    # ...but the unknown-versus-empty scenario pin must bite.
+    with pytest.raises(AssertionError):
+        _assert_capability_unknown_semantics(snap)
+
+
+def test_capability_integrity_rejects_known_empty_marked_unknown(
+        cases_document):
+    case, snap = _copy_case(cases_document,
+                            CAPABILITY_CASE_IDS[CAPABILITY_KNOWN_EMPTY_ID])
+    entry = _capability_entry(snap, CAPABILITY_KNOWN_EMPTY_ID)
+    meta = _capability_endpoint(case)["metadata"]
+    for target in (entry, meta):
+        target["architecture"]["input_modalities"] = None
+        target["architecture"]["output_modalities"] = None
+        target["supported_parameters"] = None
+    _reseal_snapshot(snap)
+    case["expect"]["snapshot_id"] = snap["snapshot_id"]
+    _assert_snapshot_contract(snap)
+    _assert_get_model_payload(case, snap)
+    with pytest.raises(AssertionError):
+        _assert_capability_known_empty_semantics(snap)
+
+
+def test_capability_integrity_rejects_one_sided_null_to_empty(cases_document):
+    case, snap = _copy_case(cases_document,
+                            CAPABILITY_CASE_IDS[CAPABILITY_UNKNOWN_ID])
+    assert _capability_endpoint(case)["metadata"]["context_length"] is None
+    _capability_endpoint(case)["metadata"]["context_length"] = 0  # golden only
+    with pytest.raises(AssertionError, match=METADATA_ATTACHMENT_MARKER):
+        _assert_get_model_payload(case, snap)
+
+
+def test_capability_integrity_rejects_null_capability_as_bare_string(
+        cases_document):
+    _, snap = _copy_case(cases_document,
+                         CAPABILITY_CASE_IDS[CAPABILITY_UNKNOWN_ID])
+    entry = _capability_entry(snap, CAPABILITY_UNKNOWN_ID)
+    entry["supported_parameters"] = "temperature"  # not a list, not null
+    _reseal_snapshot(snap)  # isolate the array rule from the hash check
+    with pytest.raises(AssertionError, match="list or null"):
+        _assert_snapshot_contract(snap)
+
+
+def test_string_list_or_null_checker_accepts_null_and_empty_rejects_bad():
+    _assert_string_list_or_null(None)
+    _assert_string_list_or_null([])
+    _assert_string_list_or_null(["text"])
+    for bad in ("text", 5, {"input": "text"}, ["text", ""], ["text", 5],
+                [None], [[]]):
+        with pytest.raises(AssertionError,
+                           match="list or null|nonempty strings"):
+            _assert_string_list_or_null(bad)
+
+
+def test_capability_integrity_rejects_dropped_zero_id_stale_provider(
+        cases_document):
+    case, snap = _copy_case(cases_document,
+                            CAPABILITY_CASE_IDS[CAPABILITY_UNKNOWN_ID])
+    staleness = case["expect"]["provider_staleness"]
+    assert staleness["synthetic-b"] is True
+    del staleness["synthetic-b"]  # drop the zero-ID stale provider
+    with pytest.raises(AssertionError):
+        _assert_get_model_payload(case, snap)
+
+
+# ---------- unit 1c-b1: normalization data table (FIXTURE CHECKER) ----------
+#
+# metadata-normalization.json is an upstream capability-fragment table: each
+# row names a raw upstream fragment plus the literal expected public
+# capability projection, the literal expected normalized capability data,
+# the `unknown_fields` list and the deduplicated warning codes. It is
+# explicitly NOT a snapshot and NOT a public query response.
+#
+# The helpers below are a TEST-LOCAL restatement of the contract's
+# projection/normalization rules, used ONLY to check that the fixture's
+# hand-authored literal data is a correct application of those rules. They
+# are a fixture checker, NOT production normalization; no implementation
+# module is imported, and the fixture's literal data — not this code — is
+# the authoritative expected value.
+
+_MISSING = object()
+ROW_FIELDS = frozenset(
+    {"id", "note", "raw", "projected", "normalized", "warnings"})
+PROJECTED_FIELDS = frozenset(
+    {"context_length", "architecture", "supported_parameters"})
+NORMALIZED_FIELDS = frozenset(CAPABILITY_FIELDS) | {"unknown_fields"}
+
+
+def _ascii_lower(text):
+    """ASCII-only lowercasing: A-Z fold to a-z; every other code point
+    (including accented or uppercase non-ASCII letters) stays literal."""
+    return "".join(chr(ord(ch) + 32) if "A" <= ch <= "Z" else ch
+                   for ch in text)
+
+
+def _checker_dedup_warnings(codes):
+    present = {code for code in codes if code}
+    return [code for code in WARNING_ORDER if code in present]
+
+
+def _checker_project_context(value):
+    if value is _MISSING or value is None:
+        return None, "metadata_missing"
+    if isinstance(value, bool):
+        return None, "metadata_invalid"
+    if isinstance(value, int) and 0 <= value <= MAX_SAFE_INT:
+        return value, None
+    return None, "metadata_invalid"
+
+
+def _checker_project_array(value):
+    if value is _MISSING or value is None:
+        return None, "metadata_missing"
+    if not isinstance(value, list):
+        return None, "metadata_invalid"
+    if any(not isinstance(item, str) or not item for item in value):
+        return None, "metadata_invalid"
+    return list(value), None
+
+
+def _checker_project(raw):
+    ctx, ctx_warn = _checker_project_context(
+        raw.get("context_length", _MISSING))
+    arch = raw.get("architecture", _MISSING)
+    if isinstance(arch, dict):
+        in_, in_warn = _checker_project_array(
+            arch.get("input_modalities", _MISSING))
+        out_, out_warn = _checker_project_array(
+            arch.get("output_modalities", _MISSING))
+    else:
+        in_ = out_ = None
+        parent_warn = ("metadata_missing" if arch is _MISSING
+                       else "metadata_invalid")
+        in_warn = out_warn = parent_warn
+    params, params_warn = _checker_project_array(
+        raw.get("supported_parameters", _MISSING))
+    projected = {
+        "context_length": ctx,
+        "architecture": {"input_modalities": in_, "output_modalities": out_},
+        "supported_parameters": params,
+    }
+    warnings = _checker_dedup_warnings(
+        [ctx_warn, in_warn, out_warn, params_warn])
+    return projected, warnings
+
+
+def _checker_normalize_array(values):
+    if values is None:
+        return None
+    out, seen = [], set()
+    for item in values:
+        folded = _ascii_lower(item)
+        if folded not in seen:
+            seen.add(folded)
+            out.append(folded)
+    return out
+
+
+def _checker_normalize(projected):
+    normalized = {
+        "context_length": projected["context_length"],
+        "input_modalities": _checker_normalize_array(
+            projected["architecture"]["input_modalities"]),
+        "output_modalities": _checker_normalize_array(
+            projected["architecture"]["output_modalities"]),
+        "supported_parameters": _checker_normalize_array(
+            projected["supported_parameters"]),
+    }
+    normalized["unknown_fields"] = [
+        field for field in CAPABILITY_FIELDS if normalized[field] is None]
+    return normalized
+
+
+def _assert_normalization_row(row):
+    assert set(row) == ROW_FIELDS, f"{row['id']}: row field set"
+    assert set(row["projected"]) == PROJECTED_FIELDS, \
+        f"{row['id']}: projected field set"
+    assert set(row["projected"]["architecture"]) == ARCHITECTURE_FIELDS, \
+        f"{row['id']}: projected architecture field set"
+    assert set(row["normalized"]) == NORMALIZED_FIELDS, \
+        f"{row['id']}: normalized field set"
+    projected, warnings = _checker_project(row["raw"])
+    assert row["projected"] == projected, f"{row['id']}: projection mismatch"
+    assert row["warnings"] == warnings, f"{row['id']}: warning mismatch"
+    normalized = _checker_normalize(row["projected"])
+    assert row["normalized"] == normalized, \
+        f"{row['id']}: normalization mismatch"
+    unknown = row["normalized"]["unknown_fields"]
+    assert unknown == [f for f in CAPABILITY_FIELDS if f in set(unknown)], \
+        f"{row['id']}: unknown_fields order"
+    assert unknown == [f for f in CAPABILITY_FIELDS
+                       if row["normalized"][f] is None], \
+        f"{row['id']}: unknown_fields content"
+
+
+def _normalization_rows():
+    doc = _load_strict(NORMALIZATION_FIXTURE)
+    return {row["id"]: copy.deepcopy(row) for row in doc["rows"]}
+
+
+def test_normalization_table_is_fragment_not_snapshot():
+    doc = _load_strict(NORMALIZATION_FIXTURE)
+    assert doc["kind"] == "upstream-capability-fragment-table"
+    assert doc["not_a_snapshot"] is True
+    assert doc["capability_fields"] == list(CAPABILITY_FIELDS)
+    assert doc["warning_vocabulary"] == list(WARNING_ORDER)
+    # It is NOT a snapshot: no snapshot top-level field may appear.
+    assert not (set(doc) & TOP_LEVEL_FIELDS)
+    assert isinstance(doc["rows"], list) and doc["rows"]
+
+
+def test_normalization_rows_match_the_documented_rules():
+    doc = _load_strict(NORMALIZATION_FIXTURE)
+    ids = [row["id"] for row in doc["rows"]]
+    assert len(ids) == len(set(ids)), "duplicate normalization row id"
+    for row in doc["rows"]:
+        _assert_normalization_row(row)
+
+
+def test_normalization_table_covers_each_rule():
+    ids = set(_normalization_rows())
+    for required in (
+            "context_missing", "context_explicit_null",
+            "context_numeric_string", "context_boolean", "context_negative",
+            "context_unsafe", "context_safe_max_known", "context_zero_known",
+            "context_inclusive_boundary_known", "arrays_missing",
+            "arrays_explicit_null", "array_string_not_list",
+            "array_mixed_types", "array_contains_empty_string",
+            "array_invalid_architecture_parent", "array_known_empty",
+            "array_valid_retained_ordering_duplicates",
+            "array_mixed_ascii_case_duplicates",
+            "array_non_ascii_case_pair_not_folded",
+            "array_whitespace_not_trimmed",
+            "warnings_missing_then_invalid_dedup",
+            "warnings_invalid_dedup_multiple"):
+        assert required in ids, \
+            f"normalization table missing rule row {required}"
+
+
+def test_normalization_positive_controls():
+    rows = _normalization_rows()
+    # Valid raw casing/order/duplicates survive in the PUBLIC fragment.
+    r = rows["array_valid_retained_ordering_duplicates"]
+    assert r["projected"]["supported_parameters"] == [
+        "temperature", "temperature", "max_tokens"]
+    assert r["normalized"]["supported_parameters"] == [
+        "temperature", "max_tokens"]
+    # Mixed ASCII case folds and first-occurrence dedups.
+    r = rows["array_mixed_ascii_case_duplicates"]
+    assert r["projected"]["supported_parameters"] == ["TEXT", "text", "Text"]
+    assert r["normalized"]["supported_parameters"] == ["text"]
+    assert r["projected"]["supported_parameters"] != \
+        r["normalized"]["supported_parameters"]
+    # A non-ASCII case pair is NOT Unicode-folded; it stays two entries.
+    r = rows["array_non_ascii_case_pair_not_folded"]
+    assert r["projected"]["architecture"]["input_modalities"] == ["É", "é"]
+    assert r["normalized"]["input_modalities"] == ["É", "é"]
+    assert len(r["normalized"]["input_modalities"]) == 2
+    # Whitespace is not trimmed; only ASCII case is folded.
+    r = rows["array_whitespace_not_trimmed"]
+    assert r["projected"]["supported_parameters"] == [" Text "]
+    assert r["normalized"]["supported_parameters"] == [" text "]
+    # Unknown versus known-empty flags are correct.
+    r = rows["array_known_empty"]
+    assert r["normalized"]["input_modalities"] == []
+    assert r["normalized"]["output_modalities"] == []
+    assert r["normalized"]["supported_parameters"] == []
+    assert r["normalized"]["unknown_fields"] == []
+    assert r["warnings"] == []
+    r = rows["arrays_missing"]
+    assert r["normalized"]["input_modalities"] is None
+    assert r["normalized"]["unknown_fields"] == [
+        "input_modalities", "output_modalities", "supported_parameters"]
+    assert r["warnings"] == ["metadata_missing"]
+    # Warnings dedup in the frozen vocabulary order.
+    assert rows["warnings_missing_then_invalid_dedup"]["warnings"] == \
+        ["metadata_missing", "metadata_invalid"]
+    assert rows["warnings_invalid_dedup_multiple"]["warnings"] == \
+        ["metadata_invalid"]
+    # The safe bound is inclusive; one above it is unknown.
+    assert rows["context_safe_max_known"]["normalized"]["context_length"] == \
+        MAX_SAFE_INT
+    assert rows["context_unsafe"]["normalized"]["context_length"] is None
+    assert rows["context_unsafe"]["warnings"] == ["metadata_invalid"]
+    # Known zero and the inclusive context boundary are KNOWN.
+    assert rows["context_zero_known"]["normalized"]["context_length"] == 0
+    assert rows["context_inclusive_boundary_known"][
+        "normalized"]["context_length"] == 65536
+
+
+def test_normalization_integrity_rejects_missing_unknown_flag():
+    row = _normalization_rows()["arrays_missing"]
+    assert row["normalized"]["unknown_fields"]
+    row["normalized"]["unknown_fields"] = \
+        row["normalized"]["unknown_fields"][:-1]
+    with pytest.raises(AssertionError, match="normalization mismatch"):
+        _assert_normalization_row(row)
+
+
+def test_normalization_integrity_rejects_unicode_folded_token():
+    row = _normalization_rows()["array_non_ascii_case_pair_not_folded"]
+    assert row["normalized"]["input_modalities"] == ["É", "é"]
+    # Accidental Unicode folding would collapse the pair to one entry.
+    row["normalized"]["input_modalities"] = ["é"]
+    with pytest.raises(AssertionError, match="normalization mismatch"):
+        _assert_normalization_row(row)
+
+
+def test_normalization_integrity_rejects_partially_salvaged_malformed_array():
+    row = _normalization_rows()["array_mixed_types"]
+    assert row["projected"]["architecture"]["input_modalities"] is None
+    # Salvage the one valid token out of the malformed array.
+    row["projected"]["architecture"]["input_modalities"] = ["text"]
+    with pytest.raises(AssertionError, match="projection mismatch"):
+        _assert_normalization_row(row)
+
+
+def test_normalization_integrity_rejects_known_empty_marked_unknown():
+    row = _normalization_rows()["array_known_empty"]
+    assert row["normalized"]["supported_parameters"] == []
+    row["normalized"]["supported_parameters"] = None
+    with pytest.raises(AssertionError, match="normalization mismatch"):
+        _assert_normalization_row(row)
+
+
+def test_normalization_integrity_rejects_null_replaced_by_empty():
+    row = _normalization_rows()["arrays_missing"]
+    assert row["projected"]["supported_parameters"] is None
+    row["projected"]["supported_parameters"] = []
+    with pytest.raises(AssertionError, match="projection mismatch"):
+        _assert_normalization_row(row)
+
+
+def test_normalization_integrity_rejects_wrong_warning_code():
+    row = _normalization_rows()["array_known_empty"]
+    assert row["warnings"] == []
+    row["warnings"] = ["metadata_missing"]
+    with pytest.raises(AssertionError, match="warning mismatch"):
+        _assert_normalization_row(row)
+
+
 # ---------- README contract-draft pins ----------
 
 
@@ -1346,3 +1951,28 @@ def test_readme_contract_resolves_pricing_nullability():
     for phrase in ("whole object", "individually unknown", "Booleans"):
         assert phrase in text, \
             f"contract section missing pricing rule: {phrase}"
+
+
+def test_readme_contract_freezes_nullable_capability_and_normalization_rules():
+    text = _contract_section_text()
+    for phrase in (
+            "each a list of nonempty strings or `null`",
+            "KNOWN empty",
+            "safe non-negative integer",
+            "never partially salvaged",
+            "ASCII-only lowercased and first-occurrence deduplicated",
+            "Unicode casefolding repairs a token",
+            "empty FILTER array applies no constraint",
+            "no schema-version bump",
+    ):
+        assert phrase in text, \
+            f"contract section missing nullable/normalization rule: {phrase}"
+
+
+def test_readme_contract_enumerates_normalized_capability_fields_in_order():
+    text = _contract_section_text()
+    ordered = ("normalized capability fields are `context_length`, "
+               "`input_modalities`, `output_modalities`, "
+               "`supported_parameters` plus `unknown_fields`")
+    assert ordered in text, \
+        "normalization capability fields must be listed in the stated order"

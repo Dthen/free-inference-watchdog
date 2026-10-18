@@ -1,5 +1,5 @@
 {
-  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone and never generated from an implementation. Unit 1b freezes the get_model exact-ID and marker-lookup cases against lookup.json (oracle case 1 scenario); later units append their own cases to 'cases'. The envelope-freeze correction froze the successful PURE get_model payload: the top-level field set (including provider_staleness), the endpoint field set and the counts cardinalities (exact_matches, endpoints, distinct_raw_ids, marker_group_labels) are final. Counts describe the returned lookup result only. The shared-ID correction gives the two providers tracking vendor/shared intentionally conflicting, valid per-provider metadata (synthetic-a: large text-only context; synthetic-b: image input with a smaller context) so that metadata attachment by (provider, raw model_id) is testable; every snapshot_id was recomputed from the lookup.json fixture body. Unit 1c-a appends four metadata edge-case goldens against metadata-edge-cases.json (unknown-context / known-context / zero-context / unknown-description, plus a stale zero-ID second provider), each with a complete literal payload whose snapshot_id is the real canonical hash of that fixture body.",
+  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone and never generated from an implementation. Unit 1b freezes the get_model exact-ID and marker-lookup cases against lookup.json (oracle case 1 scenario); later units append their own cases to 'cases'. The envelope-freeze correction froze the successful PURE get_model payload: the top-level field set (including provider_staleness), the endpoint field set and the counts cardinalities (exact_matches, endpoints, distinct_raw_ids, marker_group_labels) are final. Counts describe the returned lookup result only. The shared-ID correction gives the two providers tracking vendor/shared intentionally conflicting, valid per-provider metadata (synthetic-a: large text-only context; synthetic-b: image input with a smaller context) so that metadata attachment by (provider, raw model_id) is testable; every snapshot_id was recomputed from the lookup.json fixture body. Unit 1c-a appends four metadata edge-case goldens against metadata-edge-cases.json (unknown-context / known-context / zero-context / unknown-description, plus a stale zero-ID second provider), each with a complete literal payload whose snapshot_id is the real canonical hash of that fixture body. Unit 1c-b1 appends two capability goldens against capability-unknown.json (an all-null-capability model and a known-empty-lists model, plus a stale zero-ID second provider); the two ids are not free-marker variants, so each query returns exactly one endpoint, all four counts are 1, and both payloads preserve the null-versus-empty distinction.",
   "fixture": "lookup.json",
   "cases": [
     {
@@ -646,6 +646,119 @@
               "pricing": {
                 "prompt": null,
                 "completion": null
+              }
+            }
+          }
+        ],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 1,
+          "endpoints": 1,
+          "distinct_raw_ids": 1,
+          "marker_group_labels": 1
+        }
+      }
+    },
+    {
+      "id": "get_model_capability_unknown_all_null",
+      "tool": "get_model",
+      "fixture": "capability-unknown.json",
+      "args": {
+        "model_id": "vendor/unknown-capabilities"
+      },
+      "expect": {
+        "ok": true,
+        "query": "vendor/unknown-capabilities",
+        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-a": true,
+          "synthetic-b": false
+        },
+        "exact_gateways": [
+          "synthetic-a"
+        ],
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": true
+        },
+        "endpoints": [
+          {
+            "provider": "synthetic-a",
+            "model_id": "vendor/unknown-capabilities",
+            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/unknown-capabilities",
+              "name": "Vendor Unknown Capabilities",
+              "description": null,
+              "context_length": null,
+              "architecture": {
+                "input_modalities": null,
+                "output_modalities": null
+              },
+              "supported_parameters": null,
+              "pricing": null
+            }
+          }
+        ],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 1,
+          "endpoints": 1,
+          "distinct_raw_ids": 1,
+          "marker_group_labels": 1
+        }
+      }
+    },
+    {
+      "id": "get_model_capability_known_empty_lists",
+      "tool": "get_model",
+      "fixture": "capability-unknown.json",
+      "args": {
+        "model_id": "vendor/known-empty-capabilities"
+      },
+      "expect": {
+        "ok": true,
+        "query": "vendor/known-empty-capabilities",
+        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-a": true,
+          "synthetic-b": false
+        },
+        "exact_gateways": [
+          "synthetic-a"
+        ],
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": true
+        },
+        "endpoints": [
+          {
+            "provider": "synthetic-a",
+            "model_id": "vendor/known-empty-capabilities",
+            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/known-empty-capabilities",
+              "name": "Vendor Known Empty Capabilities",
+              "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
+              "context_length": 0,
+              "architecture": {
+                "input_modalities": [],
+                "output_modalities": []
+              },
+              "supported_parameters": [],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
               }
             }
           }
