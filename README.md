@@ -142,6 +142,95 @@ the repo stays agent-agnostic.
 All per-tick fields are **rebuilt** (never appended to). The only persistent
 counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 
+## Published catalogue snapshot (v1) — contract draft
+
+**Status: frozen for contract review (unit 1a).** This section is the
+human half of the executable specification: `tests/test_catalog.py` pins
+it against synthetic fixtures under `tests/fixtures/catalog/`. Query and
+tool behaviour freezes with its implementation units (Tasks 2/3); nothing
+here is shipped code. `site/catalog.json` (declared in AGENTS.md) is the
+produced artifact: a generated, tracked, credential-free public snapshot
+consumed by the standalone `watchdog_catalog` package and the browser
+adapters. Provider config is used only at export time.
+
+### Top-level fields (exact set)
+
+| Field | Type | Definition |
+|---|---|---|
+| `schema_version` | int | Exactly `1`. |
+| `snapshot_id` | string | SHA-256 (64 lowercase hex chars) of the canonical snapshot body excluding this field. Canonical encoding: UTF-8, sorted object keys, compact separators (`,`/`:`), finite JSON values, `ensure_ascii=True`. The raw observation epoch is part of the hashed body; wall-clock build times and machine paths are never included. |
+| `tick_epoch` | int or null | Non-negative integer observation time; `null` (with a `tick_epoch_unknown` warning) when unknown. Freshness is never inferred from HTTP download time. |
+| `cadence_s` | int | Positive integer observation cadence (initially 3600), exposed explicitly rather than duplicated inside clients. |
+| `provider_order` | list of string | Active configured provider keys in display order; includes providers with zero tracked IDs. |
+| `providers` | map | One entry per active provider, keyed by provider key (below). |
+| `warnings` | list of string | Stable warning codes (frozen vocabulary below); never private paths or exception dumps. |
+
+### Provider entry (exact set)
+
+| Field | Type | Definition |
+|---|---|---|
+| `display_name` | string | Human-readable provider name. |
+| `chat_completions_url` | string | Chat-completions endpoint URL. |
+| `api_type` | string | API dialect (e.g. `openai`). |
+| `model_ids` | list of string | Raw tracked IDs, sorted and deduplicated. |
+| `models` | map | Projected model objects keyed by tracked raw ID (exact field set below). |
+| `stale` | bool | Derived from the roster's stale-provider list. |
+
+### Projected model fields (exact set)
+
+Only these fields are exposed. Provider-returned values are preserved
+for retained fields; validated search values attach separately at query
+time. New public metadata fields require a deliberate schema/projection
+test — arbitrary upstream objects are never exposed automatically.
+
+| Field | Type | Definition |
+|---|---|---|
+| `id` | string | The raw model ID; equals the enclosing map key. |
+| `name` | string | Display name. |
+| `description` | string or null | `null` when unknown. |
+| `context_length` | int or null | Non-negative integer; `null` when unknown. |
+| `architecture` | object | Exactly `input_modalities` + `output_modalities`, each a list of strings. |
+| `supported_parameters` | list of string | e.g. `temperature`, `max_tokens`. |
+| `pricing` | object or null | Exactly `prompt` + `completion`, each a finite scalar preserved as returned (number or numeric string), `null` when absent. Booleans and non-finite numbers are invalid. |
+
+### Warning codes (frozen vocabulary)
+
+| Code | Meaning |
+|---|---|
+| `tick_epoch_unknown` | Observation epoch missing or invalid — tick age unknown, never a healthy tick. |
+| `metadata_missing` | Optional metadata field absent upstream. |
+| `metadata_invalid` | Optional metadata present but malformed or unusable. |
+
+### Error and degradation rules
+
+- **Structural errors fail export** and retain the last published artifact:
+  wrong provider map, invalid ID lists, invalid wiring, duplicate registry keys.
+- **Optional degradation is unknown, never loss:** missing or malformed
+  OPTIONAL metadata degrades to `null`/unknown, not loss of the endpoint;
+  invalid optional timestamps become unknown, not a healthy tick.
+- **Public JSON parsing rejections** (Python and JS share these
+  expectations): `NaN`/`Infinity`, unreasonable nesting, unsafe integers.
+- **Never serialized:** config dicts, `_token`, auth blocks, token-file
+  paths, local env, pending alerts, ratelimit headers, probe internals,
+  untracked IDs, and unknown/disabled provider entries. The root-script
+  local compatibility adapter retains raw metadata (including unknown
+  upstream fields) for tracked IDs in its legacy `models` and endpoint
+  `metadata` fields only — those compatibility objects never appear in
+  the public JSON, embedded page, consumer package, or parity fixtures.
+
+### Tool surface (frozen names)
+
+Five tools, names stable; `watchdog_status` reports **published catalogue
+health**, not private operator health. Schemas stay static with provider
+validation against each snapshot (no stale provider enums embedded in an
+installed package):
+
+- `list_free_models(provider=None)`
+- `get_model(model_id)`
+- `list_endpoints(provider=None)`
+- `watchdog_status()`
+- `search_models(query=None, provider=None, min_context_length=None, input_modalities=None, supported_parameters=None, limit=50, offset=0)`
+
 ## State layout (state/, gitignored)
 
 - `roster.json`: providers + provider_models + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
