@@ -174,7 +174,7 @@ config is used only at export time.
 | `display_name` | string | Human-readable provider name. |
 | `chat_completions_url` | string | Chat-completions endpoint URL. |
 | `api_type` | string | API dialect (e.g. `openai`). |
-| `model_ids` | list of string | Raw tracked IDs, sorted and deduplicated. |
+| `model_ids` | list of string | Raw tracked IDs, sorted and deduplicated by literal code-point string order (never natural order). |
 | `models` | map | Projected model objects keyed by tracked raw ID (exact field set below). |
 | `stale` | bool | Derived from the roster's stale-provider list. |
 
@@ -293,6 +293,30 @@ installed package):
   providers is two endpoints, and metadata stays attached to its own pair.
   Result arrays order by provider display order, then natural raw-ID order
   (ASCII digit runs compared by digit length and lexical order).
+- **Total ordering rule (frozen):** provider precedence is the index in
+  `provider_order`, never alphabetic key order, provider-map insertion order or
+  global raw-ID order. Identical raw IDs on different providers remain two pairs
+  and order by provider precedence; within one provider, raw IDs compare by the
+  natural comparator below.
+- **Natural comparator:** tokenize only maximal ASCII `[0-9]+` runs, preserving
+  intervening text and string boundaries. Numeric runs compare by original digit
+  count, then lexical ASCII digits — no integer/float conversion of long digit
+  sequences and no stripping of leading zeroes, so `vendor/item1` <
+  `vendor/item2` < `vendor/item02` < `vendor/item10`. Text segments compare
+  case-sensitively by Unicode code point: no case folding, no locale collation,
+  no Unicode normalization and never UTF-16 code-unit comparison; on a strict
+  prefix the shorter sequence sorts first. Non-ASCII numeric-looking characters
+  are TEXT, never digit runs; Arabic-Indic digits (`١`) and superscript digits
+  (`²`) stay text (generic `isdigit`/`\d` classification is not this contract).
+  Digit-run tokens precede text tokens, empty boundary text tokens are preserved,
+  and literal raw IDs are never rewritten or replaced by normalized labels.
+- **Snapshot order versus query order:** snapshot `model_ids` stay sorted and
+  deduplicated by literal code-point string order (frozen), while query endpoint
+  result arrays use provider precedence plus NATURAL raw-ID order. The two orders
+  genuinely differ — `vendor/item02` precedes `vendor/item1` in a snapshot
+  `model_ids` list but follows `vendor/item2` in a query result. Input
+  `model_ids` are never reordered to hide a query sort defect, and snapshot
+  integrity is never relaxed to accept an adversarial unsorted `model_ids` list.
 
 ### Success envelope — `get_model` (frozen field sets)
 

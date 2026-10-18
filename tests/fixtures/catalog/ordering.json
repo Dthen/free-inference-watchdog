@@ -1,0 +1,262 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "2ce5d5e119b442d14e1bf95f7eede5229ea912a7a1fc801db8746b0df3f84d14",
+  "tick_epoch": 1759200000,
+  "cadence_s": 3600,
+  "provider_order": [
+    "synthetic-b",
+    "synthetic-a",
+    "synthetic-c"
+  ],
+  "providers": {
+    "synthetic-a": {
+      "display_name": "Synthetic Alpha",
+      "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [
+        "vendor/item2"
+      ],
+      "models": {
+        "vendor/item2": {
+          "id": "vendor/item2",
+          "name": "Order A Item Two",
+          "description": "Synthetic ordering fixture row for the alpha gateway.",
+          "context_length": 65536,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        }
+      },
+      "stale": false
+    },
+    "synthetic-b": {
+      "display_name": "Synthetic Beta",
+      "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [
+        "vendor/item02",
+        "vendor/item1",
+        "vendor/item10",
+        "vendor/item2",
+        "vendor/item١",
+        "vendor/long9999999999999999999999999999999999999999999999999999999999999991",
+        "vendor/long9999999999999999999999999999999999999999999999999999999999999992",
+        "vendor/Ａ",
+        "vendor/😀"
+      ],
+      "models": {
+        "vendor/item1": {
+          "id": "vendor/item1",
+          "name": "Order B Item One",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/item2": {
+          "id": "vendor/item2",
+          "name": "Order B Item Two",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/item02": {
+          "id": "vendor/item02",
+          "name": "Order B Item Zero Two",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/item10": {
+          "id": "vendor/item10",
+          "name": "Order B Item Ten",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/item١": {
+          "id": "vendor/item١",
+          "name": "Order B Item Arabic One",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/long9999999999999999999999999999999999999999999999999999999999999991": {
+          "id": "vendor/long9999999999999999999999999999999999999999999999999999999999999991",
+          "name": "Order B Long Run One",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/long9999999999999999999999999999999999999999999999999999999999999992": {
+          "id": "vendor/long9999999999999999999999999999999999999999999999999999999999999992",
+          "name": "Order B Long Run Two",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/Ａ": {
+          "id": "vendor/Ａ",
+          "name": "Order B Fullwidth Letter",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/😀": {
+          "id": "vendor/😀",
+          "name": "Order B Astral Emoji",
+          "description": "Synthetic ordering fixture row for the beta gateway.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        }
+      },
+      "stale": true
+    },
+    "synthetic-c": {
+      "display_name": "Synthetic Gamma",
+      "chat_completions_url": "https://synthetic-gamma.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [],
+      "models": {},
+      "stale": false
+    }
+  },
+  "warnings": []
+}

@@ -3553,6 +3553,226 @@
         ]
       }
     }
+,
+    {
+      "id": "get_model_ordering_identical_raw_id_provider_precedence",
+      "tool": "get_model",
+      "fixture": "ordering.json",
+      "args": {
+        "model_id": "vendor/item2"
+      },
+      "expect": {
+        "ok": true,
+        "query": "vendor/item2",
+        "snapshot_id": "2ce5d5e119b442d14e1bf95f7eede5229ea912a7a1fc801db8746b0df3f84d14",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-b": true,
+          "synthetic-a": true,
+          "synthetic-c": false
+        },
+        "exact_gateways": [
+          "synthetic-b",
+          "synthetic-a"
+        ],
+        "provider_staleness": {
+          "synthetic-b": true,
+          "synthetic-a": false,
+          "synthetic-c": false
+        },
+        "endpoints": [
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/item2",
+            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": true,
+            "metadata": {
+              "id": "vendor/item2",
+              "name": "Order B Item Two",
+              "description": "Synthetic ordering fixture row for the beta gateway.",
+              "context_length": 131072,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          },
+          {
+            "provider": "synthetic-a",
+            "model_id": "vendor/item2",
+            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/item2",
+              "name": "Order A Item Two",
+              "description": "Synthetic ordering fixture row for the alpha gateway.",
+              "context_length": 65536,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          }
+        ],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 2,
+          "endpoints": 2,
+          "distinct_raw_ids": 1,
+          "marker_group_labels": 1
+        }
+      }
+    },
+    {
+      "id": "search_ordering_provider_b_natural_page",
+      "tool": "search_models",
+      "fixture": "ordering.json",
+      "args": {
+        "query": "vendor/item",
+        "provider": "synthetic-b",
+        "limit": 2,
+        "offset": 1
+      },
+      "expect": {
+        "ok": true,
+        "query": "vendor/item",
+        "filters": {
+          "provider": "synthetic-b",
+          "min_context_length": null,
+          "input_modalities": null,
+          "supported_parameters": null
+        },
+        "limit": 2,
+        "offset": 1,
+        "snapshot_id": "2ce5d5e119b442d14e1bf95f7eede5229ea912a7a1fc801db8746b0df3f84d14",
+        "tick_epoch": 1759200000,
+        "provider_staleness": {
+          "synthetic-b": true
+        },
+        "endpoints": [
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/item2",
+            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": true,
+            "name": "Order B Item Two",
+            "description": "Synthetic ordering fixture row for the beta gateway.",
+            "context_length": 131072,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "supported_parameters": [
+              "temperature"
+            ],
+            "unknown_fields": [],
+            "metadata": {
+              "id": "vendor/item2",
+              "name": "Order B Item Two",
+              "description": "Synthetic ordering fixture row for the beta gateway.",
+              "context_length": 131072,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          },
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/item02",
+            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": true,
+            "name": "Order B Item Zero Two",
+            "description": "Synthetic ordering fixture row for the beta gateway.",
+            "context_length": 131072,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "supported_parameters": [
+              "temperature"
+            ],
+            "unknown_fields": [],
+            "metadata": {
+              "id": "vendor/item02",
+              "name": "Order B Item Zero Two",
+              "description": "Synthetic ordering fixture row for the beta gateway.",
+              "context_length": 131072,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          }
+        ],
+        "total_matches": 5,
+        "returned_count": 2,
+        "next_offset": 3,
+        "counts": {
+          "gateways": 1,
+          "endpoints": 2,
+          "distinct_raw_ids": 2,
+          "marker_group_labels": 2
+        },
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ]
+      }
+    }
   ],
   "marker_strip_rule": [
     {"raw_id": "vendor/model", "stripped": "vendor/model"},

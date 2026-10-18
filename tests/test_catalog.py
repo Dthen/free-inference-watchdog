@@ -86,6 +86,24 @@ mutant that derives the unfiltered ordered catalogue from snapshot data,
 slices the window BEFORE filtering, and rebuilds a consistent (but wrongly
 empty) page with the correct unpaginated total — so the rejection proves wrong
 membership, never a truncated golden. Still fixture/contract work only.
+
+Unit 1d-a freezes the TOTAL ordering contract before runtime extraction.
+`ordering-cases.json` is a clearly-labelled ordering-rule TABLE (explicitly NOT
+a snapshot and NOT a query result): adversarial literal vectors for ASCII
+natural runs and leading zeroes, two 64-digit equal-length runs supplied in
+reverse, adjacent run lengths, the mixed boundary ids "2"/"10"/"a"/"²"/"١",
+BMP-versus-astral code points with ASCII case, prefix/trailing-text and
+numeric-value ties. `ordering.json` is a valid synthetic v1 snapshot whose
+PHYSICAL provider-map order (synthetic-a,b,c) is NOT its `provider_order`
+(synthetic-b,a,c), with one raw id tracked by two providers. Two complete
+literal goldens — one `get_model` and one `search_models` page — prove provider
+PRECEDENCE and natural (never lexical, never declaration-order, never
+numeric-value) raw-ID ordering. The unit also corrects ONLY the test-local
+ordering restatement: the previous `str.isdigit()`/`\\d` version classified
+Arabic-Indic and superscript characters as digits and mixed tuple/str keys, so
+it was neither total nor the frozen ASCII/code-point rule. No production
+helper, package, query or browser code exists or is imported here; runtime
+implementation remains Task 2d.
 """
 
 import copy
@@ -270,13 +288,45 @@ def _strip_marker_contract(raw_id):
     return stripped or raw_id
 
 
+# The test-local ordering restatement's homogeneous token-tag space: a
+# digit-run token sorts BEFORE a text token when unlike kinds meet, so every
+# string key is total and mutually comparable. Only maximal ASCII `[0-9]+`
+# runs are digit runs; Unicode-wide `\d` and `str.isdigit()` classification are
+# NOT the contract (they survive below only as documented wrong-rule mutants).
+_ORDERING_DIGIT_TOKEN = 0
+_ORDERING_TEXT_TOKEN = 1
+_ASCII_DIGIT_RUN = re.compile(r"[0-9]+")
+_UNICODE_DIGIT_RUN = re.compile(r"\d+")
+
+
 def _natural_key_contract(raw_id):
-    """Contract restatement of result ordering: provider display order,
-    then natural raw-ID order — ASCII digit runs compared by digit
-    length and lexical order, never locale-dependent sorting or
-    floating-point conversion of long digit sequences."""
-    return [(len(part), part) if part.isdigit() else part
-            for part in re.split(r"(\d+)", raw_id)]
+    """TEST-LOCAL restatement of the frozen ordering rule, corrected in unit
+    1d-a. Provider display order comes from `provider_order`; within a
+    provider, raw IDs compare by this key:
+
+    * only maximal ASCII `[0-9]+` runs become digit-run tokens, compared by
+      their ORIGINAL digit count then lexically on the ASCII digits — no
+      integer/float conversion of long digit sequences and no stripping of
+      leading zeroes;
+    * every other segment is a text token compared case-sensitively by
+      Unicode code point — no case folding, locale collation, normalization or
+      UTF-16 code-unit comparison;
+    * unlike token kinds keep digit-run tokens first (homogeneous tags 0/1);
+    * a strict prefix of a token sequence sorts first, and empty boundary text
+      tokens are preserved.
+
+    `raw_id` is never rewritten. This is a fixture checker restated from the
+    contract text — NOT imported from build_site or any implementation module,
+    and no runtime ordering code exists yet."""
+    tokens = []
+    pos = 0
+    for match in _ASCII_DIGIT_RUN.finditer(raw_id):
+        tokens.append((_ORDERING_TEXT_TOKEN, raw_id[pos:match.start()]))
+        tokens.append((_ORDERING_DIGIT_TOKEN,
+                       (len(match.group()), match.group())))
+        pos = match.end()
+    tokens.append((_ORDERING_TEXT_TOKEN, raw_id[pos:]))
+    return tokens
 
 
 # ---------- shared snapshot-contract integrity ----------
@@ -1958,6 +2008,7 @@ SEARCH_REQUIRED_CASE_IDS = (
     "search_text_metadata_array_not_searched",
     "search_text_raw_id_unknown_flags",
     "search_text_padded_query_not_trimmed",
+    "search_ordering_provider_b_natural_page",
 )
 
 # Full ordered registry of lookup.json (no filters): provider display order,
@@ -3687,6 +3738,723 @@ def test_status_integrity_rejects_bool_tick_fresh_and_extra_keys(
         _assert_status_payload(case, snap)
 
 
+# ---------- unit 1d-a: total ASCII-digit/code-point ordering contract ----------
+#
+# The frozen ordering rule lives in README.md ("Identity, lookup, and
+# ordering"). This section pins it with adversarial, hand-authored data:
+#
+#   * `ordering-cases.json` is a labelling-clear ordering-rule TABLE — never a
+#     snapshot and never a query result. Its `expected` arrays are literal and
+#     every `input` is deliberately NOT pre-sorted (or, for the long-runs case,
+#     supplied in REVERSE correct order).
+#   * `ordering.json` is a valid synthetic v1 snapshot whose provider-map
+#     insertion order is NOT its `provider_order`, and which tracks one raw id
+#     on two providers.
+#   * Two complete literal goldens (one get_model, one search_models page) pin
+#     provider precedence and natural (not lexical, not declaration-order,
+#     not numeric-value) raw-ID order.
+#
+# `_natural_key_contract` is the TEST-LOCAL restatement of the rule, corrected
+# in this unit: the earlier `re.split(r"(\d+)")` + `str.isdigit()` version used
+# Unicode-wide digit classification AND mixed `(len, digits)` tuples with bare
+# `str` parts, so it raised TypeError on real supplied boundary ids. The
+# corrected restatement tags every token homogeneously (digit-run tokens
+# precede text tokens), tokenizes only maximal ASCII `[0-9]+` runs, compares
+# runs by ORIGINAL digit count then lexical ASCII digits and text by Unicode
+# code point. It is a fixture checker, never production code.
+
+ORDERING_FIXTURE_NAME = "ordering.json"
+ORDERING_FIXTURE = FIXTURE_DIR / ORDERING_FIXTURE_NAME
+ORDERING_CASES_DOC = FIXTURE_DIR / "ordering-cases.json"
+
+
+@pytest.fixture(scope="module")
+def ordering_snapshot():
+    return _load_strict(ORDERING_FIXTURE)
+
+
+@pytest.fixture(scope="module")
+def ordering_vectors():
+    return _load_strict(ORDERING_CASES_DOC)
+
+
+def _ordering_vector(vectors, case_id):
+    case = next(c for c in vectors["cases"] if c["id"] == case_id)
+    return case
+
+
+def _digit_run_tokens(key):
+    return [tok for tok in key if tok[0] == _ORDERING_DIGIT_TOKEN]
+
+
+def _ordering_query_case(cases_document, case_id):
+    case = next(c for c in cases_document["cases"] if c["id"] == case_id)
+    assert case["fixture"] == ORDERING_FIXTURE_NAME, \
+        f"{case_id}: must use the ordering fixture"
+    return case, _load_strict(ORDERING_FIXTURE)
+
+
+def _copy_ordering_query_case(cases_document, case_id):
+    case, snap = _ordering_query_case(cases_document, case_id)
+    return copy.deepcopy(case), snap
+
+
+# -- wrong-rule mutants (rejection evidence ONLY; never an authoring oracle) --
+
+def _declaration_order_rule(values):
+    """WRONG RULE: the registry is never re-sorted."""
+    return list(values)
+
+
+def _plain_lexical_rule(values):
+    """WRONG RULE: plain lexical (code-point) string order, no digit runs."""
+    return sorted(values)
+
+
+def _unicode_digit_rule(values):
+    """WRONG RULE: Unicode-wide `\\d` runs (Arabic-Indic digits become
+    numeric tokens)."""
+    return sorted(values, key=_unicode_digit_key)
+
+
+def _float_run_rule(values):
+    """WRONG RULE: numeric runs converted to float."""
+    return sorted(values, key=_float_run_key)
+
+
+def _numeric_value_rule(values):
+    """WRONG RULE: leading zeroes stripped, runs compared by integer value."""
+    return sorted(values, key=_numeric_value_key)
+
+
+def _casefold_rule(values):
+    """WRONG RULE: Unicode casefold collation."""
+    return sorted(values, key=_casefold_key)
+
+
+def _utf16_code_unit_rule(values):
+    """WRONG RULE: native UTF-16 code-unit ordering."""
+    return sorted(values, key=lambda raw_id: raw_id.encode("utf-16-be"))
+
+
+def _unicode_digit_key(raw_id):
+    tokens = []
+    pos = 0
+    for match in _UNICODE_DIGIT_RUN.finditer(raw_id):
+        tokens.append((_ORDERING_TEXT_TOKEN, raw_id[pos:match.start()]))
+        tokens.append((_ORDERING_DIGIT_TOKEN,
+                       (len(match.group()), match.group())))
+        pos = match.end()
+    tokens.append((_ORDERING_TEXT_TOKEN, raw_id[pos:]))
+    return tokens
+
+
+def _float_run_key(raw_id):
+    tokens = []
+    pos = 0
+    for match in _ASCII_DIGIT_RUN.finditer(raw_id):
+        tokens.append((_ORDERING_TEXT_TOKEN, raw_id[pos:match.start()]))
+        tokens.append((_ORDERING_DIGIT_TOKEN, float(match.group())))
+        pos = match.end()
+    tokens.append((_ORDERING_TEXT_TOKEN, raw_id[pos:]))
+    return tokens
+
+
+def _numeric_value_key(raw_id):
+    tokens = []
+    pos = 0
+    for match in _ASCII_DIGIT_RUN.finditer(raw_id):
+        tokens.append((_ORDERING_TEXT_TOKEN, raw_id[pos:match.start()]))
+        tokens.append((_ORDERING_DIGIT_TOKEN, int(match.group())))
+        pos = match.end()
+    tokens.append((_ORDERING_TEXT_TOKEN, raw_id[pos:]))
+    return tokens
+
+
+def _casefold_key(raw_id):
+    return raw_id.casefold()
+
+
+def _legacy_heterogeneous_key(raw_id):
+    """The restatement this unit CORRECTED, kept only as documented defect
+    evidence: Unicode-wide `re.split(r"(\\d+)")` plus `str.isdigit()` mixes
+    `(len, digits)` tuples with bare `str` parts, so it is not a total order
+    and raises TypeError on the real supplied boundary ids."""
+    return [(len(part), part) if part.isdigit() else part
+            for part in re.split(r"(\d+)", raw_id)]
+
+
+# -- fixture integrity --
+
+def test_ordering_fixture_matches_snapshot_contract(ordering_snapshot):
+    _assert_snapshot_contract(ordering_snapshot)
+
+
+def test_ordering_fixture_shape_is_frozen(ordering_snapshot):
+    snap = ordering_snapshot
+    assert snap["schema_version"] == 1
+    assert snap["tick_epoch"] == 1759200000
+    assert snap["cadence_s"] == 3600
+    assert snap["warnings"] == []
+    assert snap["provider_order"] == [
+        "synthetic-b", "synthetic-a", "synthetic-c"]
+    a = snap["providers"]["synthetic-a"]
+    b = snap["providers"]["synthetic-b"]
+    c = snap["providers"]["synthetic-c"]
+    assert a["stale"] is False and b["stale"] is True and c["stale"] is False
+    assert a["model_ids"] == ["vendor/item2"]
+    assert c["model_ids"] == [] and c["models"] == {}
+    # Two equal-length 64+-digit ASCII runs that differ only at the end.
+    long_ids = [i for i in b["model_ids"] if i.startswith("vendor/long")]
+    assert len(long_ids) == 2
+    runs = [raw_id[len("vendor/long"):] for raw_id in long_ids]
+    assert all(len(run) >= 64 and set(run) <= set("0123456789")
+               for run in runs)
+    assert len(runs[0]) == len(runs[1])
+    assert runs[0][:-1] == runs[1][:-1] and runs[0][:-1]
+    assert runs[0][-1] != runs[1][-1]
+    # Non-ASCII ids are written literally and never transliterated.
+    for raw_id in ("vendor/item\u0661", "vendor/\uff21", "vendor/\U0001f600"):
+        assert raw_id in b["model_ids"]
+    text = ORDERING_FIXTURE.read_text(encoding="utf-8")
+    assert "vendor/item\u0661" in text and "vendor/\uff21" in text
+    assert "vendor/\U0001f600" in text
+    assert "\\u" not in text, "non-ASCII ids must stay literal, not escaped"
+
+
+def test_ordering_fixture_map_key_order_is_not_display_order(ordering_snapshot):
+    snap = ordering_snapshot
+    # Physical/insertion order of the provider map is a,b,c (also the
+    # alphabetic order); display order is b,a,c and is NOT derived from it.
+    assert list(snap["providers"]) == [
+        "synthetic-a", "synthetic-b", "synthetic-c"]
+    assert snap["provider_order"] == [
+        "synthetic-b", "synthetic-a", "synthetic-c"]
+    assert sorted(snap["provider_order"]) == list(snap["providers"])
+    assert sorted(snap["provider_order"]) != snap["provider_order"]
+
+
+def test_ordering_fixture_snapshot_id_is_canonical(ordering_snapshot):
+    body = {k: v for k, v in ordering_snapshot.items() if k != "snapshot_id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    assert ordering_snapshot["snapshot_id"] == \
+        hashlib.sha256(canonical).hexdigest()
+
+
+def test_ordering_fixture_model_ids_are_literal_code_point_sorted(
+        ordering_snapshot):
+    snap = ordering_snapshot
+    for key, entry in snap["providers"].items():
+        assert entry["model_ids"] == sorted(set(entry["model_ids"])), key
+    b_ids = snap["providers"]["synthetic-b"]["model_ids"]
+    # Snapshot order is literal CODE POINT order, which is NOT natural order.
+    assert b_ids.index("vendor/item02") < b_ids.index("vendor/item1")
+    natural = sorted(b_ids, key=_natural_key_contract)
+    assert natural.index("vendor/item1") < natural.index("vendor/item02")
+    assert natural != b_ids
+
+
+def test_ordering_fixture_long_runs_match_the_vector_table(
+        ordering_snapshot, ordering_vectors):
+    # The fixture tracks the SAME literal long ids as the rule table, so the
+    # long-run vector is not a detached string exercise.
+    table = _ordering_vector(ordering_vectors,
+                             "long_equal_length_runs_reverse_supplied")
+    b_ids = ordering_snapshot["providers"]["synthetic-b"]["model_ids"]
+    for raw_id in table["input"]:
+        assert raw_id in b_ids, \
+            "the fixture must carry the rule table's literal long ids"
+        assert len(raw_id) >= len("vendor/long") + 64
+
+
+def test_ordering_fixture_adds_a_provider_without_package_code(
+        ordering_snapshot):
+    # A third synthetic provider is added by DATA alone: the fixture declares
+    # all three providers with no python change, and this file imports no
+    # implementation module.
+    import sys
+    assert not any(name.startswith("watchdog_catalog")
+                   for name in sys.modules)
+    assert set(ordering_snapshot["providers"]) == set(
+        ordering_snapshot["provider_order"])
+    assert len(ordering_snapshot["provider_order"]) == 3
+
+
+# -- the ordering-rule vector table --
+
+def test_ordering_vectors_are_a_clearly_labelled_rule_table(ordering_vectors):
+    doc = ordering_vectors
+    assert set(doc) == {"description", "ordering_rule", "cases"}
+    assert "NOT a snapshot and NOT a query result" in doc["description"]
+    assert "never computed by an implementation" in doc["description"]
+    assert "only maximal ASCII [0-9]+ runs are digit runs" in \
+        doc["ordering_rule"]
+    assert "ORIGINAL digit count then lexical ASCII digits" in \
+        doc["ordering_rule"]
+    assert "no integer/float conversion" in doc["ordering_rule"]
+    assert "compare case-sensitively by Unicode code point" in \
+        doc["ordering_rule"]
+    assert "UTF-16 code-unit comparison" in doc["ordering_rule"]
+    assert "digit-run tokens precede text tokens" in doc["ordering_rule"]
+    assert "never rewritten" in doc["ordering_rule"]
+    # A rule table carries none of the snapshot/query envelope vocabulary.
+    for stray in ("schema_version", "snapshot_id", "providers",
+                  "provider_order", "endpoints", "counts"):
+        assert stray not in doc
+
+
+def test_ordering_vectors_are_literal_permutations_never_pre_sorted(
+        ordering_vectors):
+    cases = ordering_vectors["cases"]
+    assert cases
+    for case in cases:
+        assert set(case) == {"id", "why", "input", "expected"}, case.get("id")
+        assert isinstance(case["why"], str) and case["why"].strip()
+        assert len(case["input"]) == len(case["expected"]) >= 2
+        assert all(isinstance(i, str) and i
+                   for i in case["input"] + case["expected"])
+        assert sorted(case["input"]) == sorted(case["expected"]), case["id"]
+        assert set(case["input"]) == set(case["expected"])
+        # Adversarial by construction: no vector arrives pre-sorted.
+        assert case["input"] != case["expected"], case["id"]
+
+
+def test_ordering_vectors_match_the_corrected_restated_rule(ordering_vectors):
+    for case in ordering_vectors["cases"]:
+        assert sorted(case["input"], key=_natural_key_contract) == \
+            case["expected"], case["id"]
+
+
+def test_ordering_vector_ascii_runs_keep_original_digit_count(
+        ordering_vectors):
+    case = _ordering_vector(ordering_vectors,
+                            "ascii_natural_runs_and_leading_zeroes")
+    assert case["input"] == [
+        "vendor/item000", "vendor/item10", "vendor/item02", "vendor/item2",
+        "vendor/item1"]
+    assert case["expected"] == [
+        "vendor/item1", "vendor/item2", "vendor/item02", "vendor/item10",
+        "vendor/item000"]
+    # Length-then-lexical, NOT numeric value: the longer run (000) is last.
+    mutant = _numeric_value_rule(case["input"])
+    assert mutant[0] == "vendor/item000"
+    assert mutant != case["expected"]
+    # The plain lexical rule is also wrong (000/02 sort before item1).
+    assert _plain_lexical_rule(case["input"]) != case["expected"]
+
+
+def test_ordering_vector_long_equal_length_runs_reverse_supplied(
+        ordering_vectors):
+    case = _ordering_vector(ordering_vectors,
+                            "long_equal_length_runs_reverse_supplied")
+    first, second = (raw_id[len("vendor/long"):] for raw_id in case["input"])
+    # input is [..992, ..991] (reverse correct order); expected is [991, 992].
+    assert len(first) == len(second) == 64
+    assert first[:-1] == second[:-1] and first[-1] == "2" and second[-1] == "1"
+    assert case["expected"] == ["vendor/long" + second, "vendor/long" + first]
+    assert case["expected"] == [case["input"][1], case["input"][0]]
+    # A float-conversion key COLLIDES on the equal-length pair and therefore
+    # cannot restore the correct order.
+    assert float(first) == float(second)
+    assert _float_run_rule(case["input"]) == case["input"]
+    assert _float_run_rule(case["input"]) != case["expected"]
+
+
+def test_ordering_vector_adjacent_run_lengths(ordering_vectors):
+    case = _ordering_vector(ordering_vectors,
+                            "long_adjacent_run_length_shorter_first")
+    runs = [raw_id[len("vendor/long"):] for raw_id in case["input"]]
+    assert sorted(len(run) for run in runs) == [64, 65]
+    assert case["input"][0] == "vendor/long" + runs[0]
+    assert len(runs[0]) == 65
+    assert case["expected"] == [case["input"][1], case["input"][0]]
+    assert _digit_run_tokens(_natural_key_contract(case["expected"][0])) == \
+        [(_ORDERING_DIGIT_TOKEN, (64, "1" * 64))]
+    assert _digit_run_tokens(_natural_key_contract(case["expected"][1])) == \
+        [(_ORDERING_DIGIT_TOKEN, (65, "1" * 65))]
+
+
+def test_ordering_vector_non_ascii_digit_lookalikes_are_text(ordering_vectors):
+    case = _ordering_vector(ordering_vectors,
+                            "mixed_ascii_arabic_indic_and_superscript")
+    assert case["expected"] == ["2", "10", "a", "\u00b2", "\u0661"]
+    assert _digit_run_tokens(_natural_key_contract("2")) == \
+        [(_ORDERING_DIGIT_TOKEN, (1, "2"))]
+    assert _digit_run_tokens(_natural_key_contract("10")) == \
+        [(_ORDERING_DIGIT_TOKEN, (2, "10"))]
+    for text in ("a", "\u00b2", "\u0661"):
+        assert _digit_run_tokens(_natural_key_contract(text)) == [], text
+        assert _natural_key_contract(text) == [(_ORDERING_TEXT_TOKEN, text)]
+    assert _unicode_digit_rule(case["input"]) != case["expected"], \
+        "Unicode-wide \\d digit classification must be discriminated"
+    # The corrected restatement is TOTAL on these real boundary ids...
+    assert sorted(case["input"], key=_natural_key_contract) == case["expected"]
+    # ...while the classifier it replaced is not: `str.isdigit()` turns the
+    # superscript into a `(len, digits)` tuple and mixes it with bare `str`
+    # parts, so the sort raises TypeError on the real supplied ids.
+    with pytest.raises(TypeError):
+        sorted(case["input"], key=_legacy_heterogeneous_key)
+
+
+def test_ordering_vector_code_point_order_and_no_case_folding(
+        ordering_vectors):
+    case = _ordering_vector(ordering_vectors,
+                            "bmp_astral_code_point_and_ascii_case")
+    assert case["expected"] == [
+        "vendor/B", "vendor/a", "vendor/\uff21", "vendor/\U0001f600"]
+    # ASCII case order proves there is no folding/collation.
+    assert _casefold_rule(case["input"])[:2] == ["vendor/a", "vendor/B"]
+    assert _casefold_rule(case["input"]) != case["expected"]
+    # Native UTF-16 code-unit order REVERSES the BMP/astral pair.
+    utf16 = _utf16_code_unit_rule(case["input"])
+    assert utf16 == [
+        "vendor/B", "vendor/a", "vendor/\U0001f600", "vendor/\uff21"]
+    assert utf16 != case["expected"]
+    assert ord("\uff21") < ord("\U0001f600")
+
+
+def test_ordering_vector_prefix_trailing_text_and_value_ties(ordering_vectors):
+    prefix = _ordering_vector(ordering_vectors,
+                              "prefix_and_trailing_text_empty_token")
+    assert prefix["expected"] == [
+        "vendor/item1", "vendor/item1-suffix", "vendor/item1a"]
+    # Empty boundary text tokens are preserved consistently.
+    assert _natural_key_contract("vendor/item1") == [
+        (_ORDERING_TEXT_TOKEN, "vendor/item"),
+        (_ORDERING_DIGIT_TOKEN, (1, "1")),
+        (_ORDERING_TEXT_TOKEN, "")]
+    assert _natural_key_contract("vendor/item1a")[-1] == \
+        (_ORDERING_TEXT_TOKEN, "a")
+    assert _natural_key_contract("vendor/item1-suffix")[-1] == \
+        (_ORDERING_TEXT_TOKEN, "-suffix")
+    ties = _ordering_vector(ordering_vectors,
+                            "equal_run_length_lexical_and_value_ties")
+    assert ties["expected"] == ["vendor/x1", "vendor/x01", "vendor/x001"]
+    assert {int(raw[len("vendor/x"):]) for raw in ties["input"]} == {1}
+    # Numeric-value ties keep the supplied order and lose the zeroes' rank.
+    assert _numeric_value_rule(ties["input"]) == ties["input"]
+    assert _numeric_value_rule(ties["input"]) != ties["expected"]
+
+
+def test_ordering_comparator_is_total_over_boundary_and_old_corpus(
+        ordering_vectors, cases_document):
+    boundary = ["2", "10", "a", "\u00b2", "\u0661"]
+    old_ids = set()
+    for case in cases_document["cases"]:
+        snap = _case_fixture(case, cases_document)
+        for entry in snap["providers"].values():
+            old_ids.update(entry["model_ids"])
+    # Every committed fixture snapshot (basic.json is not referenced by a
+    # case, but is part of the frozen corpus).
+    for path in sorted(FIXTURE_DIR.glob("*.json")):
+        doc = _load_strict(path)
+        if isinstance(doc, dict) and "providers" in doc:
+            for entry in doc["providers"].values():
+                old_ids.update(entry["model_ids"])
+    vector_ids = set()
+    for case in ordering_vectors["cases"]:
+        vector_ids.update(case["input"])
+    ids = sorted(set(boundary) | old_ids | vector_ids)
+    assert len(ids) > len(boundary)
+    # A correct comparator accepts the full vector table AND the old corpus
+    # without TypeError, and every pair of keys is mutually comparable.
+    ordered = sorted(ids, key=_natural_key_contract)
+    assert sorted(ordered) == ids
+    for a in ids:
+        ka = _natural_key_contract(a)
+        assert ka and all(isinstance(tok, tuple) and len(tok) == 2
+                          for tok in ka)
+        for b in ids:
+            kb = _natural_key_contract(b)
+            assert (ka < kb) == (kb > ka)
+            assert (ka <= kb) or (kb <= ka)
+    # The corrected restatement preserves the old corpus' relative order:
+    # only `alpha-1:free`/`alpha-2-free` carry ASCII digit runs.
+    assert old_ids >= {"alpha-1:free", "alpha-2-free"}
+    assert _natural_key_contract("alpha-1:free") < \
+        _natural_key_contract("alpha-2-free")
+    # The corrected restatement is total on the real boundary ids the old
+    # classifier could not even sort.
+    assert sorted(boundary, key=_natural_key_contract) == boundary
+
+
+# -- wrong-rule discrimination over the vector table --
+
+ORDERING_WRONG_VECTOR_RULES = (
+    ("never sorted (declaration order)", _declaration_order_rule,
+     "long_equal_length_runs_reverse_supplied"),
+    ("plain lexical (code-point) order", _plain_lexical_rule,
+     "ascii_natural_runs_and_leading_zeroes"),
+    ("Unicode-wide digit classification", _unicode_digit_rule,
+     "mixed_ascii_arabic_indic_and_superscript"),
+    ("floating-point numeric-run conversion", _float_run_rule,
+     "long_equal_length_runs_reverse_supplied"),
+    ("leading-zero stripping numeric value", _numeric_value_rule,
+     "ascii_natural_runs_and_leading_zeroes"),
+    ("Unicode casefold collation", _casefold_rule,
+     "bmp_astral_code_point_and_ascii_case"),
+    ("UTF-16 code-unit ordering", _utf16_code_unit_rule,
+     "bmp_astral_code_point_and_ascii_case"),
+)
+
+
+@pytest.mark.parametrize(
+    "label,rule,case_id", ORDERING_WRONG_VECTOR_RULES,
+    ids=[row[0] for row in ORDERING_WRONG_VECTOR_RULES])
+def test_ordering_wrong_rule_mutants_rejected_on_vectors(
+        ordering_vectors, label, rule, case_id):
+    case = _ordering_vector(ordering_vectors, case_id)
+    # Positive control first: the corrected restatement accepts the vector.
+    assert sorted(case["input"], key=_natural_key_contract) == \
+        case["expected"]
+    mutant = rule(case["input"])
+    assert sorted(mutant) == sorted(case["expected"]), \
+        f"{label}: a mutant must reorder, never lose elements"
+    assert mutant != case["expected"], f"{label}: not discriminated"
+    # The named case is genuinely a discriminating case for this rule.
+    hits = [c["id"] for c in ordering_vectors["cases"]
+            if rule(c["input"]) != c["expected"]]
+    assert case_id in hits, f"{label}: expected {case_id} to discriminate"
+
+
+# -- the two complete literal query goldens --
+
+def test_ordering_get_model_golden_orders_by_provider_precedence(
+        cases_document):
+    case, snap = _ordering_query_case(
+        cases_document,
+        "get_model_ordering_identical_raw_id_provider_precedence")
+    assert case["args"] == {"model_id": "vendor/item2"}
+    assert snap["provider_order"] == [
+        "synthetic-b", "synthetic-a", "synthetic-c"]
+    assert sorted(snap["provider_order"]) == [
+        "synthetic-a", "synthetic-b", "synthetic-c"]
+    expect = case["expect"]
+    # One identical raw id on two providers => two pairs, ordered by
+    # provider PRECEDENCE (b then a), never by alphabetic provider key.
+    assert [(e["provider"], e["model_id"]) for e in expect["endpoints"]] == [
+        ("synthetic-b", "vendor/item2"), ("synthetic-a", "vendor/item2")]
+    assert expect["exact_matches"] == {
+        "synthetic-b": True, "synthetic-a": True, "synthetic-c": False}
+    assert expect["exact_gateways"] == ["synthetic-b", "synthetic-a"]
+    assert expect["provider_staleness"] == {
+        "synthetic-b": True, "synthetic-a": False, "synthetic-c": False}
+    assert expect["counts"] == {
+        "exact_matches": 2, "endpoints": 2, "distinct_raw_ids": 1,
+        "marker_group_labels": 1}
+    # Per-pair metadata stays attached to its own (provider, raw id) pair.
+    assert expect["endpoints"][0]["metadata"]["name"] == "Order B Item Two"
+    assert expect["endpoints"][0]["metadata"]["context_length"] == 131072
+    assert expect["endpoints"][1]["metadata"]["name"] == "Order A Item Two"
+    assert expect["endpoints"][1]["metadata"]["context_length"] == 65536
+    assert expect["endpoints"][0]["stale"] is True
+    assert expect["endpoints"][1]["stale"] is False
+    # Alphabetic provider order would reverse the emitted pair.
+    assert sorted((e["provider"], e["model_id"])
+                  for e in expect["endpoints"]) == [
+        ("synthetic-a", "vendor/item2"), ("synthetic-b", "vendor/item2")]
+
+
+def test_ordering_search_golden_sorts_naturally_then_slices(cases_document):
+    case, snap = _ordering_query_case(
+        cases_document, "search_ordering_provider_b_natural_page")
+    assert case["args"] == {"query": "vendor/item", "provider": "synthetic-b",
+                            "limit": 2, "offset": 1}
+    b_ids = snap["providers"]["synthetic-b"]["model_ids"]
+    b_models = snap["providers"]["synthetic-b"]["models"]
+    matches = [raw_id for raw_id in b_ids
+               if _search_text_match("vendor/item", raw_id, b_models[raw_id])]
+    # Declaration order is literal code-point order (item02 first)...
+    assert matches == ["vendor/item02", "vendor/item1", "vendor/item10",
+                       "vendor/item2", "vendor/item\u0661"]
+    # ...while the page is the NATURAL order sliced AFTER sorting.
+    natural = sorted(matches, key=_natural_key_contract)
+    assert natural == ["vendor/item1", "vendor/item2", "vendor/item02",
+                       "vendor/item10", "vendor/item\u0661"]
+    expect = case["expect"]
+    correct_pairs = [("synthetic-b", raw_id) for raw_id in natural[1:3]]
+    assert correct_pairs == [("synthetic-b", "vendor/item2"),
+                             ("synthetic-b", "vendor/item02")]
+    assert [(e["provider"], e["model_id"]) for e in expect["endpoints"]] == \
+        correct_pairs
+    assert expect["filters"] == {"provider": "synthetic-b",
+                                 "min_context_length": None,
+                                 "input_modalities": None,
+                                 "supported_parameters": None}
+    assert expect["limit"] == 2 and expect["offset"] == 1
+    assert expect["total_matches"] == 5
+    assert expect["returned_count"] == 2
+    assert expect["next_offset"] == 3
+    assert expect["provider_staleness"] == {"synthetic-b": True}
+    assert expect["counts"] == {"gateways": 1, "endpoints": 2,
+                                "distinct_raw_ids": 2,
+                                "marker_group_labels": 2}
+    # The wrong rules page differently over the SAME matches and totals:
+    # declaration/lexical order would emit [item1, item10].
+    assert matches[1:3] == ["vendor/item1", "vendor/item10"]
+    assert [(p, i) for p, i in [("synthetic-b", m) for m in matches[1:3]]] != \
+        [(e["provider"], e["model_id"]) for e in expect["endpoints"]]
+
+
+def test_ordering_goldens_use_ordering_fixture_provenance(cases_document):
+    for case_id in ("get_model_ordering_identical_raw_id_provider_precedence",
+                    "search_ordering_provider_b_natural_page"):
+        case, snap = _ordering_query_case(cases_document, case_id)
+        _assert_snapshot_contract(snap)
+        assert case["expect"]["snapshot_id"] == snap["snapshot_id"]
+        assert case["expect"]["tick_epoch"] == snap["tick_epoch"] == 1759200000
+
+
+# -- wrong-rule discrimination over the two query goldens --
+
+def _wrong_provider_alphabetical_endpoints(case, snap):
+    """WRONG RULE: endpoints ordered by provider KEY, not `provider_order`.
+    Counts stay internally consistent (one distinct raw id, two endpoints)."""
+    case["expect"]["endpoints"].sort(key=lambda e: e["provider"])
+
+
+def _search_page_from_order(case, snap, order):
+    """Rebuild a CONSISTENT search page under a wrong ordering rule: rows,
+    page counts, `returned_count`, `next_offset` and the unpaginated
+    `total_matches` are all rebuilt from snapshot data, so rejection proves
+    wrong ORDER/membership rather than a truncated or stale golden."""
+    args = case["args"]
+    provider = args["provider"]
+    entry = snap["providers"][provider]
+    matches = [raw_id for raw_id in entry["model_ids"]
+               if _search_text_match(args["query"], raw_id,
+                                     entry["models"][raw_id])]
+    matches = order(matches)
+    offset = args.get("offset", SEARCH_DEFAULT_OFFSET)
+    limit = args.get("limit", SEARCH_DEFAULT_LIMIT)
+    page = matches[offset:offset + limit]
+    expect = case["expect"]
+    expect["endpoints"] = [
+        _search_corrupt_row(snap, provider, raw_id) for raw_id in page]
+    expect["total_matches"] = len(matches)
+    expect["returned_count"] = len(page)
+    expect["next_offset"] = (offset + len(page)
+                             if offset + len(page) < len(matches) else None)
+    expect["counts"] = {
+        "gateways": len({provider}) if page else 0,
+        "endpoints": len(page),
+        "distinct_raw_ids": len(set(page)),
+        "marker_group_labels": len({_strip_marker_contract(i)
+                                    for i in page}),
+    }
+    return page
+
+
+def _wrong_declaration_order_page(case, snap):
+    return _search_page_from_order(case, snap, _declaration_order_rule)
+
+
+def _wrong_lexical_order_page(case, snap):
+    return _search_page_from_order(case, snap, _plain_lexical_rule)
+
+
+def _wrong_slice_before_sort_page(case, snap):
+    """WRONG RULE: the registry window is sliced BEFORE it is ordered (and
+    before filtering); the surviving page is only then ordered."""
+    args = case["args"]
+    provider = args["provider"]
+    entry = snap["providers"][provider]
+    offset = args.get("offset", SEARCH_DEFAULT_OFFSET)
+    limit = args.get("limit", SEARCH_DEFAULT_LIMIT)
+    window = list(entry["model_ids"])[offset:offset + limit]
+    page = sorted([raw_id for raw_id in window
+                   if _search_text_match(args["query"], raw_id,
+                                         entry["models"][raw_id])],
+                  key=_natural_key_contract)
+    all_matches = [raw_id for raw_id in entry["model_ids"]
+                   if _search_text_match(args["query"], raw_id,
+                                         entry["models"][raw_id])]
+    expect = case["expect"]
+    expect["endpoints"] = [
+        _search_corrupt_row(snap, provider, raw_id) for raw_id in page]
+    expect["total_matches"] = len(all_matches)
+    expect["returned_count"] = len(page)
+    expect["next_offset"] = (offset + len(page)
+                             if offset + len(page) < len(all_matches)
+                             else None)
+    expect["counts"] = {
+        "gateways": len({provider}) if page else 0,
+        "endpoints": len(page),
+        "distinct_raw_ids": len(set(page)),
+        "marker_group_labels": len({_strip_marker_contract(i)
+                                    for i in page}),
+    }
+    return page
+
+
+ORDERING_WRONG_QUERY_MUTANTS = (
+    ("get_model orders providers alphabetically",
+     "get_model_ordering_identical_raw_id_provider_precedence",
+     _wrong_provider_alphabetical_endpoints),
+    ("search pages from declaration order",
+     "search_ordering_provider_b_natural_page", _wrong_declaration_order_page),
+    ("search pages from plain lexical order",
+     "search_ordering_provider_b_natural_page", _wrong_lexical_order_page),
+    ("search slices the registry before sorting",
+     "search_ordering_provider_b_natural_page", _wrong_slice_before_sort_page),
+)
+
+
+def _check_ordering_query_payload(case, snap):
+    if case["tool"] == "get_model":
+        _assert_get_model_payload(case, snap)
+    else:
+        assert case["tool"] == "search_models"
+        _assert_search_payload(case, snap)
+
+
+@pytest.mark.parametrize(
+    "label,case_id,mutate", ORDERING_WRONG_QUERY_MUTANTS,
+    ids=[row[0] for row in ORDERING_WRONG_QUERY_MUTANTS])
+def test_ordering_wrong_rule_mutants_rejected_on_query_goldens(
+        cases_document, label, case_id, mutate):
+    case, snap = _copy_ordering_query_case(cases_document, case_id)
+    # Positive control: the unmutated golden passes its complete checker.
+    _check_ordering_query_payload(case, snap)
+    before = [(e["provider"], e["model_id"]) for e in case["expect"]["endpoints"]]
+    mutate(case, snap)
+    after = [(e["provider"], e["model_id"]) for e in case["expect"]["endpoints"]]
+    assert after != before, f"{label}: mutant emitted the same page/order"
+    if case["tool"] == "search_models":
+        # The mutant stays a page of genuine matches with the correct
+        # unpaginated total, so rejection is about RULE/order, not a truncated
+        # or broken row set.
+        provider = snap["providers"]["synthetic-b"]
+        assert all(raw_id in provider["model_ids"] for _, raw_id in after)
+        assert case["expect"]["total_matches"] == 5
+    else:
+        # The get_model mutant only reorders the same two endpoints.
+        assert sorted(after) == sorted(before)
+        assert case["expect"]["counts"] == {
+            "exact_matches": 2, "endpoints": 2, "distinct_raw_ids": 1,
+            "marker_group_labels": 1}
+    with pytest.raises(AssertionError):
+        _check_ordering_query_payload(case, snap)
+
+
+def test_ordering_slice_mutant_keeps_genuine_matches_but_wrong_membership(
+        cases_document):
+    case, snap = _copy_ordering_query_case(
+        cases_document, "search_ordering_provider_b_natural_page")
+    page = _wrong_slice_before_sort_page(case, snap)
+    assert page == ["vendor/item1", "vendor/item10"]
+    correct = [e["model_id"] for e in _ordering_query_case(
+        cases_document, "search_ordering_provider_b_natural_page")[0][
+            "expect"]["endpoints"]]
+    assert correct == ["vendor/item2", "vendor/item02"]
+    for raw_id in page:
+        assert raw_id in snap["providers"]["synthetic-b"]["model_ids"]
+        assert "vendor/item" in raw_id
+    with pytest.raises(AssertionError):
+        _assert_search_payload(case, snap)
+
+
 # ---------- README contract-draft pins ----------
 
 
@@ -3739,6 +4507,47 @@ def test_readme_contract_freezes_identity_rules():
                    "(provider, raw model_id)", "never silently trimmed"):
         assert phrase in text, \
             f"contract draft missing identity rule: {phrase}"
+
+
+def test_readme_contract_freezes_total_ordering_rule():
+    text = _contract_section_text()
+    for phrase in (
+            "Total ordering rule (frozen)",
+            "`provider_order`, never alphabetic key order",
+            "Identical raw IDs on different providers remain two pairs",
+            "Natural comparator",
+            "tokenize only maximal ASCII `[0-9]+` runs",
+            "Numeric runs compare by original digit",
+            "no integer/float conversion",
+            "no stripping of leading zeroes",
+            "case-sensitively by Unicode code point",
+            "no case folding",
+            "no locale collation",
+            "never UTF-16 code-unit comparison",
+            "prefix the shorter sequence sorts first",
+            "Arabic-Indic digits (`\u0661`) and superscript digits",
+            "Digit-run tokens precede text tokens",
+            "literal raw IDs are never rewritten",
+    ):
+        assert phrase in text, \
+            f"contract section missing ordering rule: {phrase}"
+
+
+def test_readme_contract_distinguishes_snapshot_and_query_order():
+    text = _contract_section_text()
+    for phrase in (
+            "snapshot `model_ids` stay sorted and",
+            "deduplicated by literal code-point string order",
+            "NATURAL raw-ID order",
+            "`vendor/item02` precedes `vendor/item1`",
+            "follows `vendor/item2` in a query result",
+            "never reordered to hide a query sort defect",
+            "never relaxed to accept an adversarial unsorted `model_ids` list",
+    ):
+        assert phrase in text, \
+            f"contract section missing order distinction: {phrase}"
+    # The `model_ids` snapshot row pins literal code-point order itself.
+    assert "sorted and deduplicated by literal code-point string order" in text
 
 
 def test_readme_contract_freezes_get_model_envelope_field_sets():
