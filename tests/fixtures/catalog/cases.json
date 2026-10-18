@@ -1,5 +1,5 @@
 {
-  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone and never generated from an implementation. Unit 1b freezes the get_model exact-ID and marker-lookup cases against lookup.json (oracle case 1 scenario); later units append their own cases to 'cases'. Count key names ('exact_matches', 'endpoints') are provisional until the Task 2/3 implementation units freeze the count vocabulary.",
+  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone and never generated from an implementation. Unit 1b freezes the get_model exact-ID and marker-lookup cases against lookup.json (oracle case 1 scenario); later units append their own cases to 'cases'. The envelope-freeze correction froze the successful PURE get_model payload: the top-level field set (including provider_staleness), the endpoint field set and the counts cardinalities (exact_matches, endpoints, distinct_raw_ids, marker_group_labels) are final. Counts describe the returned lookup result only.",
   "fixture": "lookup.json",
   "cases": [
     {
@@ -17,6 +17,11 @@
           "synthetic-c": false
         },
         "exact_gateways": [],
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
         "endpoints": [
           {
             "provider": "synthetic-a",
@@ -82,7 +87,9 @@
         ],
         "counts": {
           "exact_matches": 0,
-          "endpoints": 2
+          "endpoints": 2,
+          "distinct_raw_ids": 2,
+          "marker_group_labels": 1
         }
       }
     },
@@ -103,6 +110,11 @@
         "exact_gateways": [
           "synthetic-a"
         ],
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
         "endpoints": [
           {
             "provider": "synthetic-a",
@@ -168,7 +180,9 @@
         ],
         "counts": {
           "exact_matches": 1,
-          "endpoints": 2
+          "endpoints": 2,
+          "distinct_raw_ids": 2,
+          "marker_group_labels": 1
         }
       }
     },
@@ -190,6 +204,11 @@
           "synthetic-a",
           "synthetic-b"
         ],
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
         "endpoints": [
           {
             "provider": "synthetic-a",
@@ -255,7 +274,9 @@
         ],
         "counts": {
           "exact_matches": 2,
-          "endpoints": 2
+          "endpoints": 2,
+          "distinct_raw_ids": 1,
+          "marker_group_labels": 1
         }
       }
     },
@@ -276,6 +297,11 @@
         "exact_gateways": [
           "synthetic-a"
         ],
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
         "endpoints": [
           {
             "provider": "synthetic-a",
@@ -311,7 +337,9 @@
         ],
         "counts": {
           "exact_matches": 1,
-          "endpoints": 1
+          "endpoints": 1,
+          "distinct_raw_ids": 1,
+          "marker_group_labels": 1
         }
       }
     },
@@ -330,13 +358,20 @@
           "synthetic-c": false
         },
         "exact_gateways": [],
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
         "endpoints": [],
         "caveats": [
           "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ],
         "counts": {
           "exact_matches": 0,
-          "endpoints": 0
+          "endpoints": 0,
+          "distinct_raw_ids": 0,
+          "marker_group_labels": 0
         }
       }
     },
@@ -355,13 +390,20 @@
           "synthetic-c": false
         },
         "exact_gateways": [],
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
         "endpoints": [],
         "caveats": [
           "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ],
         "counts": {
           "exact_matches": 0,
-          "endpoints": 0
+          "endpoints": 0,
+          "distinct_raw_ids": 0,
+          "marker_group_labels": 0
         }
       }
     }

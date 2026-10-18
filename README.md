@@ -144,14 +144,16 @@ counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
 
 ## Published catalogue snapshot (v1) — contract draft
 
-**Status: frozen for contract review (unit 1a).** This section is the
-human half of the executable specification: `tests/test_catalog.py` pins
-it against synthetic fixtures under `tests/fixtures/catalog/`. Query and
-tool behaviour freezes with its implementation units (Tasks 2/3); nothing
-here is shipped code. `site/catalog.json` (declared in AGENTS.md) is the
-produced artifact: a generated, tracked, credential-free public snapshot
-consumed by the standalone `watchdog_catalog` package and the browser
-adapters. Provider config is used only at export time.
+**Status: frozen for contract review (unit 1a; the `get_model` success
+envelope and its count vocabulary were frozen by the envelope-freeze
+correction).** This section is the human half of the executable
+specification: `tests/test_catalog.py` pins it against synthetic fixtures
+under `tests/fixtures/catalog/`. Query and tool behaviour freezes with its
+implementation units (Tasks 2/3); nothing here is shipped code.
+`site/catalog.json` (declared in AGENTS.md) is the produced artifact: a
+generated, tracked, credential-free public snapshot consumed by the
+standalone `watchdog_catalog` package and the browser adapters. Provider
+config is used only at export time.
 
 ### Top-level fields (exact set)
 
@@ -191,7 +193,7 @@ test — arbitrary upstream objects are never exposed automatically.
 | `context_length` | int or null | Non-negative integer; `null` when unknown. |
 | `architecture` | object | Exactly `input_modalities` + `output_modalities`, each a list of strings. |
 | `supported_parameters` | list of string | e.g. `temperature`, `max_tokens`. |
-| `pricing` | object or null | Exactly `prompt` + `completion`, each a finite scalar preserved as returned (number or numeric string), `null` when absent. Booleans and non-finite numbers are invalid. |
+| `pricing` | object or null | `null` as the **whole object** when pricing is unknown overall. Otherwise **exactly** `prompt` + `completion`, each a finite scalar preserved as returned (number or numeric string) or `null` when that scalar is **individually unknown**. Booleans and non-finite numbers are invalid. |
 
 ### Warning codes (frozen vocabulary)
 
@@ -213,10 +215,14 @@ test — arbitrary upstream objects are never exposed automatically.
 - **Never serialized:** config dicts, `_token`, auth blocks, token-file
   paths, local env, pending alerts, ratelimit headers, probe internals,
   untracked IDs, and unknown/disabled provider entries. The root-script
-  local compatibility adapter retains raw metadata (including unknown
-  upstream fields) for tracked IDs in its legacy `models` and endpoint
-  `metadata` fields only — those compatibility objects never appear in
-  the public JSON, embedded page, consumer package, or parity fixtures.
+  local compatibility adapter still **PRESERVES raw tracked metadata**
+  (including unknown upstream fields) for tracked IDs in its legacy `models`
+  and endpoint `metadata` objects — that local boundary is unchanged and
+  never weakened. Those raw objects never appear in the public JSON,
+  embedded page, consumer package, or parity fixtures: in the frozen public
+  payload the name `metadata` carries **only the projected public model
+  object** of the exact `(provider, raw model_id)` pair, **never the legacy
+  raw metadata**.
 
 ### Tool surface (frozen names)
 
@@ -249,6 +255,57 @@ installed package):
   providers is two endpoints, and metadata stays attached to its own pair.
   Result arrays order by provider display order, then natural raw-ID order
   (ASCII digit runs compared by digit length and lexical order).
+
+### Success envelope — `get_model` (frozen field sets)
+
+The pure query payload is the **semantic** payload: SDK and browser
+wrappers may differ in protocol envelopes, but this object is identical
+across them. It exposes no local filesystem path and no source
+retrieval/cache metadata — a source layer adds a separate `source` object
+(URL/file/browser mode, retrieval/cache information, refresh warnings)
+OUTSIDE this pure payload, and the pure payload never invents freshness
+from HTTP download time.
+
+`get_model(model_id)` success payload — exact top-level fields:
+
+| Field | Type | Definition |
+|---|---|---|
+| `ok` | bool | Exactly `true` on success; a lookup that finds nothing is still a success. |
+| `query` | string | The exact raw query as passed, never trimmed or repaired. |
+| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`. |
+| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`; `null` means unknown, never fresh. |
+| `exact_matches` | map of bool | Literal raw-ID membership — one entry per snapshot provider in `provider_order`, **including zero-ID providers**. |
+| `exact_gateways` | list of string | Provider keys whose `exact_matches` is `true`, in provider display order. |
+| `provider_staleness` | map of bool | Staleness of **every** snapshot provider relevant to the response. Exact membership covers all snapshot providers, so this map carries one entry per `provider_order` provider even when no endpoint matches. Each value is that gateway's carried-forward stale flag — **provider staleness, never tick age** (tick freshness is derived from `tick_epoch` against the snapshot's `cadence_s`). |
+| `endpoints` | list of object | Matched endpoint pairs, ordered by provider display order then natural raw-ID order. |
+| `caveats` | list of string | Always carries the absence caveat. |
+| `counts` | object | Explicit cardinalities of the returned lookup result; exact set below. |
+
+Endpoint object — exact fields:
+
+| Field | Type | Definition |
+|---|---|---|
+| `provider` | string | Provider key of the `(provider, raw model_id)` pair. |
+| `model_id` | string | Raw tracked model ID, unchanged. A raw id shared by two providers yields two endpoints. |
+| `chat_completions_url` | string | The provider's chat-completions URL. |
+| `api_type` | string | The provider's API dialect. |
+| `stale` | bool | This provider's staleness — equals `provider_staleness[provider]`. |
+| `metadata` | object | The credential-free **projected public model object** of exactly this `(provider, raw model_id)` pair — the same exact field set as a snapshot projected model, and **never the legacy raw metadata** object. Not nullable: an endpoint exists only for a tracked raw id and the projection always carries the exact field set, with unknown optional fields `null`. |
+
+`counts` object — exact fields (each a non-negative int; booleans are invalid):
+
+| Field | Definition |
+|---|---|
+| `exact_matches` | **Matching gateways**: providers with literal raw-ID membership (`len(exact_gateways)`). |
+| `endpoints` | Endpoint pairs returned (`len(endpoints)`). |
+| `distinct_raw_ids` | Distinct raw `model_id` strings among the returned endpoints: a raw id shared by two providers is **two endpoints but one distinct raw id**. |
+| `marker_group_labels` | Distinct **marker group** labels among the returned endpoints (the delimiter-stripped query label they matched); `0` when `endpoints` is empty. A marker group is a labelling convenience, **never** a count of verified underlying models — marker grouping is not proof of cross-gateway identity. |
+
+Every `counts` value describes only the returned lookup result —
+never the global registry. A no-match lookup is an explicit success:
+`exact_gateways` and `endpoints` are `[]`, `provider_staleness` still lists
+every snapshot provider, and `counts` is **all zeros** — there is no
+no-match error.
 
 ## State layout (state/, gitignored)
 
