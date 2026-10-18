@@ -309,6 +309,77 @@ duplicate-member handling or canonical-language/JS-parity questions: those
 belong to a separate raw-JSON/canonical-boundary unit. No runtime validator,
 package or JS implementation is claimed here.
 
+### Raw JSON validation of published payloads (frozen rules)
+
+Raw JSON validation runs **BEFORE** any structural schema check. A published
+catalogue document is first checked as raw JSON text and, only if it is
+lexically accepted, checked against the structural contract above. An intended
+raw failure uses one shared envelope: top-level fields are **exactly** `ok` and
+`error`, `ok` is strictly `false`, and `error` carries **exactly** `code` and
+`message` with the single literal `invalid_json` / `Invalid catalogue JSON.`
+No parameter, offset, exception text, reflected raw content, local path,
+source/cache datum or partial result is ever carried, and several simultaneous
+raw faults still produce that one literal — there is **no** public subtype
+precedence. The existing `invalid_snapshot` and `unsupported_schema_version`
+envelopes are unchanged.
+
+- **Lexical acceptance is not public-snapshot acceptance.** Valid JSON that is
+  a scalar, array or `null` is **not** a raw error: it is lexically accepted
+  and later classified `invalid_snapshot` by the structural layer. Root
+  primitives never claim a valid public catalogue.
+- **Strict JSON syntax.** Empty or whitespace-only text, malformed or
+  truncated documents, comments, trailing data or a trailing comma, unquoted
+  member names, a leading-zero integer, a plus-prefixed number, malformed
+  escapes and raw control characters inside strings, and a UTF-8 BOM at the
+  start of the text are all rejected. No BOM stripping, trimming or other
+  silent preprocessing or sanitizing is performed, and the native JSON decoder
+  remains the syntax authority.
+- **Non-finite and overflowing numbers.** The `NaN`, `Infinity` and
+  `-Infinity` constants are rejected, and a syntactically valid number that
+  overflows binary64 (`1e400`, `-1e400`) is rejected as non-finite.
+- **Notation-independent numeric safety (at EVERY depth).** Every integer
+  token is checked **exactly**, before any precision-losing conversion,
+  against `[-9007199254740991, 9007199254740991]`; floating and exponent
+  tokens convert with normal binary64 semantics, and a non-finite result or an
+  integer-valued result outside that same range is rejected. Unsafe integers
+  therefore reject in **every notation** — plain digits, a `.0` spelling and
+  an exponent spelling such as `1e16` — positive and negative alike, wherever
+  they appear (including pricing or unused extra fields), before any schema
+  check. A lexical-integer-only safety policy is expressly **not** the
+  contract, and numeric-looking **strings** are untouched and never inspected
+  as numbers.
+- **Python-compatible finite rounding and underflow.** Normal finite
+  fractions, signed zero, subnormal values, rounded finite decimals
+  (`1.0000000000000001` becomes `1.0`, `9007199254740991.1` becomes
+  `9007199254740991.0`) and underflow (`1e-400` becomes `0.0`) remain
+  accepted at the raw boundary, and an accepted float token keeps **float**
+  type even when its value is integral — it is never coerced into an int or a
+  string. No arbitrary decimal-precision reinterpretation is performed.
+- **Duplicate member names.** A repeated object member name is rejected at
+  **every** object nesting level, including decoded escape-equivalent keys
+  (`"a"` versus `"\u0061"`), even when the repeated values are equal. Names
+  are compared after decoding and **before** any dict conversion, so there is
+  no last-write-wins repair; different case is distinct, and repeating a name
+  in two separate objects is fine.
+- **Container depth.** `MAX_JSON_DEPTH` is `64`, inclusive: a root container
+  is depth `1`, each nested array or object adds `1`, and a root scalar is
+  depth `0`. Arrays and objects **both** count, including mixed nesting;
+  quoted brackets and braces and escaped quotes or backslashes never affect the
+  container depth. The bound is enforced before an unbounded recursive decode
+  could exceed runtime limits; the interpreter recursion limit is never raised
+  as a substitute.
+- **No raw-value repair.** Values are never rewritten: duplicates, unsafe
+  numbers, malformed lexemes and over-deep nesting are rejected outright,
+  never partially salvaged, clamped, re-spelled or silently preprocessed.
+
+`tests/fixtures/catalog/raw-json-cases.json` is the clearly-labelled raw-JSON
+rule **TABLE** (explicitly **not** a snapshot and **not** a query result)
+holding the adversarial literal lexemes as STRINGS plus their handwritten
+complete expected envelopes or decoded values; `tests/test_catalog.py`
+restates these rules as a test-local stdlib checker. No runtime parser, public
+success envelope or JavaScript implementation is claimed here: the canonical
+language/hash-vector parity unit (c2b2) and JS parity remain separate.
+
 ### Tool surface (frozen names)
 
 Five tools, names stable; `watchdog_status` reports **published catalogue

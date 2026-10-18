@@ -7354,5 +7354,755 @@ def test_readme_freezes_structural_object_and_generic_rules():
             "still requires `tick_epoch_unknown`",
             "does NOT settle raw-JSON numeric lexeme handling",
     ):
+        assert phrase in text, \
+            f"structural subsection missing rule: {phrase}"
+
+
+# ---------- unit 1d-c2b1: raw-JSON acceptance/rejection boundary ----------
+#
+# Contract-only stage. `raw-json-cases.json` is a clearly-labelled raw-JSON
+# RULE TABLE (explicitly NOT a snapshot and NOT a query result). Every raw
+# document is preserved as a STRING inside the valid table JSON, so malformed
+# lexemes survive intact; each invalid row carries the COMPLETE literal raw
+# error envelope and each valid control an explicit decoded value or a literal
+# depth/shape expectation. The loader below is a TEST-LOCAL stdlib restatement
+# of the published raw-JSON boundary -- a fixture checker, never production
+# parsing -- and NO package implementation module is imported. Raw validation
+# runs BEFORE the structural layer, so a valid scalar/array/null is
+# raw-accepted and only later classified `invalid_snapshot`. The user approved
+# notation-independent numeric safety (reject unsafe integers in ANY notation)
+# while ordinary binary64 rounding/underflow stays accepted. Canonical
+# language/hash-vector parity (c2b2) and JS parity remain separate.
+
+RAW_JSON_FIXTURE_NAME = "raw-json-cases.json"
+RAW_JSON_TABLE_DOC = FIXTURE_DIR / RAW_JSON_FIXTURE_NAME
+
+# The single frozen raw error code and its literal message.
+RAW_ERROR_MESSAGES = {"invalid_json": "Invalid catalogue JSON."}
+RAW_ENVELOPE_FIELDS = frozenset({"ok", "error"})
+RAW_ERROR_FIELDS = frozenset({"code", "message"})
+# Fields a raw error must NEVER carry: a parameter, offsets/positions,
+# exception text, reflected raw content, local paths, source/cache data,
+# snapshot provenance, staleness, partial data or counts.
+RAW_FORBIDDEN_FIELDS = frozenset({
+    "parameter", "offset", "offsets", "position", "line", "column",
+    "exception", "traceback", "message_detail", "raw", "content", "text",
+    "tool", "state_root", "path", "paths", "source", "cache", "retrieval",
+    "snapshot_id", "tick_epoch", "provider_staleness", "stale", "counts",
+    "partial", "warnings", "providers", "provider_order",
+})
+
+RAW_TABLE_FIELDS = frozenset(
+    {"description", "raw_json_rule", "invalid_cases", "valid_controls"})
+RAW_INVALID_ROW_FIELDS = frozenset({"id", "category", "json_text", "expect"})
+RAW_VALID_ROW_FIELDS = frozenset({"id", "category", "json_text", "expect"})
+RAW_VALID_DEPTH_ROW_FIELDS = frozenset(
+    {"id", "category", "json_text", "expect_depth", "expect_kind"})
+
+# The inclusive container-depth bound and the JSON safe-integer range.
+RAW_JSON_MAX_DEPTH = 64
+assert RAW_JSON_MAX_DEPTH == 64
+RAW_SAFE_INT_MAX = 2 ** 53 - 1
+RAW_SAFE_INT_MIN = -RAW_SAFE_INT_MAX
+assert RAW_SAFE_INT_MAX == MAX_SAFE_INT == 9007199254740991
+assert RAW_SAFE_INT_MAX + 1 == UNSAFE_INT
+
+# WHICH guard rejects each single-fault input -- never an incidental
+# TypeError/KeyError/RecursionError. The checker asserts the reason.
+RAW_CATEGORY_REASON = {
+    "syntax": "syntax",
+    "nonfinite_constant": "nonfinite_constant",
+    "overflow": "float",
+    "unsafe_integer": "integer",
+    "unsafe_float": "float",
+    "nested_unsafe": "integer",
+    "duplicate": "duplicate",
+    "depth": "depth",
+}
+REQUIRED_RAW_INVALID_CATEGORIES = tuple(RAW_CATEGORY_REASON)
+REQUIRED_RAW_VALID_CATEGORIES = (
+    "boundary", "float", "string", "duplicate_ok", "depth", "root_primitive")
+REQUIRED_RAW_CASE_IDS = (
+    "raw_invalid_empty_string",
+    "raw_invalid_trailing_comma_object",
+    "raw_invalid_bom_at_start",
+    "raw_invalid_nan_constant",
+    "raw_invalid_overflow_positive",
+    "raw_invalid_unsafe_int_positive",
+    "raw_invalid_unsafe_decimal_positive",
+    "raw_invalid_unsafe_exponent_positive",
+    "raw_invalid_nested_unsafe_number",
+    "raw_invalid_duplicate_exact",
+    "raw_invalid_duplicate_escaped_equivalent",
+    "raw_invalid_depth65_array",
+    "raw_invalid_depth65_object",
+    "raw_invalid_depth65_mixed",
+    "raw_valid_safe_int_max",
+    "raw_valid_safe_int_min",
+    "raw_valid_integral_float_token",
+    "raw_valid_negative_float_zero",
+    "raw_valid_quoted_brackets_only",
+    "raw_valid_depth64_mixed",
+    "raw_valid_root_null",
+)
+
+# The frozen `invalid_snapshot` literal, restated for the lexical/structural
+# split proof (the structural subsection owns the code itself).
+RAW_INVALID_SNAPSHOT_ENVELOPE = {
+    "ok": False,
+    "error": {"code": "invalid_snapshot",
+              "message": "Invalid catalogue snapshot."}}
+
+
+class _RawJsonRejected(Exception):
+    """Deliberately narrow TEST-LOCAL rejection of an intended raw-JSON
+    failure. Only this type (or a genuine programming error) escapes
+    `_raw_load`; broad `Exception`/`AssertionError` are never swallowed and
+    mislabelled a valid rejection."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _raw_json_container_depth(text):
+    """Quote-aware container-depth preflight: counts NESTED `[`/`{` outside
+    strings (a root container is depth 1, a root scalar depth 0), so quoted
+    brackets/braces and escaped quotes/backslashes never count. The native
+    JSON decoder remains the syntax authority; this is only a bound guard."""
+    depth = 0
+    high = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > high:
+                high = depth
+        elif ch in "]}":
+            depth -= 1
+    return high
+
+
+def _raw_parse_int(token):
+    """Integer tokens are checked EXACTLY, before any precision-losing
+    conversion, against the safe range."""
+    value = int(token)
+    if not (RAW_SAFE_INT_MIN <= value <= RAW_SAFE_INT_MAX):
+        raise _RawJsonRejected("integer")
+    return value
+
+
+def _raw_parse_float(token):
+    """Floating/exponent tokens convert with normal binary64 semantics; a
+    non-finite result, or an integer-valued result outside the safe range, is
+    rejected. The returned value KEEPS float type even when integral."""
+    value = float(token)
+    if not math.isfinite(value):
+        raise _RawJsonRejected("float")
+    if value == math.trunc(value) and not (
+            RAW_SAFE_INT_MIN <= value <= RAW_SAFE_INT_MAX):
+        raise _RawJsonRejected("float")
+    return value
+
+
+def _raw_parse_constant(token):
+    raise _RawJsonRejected("nonfinite_constant")
+
+
+def _raw_object_pairs(pairs):
+    """Reject a decoded-duplicate member name at EVERY object nesting, BEFORE
+    any dict conversion, so there is no last-write-wins repair."""
+    seen = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise _RawJsonRejected("duplicate")
+        seen.add(key)
+    return dict(pairs)
+
+
+def _raw_load(text):
+    """TEST-LOCAL loading helper: return the decoded value (including floats)
+    on lexical acceptance, or raise the narrow `_RawJsonRejected` on an
+    intended raw failure. The depth guard runs BEFORE decode, so an unbounded
+    recursive walk can never exceed runtime limits."""
+    if not isinstance(text, str):
+        raise TypeError("raw JSON text must be a string")
+    if _raw_json_container_depth(text) > RAW_JSON_MAX_DEPTH:
+        raise _RawJsonRejected("depth")
+    try:
+        return json.loads(
+            text, parse_int=_raw_parse_int, parse_float=_raw_parse_float,
+            parse_constant=_raw_parse_constant,
+            object_pairs_hook=_raw_object_pairs)
+    except _RawJsonRejected:
+        raise
+    except json.JSONDecodeError as exc:
+        raise _RawJsonRejected("syntax") from exc
+
+
+def _raw_error_envelope():
+    """The separate error adapter's output: the one frozen literal."""
+    return {"ok": False, "error": {
+        "code": "invalid_json", "message": RAW_ERROR_MESSAGES["invalid_json"]}}
+
+
+def _raw_probe(text):
+    """The literal envelope for an intended raw rejection, else None. Catches
+    ONLY the narrow rejection -- never a broad or programming failure."""
+    try:
+        _raw_load(text)
+    except _RawJsonRejected:
+        return _raw_error_envelope()
+    return None
+
+
+# -- literal depth builders (grouped edge rows; not one helper per row) --
+
+def _raw_nested_array(n):
+    return "[" * n + "0" + "]" * n
+
+
+def _raw_nested_object(n):
+    return '{"a":' * n + "0" + "}" * n
+
+
+def _raw_nested_mixed(n):
+    opens, closes = [], []
+    for i in range(n):
+        if i % 2 == 0:
+            opens.append("[")
+            closes.append("]")
+        else:
+            opens.append('{"a":')
+            closes.append("}")
+    return "".join(opens) + "0" + "".join(reversed(closes))
+
+
+# -- table loading + integrity helpers --
+
+def _load_raw_table(path=RAW_JSON_TABLE_DOC):
+    path = Path(path)
+    assert path.is_file(), (
+        f"raw-JSON rule table fixture is missing: {path.name}")
+    return _load_strict(path)
+
+
+@pytest.fixture(scope="module")
+def raw_table():
+    return _load_raw_table()
+
+
+def _raw_row(table, list_name, case_id):
+    return next(r for r in table[list_name] if r["id"] == case_id)
+
+
+def _raw_finite(node, cid):
+    """No NaN/Infinity may appear as a JSON value in the rule table."""
+    if isinstance(node, bool):
+        return
+    if isinstance(node, float):
+        assert math.isfinite(node), f"{cid}: non-finite number in the table"
+    elif isinstance(node, dict):
+        for value in node.values():
+            _raw_finite(value, cid)
+    elif isinstance(node, list):
+        for value in node:
+            _raw_finite(value, cid)
+
+
+def _assert_raw_error_envelope(cid, expect):
+    assert isinstance(expect, dict), f"{cid}: expected a literal error envelope"
+    assert set(expect) == RAW_ENVELOPE_FIELDS, (
+        f"{cid}: a raw error must be exactly `ok`+`error`")
+    assert expect["ok"] is False, f"{cid}: `ok` must be strictly false"
+    error = expect["error"]
+    assert isinstance(error, dict) and set(error) == RAW_ERROR_FIELDS, (
+        f"{cid}: `error` must be exactly code+message")
+    assert error["code"] in RAW_ERROR_MESSAGES, (
+        f"{cid}: unknown raw-error code {error['code']!r}")
+    assert error["message"] == RAW_ERROR_MESSAGES[error["code"]], (
+        f"{cid}: error message is not the frozen literal for its code")
+    assert not ((set(expect) | set(error)) & RAW_FORBIDDEN_FIELDS), (
+        f"{cid}: raw error leaks a forbidden public/private field")
+
+
+def _raw_invalid_row_consistent(row):
+    """True iff this invalid row genuinely behaves as its row claims: the raw
+    text is rejected by the narrow guard AND the adapter yields its literal."""
+    try:
+        _raw_load(row["json_text"])
+    except _RawJsonRejected:
+        return _raw_probe(row["json_text"]) == row["expect"]
+    return False
+
+
+# -- table integrity --
+
+def test_raw_json_table_is_a_labelled_rule_table(raw_table):
+    assert set(raw_table) == RAW_TABLE_FIELDS, (
+        "raw-json-cases.json must be a labelled rule table with exactly "
+        "description + raw_json_rule + the two case lists")
+    description = raw_table["description"]
+    assert isinstance(description, str) and description
+    for clue in ("RULE TABLE", "NOT a snapshot", "NOT a query result",
+                 "never computed by an implementation"):
+        assert clue in description, (
+            f"raw-JSON rule table description must state {clue!r}")
+    rule = raw_table["raw_json_rule"]
+    assert isinstance(rule, str) and rule
+    for clue in ("BEFORE any structural schema check", "invalid_json",
+                 "Invalid catalogue JSON.", "MAX_JSON_DEPTH is 64",
+                 "before any precision-losing conversion", "every notation"):
+        assert clue in rule, f"raw-JSON rule text must state {clue!r}"
+    for key in ("schema_version", "snapshot_id", "provider_order", "providers",
+                "model_ids", "warnings", "tick_epoch", "cadence_s", "cases"):
+        assert key not in raw_table, (
+            f"raw-JSON rule table must not masquerade as a snapshot ({key})")
+    assert isinstance(raw_table["invalid_cases"], list) \
+        and raw_table["invalid_cases"]
+    assert isinstance(raw_table["valid_controls"], list) \
+        and raw_table["valid_controls"]
+
+
+def test_raw_json_table_rows_are_wellformed_with_unique_ids(raw_table):
+    seen = set()
+    for row in raw_table["invalid_cases"]:
+        cid = row["id"]
+        assert set(row) == RAW_INVALID_ROW_FIELDS, (
+            f"{cid}: unexpected invalid-row fields "
+            f"{sorted(set(row) ^ RAW_INVALID_ROW_FIELDS)}")
+        assert cid not in seen, f"duplicate case id {cid}"
+        seen.add(cid)
+        assert isinstance(row["category"], str) and row["category"]
+        assert isinstance(row["json_text"], str)
+        _assert_raw_error_envelope(cid, row["expect"])
+        _raw_finite(row, cid)
+    for row in raw_table["valid_controls"]:
+        cid = row["id"]
+        assert set(row) in (RAW_VALID_ROW_FIELDS, RAW_VALID_DEPTH_ROW_FIELDS), (
+            f"{cid}: unexpected valid-row fields {sorted(set(row))}")
+        assert cid not in seen, f"duplicate case id {cid}"
+        seen.add(cid)
+        assert isinstance(row["category"], str) and row["category"]
+        assert isinstance(row["json_text"], str)
+        _raw_finite(row, cid)
+
+
+def test_raw_json_table_covers_required_categories_and_cases(raw_table):
+    invalid = raw_table["invalid_cases"]
+    valid = raw_table["valid_controls"]
+    missing = (set(REQUIRED_RAW_INVALID_CATEGORIES)
+               - {row["category"] for row in invalid})
+    assert not missing, (
+        f"raw-JSON table is missing invalid categories {sorted(missing)}")
+    missing = (set(REQUIRED_RAW_VALID_CATEGORIES)
+               - {row["category"] for row in valid})
+    assert not missing, (
+        f"raw-JSON table is missing valid categories {sorted(missing)}")
+    ids = ({row["id"] for row in invalid} | {row["id"] for row in valid})
+    missing = set(REQUIRED_RAW_CASE_IDS) - ids
+    assert not missing, (
+        f"raw-JSON table is missing required cases {sorted(missing)}")
+
+
+# -- literal corpus --
+
+def test_raw_json_error_envelope_is_the_frozen_literal():
+    assert _raw_error_envelope() == {
+        "ok": False,
+        "error": {"code": "invalid_json",
+                  "message": "Invalid catalogue JSON."}}
+
+
+def test_raw_json_invalid_cases_reject_with_the_intended_condition(raw_table):
+    for row in raw_table["invalid_cases"]:
+        cid = row["id"]
+        with pytest.raises(_RawJsonRejected) as excinfo:
+            _raw_load(row["json_text"])
+        expected = RAW_CATEGORY_REASON[row["category"]]
+        assert excinfo.value.reason == expected, (
+            f"{cid}: rejected by condition {excinfo.value.reason!r}, expected "
+            f"{expected!r}")
+        assert _raw_probe(row["json_text"]) == row["expect"], (
+            f"{cid}: the adapter must yield the row's COMPLETE literal "
+            "envelope")
+        assert _raw_invalid_row_consistent(row), (
+            f"{cid}: row does not behave as its literal envelope claims")
+
+
+def test_raw_json_valid_controls_decode_to_expected_values(raw_table):
+    for row in raw_table["valid_controls"]:
+        cid = row["id"]
+        assert _raw_probe(row["json_text"]) is None, (
+            f"{cid}: a valid control must be raw-accepted")
+        decoded = _raw_load(row["json_text"])
+        if "expect" in row:
+            assert decoded == row["expect"], (
+                f"{cid}: decoded value mismatch; got {decoded!r}")
+            assert type(decoded) is type(row["expect"]), (
+                f"{cid}: decoded type {type(decoded).__name__} must match the "
+                f"expected {type(row['expect']).__name__}")
+        else:
+            assert row["expect_depth"] == RAW_JSON_MAX_DEPTH
+            assert row["expect_kind"] in ("array", "object", "mixed")
+            assert _raw_json_container_depth(row["json_text"]) \
+                == row["expect_depth"]
+            if row["expect_kind"] == "object":
+                assert isinstance(decoded, dict)
+            else:
+                assert isinstance(decoded, list)
+
+
+# -- grouped positive-control pins (the actual boundary values) --
+
+def test_raw_json_safe_integer_boundary_is_inclusive():
+    assert _raw_load("9007199254740991") == RAW_SAFE_INT_MAX == 9007199254740991
+    assert _raw_load("-9007199254740991") == RAW_SAFE_INT_MIN
+    for bad in ("9007199254740992", "-9007199254740992",
+                "9007199254740992.0", "-9007199254740992.0", "1e16", "-1e16"):
+        with pytest.raises(_RawJsonRejected):
+            _raw_load(bad)
+
+
+def test_raw_json_float_controls_keep_type_rounding_and_sign(raw_table):
+    # An integral float token KEEPS float type (never an int or a string).
+    decoded = _raw_load("1.0")
+    assert type(decoded) is float
+    # Signed float zero retains its sign.
+    zero = _raw_load("-0.0")
+    assert zero == 0.0 and math.copysign(1.0, zero) == -1.0
+    row = _raw_row(raw_table, "valid_controls", "raw_valid_negative_float_zero")
+    assert math.copysign(1.0, row["expect"]) == -1.0
+    # Python-compatible rounding / underflow / subnormal.
+    assert _raw_load("1.0000000000000001") == 1.0
+    assert _raw_load("9007199254740991.1") == 9007199254740991.0
+    assert _raw_load("1e-400") == 0.0
+    assert _raw_load("5e-324") == 5e-324
+    assert _raw_load("0.5") == 0.5
+
+
+def test_raw_json_numeric_looking_strings_are_untouched():
+    assert _raw_load('"9007199254740992"') == "9007199254740992"
+    assert _raw_load('"NaN"') == "NaN"
+    assert _raw_load('"1e16"') == "1e16"
+    payload = '{"id": "9007199254740992", "n": "NaN"}'
+    assert _raw_load(payload) == {"id": "9007199254740992", "n": "NaN"}
+
+
+def test_raw_json_duplicate_policy_is_exact():
+    for bad in ('{"a":1,"a":2}', '{"a":1,"\\u0061":2}',
+                '{"x":{"b":1,"b":2}}', '[{"c":1,"c":1}]'):
+        with pytest.raises(_RawJsonRejected) as excinfo:
+            _raw_load(bad)
+        assert excinfo.value.reason == "duplicate", bad
+    # Different case is distinct; a name repeated in separate objects is fine.
+    assert _raw_load('{"A":1,"a":2}') == {"A": 1, "a": 2}
+    assert _raw_load('{"x":{"a":1},"y":{"a":2}}') == {
+        "x": {"a": 1}, "y": {"a": 2}}
+
+
+def test_raw_json_container_depth_bound_is_inclusive_at_64():
+    for builder in (_raw_nested_array, _raw_nested_object, _raw_nested_mixed):
+        assert _raw_json_container_depth(builder(64)) == 64
+        _raw_load(builder(64))  # accepted at the inclusive bound
+        assert _raw_json_container_depth(builder(65)) == 65
+        with pytest.raises(_RawJsonRejected) as excinfo:
+            _raw_load(builder(65))
+        assert excinfo.value.reason == "depth"
+    # A root scalar is depth 0; quoted brackets never count.
+    assert _raw_json_container_depth("42") == 0
+    assert _raw_json_container_depth('"' + "[" * 70 + '"') == 0
+    quoted = _raw_row(_load_raw_table(), "valid_controls",
+                      "raw_valid_quoted_brackets_only")
+    assert _raw_json_container_depth(quoted["json_text"]) == 0
+
+
+# -- wrong-rule probes (rejection evidence ONLY; never an authoring oracle) --
+
+def _wrong_native_json(text):
+    """WRONG RULE: the stdlib default decoder alone -- last-write-wins
+    duplicates, NaN/Infinity constants accepted, no numeric or depth guard."""
+    return json.loads(text)
+
+
+def _wrong_parse_constant_only(text):
+    """WRONG RULE: only the non-finite constants rejected; unsafe integers,
+    non-finite floats, duplicates and over-deep nesting all unguarded."""
+    return json.loads(text, parse_constant=_raw_parse_constant)
+
+
+def _wrong_integer_token_only(text):
+    """WRONG RULE: integer tokens guarded, float/exponent tokens not -- so an
+    unsafe value in `.0` or exponent notation slips through."""
+    return json.loads(text, parse_int=_raw_parse_int)
+
+
+def _wrong_omitted_depth_check(text):
+    """WRONG RULE: every guard except the container-depth preflight."""
+    try:
+        return json.loads(
+            text, parse_int=_raw_parse_int, parse_float=_raw_parse_float,
+            parse_constant=_raw_parse_constant,
+            object_pairs_hook=_raw_object_pairs)
+    except _RawJsonRejected:
+        raise
+    except json.JSONDecodeError as exc:
+        raise _RawJsonRejected("syntax") from exc
+
+
+def _wrong_naive_bracket_depth(text):
+    """WRONG RULE: quote-unaware bracket counting -- a bracket inside a string
+    is mistaken for container nesting."""
+    depth = high = 0
+    for ch in text:
+        if ch in "[{":
+            depth += 1
+            high = max(high, depth)
+        elif ch in "]}":
+            depth -= 1
+    return high
+
+
+def test_raw_json_wrong_rules_are_discriminated(raw_table):
+    # (a) native json (last-write-wins) ACCEPTS duplicates the real guard
+    #     rejects -- both an exact and an escape-equivalent repeat.
+    for cid in ("raw_invalid_duplicate_exact",
+                "raw_invalid_duplicate_escaped_equivalent"):
+        row = _raw_row(raw_table, "invalid_cases", cid)
+        with pytest.raises(_RawJsonRejected, match="duplicate"):
+            _raw_load(row["json_text"])
+        assert _wrong_native_json(row["json_text"]) is not None
+    assert _wrong_native_json('{"a":1,"a":2}') == {"a": 2}
+
+    # (b) a parse_constant-only rule still PERMITS binary64 overflow.
+    overflow = _raw_row(raw_table, "invalid_cases",
+                        "raw_invalid_overflow_positive")
+    assert _wrong_parse_constant_only(overflow["json_text"]) == float("inf")
+    with pytest.raises(_RawJsonRejected, match="float"):
+        _raw_load(overflow["json_text"])
+
+    # (c) integer-token-only safety wrongly ACCEPTS `1e16` and the `.0`
+    #     spelling of the same unsafe value.
+    for cid in ("raw_invalid_unsafe_exponent_positive",
+                "raw_invalid_unsafe_decimal_positive"):
+        row = _raw_row(raw_table, "invalid_cases", cid)
+        assert _wrong_integer_token_only(row["json_text"]) is not None
+        with pytest.raises(_RawJsonRejected, match="float"):
+            _raw_load(row["json_text"])
+
+    # (d) omitting the depth preflight ACCEPTS the 65-deep documents.
+    for cid in ("raw_invalid_depth65_array", "raw_invalid_depth65_object",
+                "raw_invalid_depth65_mixed"):
+        row = _raw_row(raw_table, "invalid_cases", cid)
+        assert _wrong_omitted_depth_check(row["json_text"]) is not None
+        with pytest.raises(_RawJsonRejected, match="depth"):
+            _raw_load(row["json_text"])
+
+    # (e) naive bracket counting REJECTS a valid quoted-bracket control that
+    #     the quote-aware preflight accepts.
+    quoted = _raw_row(raw_table, "valid_controls",
+                      "raw_valid_quoted_brackets_only")
+    assert _wrong_naive_bracket_depth(quoted["json_text"]) > RAW_JSON_MAX_DEPTH
+    assert _raw_json_container_depth(quoted["json_text"]) == 0
+    assert _raw_load(quoted["json_text"]) == quoted["expect"]
+
+
+# -- grouped integration proofs --
+
+def test_raw_json_loader_accepts_every_snapshot_fixture_then_the_wrapper():
+    snapshot_files = []
+    for path in sorted(FIXTURE_DIR.glob("*.json")):
+        text = path.read_text(encoding="utf-8")
+        doc = _load_strict(path)
+        if not (isinstance(doc, dict) and set(doc) == TOP_LEVEL_FIELDS):
+            continue
+        decoded = _raw_load(text)               # raw-lexically accepted
+        assert decoded == doc, path.name
+        _assert_snapshot_contract(decoded)      # still accepted by the wrapper
+        snapshot_files.append(path.name)
+    assert len(snapshot_files) >= 9, snapshot_files
+    for required in ("basic.json", "lookup.json", "ordering.json",
+                     "provider-extension.json", "search-text.json"):
+        assert required in snapshot_files
+
+
+def test_raw_json_scalar_or_container_is_raw_accepted_then_structurally_invalid():
+    for text in ("null", "true", "false", "42", '"hello"', "[]", "[1,2]",
+                 "{}", '{"a": 1}'):
+        decoded = _raw_load(text)          # NOT a raw error
+        assert _raw_probe(text) is None
+        assert _public_structural_error(decoded) == \
+            RAW_INVALID_SNAPSHOT_ENVELOPE, text
+
+
+# -- table-integrity corruption probes --
+
+def test_raw_json_table_integrity_probes_fail_as_intended(raw_table):
+    # (1) A missing table fails the loading guard -- never a vacuous pass.
+    with pytest.raises(AssertionError, match="missing"):
+        _load_raw_table(FIXTURE_DIR / "no-such-raw-table.json")
+
+    # (2) An expected message corrupted away from the frozen literal fails.
+    row = copy.deepcopy(
+        _raw_row(raw_table, "invalid_cases", "raw_invalid_nan_constant"))
+    row["expect"]["error"]["message"] = "Invalid JSON."
+    with pytest.raises(AssertionError, match="frozen literal"):
+        _assert_raw_error_envelope(row["id"], row["expect"])
+
+    # (3) Deleting a required category fails the coverage guard.
+    broken = copy.deepcopy(raw_table)
+    broken["invalid_cases"] = [r for r in broken["invalid_cases"]
+                               if r["category"] != "duplicate"]
+    missing = (set(REQUIRED_RAW_INVALID_CATEGORIES)
+               - {r["category"] for r in broken["invalid_cases"]})
+    assert missing == {"duplicate"}
+    with pytest.raises(AssertionError, match="missing invalid categories"):
+        assert not missing, (
+            f"raw-JSON table is missing invalid categories {sorted(missing)}")
+
+    # (4) Altered rawdata that becomes accidentally VALID must not remain
+    #     consistent with its (invalid) purported row.
+    valid_row = copy.deepcopy(
+        _raw_row(raw_table, "invalid_cases", "raw_invalid_empty_string"))
+    valid_row["json_text"] = '{"a": 1}'
+    assert _raw_load(valid_row["json_text"]) == {"a": 1}
+    assert _raw_probe(valid_row["json_text"]) is None
+    assert _raw_invalid_row_consistent(valid_row) is False
+
+
+# -- README subsection pins --
+
+RAW_JSON_SECTION = "Raw JSON validation of published payloads (frozen rules)"
+
+
+def _raw_json_section_text():
+    """The README body of the frozen raw-JSON subsection ONLY (from its `###`
+    heading to the next `###`/`##` heading), so pins here can never be
+    satisfied by tokens from an adjacent section."""
+    text = README.read_text(encoding="utf-8")
+    heading = f"### {RAW_JSON_SECTION}"
+    assert heading in text, (
+        "README is missing the frozen raw-JSON validation subsection")
+    body = text[text.index(heading):]
+    ends = [i for i in (body.find("\n### ", len(heading)),
+                        body.find("\n## ", len(heading))) if i != -1]
+    return body[:min(ends)] if ends else body
+
+
+def test_readme_raw_json_subsection_is_itself_scoped():
+    text = " ".join(_raw_json_section_text().split())
+    # Adjacent-section tokens must NOT satisfy these pins.
+    assert "fail export" not in text
+    assert "Success envelope" not in text
+    assert "Total ordering rule (frozen)" not in text
+
+
+def test_readme_freezes_raw_json_envelope_and_lexical_split():
+    text = " ".join(_raw_json_section_text().split())
+    for phrase in (
+            "Raw JSON validation runs **BEFORE** any structural schema check",
+            "top-level fields are **exactly** `ok` and `error`",
+            "`ok` is strictly `false`",
+            "`error` carries **exactly** `code` and `message`",
+            "single literal `invalid_json` / `Invalid catalogue JSON.`",
+            "No parameter, offset, exception text, reflected raw content, "
+            "local path, source/cache datum or partial result",
+            "several simultaneous raw faults still produce that one literal",
+            "**no** public subtype precedence",
+            "`invalid_snapshot` and `unsupported_schema_version` envelopes "
+            "are unchanged",
+            "Lexical acceptance is not public-snapshot acceptance",
+            "later classified `invalid_snapshot` by the structural layer",
+            "Root primitives never claim a valid public catalogue",
+    ):
         assert phrase in text, (
-            f"structural subsection missing rule: {phrase}")
+            f"raw-JSON subsection missing envelope/lexical rule: {phrase}")
+
+
+def test_readme_freezes_raw_json_syntax_rules():
+    text = " ".join(_raw_json_section_text().split())
+    for phrase in (
+            "Empty or whitespace-only text",
+            "malformed or truncated documents",
+            "trailing data or a trailing comma",
+            "a leading-zero integer, a plus-prefixed number",
+            "raw control characters inside strings, and a UTF-8 BOM at the "
+            "start of the text are all rejected",
+            "No BOM stripping, trimming or other silent preprocessing or "
+            "sanitizing",
+            "the native JSON decoder remains the syntax authority",
+            "`NaN`, `Infinity` and `-Infinity` constants are rejected",
+            "overflows binary64 (`1e400`, `-1e400`) is rejected as non-finite",
+    ):
+        assert phrase in text, (
+            f"raw-JSON subsection missing syntax rule: {phrase}")
+
+
+def test_readme_freezes_raw_json_numeric_safety_and_rounding():
+    text = " ".join(_raw_json_section_text().split())
+    for phrase in (
+            "Notation-independent numeric safety (at EVERY depth)",
+            "checked **exactly**, before any precision-losing conversion, "
+            "against `[-9007199254740991, 9007199254740991]`",
+            "floating and exponent tokens convert with normal binary64 "
+            "semantics",
+            "integer-valued result outside that same range is rejected",
+            "reject in **every notation**",
+            "an exponent spelling such as `1e16`",
+            "before any schema check",
+            "A lexical-integer-only safety policy is expressly **not** the "
+            "contract",
+            "numeric-looking **strings** are untouched and never inspected "
+            "as numbers",
+            "Python-compatible finite rounding and underflow",
+            "signed zero, subnormal values",
+            "`1.0000000000000001` becomes `1.0`",
+            "`9007199254740991.1` becomes `9007199254740991.0`",
+            "underflow (`1e-400` becomes `0.0`)",
+            "keeps **float** type even when its value is integral",
+            "never coerced into an int or a string",
+            "No arbitrary decimal-precision reinterpretation",
+    ):
+        assert phrase in text, (
+            f"raw-JSON subsection missing numeric rule: {phrase}")
+
+
+def test_readme_freezes_raw_json_duplicate_depth_and_repair_rules():
+    text = " ".join(_raw_json_section_text().split())
+    for phrase in (
+            "rejected at **every** object nesting level",
+            "escape-equivalent keys",
+            "even when the repeated values are equal",
+            "compared after decoding and **before** any dict conversion",
+            "no last-write-wins repair",
+            "different case is distinct, and repeating a name in two separate "
+            "objects is fine",
+            "`MAX_JSON_DEPTH` is `64`, inclusive",
+            "a root container is depth `1`",
+            "Arrays and objects **both** count, including mixed nesting",
+            "never affect the container depth",
+            "enforced before an unbounded recursive decode",
+            "the interpreter recursion limit is never raised as a substitute",
+            "No raw-value repair",
+            "never partially salvaged, clamped, re-spelled or silently "
+            "preprocessed",
+            "rule **TABLE** (explicitly **not** a snapshot and **not** a "
+            "query result)",
+            "adversarial literal lexemes as STRINGS",
+            "canonical language/hash-vector parity unit (c2b2) and JS parity "
+            "remain separate",
+    ):
+        assert phrase in text, (
+            f"raw-JSON subsection missing duplicate/depth/repair rule: "
+            f"{phrase}")
