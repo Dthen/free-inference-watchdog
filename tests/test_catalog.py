@@ -5092,6 +5092,693 @@ def test_list_free_positive_control_swapped_metadata_on_one_fixture_fails(
         _assert_list_free_payload(case, snap)
 
 
+# ---------- unit 1d-b2: published `list_endpoints` success + provider extensibility ----------
+#
+# `list_endpoints(provider=None)` publishes the wiring and the projected public
+# model object of every selected `(provider, raw model ID)` pair, in ONE exact
+# top-level field set for both variants (`ok`, `gateways`, `counts`, `provider`,
+# `snapshot_id`, `tick_epoch`, `provider_staleness`). Each `gateways` entry is
+# exactly `chat_completions_url`/`api_type`/`model_ids`/`models`. Five complete,
+# literal hand-authored goldens in cases.json pin the genuine distinctions: a
+# filtered `gateways` count that describes only the SELECTED providers (never
+# the whole registry), a `counts.models` legacy alias that always equals
+# `marker_group_labels` (never the distinct-raw-ID or endpoint-pair
+# cardinality), a registered zero-ID provider retained as an empty success even
+# when explicitly selected, the frozen unit 1d-a NATURAL raw-ID array order that
+# genuinely differs from the snapshot's literal code-point `model_ids`, and
+# per-provider metadata for a raw id shared by several gateways staying attached
+# to its own pair. The sixth appended golden (`list_free_extension_provider_d`)
+# exercises the ALREADY FROZEN unit 1d-b1 one-provider `list_free_models`
+# envelope on the new snapshot with no alteration. `provider-extension.json`
+# adds a synthetic gateway by DATA alone: the same generic list_free/endpoint
+# checkers derive membership from `provider_order`, so no provider enum or
+# package-code edit is required. Still fixture/contract work only — no endpoint
+# query, projection or validation implementation exists or is imported here.
+EXTENSION_FIXTURE_NAME = "provider-extension.json"
+EXTENSION_FIXTURE = FIXTURE_DIR / EXTENSION_FIXTURE_NAME
+EXTENSION_NEW_PROVIDER = "synthetic-d"
+ENDPOINTS_RESPONSE_FIELDS = frozenset({
+    "ok", "gateways", "counts", "provider", "snapshot_id", "tick_epoch",
+    "provider_staleness",
+})
+ENDPOINTS_GATEWAY_FIELDS = frozenset({
+    "chat_completions_url", "api_type", "model_ids", "models",
+})
+ENDPOINTS_COUNT_FIELDS = frozenset({
+    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
+    "models",
+})
+ENDPOINTS_REQUIRED_CASE_IDS = (
+    "endpoints_lookup_all",
+    "endpoints_lookup_provider_a",
+    "endpoints_lookup_zero_provider_c",
+    "endpoints_ordering_all",
+    "endpoints_extension_all",
+)
+ENDPOINTS_LOOKUP_ALL = "endpoints_lookup_all"
+ENDPOINTS_PROVIDER_A = "endpoints_lookup_provider_a"
+ENDPOINTS_ZERO_PROVIDER_C = "endpoints_lookup_zero_provider_c"
+ENDPOINTS_ORDERING_ALL = "endpoints_ordering_all"
+ENDPOINTS_EXTENSION_ALL = "endpoints_extension_all"
+LIST_FREE_EXTENSION_D = "list_free_extension_provider_d"
+# The lookup fixture's live keys: a HARDCODED provider enum would accept the
+# lookup/ordering snapshots yet drop the data-only `synthetic-d` extension.
+HARDCODED_ABC_PROVIDERS = ("synthetic-a", "synthetic-b", "synthetic-c")
+
+
+@pytest.fixture(scope="module")
+def extension_snapshot():
+    return _load_strict(EXTENSION_FIXTURE)
+
+
+def _iter_endpoints_cases(cases_doc):
+    return [c for c in cases_doc["cases"] if c["tool"] == "list_endpoints"]
+
+
+def _endpoints_case(cases_document, case_id):
+    case = next(c for c in _iter_endpoints_cases(cases_document)
+                if c["id"] == case_id)
+    return case, _case_fixture(case, cases_document)
+
+
+def _copy_endpoints_case(cases_document, case_id):
+    """Deep-copied golden + its snapshot, for in-memory wrong-rule probes.
+    No committed fixture is ever corrupted."""
+    case, snap = _endpoints_case(cases_document, case_id)
+    return copy.deepcopy(case), snap
+
+
+def _endpoints_cases_checked(cases_document):
+    """The list_endpoints cases, with the five required hand-authored scenarios
+    asserted present — so a checker loop over an empty corpus can never pass."""
+    cases = _iter_endpoints_cases(cases_document)
+    ids = {case["id"] for case in cases}
+    missing = sorted(set(ENDPOINTS_REQUIRED_CASE_IDS) - ids)
+    assert not missing, f"missing hand-authored endpoint scenarios: {missing}"
+    return cases
+
+
+def _endpoints_reference_ids(snap, provider):
+    """TEST-LOCAL reference selection: that provider's tracked raw IDs in the
+    frozen NATURAL order (unit 1d-a comparator), never the snapshot's literal
+    code-point `model_ids` order."""
+    return sorted(snap["providers"][provider]["model_ids"],
+                  key=_natural_key_contract)
+
+
+def _endpoints_selected(snap, provider):
+    """The selected provider scope: all `provider_order` keys when `provider`
+    is omitted/null, else exactly the one known key."""
+    if provider is None:
+        return list(snap["provider_order"])
+    assert provider in snap["provider_order"]
+    return [provider]
+
+
+def _assert_endpoints_payload(case, snap):
+    """Complete integrity of one hand-authored `list_endpoints` success golden:
+    the exact top-level/gateway/count field sets, the exact selected-provider
+    scope (zero-ID providers included), wiring from the exact snapshot provider,
+    the complete NATURAL raw-ID arrays with their projected model objects, the
+    count scopes (and the `models` legacy alias), strict scalar types and the
+    provenance/staleness echo. Stdlib data operations only — no endpoint query
+    implementation is imported and no expected value is generated by one."""
+    expect = case["expect"]
+    assert set(expect) == ENDPOINTS_RESPONSE_FIELDS, (
+        "unexpected response fields: "
+        f"{sorted(set(expect) ^ ENDPOINTS_RESPONSE_FIELDS)}")
+    assert expect["ok"] is True, "ok must be exactly true"
+    provider = case["args"].get("provider")
+    assert expect["provider"] == provider, \
+        "provider must echo the exact selected key, or null"
+    selected = _endpoints_selected(snap, provider)
+    gateways = expect["gateways"]
+    assert set(gateways) == set(selected), (
+        "gateways must carry exactly the SELECTED providers, zero-ID ones "
+        "included")
+    pairs = []
+    literal_ids = set()
+    labels = set()
+    for key in selected:
+        entry = snap["providers"][key]
+        gw = gateways[key]
+        assert set(gw) == ENDPOINTS_GATEWAY_FIELDS, (
+            f"{key}: unexpected gateway fields "
+            f"{sorted(set(gw) ^ ENDPOINTS_GATEWAY_FIELDS)}")
+        assert gw["chat_completions_url"] == entry["chat_completions_url"], \
+            f"{key}: chat_completions_url must come from that exact provider"
+        assert gw["api_type"] == entry["api_type"], \
+            f"{key}: api_type must come from that exact provider"
+        reference = _endpoints_reference_ids(snap, key)
+        assert gw["model_ids"] == reference, (
+            f"{key}: model_ids must be the complete raw-ID array in NATURAL "
+            "raw-ID order, unchanged strings")
+        assert set(gw["models"]) == set(reference), (
+            f"{key}: models must map every tracked raw ID to its projected "
+            "object")
+        for raw_id, model in gw["models"].items():
+            assert model == entry["models"][raw_id], (
+                f"{key}/{raw_id}: projected metadata is not attached to that "
+                "exact (provider, raw model_id) pair")
+        for raw_id in reference:
+            pairs.append((key, raw_id))
+            literal_ids.add(raw_id)
+            labels.add(_strip_marker_contract(raw_id))
+    counts = expect["counts"]
+    assert set(counts) == ENDPOINTS_COUNT_FIELDS, (
+        "unexpected count fields: "
+        f"{sorted(set(counts) ^ ENDPOINTS_COUNT_FIELDS)}")
+    for field, value in counts.items():
+        assert _counts_are_strict_int(value), \
+            f"{field} must be a strict non-negative int"
+    assert counts["gateways"] == len(selected), (
+        "gateways must count only the SELECTED providers, never the whole "
+        "registry")
+    assert counts["endpoints"] == len(pairs), \
+        "endpoints must count selected (provider, raw ID) pairs"
+    assert counts["distinct_raw_ids"] == len(literal_ids), \
+        "distinct_raw_ids must count selected literal raw IDs"
+    assert counts["marker_group_labels"] == len(labels), \
+        "marker_group_labels must count selected marker-group labels"
+    assert counts["models"] == counts["marker_group_labels"], (
+        "counts.models is the documented legacy alias of marker_group_labels")
+    staleness = expect["provider_staleness"]
+    assert set(staleness) == set(selected), \
+        "provider_staleness must carry exactly the selected providers"
+    for key in selected:
+        value = staleness[key]
+        assert isinstance(value, bool), \
+            "provider_staleness values must be strict bools"
+        assert value is snap["providers"][key]["stale"], (
+            f"{key}: provider_staleness must be that provider's strict bool "
+            "snapshot stale flag, never inferred from age")
+    assert expect["snapshot_id"] == snap["snapshot_id"], \
+        "snapshot_id must echo the consumed snapshot literally"
+    assert expect["tick_epoch"] == snap["tick_epoch"], \
+        "tick_epoch must echo the consumed snapshot literally"
+
+
+# -- extension fixture integrity (data-only provider extensibility) --
+
+def test_extension_fixture_matches_snapshot_contract(extension_snapshot):
+    _assert_snapshot_contract(extension_snapshot)
+
+
+def test_extension_fixture_shape_is_frozen(extension_snapshot):
+    snap = extension_snapshot
+    assert snap["schema_version"] == 1
+    assert snap["tick_epoch"] == 1759200000
+    assert snap["cadence_s"] == 3600
+    assert snap["warnings"] == []
+    assert snap["provider_order"] == [
+        "synthetic-d", "synthetic-a", "synthetic-b", "synthetic-c"]
+    # Physical map insertion order (a,b,c,d) is NOT display order (d,a,b,c).
+    assert list(snap["providers"]) == [
+        "synthetic-a", "synthetic-b", "synthetic-c", "synthetic-d"]
+    d = snap["providers"][EXTENSION_NEW_PROVIDER]
+    assert set(d) == PROVIDER_FIELDS
+    assert d["display_name"] == "Synthetic Delta"
+    assert d["chat_completions_url"] == \
+        "https://synthetic-delta.example/v1/chat/completions"
+    assert d["api_type"] == "openai"
+    assert d["model_ids"] == [LIST_FREE_SHARED_ID]
+    assert d["stale"] is True
+    model = d["models"][LIST_FREE_SHARED_ID]
+    assert set(model) == MODEL_FIELDS
+    assert model["id"] == LIST_FREE_SHARED_ID
+    assert model["name"] == "Synthetic Delta Shared"
+    assert model["description"] == \
+        "Synthetic delta endpoint with its own small context."
+    assert model["context_length"] == 8192
+    assert model["architecture"] == {
+        "input_modalities": ["text"], "output_modalities": ["text"]}
+    assert model["supported_parameters"] == ["top_p"]
+    assert model["pricing"] == {"prompt": "0", "completion": "0"}
+    text = EXTENSION_FIXTURE.read_text(encoding="utf-8")
+    assert "\\u" not in text, "non-ASCII ids must stay literal, not escaped"
+
+
+def test_extension_fixture_reuses_lookup_providers_data_level(
+        extension_snapshot, lookup_snapshot):
+    # Only provider_order, providers (ADDING synthetic-d) and the recomputed
+    # snapshot_id change: a/b/c stay data-level identical to lookup.json, and
+    # the epoch/cadence/warnings are copied exactly.
+    for key in HARDCODED_ABC_PROVIDERS:
+        assert extension_snapshot["providers"][key] == \
+            lookup_snapshot["providers"][key], key
+    assert extension_snapshot["schema_version"] == \
+        lookup_snapshot["schema_version"]
+    assert extension_snapshot["tick_epoch"] == lookup_snapshot["tick_epoch"]
+    assert extension_snapshot["cadence_s"] == lookup_snapshot["cadence_s"]
+    assert extension_snapshot["warnings"] == lookup_snapshot["warnings"]
+    assert extension_snapshot["snapshot_id"] != lookup_snapshot["snapshot_id"]
+
+
+def test_extension_fixture_snapshot_id_is_canonical(extension_snapshot):
+    body = {k: v for k, v in extension_snapshot.items()
+            if k != "snapshot_id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    assert extension_snapshot["snapshot_id"] == \
+        hashlib.sha256(canonical).hexdigest()
+
+
+def test_extension_fixture_adds_a_provider_without_package_code(
+        extension_snapshot):
+    import sys
+    assert not any(name.startswith("watchdog_catalog")
+                   for name in sys.modules)
+    assert set(extension_snapshot["providers"]) == set(
+        extension_snapshot["provider_order"])
+    assert len(extension_snapshot["provider_order"]) == 4
+    assert EXTENSION_NEW_PROVIDER in extension_snapshot["provider_order"]
+
+
+# -- fixture/case integrity + envelope freeze --
+
+def test_endpoints_goldens_present_unique_and_use_explicit_fixtures(
+        cases_document):
+    cases = _iter_endpoints_cases(cases_document)
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids)), "duplicate list_endpoints case id"
+    missing = [cid for cid in ENDPOINTS_REQUIRED_CASE_IDS if cid not in ids]
+    assert not missing, f"missing hand-authored endpoint scenarios: {missing}"
+    for case in cases:
+        # Explicit fixture override — never the cases.json default.
+        assert "fixture" in case, f"{case['id']}: needs an explicit fixture"
+        assert isinstance(case["args"], dict)
+        assert isinstance(case["expect"], dict)
+
+
+def test_endpoints_goldens_pass_complete_checker(cases_document):
+    for case in _endpoints_cases_checked(cases_document):
+        snap = _case_fixture(case, cases_document)
+        _assert_snapshot_contract(snap)
+        _assert_endpoints_payload(case, snap)
+
+
+def test_endpoints_response_envelope_field_sets_are_frozen(cases_document):
+    assert set(ENDPOINTS_RESPONSE_FIELDS) == {
+        "ok", "gateways", "counts", "provider", "snapshot_id", "tick_epoch",
+        "provider_staleness"}
+    assert set(ENDPOINTS_GATEWAY_FIELDS) == {
+        "chat_completions_url", "api_type", "model_ids", "models"}
+    assert set(ENDPOINTS_COUNT_FIELDS) == {
+        "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
+        "models"}
+    for case in _endpoints_cases_checked(cases_document):
+        _case_fixture(case, cases_document)
+        assert set(case["expect"]) == ENDPOINTS_RESPONSE_FIELDS, case["id"]
+
+
+def test_endpoints_provider_null_equals_omission_and_never_mixes(
+        cases_document):
+    omitted = _endpoints_case(cases_document, ENDPOINTS_LOOKUP_ALL)[0]
+    nulled = _endpoints_case(cases_document, ENDPOINTS_ORDERING_ALL)[0]
+    assert "provider" not in omitted["args"]
+    assert nulled["args"] == {"provider": None}
+    for case in (omitted, nulled):
+        assert case["expect"]["provider"] is None
+        assert set(case["expect"]) == ENDPOINTS_RESPONSE_FIELDS
+    # BOTH variants share the ONE top-level field set: no filtered-only or
+    # global-only field exists.
+    one = _endpoints_case(cases_document, ENDPOINTS_PROVIDER_A)[0]
+    assert set(one["expect"]) == ENDPOINTS_RESPONSE_FIELDS
+
+
+# -- scenario pins (the actual values, not self-consistency) --
+
+def test_endpoints_lookup_all_pins_selected_gateways_and_counts(cases_document):
+    case, snap = _endpoints_case(cases_document, ENDPOINTS_LOOKUP_ALL)
+    assert case["fixture"] == "lookup.json"
+    assert case["args"] == {}
+    expect = case["expect"]
+    assert expect["provider"] is None
+    assert set(expect["gateways"]) == {
+        "synthetic-a", "synthetic-b", "synthetic-c"}
+    a = expect["gateways"]["synthetic-a"]
+    assert a["chat_completions_url"] == \
+        "https://synthetic-alpha.example/v1/chat/completions"
+    assert a["api_type"] == "openai"
+    assert a["model_ids"] == [
+        "vendor/model-renamed", "vendor/model:free", "vendor/shared"]
+    assert expect["gateways"]["synthetic-b"]["model_ids"] == [
+        "vendor/model-free", "vendor/shared"]
+    # counts gateways 3 / endpoints 5 / distinct raw 4 / labels 3.
+    assert expect["counts"] == {
+        "gateways": 3, "endpoints": 5, "distinct_raw_ids": 4,
+        "marker_group_labels": 3, "models": 3}
+    # pairs vs literal ids vs marker labels are three genuinely different
+    # cardinalities.
+    pairs = [(k, rid) for k in snap["provider_order"]
+             for rid in expect["gateways"][k]["model_ids"]]
+    assert len(pairs) == 5
+    assert len({rid for _, rid in pairs}) == 4
+    assert {_strip_marker_contract(rid) for _, rid in pairs} == {
+        "vendor/model", "vendor/model-renamed", "vendor/shared"}
+    assert expect["provider_staleness"] == {
+        "synthetic-a": False, "synthetic-b": False, "synthetic-c": False}
+
+
+def test_endpoints_lookup_provider_a_is_single_selected_gateway(
+        cases_document):
+    case, snap = _endpoints_case(cases_document, ENDPOINTS_PROVIDER_A)
+    assert case["fixture"] == "lookup.json"
+    assert case["args"] == {"provider": "synthetic-a"}
+    expect = case["expect"]
+    assert expect["provider"] == "synthetic-a"
+    # Filtered: the whole registry's other gateways NEVER leak in.
+    assert set(expect["gateways"]) == {"synthetic-a"}
+    assert expect["counts"] == {
+        "gateways": 1, "endpoints": 3, "distinct_raw_ids": 3,
+        "marker_group_labels": 3, "models": 3}
+    assert expect["provider_staleness"] == {"synthetic-a": False}
+
+
+def test_endpoints_zero_provider_c_is_empty_success(cases_document):
+    case, snap = _endpoints_case(cases_document, ENDPOINTS_ZERO_PROVIDER_C)
+    assert case["args"] == {"provider": "synthetic-c"}
+    assert snap["providers"]["synthetic-c"]["model_ids"] == []
+    expect = case["expect"]
+    # A registered zero-ID provider is a SUCCESS, never a no-match error.
+    assert expect["ok"] is True
+    assert expect["provider"] == "synthetic-c"
+    # zero-ID single provider: gateways 1, every other count zero.
+    assert set(expect["gateways"]) == {"synthetic-c"}
+    gw = expect["gateways"]["synthetic-c"]
+    assert gw["model_ids"] == [] and gw["models"] == {}
+    assert expect["counts"] == {
+        "gateways": 1, "endpoints": 0, "distinct_raw_ids": 0,
+        "marker_group_labels": 0, "models": 0}
+    assert expect["provider_staleness"] == {"synthetic-c": False}
+
+
+def test_endpoints_ordering_all_pins_natural_not_literal_order(cases_document):
+    case, snap = _endpoints_case(cases_document, ENDPOINTS_ORDERING_ALL)
+    assert case["fixture"] == "ordering.json"
+    assert case["args"] == {"provider": None}
+    expect = case["expect"]
+    assert snap["provider_order"] == [
+        "synthetic-b", "synthetic-a", "synthetic-c"]
+    b = expect["gateways"]["synthetic-b"]
+    literal = snap["providers"]["synthetic-b"]["model_ids"]
+    # NATURAL order genuinely differs from the snapshot's literal code-point
+    # order, with every row retained (never a truncated array).
+    assert b["model_ids"] == list(LIST_FREE_ORDERING_NATURAL_B)
+    assert b["model_ids"] != literal
+    assert sorted(b["model_ids"]) == sorted(literal)
+    assert expect["counts"] == {
+        "gateways": 3, "endpoints": 10, "distinct_raw_ids": 9,
+        "marker_group_labels": 9, "models": 9}
+    assert expect["gateways"]["synthetic-a"]["model_ids"] == ["vendor/item2"]
+    assert expect["provider_staleness"] == {
+        "synthetic-b": True, "synthetic-a": False, "synthetic-c": False}
+
+
+def test_endpoints_extension_all_attaches_new_provider_and_keeps_zero_id_c(
+        cases_document):
+    case, snap = _endpoints_case(cases_document, ENDPOINTS_EXTENSION_ALL)
+    assert case["fixture"] == EXTENSION_FIXTURE_NAME
+    assert case["args"] == {}
+    expect = case["expect"]
+    assert expect["snapshot_id"] == snap["snapshot_id"]
+    assert set(expect["gateways"]) == {
+        "synthetic-d", "synthetic-a", "synthetic-b", "synthetic-c"}
+    # The new data-only provider's own gateway + attached metadata.
+    d = expect["gateways"][EXTENSION_NEW_PROVIDER]
+    assert d["chat_completions_url"] == \
+        "https://synthetic-delta.example/v1/chat/completions"
+    assert d["model_ids"] == [LIST_FREE_SHARED_ID]
+    assert d["models"][LIST_FREE_SHARED_ID]["context_length"] == 8192
+    assert d["models"][LIST_FREE_SHARED_ID]["name"] == "Synthetic Delta Shared"
+    # The shared raw id must NOT be a marker variant of the alpha/beta ids.
+    assert _strip_marker_contract(LIST_FREE_SHARED_ID) == LIST_FREE_SHARED_ID
+    # zero-ID synthetic-c is retained, dropped by no rule.
+    c = expect["gateways"]["synthetic-c"]
+    assert c["model_ids"] == [] and c["models"] == {}
+    assert expect["counts"] == {
+        "gateways": 4, "endpoints": 6, "distinct_raw_ids": 4,
+        "marker_group_labels": 3, "models": 3}
+    assert expect["provider_staleness"] == {
+        "synthetic-d": True, "synthetic-a": False, "synthetic-b": False,
+        "synthetic-c": False}
+    assert expect["tick_epoch"] == 1759200000
+
+
+def test_endpoints_projected_gateways_are_projected_objects(cases_document):
+    for case in _endpoints_cases_checked(cases_document):
+        for key, gw in case["expect"]["gateways"].items():
+            assert set(gw) == ENDPOINTS_GATEWAY_FIELDS, f"{case['id']}/{key}"
+            assert "display_name" not in gw and "stale" not in gw
+            for raw_id, model in gw["models"].items():
+                assert set(model) == MODEL_FIELDS, f"{case['id']}/{key}/{raw_id}"
+                assert model["id"] == raw_id
+
+
+def test_list_free_extension_provider_d_passes_frozen_one_provider_envelope(
+        cases_document):
+    case, snap = _list_free_case(cases_document, LIST_FREE_EXTENSION_D)
+    assert case["fixture"] == EXTENSION_FIXTURE_NAME
+    assert case["args"] == {"provider": EXTENSION_NEW_PROVIDER}
+    _assert_snapshot_contract(snap)
+    # The ALREADY FROZEN unit 1d-b1 one-provider checker accepts the new
+    # provider through snapshot data alone.
+    _assert_list_free_payload(case, snap)
+    expect = case["expect"]
+    assert set(expect) == LIST_FREE_ONE_FIELDS
+    assert expect["provider"] == EXTENSION_NEW_PROVIDER
+    assert expect["model_ids"] == [LIST_FREE_SHARED_ID]
+    assert expect["models"][LIST_FREE_SHARED_ID]["name"] == \
+        "Synthetic Delta Shared"
+    assert expect["count"] == 1
+    assert expect["provider_staleness"] == {EXTENSION_NEW_PROVIDER: True}
+    assert expect["snapshot_id"] == snap["snapshot_id"]
+
+
+def test_endpoints_cases_reference_their_fixture_provenance(cases_document):
+    cases = _endpoints_cases_checked(cases_document) + \
+        [_list_free_case(cases_document, LIST_FREE_EXTENSION_D)[0]]
+    for case in cases:
+        snap = _case_fixture(case, cases_document)
+        assert case["expect"]["snapshot_id"] == snap["snapshot_id"], case["id"]
+        assert case["expect"]["tick_epoch"] == snap["tick_epoch"], case["id"]
+
+
+def test_extension_and_source_snapshots_hash_independently(
+        extension_snapshot, lookup_snapshot, ordering_snapshot):
+    for snap in (lookup_snapshot, ordering_snapshot, extension_snapshot):
+        body = {k: v for k, v in snap.items() if k != "snapshot_id"}
+        canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=True).encode("utf-8")
+        assert snap["snapshot_id"] == hashlib.sha256(canonical).hexdigest()
+    ids = {lookup_snapshot["snapshot_id"], ordering_snapshot["snapshot_id"],
+           extension_snapshot["snapshot_id"]}
+    assert len(ids) == 3
+
+
+# -- wrong-rule probes (rejection evidence ONLY; never an authoring oracle) --
+
+def _wrong_filtered_gateways_count_global(case, snap):
+    """WRONG RULE: a filtered response reports the whole registry's gateway
+    count instead of the selected provider's."""
+    case["expect"]["counts"]["gateways"] = len(snap["provider_order"])
+
+
+def _wrong_models_alias_distinct_ids(case, snap):
+    """WRONG RULE: `counts.models` is the distinct-raw-ID cardinality, not the
+    marker-group-label alias."""
+    case["expect"]["counts"]["models"] = \
+        case["expect"]["counts"]["distinct_raw_ids"]
+
+
+def _wrong_models_alias_endpoints(case, snap):
+    """WRONG RULE: `counts.models` counts endpoint pairs."""
+    case["expect"]["counts"]["models"] = case["expect"]["counts"]["endpoints"]
+
+
+def _endpoints_wrong_shared_metadata_swap(case, snap):
+    """WRONG RULE: the two gateways' objects for a shared raw id are swapped
+    (each keeps a real, valid object -- just not its own)."""
+    models = case["expect"]["gateways"]
+    a = models["synthetic-a"]["models"][LIST_FREE_SHARED_ID]
+    b = models["synthetic-b"]["models"][LIST_FREE_SHARED_ID]
+    models["synthetic-a"]["models"][LIST_FREE_SHARED_ID] = copy.deepcopy(b)
+    models["synthetic-b"]["models"][LIST_FREE_SHARED_ID] = copy.deepcopy(a)
+
+
+def _wrong_gateway_wiring_other_provider(case, snap):
+    """WRONG RULE: a gateway borrows another provider's wiring."""
+    case["expect"]["gateways"]["synthetic-b"]["chat_completions_url"] = \
+        snap["providers"]["synthetic-a"]["chat_completions_url"]
+
+
+def _endpoints_wrong_drop_zero_id_provider(case, snap):
+    """WRONG RULE: a zero-ID provider is omitted from every map AND the count,
+    so only the selected-provider membership check can catch it."""
+    expect = case["expect"]
+    del expect["gateways"]["synthetic-c"]
+    del expect["provider_staleness"]["synthetic-c"]
+    expect["counts"]["gateways"] = len(snap["provider_order"]) - 1
+    assert expect["counts"]["gateways"] == len(expect["gateways"])
+
+
+def _wrong_global_staleness_leak(case, snap):
+    """WRONG RULE: the filtered response keeps whole-registry staleness."""
+    case["expect"]["provider_staleness"] = {
+        key: snap["providers"][key]["stale"] for key in snap["provider_order"]}
+
+
+def _wrong_lexical_arrays_ordering(case, snap):
+    """WRONG RULE: query arrays keep the literal code-point order; every row
+    retained and all counts left correct."""
+    for key in snap["provider_order"]:
+        case["expect"]["gateways"][key]["model_ids"] = list(
+            snap["providers"][key]["model_ids"])
+
+
+def _endpoints_wrong_provenance_other_snapshot(case, snap):
+    """WRONG RULE: provenance carries another genuine snapshot id."""
+    case["expect"]["snapshot_id"] = _load_strict(LOOKUP_FIXTURE)["snapshot_id"]
+
+
+def _endpoints_wrong_staleness_inferred_from_age(case, snap):
+    """WRONG RULE: staleness is inferred from observation age (a fresh fixed
+    epoch means every provider is healthy)."""
+    case["expect"]["provider_staleness"] = {
+        key: False for key in snap["provider_order"]}
+
+
+def _wrong_hardcoded_abc_selection(case, snap):
+    """WRONG RULE: a hardcoded a/b/c provider enum selects only those
+    providers, consistently dropping the data-only synthetic-d from the maps,
+    the counts and the staleness map."""
+    selected = [k for k in snap["provider_order"]
+                if k in HARDCODED_ABC_PROVIDERS]
+    expect = case["expect"]
+    expect["gateways"] = {k: expect["gateways"][k] for k in selected}
+    expect["provider_staleness"] = {
+        k: snap["providers"][k]["stale"] for k in selected}
+    pairs = [(k, rid) for k in selected
+             for rid in expect["gateways"][k]["model_ids"]]
+    distinct = {rid for _, rid in pairs}
+    labels = {_strip_marker_contract(rid) for _, rid in pairs}
+    expect["counts"] = {
+        "gateways": len(selected), "endpoints": len(pairs),
+        "distinct_raw_ids": len(distinct),
+        "marker_group_labels": len(labels), "models": len(labels)}
+    assert expect["counts"] == {
+        "gateways": 3, "endpoints": 5, "distinct_raw_ids": 4,
+        "marker_group_labels": 3, "models": 3}
+    assert EXTENSION_NEW_PROVIDER not in expect["gateways"]
+
+
+def _mutate_bool_count(case, snap):
+    """WRONG RULE: a bool count is accepted as 1 (Python `True == 1`)."""
+    case["expect"]["counts"]["gateways"] = True
+
+
+ENDPOINTS_WRONG_RULE_MUTANTS = (
+    ("filtered gateways count the whole registry",
+     ENDPOINTS_PROVIDER_A, _wrong_filtered_gateways_count_global),
+    ("counts.models aliases distinct raw ids",
+     ENDPOINTS_LOOKUP_ALL, _wrong_models_alias_distinct_ids),
+    ("counts.models counts endpoint pairs",
+     ENDPOINTS_LOOKUP_ALL, _wrong_models_alias_endpoints),
+    ("shared-ID metadata swapped between gateways",
+     ENDPOINTS_LOOKUP_ALL, _endpoints_wrong_shared_metadata_swap),
+    ("gateway borrows another provider's wiring",
+     ENDPOINTS_LOOKUP_ALL, _wrong_gateway_wiring_other_provider),
+    ("zero-ID provider dropped from every map and the count",
+     ENDPOINTS_LOOKUP_ALL, _endpoints_wrong_drop_zero_id_provider),
+    ("filtered response keeps global staleness",
+     ENDPOINTS_PROVIDER_A, _wrong_global_staleness_leak),
+    ("query arrays keep the lexical snapshot order",
+     ENDPOINTS_ORDERING_ALL, _wrong_lexical_arrays_ordering),
+    ("provenance echoes another snapshot",
+     ENDPOINTS_ORDERING_ALL, _endpoints_wrong_provenance_other_snapshot),
+    ("staleness inferred from observation age",
+     ENDPOINTS_ORDERING_ALL, _endpoints_wrong_staleness_inferred_from_age),
+    ("hardcoded a/b/c enum drops the data-only provider",
+     ENDPOINTS_EXTENSION_ALL, _wrong_hardcoded_abc_selection),
+)
+
+
+@pytest.mark.parametrize(
+    "label,case_id,mutate", ENDPOINTS_WRONG_RULE_MUTANTS,
+    ids=[row[0] for row in ENDPOINTS_WRONG_RULE_MUTANTS])
+def test_endpoints_wrong_rule_mutants_rejected_on_goldens(
+        cases_document, label, case_id, mutate):
+    case, snap = _copy_endpoints_case(cases_document, case_id)
+    # Positive control: the unmutated golden passes its complete checker.
+    _assert_endpoints_payload(case, snap)
+    before = copy.deepcopy(case["expect"])
+    mutate(case, snap)
+    assert case["expect"] != before, f"{label}: the mutant changed nothing"
+    with pytest.raises(AssertionError):
+        _assert_endpoints_payload(case, snap)
+
+
+def test_endpoints_integrity_rejects_bool_count_and_local_keys(cases_document):
+    # A bool is not a count: `True == 1` must never pass a count check.
+    case, snap = _copy_endpoints_case(cases_document, ENDPOINTS_LOOKUP_ALL)
+    _mutate_bool_count(case, snap)
+    with pytest.raises(AssertionError, match="gateways must be a strict"):
+        _assert_endpoints_payload(case, snap)
+
+    # The pure payload never carries a local path/tool/source field.
+    for field, leaked in (("tool", "list_endpoints"),
+                          ("state_root", "/tmp/state"),
+                          ("source", {"mode": "file"})):
+        case, snap = _copy_endpoints_case(cases_document, ENDPOINTS_LOOKUP_ALL)
+        case["expect"][field] = leaked
+        with pytest.raises(AssertionError, match="unexpected response fields"):
+            _assert_endpoints_payload(case, snap)
+
+    # An int-valued stale flag must not pass as a bool (0 == False is True).
+    case, snap = _copy_endpoints_case(cases_document, ENDPOINTS_PROVIDER_A)
+    case["expect"]["provider_staleness"]["synthetic-a"] = 0
+    with pytest.raises(AssertionError, match="strict bool"):
+        _assert_endpoints_payload(case, snap)
+
+
+def test_endpoints_integrity_rejects_global_gateway_count(cases_document):
+    case, snap = _copy_endpoints_case(cases_document, ENDPOINTS_PROVIDER_A)
+    _wrong_filtered_gateways_count_global(case, snap)
+    with pytest.raises(AssertionError,
+                       match="gateways must count only the SELECTED"):
+        _assert_endpoints_payload(case, snap)
+
+
+def test_endpoints_generic_checker_accepts_data_only_provider(cases_document):
+    # The SAME generic checker accepts the new provider via snapshot data.
+    case, snap = _endpoints_case(cases_document, ENDPOINTS_EXTENSION_ALL)
+    _assert_endpoints_payload(case, snap)
+    assert EXTENSION_NEW_PROVIDER in snap["provider_order"]
+    assert EXTENSION_NEW_PROVIDER in case["expect"]["gateways"]
+    # A hardcoded a/b/c registry rule DISAGREES: it would drop synthetic-d.
+    assert set(HARDCODED_ABC_PROVIDERS) != set(snap["provider_order"])
+    assert EXTENSION_NEW_PROVIDER not in HARDCODED_ABC_PROVIDERS
+    case_mut, snap_mut = _copy_endpoints_case(
+        cases_document, ENDPOINTS_EXTENSION_ALL)
+    _wrong_hardcoded_abc_selection(case_mut, snap_mut)
+    with pytest.raises(AssertionError):
+        _assert_endpoints_payload(case_mut, snap_mut)
+
+
+def test_endpoints_positive_control_consistent_staleness_mutation_passes(
+        cases_document):
+    # A CONSISTENT mutation (snapshot + golden) keeps the checker honest:
+    # flip synthetic-b's stale flag everywhere and re-seal, then require PASS.
+    case, snap = _copy_endpoints_case(cases_document, ENDPOINTS_ORDERING_ALL)
+    assert case["expect"]["provider_staleness"]["synthetic-b"] is True
+    snap["providers"]["synthetic-b"]["stale"] = False
+    _reseal_snapshot(snap)
+    case["expect"]["snapshot_id"] = snap["snapshot_id"]
+    case["expect"]["provider_staleness"]["synthetic-b"] = False
+    _assert_snapshot_contract(snap)
+    _assert_endpoints_payload(case, snap)
+
+
 # ---------- README contract-draft pins ----------
 
 
@@ -5353,3 +6040,51 @@ def test_readme_contract_freezes_list_free_models_bulk_semantics():
     ):
         assert phrase in text, \
             f"contract section missing bulk rule: {phrase}"
+
+
+def test_readme_contract_freezes_list_endpoints_envelope_field_sets():
+    text = " ".join(_contract_section_text().split())
+    for field in sorted(ENDPOINTS_RESPONSE_FIELDS | ENDPOINTS_GATEWAY_FIELDS
+                        | ENDPOINTS_COUNT_FIELDS):
+        assert f"`{field}`" in text, \
+            f"contract section missing list_endpoints field {field}"
+
+
+def test_readme_contract_freezes_list_endpoints_count_scope_and_alias():
+    text = " ".join(_contract_section_text().split())
+    for phrase in (
+            "selected providers",
+            "zero-ID providers included",
+            "never the whole registry",
+            "documented legacy alias",
+            "never a verified underlying model identity",
+    ):
+        assert phrase in text, \
+            f"contract section missing list_endpoints count rule: {phrase}"
+
+
+def test_readme_contract_freezes_list_endpoints_zero_provider_and_projection():
+    text = " ".join(_contract_section_text().split())
+    for phrase in (
+            "zero-ID",
+            "projected public model object",
+            "never the legacy raw metadata",
+            "NATURAL raw-ID order",
+            "provider staleness, never tick age",
+    ):
+        assert phrase in text, \
+            f"contract section missing list_endpoints rule: {phrase}"
+
+
+def test_readme_contract_freezes_list_endpoints_bulk_guidance_and_order():
+    text = " ".join(_contract_section_text().split())
+    for phrase in (
+            "search_models` with a small",
+            "then `get_model`",
+            "no truncation",
+            "no browser-only semantic difference",
+            "added by DATA alone",
+            "object key order is not semantic; result array order is",
+    ):
+        assert phrase in text, \
+            f"contract section missing list_endpoints guidance: {phrase}"

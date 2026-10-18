@@ -641,6 +641,73 @@ successful zero-ID selection) and `list_free_ordering_all` (natural raw-ID
 array order, a shared raw ID whose per-provider objects conflict, and a stale
 flag preserved independently of the observation epoch).
 
+### Success envelope — `list_endpoints` (frozen field sets)
+
+`list_endpoints(provider=None)` publishes the wiring and the projected metadata
+of every selected `(provider, raw model ID)` pair. Routine lookups should not
+use it — direct those to `search_models` with a small explicit `limit` (e.g.
+1–5), then `get_model` for one exact ID. Limits in this surface bound returned
+**rows, not characters**: there is no truncation and no browser-only semantic
+difference anywhere in it. Like the other pure payloads this object exposes no
+local filesystem path, no `tool`/`state_root` field and no source
+retrieval/cache data (a source layer adds a separate `source` object OUTSIDE
+it). It preserves the useful root-script nesting while publishing only projected
+data.
+
+One **exact** top-level field set for BOTH the all-provider and the
+provider-filtered variant:
+
+| Field | Type | Definition |
+|---|---|---|
+| `ok` | bool | Exactly `true`. |
+| `gateways` | map | Provider key -> gateway object (below), one entry per **selected** provider, **including zero-ID ones**. Provider object key order is not semantic; result array order is. |
+| `counts` | map | The exact count object below. |
+| `provider` | string or null | The exact selected provider key echoed, or strictly `null` when `provider` is omitted or `null`. Identifiers are never trimmed or repaired. |
+| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`, echoed literally. |
+| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`, echoed literally — no invented freshness or download date. |
+| `provider_staleness` | map of bool | Exactly the **selected** providers' strict carried-forward snapshot stale flags — **provider staleness, never tick age**. |
+
+Each `gateways` value is the exact gateway entry field set:
+
+| Field | Type | Definition |
+|---|---|---|
+| `chat_completions_url` | string | Wiring, from the exact snapshot provider. |
+| `api_type` | string | Wiring, from the exact snapshot provider. |
+| `model_ids` | list of string | That provider's complete raw ID array in NATURAL raw-ID order (the frozen comparator above) — unchanged strings, never marker labels. |
+| `models` | map | Every tracked raw ID -> its complete **projected public model object**, never the legacy raw metadata; an empty map for a zero-ID provider. |
+
+The `counts` object carries the exact count field set:
+
+| Field | Type | Definition |
+|---|---|---|
+| `gateways` | int | Number of **selected** providers, zero-ID providers included. |
+| `endpoints` | int | Number of selected `(provider, raw model ID)` pairs. |
+| `distinct_raw_ids` | int | Number of selected literal raw IDs. |
+| `marker_group_labels` | int | Number of selected marker-group labels (delimiter-stripped, frozen empty-result guard). |
+| `models` | int | A **documented legacy alias** equal to `marker_group_labels`. |
+
+Counts describe the filtered response, not the entire registry: `gateways`
+counts the selected providers, zero-ID providers included, never the whole
+registry. `models` is the documented legacy alias equal to
+`marker_group_labels`, never a verified underlying model identity. A filtered
+`list_endpoints("synthetic-a")` reports only synthetic-a's `gateways`,
+`endpoints`, ids and labels, and no registry-wide total leaks in. A zero-ID
+single provider yields `gateways` 1 with all other counts zero.
+
+Provider selection is all `provider_order` keys if `provider` is omitted or
+`null`, else exactly the known selected provider. A registered **zero-ID**
+provider is a success: its `gateways` entry still exists with `model_ids` `[]`
+and `models` `{}` — never a no-match or missing-provider error.
+
+Complete worked examples live as literal goldens in
+`tests/fixtures/catalog/cases.json` — `endpoints_lookup_all`,
+`endpoints_lookup_provider_a`, `endpoints_lookup_zero_provider_c` (an empty but
+successful zero-ID selection), `endpoints_ordering_all` (natural raw-ID array
+order over the ordering snapshot) and `endpoints_extension_all` (a new synthetic
+gateway added by DATA alone: the `provider-extension.json` snapshot adds
+`synthetic-d` and the same generic checkers accept it with no provider enum or
+package-code edit).
+
 ## State layout (state/, gitignored)
 
 - `roster.json`: providers + provider_models + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
