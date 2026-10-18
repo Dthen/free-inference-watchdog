@@ -121,6 +121,23 @@ literal code-point `model_ids`, and conflicting per-pair metadata for a shared
 raw id staying attached to its own provider. Grouped wrong-rule probes prove
 rejection by membership/attachment, never by a truncated golden. Still
 fixture/contract work only: no bulk query implementation exists or is imported.
+
+Unit 1d-c1 freezes the TOOL-ARGUMENT and argument-error contract before any
+runtime validation exists. `argument-cases.json` is a clearly-labelled
+argument/error RULE TABLE (explicitly NOT a snapshot and NOT a successful
+query result): single-fault and precedence invalid rows carrying the COMPLETE
+literal `{ok, error: {code, message, parameter}}` envelope, plus valid
+controls for omission/null, empty values, registered (including zero-ID and
+new synthetic) providers, literal identifiers, capability entries, pagination
+ranges and the JSON safe-integer boundary. A test-local, clearly-labelled
+restatement of the argument rules (object check, unknown-key-first rejection,
+signature-order precedence, exact provider membership, required nonblank
+`model_id`, literal query, JSON safe-integer ranges with the integer-`1.0`
+input boundary, nonempty-string capability arrays) checks the table and proves
+every previously frozen success case's arguments stay accepted. No production
+validator, shared schema, package or runtime code is imported or exercised;
+the frozen constants, README subsection and wrong-rule probes remain contract
+evidence only.
 """
 
 import copy
@@ -6088,3 +6105,631 @@ def test_readme_contract_freezes_list_endpoints_bulk_guidance_and_order():
     ):
         assert phrase in text, \
             f"contract section missing list_endpoints guidance: {phrase}"
+
+
+# ---------- unit 1d-c1: tool arguments and the frozen argument-error envelope ----------
+#
+# Contract-only stage. `argument-cases.json` is a clearly-labelled
+# tool-argument/error RULE TABLE (explicitly NOT a snapshot and NOT a
+# successful query result). The validation below is a TEST-LOCAL restatement of
+# the published argument rules — a fixture checker, never production validation
+# — and NO package implementation module is imported. Every expected envelope
+# in the table is a hand-authored literal; nothing here authors one. Runtime
+# validation, shared JSON schemas and JS parity remain unimplemented.
+
+ARGUMENT_FIXTURE_NAME = "argument-cases.json"
+ARGUMENT_TABLE_DOC = FIXTURE_DIR / ARGUMENT_FIXTURE_NAME
+
+# The five known tools and their exact public signatures, in validation order.
+# `get_model`'s required `model_id` is checked in its signature position;
+# `watchdog_status` has no public arguments (the fixed test clock is case-level
+# harness input, never an argument).
+ARGUMENT_SIGNATURES = {
+    "list_free_models": ("provider",),
+    "get_model": ("model_id",),
+    "list_endpoints": ("provider",),
+    "watchdog_status": (),
+    "search_models": ("query", "provider", "min_context_length",
+                      "input_modalities", "supported_parameters", "limit",
+                      "offset"),
+}
+PROVIDER_TAKING_TOOLS = ("list_free_models", "list_endpoints", "search_models")
+
+# The two frozen argument-error codes and their literal messages.
+ARGUMENT_ERROR_MESSAGES = {
+    "invalid_arguments": "Invalid tool arguments.",
+    "unknown_provider": "Unknown provider.",
+}
+ARGUMENT_ENVELOPE_FIELDS = frozenset({"ok", "error"})
+ARGUMENT_ERROR_FIELDS = frozenset({"code", "message", "parameter"})
+ARGUMENT_TABLE_FIELDS = frozenset(
+    {"description", "invalid_cases", "valid_controls"})
+ARGUMENT_INVALID_ROW_FIELDS = frozenset(
+    {"id", "tool", "fixture", "args", "expect", "category"})
+ARGUMENT_VALID_ROW_FIELDS = frozenset(
+    {"id", "tool", "fixture", "args", "category"})
+
+# Fields an argument error must NEVER carry: tool/state_root/paths, source or
+# cache data, snapshot provenance, staleness, partial data, counts.
+ARGUMENT_FORBIDDEN_FIELDS = frozenset({
+    "tool", "state_root", "path", "paths", "source", "cache", "retrieval",
+    "snapshot_id", "tick_epoch", "provider_staleness", "stale", "counts",
+    "partial", "warnings",
+})
+
+# Required coverage pins: deleting the whole table, a required category or a
+# required edge makes at least one of these fail.
+REQUIRED_INVALID_CATEGORIES = (
+    "non_object_args", "unknown_argument", "unknown_provider", "model_id",
+    "provider_edge", "query_type", "min_context_length", "capability_array",
+    "limit", "offset", "precedence",
+)
+REQUIRED_VALID_CATEGORIES = (
+    "omission", "optional_null", "empty_value", "registered_provider",
+    "literal_identifier", "capability_entries", "pagination_range",
+    "safe_integer_boundary",
+)
+REQUIRED_ARGUMENT_CASE_IDS = (
+    "unknown_arg_watchdog_status",
+    "unknown_provider_search_models",
+    "model_id_ascii_blank",
+    "provider_padded",
+    "min_context_unsafe",
+    "input_modalities_mixed_member",
+    "limit_null",
+    "offset_unsafe",
+    "precedence_provider_before_context",
+    "valid_new_synthetic_provider",
+    "valid_padded_model_id_literal",
+    "valid_integral_numeric_inputs",
+)
+
+# ASCII whitespace exception for `model_id`: U+0009..U+000D and U+0020 only.
+# Non-ASCII code points stay literal, so `str.strip()`/JS `trim()` are NOT this
+# rule and are only used below to express the wrong-rule probes.
+_ARGUMENT_ASCII_BLANK = frozenset("\t\n\v\f\r ")
+_ARGUMENT_MISSING = object()
+
+
+@pytest.fixture(scope="module")
+def argument_table():
+    assert ARGUMENT_TABLE_DOC.is_file(), (
+        "tool-argument rule table fixture is missing: "
+        f"{ARGUMENT_TABLE_DOC.name}")
+    return _load_strict(ARGUMENT_TABLE_DOC)
+
+
+def _argument_safe_integer(value):
+    """JSON safe integer AT THE TOOL-INPUT BOUNDARY: finite numeric value with
+    zero fractional part in 0..2^53-1. Integral numerics such as `1.0` are the
+    same JSON integer value (JSON Schema integer; MDN Number.isSafeInteger(1.0)
+    is true). `bool`, `str`, fractional, unsafe and non-finite values are
+    rejected — this is NOT coercion of a string or boolean, and it does not
+    touch the separately frozen strict-int producer/output rules."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        integer = value
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            return False
+        if value != math.trunc(value):
+            return False
+        integer = int(value)
+    else:
+        return False
+    return 0 <= integer <= MAX_SAFE_INT
+
+
+def _argument_nonempty_string_array(value):
+    """Optional capability array: a list of NONEMPTY strings. `[]` is accepted;
+    a bare string, object, mixed/None member or empty-string member rejects the
+    whole parameter (never partial salvage)."""
+    return (isinstance(value, list)
+            and all(isinstance(item, str) and item for item in value))
+
+
+def _argument_model_id_is_valid(value):
+    """Required string with at least one character outside the ASCII blank set
+    (U+0009..U+000D and U+0020). Non-ASCII code points stay literal."""
+    return (isinstance(value, str)
+            and any(ch not in _ARGUMENT_ASCII_BLANK for ch in value))
+
+
+def _argument_error(code, parameter):
+    return {"ok": False, "error": {
+        "code": code,
+        "message": ARGUMENT_ERROR_MESSAGES[code],
+        "parameter": parameter,
+    }}
+
+
+def _validate_tool_arguments(tool, args, snap):
+    """TEST-LOCAL restatement of the frozen TOOL-ARGUMENT contract (a fixture
+    checker, never production validation).
+
+    Deterministic precedence: (1) arguments must be a JSON object; (2) ANY
+    unknown argument key is rejected with `parameter` null; (3) parameters are
+    validated in signature order, stopping at the first error. Returns the
+    complete literal error envelope or None. No argument is coerced, trimmed or
+    repaired."""
+    signature = ARGUMENT_SIGNATURES[tool]
+    if not isinstance(args, dict):
+        return _argument_error("invalid_arguments", None)
+    if any(name not in signature for name in args):
+        return _argument_error("invalid_arguments", None)
+    for name in signature:
+        present = name in args
+        value = args.get(name)
+        if name == "provider":
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                return _argument_error("invalid_arguments", "provider")
+            if value not in snap["provider_order"]:
+                return _argument_error("unknown_provider", "provider")
+        elif name == "model_id":
+            if not _argument_model_id_is_valid(value):
+                return _argument_error("invalid_arguments", "model_id")
+        elif name == "query":
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                return _argument_error("invalid_arguments", "query")
+        elif name == "min_context_length":
+            if value is None:
+                continue
+            if not _argument_safe_integer(value):
+                return _argument_error(
+                    "invalid_arguments", "min_context_length")
+        elif name in ("input_modalities", "supported_parameters"):
+            if value is None:
+                continue
+            if not _argument_nonempty_string_array(value):
+                return _argument_error("invalid_arguments", name)
+        elif name == "limit":
+            if not present:
+                continue
+            if not (_argument_safe_integer(value)
+                    and 1 <= int(value) <= 200):
+                return _argument_error("invalid_arguments", "limit")
+        elif name == "offset":
+            if not present:
+                continue
+            if not _argument_safe_integer(value):
+                return _argument_error("invalid_arguments", "offset")
+    return None
+
+
+def _assert_invalid_envelope(row, expect):
+    cid = row["id"]
+    assert isinstance(expect, dict), f"{cid}: expected a literal error envelope"
+    assert set(expect) == ARGUMENT_ENVELOPE_FIELDS, (
+        f"{cid}: an argument error must be exactly `ok`+`error`")
+    assert expect["ok"] is False, f"{cid}: `ok` must be strictly false"
+    error = expect["error"]
+    assert isinstance(error, dict) and set(error) == ARGUMENT_ERROR_FIELDS, (
+        f"{cid}: `error` must be exactly code+message+parameter")
+    assert error["code"] in ARGUMENT_ERROR_MESSAGES, (
+        f"{cid}: unknown argument-error code {error['code']!r}")
+    assert error["message"] == ARGUMENT_ERROR_MESSAGES[error["code"]], (
+        f"{cid}: error message is not the frozen literal for its code")
+    parameter = error["parameter"]
+    assert parameter is None or parameter in ARGUMENT_SIGNATURES[row["tool"]], (
+        f"{cid}: parameter must be a known signature parameter or null")
+    assert not ((set(expect) | set(error)) & ARGUMENT_FORBIDDEN_FIELDS), (
+        f"{cid}: argument error leaks a forbidden public/private field")
+
+
+def _assert_invalid_row(row, snap, result=_ARGUMENT_MISSING):
+    _assert_invalid_envelope(row, row["expect"])
+    actual = (_validate_tool_arguments(row["tool"], row["args"], snap)
+              if result is _ARGUMENT_MISSING else result)
+    assert actual == row["expect"], (
+        f"{row['id']}: argument-error envelope mismatch; got {actual!r}, "
+        f"expected {row['expect']!r}")
+
+
+def _assert_arguments_preserved(cid, before, after):
+    assert after == before, (
+        f"{cid}: validation must not trim, repair or otherwise mutate the "
+        "retained arguments")
+
+
+def _assert_valid_row(row, snap):
+    assert set(row) == ARGUMENT_VALID_ROW_FIELDS, (
+        f"{row['id']}: unexpected valid-control fields")
+    before = copy.deepcopy(row["args"])
+    result = _validate_tool_arguments(row["tool"], row["args"], snap)
+    assert result is None, (
+        f"{row['id']}: valid control must be accepted; got {result!r}")
+    _assert_arguments_preserved(row["id"], before, row["args"])
+
+
+def _argument_row(argument_table, list_name, case_id):
+    row = next(r for r in argument_table[list_name] if r["id"] == case_id)
+    return row, _load_strict(FIXTURE_DIR / row["fixture"])
+
+
+def _assert_argument_numbers_finite(node, cid):
+    if isinstance(node, bool):
+        return
+    if isinstance(node, float):
+        assert math.isfinite(node), f"{cid}: non-finite number in the table"
+    elif isinstance(node, dict):
+        for value in node.values():
+            _assert_argument_numbers_finite(value, cid)
+    elif isinstance(node, list):
+        for value in node:
+            _assert_argument_numbers_finite(value, cid)
+
+
+# -- table integrity --
+
+
+def test_argument_table_is_a_labelled_rule_table(argument_table):
+    assert set(argument_table) == ARGUMENT_TABLE_FIELDS, (
+        "argument-cases.json must be a labelled rule table with exactly "
+        "description + the two case lists")
+    description = argument_table["description"]
+    assert isinstance(description, str) and description
+    for clue in ("RULE TABLE", "NOT a snapshot",
+                 "NOT a successful query result"):
+        assert clue in description, (
+            f"argument rule table description must state {clue!r}")
+    for key in ("schema_version", "snapshot_id", "provider_order", "providers",
+                "model_ids", "cases"):
+        assert key not in argument_table, (
+            f"argument rule table must not masquerade as a snapshot ({key})")
+    assert isinstance(argument_table["invalid_cases"], list) \
+        and argument_table["invalid_cases"]
+    assert isinstance(argument_table["valid_controls"], list) \
+        and argument_table["valid_controls"]
+
+
+def test_argument_table_rows_are_wellformed_with_unique_ids(argument_table):
+    seen = set()
+    for row in argument_table["invalid_cases"]:
+        assert set(row) == ARGUMENT_INVALID_ROW_FIELDS, (
+            f"{row.get('id')}: unexpected invalid-row fields "
+            f"{sorted(set(row) ^ ARGUMENT_INVALID_ROW_FIELDS)}")
+        assert row["id"] not in seen, f"duplicate case id {row['id']}"
+        seen.add(row["id"])
+        assert row["tool"] in ARGUMENT_SIGNATURES
+        assert isinstance(row["fixture"], str) and row["fixture"]
+        assert isinstance(row["category"], str) and row["category"]
+        _assert_invalid_envelope(row, row["expect"])
+        _assert_argument_numbers_finite(row, row["id"])
+    for row in argument_table["valid_controls"]:
+        assert set(row) == ARGUMENT_VALID_ROW_FIELDS, (
+            f"{row.get('id')}: unexpected valid-row fields "
+            f"{sorted(set(row) ^ ARGUMENT_VALID_ROW_FIELDS)}")
+        assert row["id"] not in seen, f"duplicate case id {row['id']}"
+        seen.add(row["id"])
+        assert row["tool"] in ARGUMENT_SIGNATURES
+        assert isinstance(row["fixture"], str) and row["fixture"]
+        assert isinstance(row["category"], str) and row["category"]
+        _assert_argument_numbers_finite(row, row["id"])
+
+
+def test_argument_table_fixture_references_are_valid_snapshots(argument_table):
+    names = sorted(
+        {row["fixture"] for row in argument_table["invalid_cases"]}
+        | {row["fixture"] for row in argument_table["valid_controls"]})
+    assert names, "argument rule table must reference a valid snapshot"
+    for name in names:
+        path = FIXTURE_DIR / name
+        assert path.is_file(), (
+            f"argument rule table references missing fixture {name}")
+        _assert_snapshot_contract(_load_strict(path))
+
+
+def test_argument_table_covers_required_categories_and_tools(argument_table):
+    invalid = argument_table["invalid_cases"]
+    valid = argument_table["valid_controls"]
+    missing = (set(REQUIRED_INVALID_CATEGORIES)
+               - {row["category"] for row in invalid})
+    assert not missing, (
+        f"argument rule table is missing invalid categories {sorted(missing)}")
+    missing = (set(REQUIRED_VALID_CATEGORIES)
+               - {row["category"] for row in valid})
+    assert not missing, (
+        f"argument rule table is missing valid categories {sorted(missing)}")
+    assert {row["tool"] for row in invalid} == set(ARGUMENT_SIGNATURES), \
+        "invalid rows must cover all five known tools"
+    assert {row["tool"] for row in valid} == set(ARGUMENT_SIGNATURES), \
+        "valid controls must cover all five known tools"
+    assert {row["tool"] for row in invalid
+            if row["category"] == "unknown_provider"} \
+        == set(PROVIDER_TAKING_TOOLS), \
+        "unknown_provider must cover every provider-taking tool"
+    assert {row["tool"] for row in invalid
+            if row["category"] == "unknown_argument"} \
+        == set(ARGUMENT_SIGNATURES), \
+        "unknown-argument rejection must cover all five known tools"
+    ids = ({row["id"] for row in invalid}
+           | {row["id"] for row in valid})
+    missing = set(REQUIRED_ARGUMENT_CASE_IDS) - ids
+    assert not missing, (
+        f"argument rule table is missing required cases {sorted(missing)}")
+
+
+# -- literal corpus --
+
+
+def test_argument_invalid_table_matches_the_frozen_envelope_literally(
+        argument_table):
+    snapshots = {}
+    for row in argument_table["invalid_cases"]:
+        if row["fixture"] not in snapshots:
+            snapshots[row["fixture"]] = _load_strict(
+                FIXTURE_DIR / row["fixture"])
+        _assert_invalid_row(row, snapshots[row["fixture"]])
+
+
+def test_argument_valid_controls_are_accepted(argument_table):
+    snapshots = {}
+    for row in argument_table["valid_controls"]:
+        if row["fixture"] not in snapshots:
+            snapshots[row["fixture"]] = _load_strict(
+                FIXTURE_DIR / row["fixture"])
+        _assert_valid_row(row, snapshots[row["fixture"]])
+
+
+def test_argument_old_success_corpus_args_remain_accepted(cases_document):
+    cases = cases_document["cases"]
+    assert len(cases) >= 61, "the frozen success corpus must remain present"
+    for case in cases:
+        snap = _case_fixture(case, cases_document)
+        result = _validate_tool_arguments(case["tool"], case["args"], snap)
+        assert result is None, (
+            f"{case['id']}: previously frozen success arguments must stay "
+            f"accepted; got {result!r}")
+
+
+def test_argument_non_finite_numeric_inputs_reject_cleanly():
+    snap = _load_strict(LOOKUP_FIXTURE)
+    for parameter in ("min_context_length", "limit", "offset"):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            result = _validate_tool_arguments(
+                "search_models", {parameter: value}, snap)
+            assert result == _argument_error(
+                "invalid_arguments", parameter), (
+                f"{parameter}={value!r} must reject cleanly as "
+                "invalid_arguments, never crash or coerce")
+    # Positive control: integral numeric 1.0 IS the JSON integer 1.
+    assert _validate_tool_arguments(
+        "search_models", {"limit": 1.0, "offset": 1.0}, snap) is None
+
+
+# -- wrong-rule probes (compact, grouped, no generic mutation framework) --
+
+
+def test_argument_wrong_rule_probes_are_rejected(argument_table):
+    # (a) bool-as-int / string coercion: int(True)==1, int("50")==50.
+    for case_id in ("limit_bool", "limit_numeric_string"):
+        row, snap = _argument_row(argument_table, "invalid_cases", case_id)
+        coerced = copy.deepcopy(row["args"])
+        coerced["limit"] = int(coerced["limit"])
+        assert _validate_tool_arguments(row["tool"], coerced, snap) is None, (
+            f"{case_id}: the coercing wrong rule must accept")
+        with pytest.raises(AssertionError, match="envelope mismatch"):
+            _assert_invalid_row(row, snap, result=None)
+
+    # (b) omission and null limit/offset conflated: dropping the null key
+    #     silently applies the default instead of rejecting.
+    for case_id in ("limit_null", "offset_null"):
+        row, snap = _argument_row(argument_table, "invalid_cases", case_id)
+        dropped = {k: v for k, v in row["args"].items()
+                   if k not in ("limit", "offset")}
+        assert _validate_tool_arguments(row["tool"], dropped, snap) is None
+        with pytest.raises(AssertionError, match="envelope mismatch"):
+            _assert_invalid_row(row, snap, result=None)
+
+    # (c) unknown keys ignored: either acceptance or a DIFFERENT parameter.
+    row, snap = _argument_row(
+        argument_table, "invalid_cases", "unknown_arg_list_free_models")
+    stripped = {k: v for k, v in row["args"].items() if k != "bogus"}
+    assert _validate_tool_arguments(row["tool"], stripped, snap) is None
+    with pytest.raises(AssertionError, match="envelope mismatch"):
+        _assert_invalid_row(row, snap, result=None)
+    row, snap = _argument_row(
+        argument_table, "invalid_cases",
+        "precedence_unknown_key_before_required")
+    stripped = {k: v for k, v in row["args"].items() if k != "bogus"}
+    echoed = _validate_tool_arguments("get_model", stripped, snap)
+    assert echoed["error"]["parameter"] == "model_id"
+    assert echoed != row["expect"]
+    with pytest.raises(AssertionError, match="envelope mismatch"):
+        _assert_invalid_row(row, snap, result=echoed)
+
+    # (d) unknown provider silently accepted, or trimmed/case-repaired.
+    row, snap = _argument_row(
+        argument_table, "invalid_cases", "unknown_provider_list_endpoints")
+    with pytest.raises(AssertionError, match="envelope mismatch"):
+        _assert_invalid_row(row, snap, result=None)
+    for case_id in ("provider_padded", "provider_wrong_case"):
+        row, snap = _argument_row(argument_table, "invalid_cases", case_id)
+        repaired = dict(row["args"])
+        repaired["provider"] = row["args"]["provider"].strip().lower()
+        assert _validate_tool_arguments(row["tool"], repaired, snap) is None
+        with pytest.raises(AssertionError, match="envelope mismatch"):
+            _assert_invalid_row(row, snap, result=None)
+
+    # (e) malformed capability array partially salvaged.
+    row, snap = _argument_row(
+        argument_table, "invalid_cases", "input_modalities_mixed_member")
+    salvaged = dict(row["args"])
+    salvaged["input_modalities"] = [
+        item for item in row["args"]["input_modalities"]
+        if isinstance(item, str)]
+    assert _validate_tool_arguments(row["tool"], salvaged, snap) is None
+    with pytest.raises(AssertionError, match="envelope mismatch"):
+        _assert_invalid_row(row, snap, result=None)
+
+    # (f) ASCII-blank handling omitted, and the retained identifier trimmed.
+    row, snap = _argument_row(
+        argument_table, "invalid_cases", "model_id_ascii_blank")
+    assert not row["args"]["model_id"].strip()  # blank, yet a string
+    assert _validate_tool_arguments(
+        row["tool"], {"model_id": "x"}, snap) is None
+    with pytest.raises(AssertionError, match="envelope mismatch"):
+        _assert_invalid_row(row, snap, result=None)
+    row, snap = _argument_row(
+        argument_table, "valid_controls", "valid_padded_model_id_literal")
+    trimmed = copy.deepcopy(row["args"])
+    trimmed["model_id"] = trimmed["model_id"].strip()
+    assert trimmed != row["args"]
+    with pytest.raises(AssertionError, match="must not trim"):
+        _assert_arguments_preserved(row["id"], row["args"], trimmed)
+
+    # (g) wrong validation precedence: provider before query, context before
+    #     provider. Each yields a genuinely different frozen envelope.
+    row, snap = _argument_row(
+        argument_table, "invalid_cases", "precedence_query_before_provider")
+    provider_first = _validate_tool_arguments(
+        "list_endpoints", {"provider": "synthetic-z"}, snap)
+    assert provider_first == _argument_error("unknown_provider", "provider")
+    assert provider_first != row["expect"]
+    with pytest.raises(AssertionError, match="envelope mismatch"):
+        _assert_invalid_row(row, snap, result=provider_first)
+    row, snap = _argument_row(
+        argument_table, "invalid_cases", "precedence_provider_before_context")
+    context_first = _validate_tool_arguments(
+        "search_models", {"min_context_length": -1}, snap)
+    assert context_first == _argument_error(
+        "invalid_arguments", "min_context_length")
+    assert context_first != row["expect"]
+    with pytest.raises(AssertionError, match="envelope mismatch"):
+        _assert_invalid_row(row, snap, result=context_first)
+
+    # (h) error payload leaking a supplied unknown key or a local field.
+    row, snap = _argument_row(
+        argument_table, "invalid_cases",
+        "precedence_unknown_key_before_required")
+    leaked = copy.deepcopy(row["expect"])
+    leaked["error"]["parameter"] = "bogus"
+    assert leaked != row["expect"]
+    with pytest.raises(AssertionError, match="known signature parameter"):
+        _assert_invalid_envelope(row, leaked)
+    leaked_envelope = copy.deepcopy(row["expect"])
+    leaked_envelope["tool"] = "get_model"
+    with pytest.raises(AssertionError, match="exactly"):
+        _assert_invalid_envelope(row, leaked_envelope)
+
+    # (i) code, message and parameter corrupted.
+    row, snap = _argument_row(argument_table, "invalid_cases", "limit_null")
+    bad_code = copy.deepcopy(row["expect"])
+    bad_code["error"]["code"] = "bad_arguments"
+    with pytest.raises(AssertionError, match="unknown argument-error code"):
+        _assert_invalid_envelope(row, bad_code)
+    bad_message = copy.deepcopy(row["expect"])
+    bad_message["error"]["message"] = "Invalid arguments."
+    with pytest.raises(AssertionError, match="frozen literal"):
+        _assert_invalid_envelope(row, bad_message)
+    wrong_parameter = copy.deepcopy(row["expect"])
+    wrong_parameter["error"]["parameter"] = "offset"
+    with pytest.raises(AssertionError, match="envelope mismatch"):
+        _assert_invalid_row(row, snap, result=wrong_parameter)
+
+
+# -- README subsection pins --
+
+ARGUMENT_SECTION = "Tool arguments and argument errors (frozen rules)"
+
+
+def _argument_section_text():
+    """The README body of the frozen argument subsection ONLY (from its `###`
+    heading to the next `###`/`##` heading), so pins here can never be
+    satisfied by tokens from an adjacent section."""
+    text = README.read_text(encoding="utf-8")
+    heading = f"### {ARGUMENT_SECTION}"
+    assert heading in text, (
+        "README is missing the frozen tool-argument subsection")
+    body = text[text.index(heading):]
+    ends = [i for i in (body.find("\n### ", len(heading)),
+                        body.find("\n## ", len(heading))) if i != -1]
+    return body[:min(ends)] if ends else body
+
+
+def test_readme_argument_subsection_is_itself_scoped():
+    raw = README.read_text(encoding="utf-8")
+    assert f"### {ARGUMENT_SECTION}" in raw
+    text = " ".join(_argument_section_text().split())
+    # Adjacent-section tokens must NOT satisfy these pins.
+    assert "fail export" not in text
+    assert "Success envelope" not in text
+    assert "Total ordering rule (frozen)" not in text
+
+
+def test_readme_freezes_argument_envelope_codes_and_precedence():
+    text = " ".join(_argument_section_text().split())
+    for phrase in (
+            "top-level fields are **exactly** `ok` and `error`",
+            "`ok` is strictly `false`",
+            "`error` carries **exactly** `code`, `message` and `parameter`",
+            "`invalid_arguments` with the literal message "
+            "`Invalid tool arguments.`",
+            "`unknown_provider` with the literal message `Unknown provider.`",
+            "offending **known signature parameter** name, or `null` for "
+            "non-object arguments and unknown argument names",
+            "never reflects an arbitrary supplied key or hostile value",
+            "carries **no** `tool`, `state_root`, path, `source`, cache, "
+            "snapshot provenance, staleness, partial-data or count field",
+            "every success envelope is unchanged",
+            "The arguments must be a JSON object",
+            "**ANY** unknown argument key is rejected (`parameter` `null`)",
+            "validated in signature order and the first error wins",
+            "`query`, `provider`, `min_context_length`, `input_modalities`, "
+            "`supported_parameters`, `limit`, `offset`",
+            "`get_model` checks its required `model_id` in its signature "
+            "position",
+            "never repaired",
+            "unknown-tool protocol dispatch and invalid-snapshot or source "
+            "precedence are separate concerns",
+    ):
+        assert phrase in text, (
+            f"argument subsection missing envelope/precedence rule: {phrase}")
+
+
+def test_readme_freezes_argument_signature_rules():
+    text = " ".join(_argument_section_text().split())
+    for phrase in (
+            "U+0009..U+000D and U+0020",
+            "retained identifier is never trimmed",
+            "non-ASCII code points stay literal",
+            "never widened with Python `str.strip` or JavaScript `trim`",
+            "no public arguments",
+            "literal and untrimmed",
+            "`1..200`, never `null`",
+            "`0..2^53 - 1`, never `null`",
+            "arrays of nonempty strings",
+            "empty `[]` applies no constraint",
+            "duplicates, casing and surrounding whitespace inside nonempty "
+            "entries are preserved, not trimmed",
+            "rejects the whole parameter; arrays are never partially salvaged",
+    ):
+        assert phrase in text, (
+            f"argument subsection missing signature rule: {phrase}")
+
+
+def test_readme_freezes_argument_json_integer_boundary_and_separation():
+    text = " ".join(_argument_section_text().split())
+    for phrase in (
+            "a JSON Schema integer is a finite numeric value with zero "
+            "fractional part",
+            "numeric `1` and `1.0` are the same integer value",
+            "`Number.isSafeInteger(1.0)` is `true`",
+            "Integral numeric tool inputs such as Python `1.0` are therefore "
+            "accepted",
+            '`true`, `"1"`, `1.5`, unsafe integers and non-finite numbers '
+            "are rejected",
+            "**not** coercion of a string or boolean",
+            "does not change the separately frozen strict-int metadata "
+            "projection or payload-count rules",
+            "**separate from published snapshot degradation**",
+            "degrades to `null`/unknown inside a success payload",
+            "preserves raw tracked metadata at its own boundary",
+    ):
+        assert phrase in text, (
+            f"argument subsection missing integer/separation rule: {phrase}")

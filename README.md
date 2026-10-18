@@ -275,6 +275,69 @@ installed package):
 - `watchdog_status()`
 - `search_models(query=None, provider=None, min_context_length=None, input_modalities=None, supported_parameters=None, limit=50, offset=0)`
 
+### Tool arguments and argument errors (frozen rules)
+
+Every known tool shares one semantic argument-error envelope: top-level
+fields are **exactly** `ok` and `error`, `ok` is strictly `false`, and
+`error` carries **exactly** `code`, `message` and `parameter`. Two codes
+exist: `invalid_arguments` with the literal message `Invalid tool
+arguments.`, and `unknown_provider` with the literal message `Unknown
+provider.` `parameter` is the offending **known signature parameter** name,
+or `null` for non-object arguments and unknown argument names; the response
+never reflects an arbitrary supplied key or hostile value. An argument error
+carries **no** `tool`, `state_root`, path, `source`, cache, snapshot
+provenance, staleness, partial-data or count field, and every success
+envelope is unchanged.
+
+Argument validation is deterministic. The arguments must be a JSON object;
+then **ANY** unknown argument key is rejected (`parameter` `null`); then the
+parameters are validated in signature order and the first error wins.
+`search_models` validates `query`, `provider`, `min_context_length`,
+`input_modalities`, `supported_parameters`, `limit`, `offset`, and
+`get_model` checks its required `model_id` in its signature position. A
+provider of the wrong non-null type is `invalid_arguments`; a string absent
+from the current snapshot's `provider_order` is `unknown_provider`. Empty,
+padded and wrong-case provider keys are never repaired. Only the five known
+tools are scoped here: unknown-tool protocol dispatch and invalid-snapshot or
+source precedence are separate concerns.
+
+- `list_free_models(provider=None)` and `list_endpoints(provider=None)`
+  accept an absent or `null` `provider`; otherwise it must be one exact
+  registered key.
+- `get_model(model_id)` requires a string containing at least one character
+  outside ASCII whitespace (U+0009..U+000D and U+0020); empty or
+  ASCII-blank-only strings are `invalid_arguments(model_id)`. The retained
+  identifier is never trimmed: `" vendor/model "` remains a literal nonblank
+  query, and non-ASCII code points stay literal. The ASCII blank set is never
+  widened with Python `str.strip` or JavaScript `trim`.
+- `watchdog_status()` has no public arguments; the fixed test clock is
+  case-level harness input, never a tool argument.
+- `search_models` accepts an absent or `null` `query` and **any** string,
+  including empty, whitespace-only, non-ASCII and regex-looking values; it is
+  literal and untrimmed. Any other query type is `invalid_arguments(query)`.
+  `min_context_length` accepts absent/`null` or a JSON safe integer `>= 0`.
+  `limit` accepts omission (default `50`) or a JSON safe integer in `1..200`,
+  never `null`; `offset` accepts omission (default `0`) or a JSON safe
+  integer in `0..2^53 - 1`, never `null`. `input_modalities` and
+  `supported_parameters` accept absent/`null` or arrays of nonempty strings;
+  an empty `[]` applies no constraint, and duplicates, casing and surrounding
+  whitespace inside nonempty entries are preserved, not trimmed. A bare
+  string, an object, a mixed or `null` member, or an empty string member
+  rejects the whole parameter; arrays are never partially salvaged.
+- **JSON integer input boundary:** a JSON Schema integer is a finite numeric
+  value with zero fractional part, so numeric `1` and `1.0` are the same
+  integer value and JavaScript `Number.isSafeInteger(1.0)` is `true`.
+  Integral numeric tool inputs such as Python `1.0` are therefore accepted;
+  `true`, `"1"`, `1.5`, unsafe integers and non-finite numbers are rejected.
+  This is **not** coercion of a string or boolean, and it does not change the
+  separately frozen strict-int metadata projection or payload-count rules.
+
+These argument errors are **separate from published snapshot degradation**:
+missing or malformed OPTIONAL upstream metadata still degrades to
+`null`/unknown inside a success payload, and the root-script local
+compatibility adapter still preserves raw tracked metadata at its own
+boundary. Neither is changed by this argument contract.
+
 ### Identity, lookup, and ordering (frozen rules)
 
 - `get_model.exact_matches` is **literal raw-ID membership** — case-sensitive,
