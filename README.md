@@ -584,6 +584,63 @@ null age and `tick_epoch_future`, never `tick_stale`; and a snapshot whose
 cadence is `120` (not `3600`) proves the freshness boundary uses the snapshot's
 own cadence.
 
+### Success envelope — `list_free_models` (frozen field sets)
+
+`list_free_models(provider=None)` is the frozen **BULK export tool**: one call
+returns the whole registry, or one gateway's complete ID list. Routine agent
+lookups should not use it — direct those to `search_models` with a small
+explicit `limit` (e.g. 1–5), then `get_model` for one exact ID. Limits in this
+surface bound returned **rows, not characters**: there is no truncation and no
+browser-only semantics anywhere in it. Like the other pure payloads this
+object exposes no local filesystem path, no `tool`/`state_root` field and no
+source retrieval/cache data (a source layer adds a separate `source` object
+OUTSIDE it). It preserves the useful root-script nesting (`providers`,
+`models`, `counts`, `total_ids`, `n_gateways`) while dropping the root
+script's local-only fields.
+
+Two **different** exact top-level field sets, one per variant.
+
+`provider` omitted or `null` — all-provider export:
+
+| Field | Type | Definition |
+|---|---|---|
+| `ok` | bool | Exactly `true`. |
+| `providers` | map | Provider key -> that provider's **complete** raw ID array, each array in NATURAL raw-ID order (the frozen comparator above), **including zero-ID providers** (an empty array). Provider object key order is not semantic; result array order is. |
+| `models` | map | Provider key -> map of **all** tracked IDs to their complete **projected public model object** — an empty map for a zero-ID provider. Values stay attached to their own `(provider, raw model_id)` pair: a raw ID shared by two gateways keeps its two conflicting per-provider objects, never flattened or copied across. |
+| `counts` | map | Provider key -> that provider's tracked-ID count as a strict non-negative int, `0` included; the same exact provider set as `providers`/`models`/`provider_staleness`. |
+| `total_ids` | int | **Distinct LITERAL raw IDs** across the selected registry — never the endpoint-pair count and never marker-label count. |
+| `n_gateways` | int | `len(provider_order)`, zero-ID providers included. |
+| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`, echoed literally. |
+| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`, echoed literally — no invented freshness or download date. |
+| `provider_staleness` | map of bool | Each selected provider's strict carried-forward snapshot stale flag, **including zero-ID providers** — **provider staleness, never tick age**. |
+
+`provider` a valid exact key — one-provider export:
+
+| Field | Type | Definition |
+|---|---|---|
+| `ok` | bool | Exactly `true`. |
+| `provider` | string | The exact provider key, echoed; identifiers are never trimmed or repaired. |
+| `model_ids` | list of string | That provider's complete raw ID array in NATURAL raw-ID order. |
+| `models` | map | Its flat raw ID -> projected public model object map — **not** the all-provider nesting. |
+| `count` | int | Strict non-negative int, equal to `len(model_ids)`. |
+| `snapshot_id` | string | As above. |
+| `tick_epoch` | int or null | As above. |
+| `provider_staleness` | map of bool | Exactly `{selected_provider: its_stale_flag}`. |
+
+A registered **zero-ID** provider is a success: `model_ids` is `[]`, `models`
+is `{}`, `count` is `0` and `provider_staleness` still carries that provider —
+never a no-match or missing-provider error. No global field
+(`providers`/`counts`/`total_ids`/`n_gateways`) leaks into the one-provider
+shape, and published `models` values are projected public model objects,
+**never the legacy raw metadata** dictionaries.
+
+Complete worked examples live as literal goldens in
+`tests/fixtures/catalog/cases.json` — `list_free_lookup_all`,
+`list_free_lookup_provider_a`, `list_free_lookup_zero_provider_c` (an empty but
+successful zero-ID selection) and `list_free_ordering_all` (natural raw-ID
+array order, a shared raw ID whose per-provider objects conflict, and a stale
+flag preserved independently of the observation epoch).
+
 ## State layout (state/, gitignored)
 
 - `roster.json`: providers + provider_models + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.

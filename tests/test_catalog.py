@@ -104,6 +104,23 @@ Arabic-Indic and superscript characters as digits and mixed tuple/str keys, so
 it was neither total nor the frozen ASCII/code-point rule. No production
 helper, package, query or browser code exists or is imported here; runtime
 implementation remains Task 2d.
+
+Unit 1d-b1 freezes the published `list_free_models` BULK success contract
+before core extraction, as two DIFFERENT exact top-level field sets: the
+all-provider export (`provider` omitted or null) keeps the useful root-script
+nesting (`providers`, `models`, `counts`, `total_ids`, `n_gateways`) minus its
+local-only `tool`/`state_root`, plus the public `snapshot_id`/`tick_epoch`
+provenance echo and the per-provider `provider_staleness` flags; the
+one-provider export is a flat `model_ids`/`models`/`count` variant that never
+leaks a global field. Four complete hand-authored literal goldens (`cases.json`
+over `lookup.json` and `ordering.json`) pin the genuine distinctions: 5
+endpoint pairs versus 4 distinct LITERAL raw ids versus 3 marker labels on the
+lookup registry, a registered zero-ID provider as an empty SUCCESS, the frozen
+unit 1d-a NATURAL raw-ID array order that genuinely differs from the snapshot's
+literal code-point `model_ids`, and conflicting per-pair metadata for a shared
+raw id staying attached to its own provider. Grouped wrong-rule probes prove
+rejection by membership/attachment, never by a truncated golden. Still
+fixture/contract work only: no bulk query implementation exists or is imported.
 """
 
 import copy
@@ -4455,6 +4472,626 @@ def test_ordering_slice_mutant_keeps_genuine_matches_but_wrong_membership(
         _assert_search_payload(case, snap)
 
 
+# ---------- unit 1d-b1: published `list_free_models` bulk success contract ----------
+#
+# `list_free_models` is the frozen BULK export tool. Its two variants carry
+# two DIFFERENT exact top-level field sets, pinned here against four complete
+# hand-authored literal goldens in cases.json. The all-provider variant
+# (`provider` omitted or null) preserves the useful root-script nesting
+# (`providers`/`models`/`counts`/`total_ids`/`n_gateways`) while dropping the
+# local-only `tool`/`state_root` and adding public provenance (`snapshot_id`,
+# `tick_epoch`) and `provider_staleness`. `models` carries the projected public
+# model object of each `(provider, raw model_id)` pair -- never the legacy raw
+# metadata -- and provider-specific conflicting values for a shared raw id
+# stay attached to their own provider. `total_ids` is the literal unique
+# raw-ID count: on the lookup registry the endpoint-pair count (5), the
+# distinct raw-ID count (4) and the marker-label count (3) genuinely differ,
+# so no pair- or label-shaped rule can satisfy it. Provider arrays use the
+# frozen unit 1d-a NATURAL raw-ID order, which genuinely differs from the
+# snapshot's literal code-point `model_ids`. Every value is checked by stdlib
+# data operations only; no bulk/query implementation exists or is imported.
+LIST_FREE_ALL_FIELDS = frozenset({
+    "ok", "providers", "models", "counts", "total_ids", "n_gateways",
+    "snapshot_id", "tick_epoch", "provider_staleness",
+})
+LIST_FREE_ONE_FIELDS = frozenset({
+    "ok", "provider", "model_ids", "models", "count", "snapshot_id",
+    "tick_epoch", "provider_staleness",
+})
+# The all-provider-only fields: the one-provider shape never leaks one.
+LIST_FREE_ALL_ONLY_FIELDS = frozenset(
+    {"providers", "counts", "total_ids", "n_gateways"})
+assert LIST_FREE_ALL_ONLY_FIELDS <= LIST_FREE_ALL_FIELDS
+assert not (LIST_FREE_ALL_ONLY_FIELDS & LIST_FREE_ONE_FIELDS)
+LIST_FREE_REQUIRED_CASE_IDS = (
+    "list_free_lookup_all",
+    "list_free_lookup_provider_a",
+    "list_free_lookup_zero_provider_c",
+    "list_free_ordering_all",
+)
+LIST_FREE_LOOKUP_ALL = "list_free_lookup_all"
+LIST_FREE_PROVIDER_A = "list_free_lookup_provider_a"
+LIST_FREE_ZERO_PROVIDER_C = "list_free_lookup_zero_provider_c"
+LIST_FREE_ORDERING_ALL = "list_free_ordering_all"
+LIST_FREE_SHARED_ID = "vendor/shared"
+LIST_FREE_ORDERING_SHARED_ID = "vendor/item2"
+# Two 64-digit numeric runs (63 nines plus the final digit): the natural
+# comparator compares them by original digit count then lexical ASCII digits.
+LIST_FREE_LONG_ID_ONE = "vendor/long" + "9" * 63 + "1"
+LIST_FREE_LONG_ID_TWO = "vendor/long" + "9" * 63 + "2"
+assert len(LIST_FREE_LONG_ID_ONE) - len("vendor/long") == 64
+# The ordering fixture's beta gateway in the frozen NATURAL raw-ID order --
+# deliberately different from its snapshot `model_ids` literal order.
+LIST_FREE_ORDERING_NATURAL_B = (
+    "vendor/item1", "vendor/item2", "vendor/item02", "vendor/item10",
+    "vendor/item١", LIST_FREE_LONG_ID_ONE, LIST_FREE_LONG_ID_TWO,
+    "vendor/Ａ", "vendor/😀",
+)
+
+
+def _iter_list_free_cases(cases_doc):
+    return [c for c in cases_doc["cases"] if c["tool"] == "list_free_models"]
+
+
+def _list_free_case(cases_document, case_id):
+    case = next(c for c in _iter_list_free_cases(cases_document)
+                if c["id"] == case_id)
+    return case, _case_fixture(case, cases_document)
+
+
+def _copy_list_free_case(cases_document, case_id):
+    """Deep-copied golden + its snapshot, for in-memory wrong-rule probes.
+    No committed fixture is ever corrupted."""
+    case, snap = _list_free_case(cases_document, case_id)
+    return copy.deepcopy(case), snap
+
+
+def _list_free_cases_checked(cases_document):
+    """The list_free_models cases, with the four required hand-authored
+    scenarios asserted present -- so a checker loop over zero cases can never
+    pass vacuously."""
+    cases = _iter_list_free_cases(cases_document)
+    ids = {case["id"] for case in cases}
+    missing = sorted(set(LIST_FREE_REQUIRED_CASE_IDS) - ids)
+    assert not missing, f"missing hand-authored bulk scenarios: {missing}"
+    return cases
+
+
+def _list_free_reference_ids(snap, provider):
+    """TEST-LOCAL reference selection: that provider's tracked raw IDs in the
+    frozen NATURAL order (unit 1d-a comparator), never the snapshot's literal
+    code-point `model_ids` order."""
+    return sorted(snap["providers"][provider]["model_ids"],
+                  key=_natural_key_contract)
+
+
+def _assert_list_free_all_payload(expect, snap):
+    """Complete integrity of the all-provider (`provider` omitted or null)
+    bulk success shape against its own snapshot fixture."""
+    assert set(expect) == LIST_FREE_ALL_FIELDS, (
+        "unexpected response fields: "
+        f"{sorted(set(expect) ^ LIST_FREE_ALL_FIELDS)}")
+    assert expect["ok"] is True, "ok must be exactly true"
+    order = snap["provider_order"]
+    for field in ("providers", "models", "counts", "provider_staleness"):
+        assert set(expect[field]) == set(order), (
+            f"all-provider {field} must carry every provider_order provider, "
+            "including zero-ID ones")
+    literal_ids = set()
+    for key in order:
+        entry = snap["providers"][key]
+        reference = _list_free_reference_ids(snap, key)
+        assert expect["providers"][key] == reference, (
+            f"{key}: providers must carry the complete id array in NATURAL "
+            "raw-ID order")
+        assert set(expect["models"][key]) == set(entry["models"]), (
+            f"{key}: models must map every tracked id to its projected object")
+        for raw_id, model in expect["models"][key].items():
+            assert model == entry["models"][raw_id], (
+                f"{key}/{raw_id}: projected metadata is not attached to that "
+                "exact (provider, raw model_id) pair")
+        count = expect["counts"][key]
+        assert _counts_are_strict_int(count), \
+            f"{key}: counts must be a strict non-negative int"
+        assert count == len(reference), \
+            f"{key}: counts must equal that provider's tracked-ID count"
+        assert expect["provider_staleness"][key] is entry["stale"], (
+            f"{key}: provider_staleness must be that provider's strict bool "
+            "snapshot stale flag")
+        literal_ids.update(reference)
+    total = expect["total_ids"]
+    assert _counts_are_strict_int(total), "total_ids must be a strict int"
+    assert total == len(literal_ids), (
+        "total_ids must count distinct LITERAL raw ids, never endpoint pairs "
+        "or marker labels")
+    gateways = expect["n_gateways"]
+    assert _counts_are_strict_int(gateways), "n_gateways must be a strict int"
+    assert gateways == len(order), "n_gateways must be len(provider_order)"
+    assert expect["snapshot_id"] == snap["snapshot_id"], \
+        "snapshot_id must echo the consumed snapshot literally"
+    assert expect["tick_epoch"] == snap["tick_epoch"], \
+        "tick_epoch must echo the consumed snapshot literally"
+
+
+def _assert_list_free_one_payload(expect, snap, provider):
+    """Complete integrity of the one-provider bulk success shape."""
+    assert set(expect) == LIST_FREE_ONE_FIELDS, (
+        "unexpected response fields: "
+        f"{sorted(set(expect) ^ LIST_FREE_ONE_FIELDS)}")
+    assert expect["ok"] is True, "ok must be exactly true"
+    assert provider in snap["provider_order"]
+    assert expect["provider"] == provider, \
+        "provider must echo the exact requested key"
+    entry = snap["providers"][provider]
+    reference = _list_free_reference_ids(snap, provider)
+    assert expect["model_ids"] == reference, (
+        "model_ids must be that provider's complete id array in NATURAL "
+        "raw-ID order")
+    assert set(expect["models"]) == set(entry["models"]), (
+        "one-provider models must map every tracked id to its projected "
+        "object -- the flat map, never the all-provider nesting")
+    for raw_id, model in expect["models"].items():
+        assert model == entry["models"][raw_id], (
+            f"{raw_id}: projected metadata is not attached to that exact pair")
+    count = expect["count"]
+    assert _counts_are_strict_int(count), "count must be a strict int"
+    assert count == len(reference), "count must equal len(model_ids)"
+    stale = expect["provider_staleness"]
+    assert set(stale) == {provider}, (
+        "one-provider provider_staleness must carry exactly the selected "
+        "provider")
+    value = stale[provider]
+    assert isinstance(value, bool), \
+        "provider_staleness values must be strict bools"
+    assert value is entry["stale"], (
+        "provider_staleness must be that provider's strict bool snapshot "
+        "stale flag")
+    assert expect["snapshot_id"] == snap["snapshot_id"], \
+        "snapshot_id must echo the consumed snapshot literally"
+    assert expect["tick_epoch"] == snap["tick_epoch"], \
+        "tick_epoch must echo the consumed snapshot literally"
+
+
+def _assert_list_free_payload(case, snap):
+    """Complete integrity check of one hand-authored `list_free_models`
+    success golden: the exact variant field set, the exact provider/ID sets,
+    complete projected metadata attachment, natural raw-ID array order,
+    strict scalar/map counts, provenance echo and per-provider staleness
+    scope. Stdlib data operations only — no bulk/query implementation is
+    imported and no expected value is generated by one."""
+    provider = case["args"].get("provider")
+    if provider is None:
+        _assert_list_free_all_payload(case["expect"], snap)
+    else:
+        _assert_list_free_one_payload(case["expect"], snap, provider)
+
+
+# -- fixture/case integrity + envelope freeze --
+
+def test_list_free_goldens_present_unique_and_use_explicit_fixtures(
+        cases_document):
+    cases = _iter_list_free_cases(cases_document)
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids)), "duplicate list_free_models case id"
+    missing = [cid for cid in LIST_FREE_REQUIRED_CASE_IDS if cid not in ids]
+    assert not missing, f"missing hand-authored bulk scenarios: {missing}"
+    for case in cases:
+        # Explicit fixture override — never the cases.json default.
+        assert "fixture" in case, f"{case['id']}: needs an explicit fixture"
+        assert isinstance(case["args"], dict)
+        assert isinstance(case["expect"], dict)
+
+
+def test_list_free_goldens_pass_complete_checker(cases_document):
+    for case in _list_free_cases_checked(cases_document):
+        snap = _case_fixture(case, cases_document)
+        _assert_snapshot_contract(snap)
+        _assert_list_free_payload(case, snap)
+
+
+def test_list_free_response_envelope_field_sets_are_frozen(cases_document):
+    assert set(LIST_FREE_ALL_FIELDS) == {
+        "ok", "providers", "models", "counts", "total_ids", "n_gateways",
+        "snapshot_id", "tick_epoch", "provider_staleness"}
+    assert set(LIST_FREE_ONE_FIELDS) == {
+        "ok", "provider", "model_ids", "models", "count", "snapshot_id",
+        "tick_epoch", "provider_staleness"}
+    for case in _list_free_cases_checked(cases_document):
+        _case_fixture(case, cases_document)
+        provider = case["args"].get("provider")
+        expected = (LIST_FREE_ALL_FIELDS if provider is None
+                    else LIST_FREE_ONE_FIELDS)
+        assert set(case["expect"]) == expected, case["id"]
+
+
+def test_list_free_provider_null_equals_omission_and_shapes_never_mix(
+        cases_document):
+    omitted = _list_free_case(cases_document, LIST_FREE_LOOKUP_ALL)[0]
+    nulled = _list_free_case(cases_document, LIST_FREE_ORDERING_ALL)[0]
+    assert "provider" not in omitted["args"]
+    assert nulled["args"] == {"provider": None}
+    # Both select the all-provider shape: `null` documents the equivalence to
+    # omission without needing a redundant fifth golden.
+    for case in (omitted, nulled):
+        assert set(case["expect"]) == LIST_FREE_ALL_FIELDS
+    for case_id in (LIST_FREE_PROVIDER_A, LIST_FREE_ZERO_PROVIDER_C):
+        expect = _list_free_case(cases_document, case_id)[0]["expect"]
+        assert set(expect) == LIST_FREE_ONE_FIELDS
+        assert not (set(expect) & LIST_FREE_ALL_ONLY_FIELDS), (
+            f"{case_id}: a global field leaked into the filtered payload")
+
+
+# -- scenario pins (the actual values, not self-consistency) --
+
+def test_list_free_all_provider_pins_ids_pairs_and_marker_labels(
+        cases_document):
+    case, snap = _list_free_case(cases_document, LIST_FREE_LOOKUP_ALL)
+    assert case["fixture"] == "lookup.json"
+    assert case["args"] == {}
+    expect = case["expect"]
+    providers = expect["providers"]
+    assert set(providers) == set(snap["provider_order"]) == {
+        "synthetic-a", "synthetic-b", "synthetic-c"}
+    assert providers["synthetic-a"] == [
+        "vendor/model-renamed", "vendor/model:free", "vendor/shared"]
+    assert providers["synthetic-b"] == ["vendor/model-free", "vendor/shared"]
+    pairs = [(key, raw_id) for key in snap["provider_order"]
+             for raw_id in providers[key]]
+    # Two shared-raw-ID endpoint pairs versus one literal unique id.
+    assert len(pairs) == 5
+    assert len({raw_id for _, raw_id in pairs}) == 4 == expect["total_ids"]
+    assert pairs.count(("synthetic-a", LIST_FREE_SHARED_ID)) == 1
+    assert pairs.count(("synthetic-b", LIST_FREE_SHARED_ID)) == 1
+    # Marker-related raw strings stay DISTINCT total_ids; the marker labels
+    # they collapse into are a genuinely smaller cardinality, so neither a
+    # pair-shaped nor a label-shaped count could satisfy total_ids.
+    labels = {_strip_marker_contract(raw_id) for _, raw_id in pairs}
+    assert labels == {"vendor/model", "vendor/model-renamed", "vendor/shared"}
+    assert len(labels) == 3
+    assert "vendor/model:free" in providers["synthetic-a"]
+    assert "vendor/model-free" in providers["synthetic-b"]
+    # The unrelated renamed model is not a marker variant of either.
+    assert _strip_marker_contract("vendor/model-renamed") == \
+        "vendor/model-renamed"
+    assert providers["synthetic-a"].count("vendor/model-renamed") == 1
+    assert expect["counts"] == {
+        "synthetic-a": 3, "synthetic-b": 2, "synthetic-c": 0}
+    assert expect["n_gateways"] == 3
+    assert expect["provider_staleness"] == {
+        "synthetic-a": False, "synthetic-b": False, "synthetic-c": False}
+    # Conflicting per-provider metadata for the shared raw id stays per pair:
+    # a large text-only context on alpha never merges with beta's image input.
+    a_shared = expect["models"]["synthetic-a"][LIST_FREE_SHARED_ID]
+    b_shared = expect["models"]["synthetic-b"][LIST_FREE_SHARED_ID]
+    assert a_shared["context_length"] == 131072
+    assert a_shared["architecture"]["input_modalities"] == ["text"]
+    assert b_shared["context_length"] == 32768
+    assert b_shared["architecture"]["input_modalities"] == ["text", "image"]
+    assert a_shared != b_shared
+    assert not any(
+        model["context_length"] == 131072
+        and model["architecture"]["input_modalities"] == ["text", "image"]
+        for model in (a_shared, b_shared))
+
+
+def test_list_free_one_provider_pins_flat_metadata_shape(cases_document):
+    case, snap = _list_free_case(cases_document, LIST_FREE_PROVIDER_A)
+    assert case["fixture"] == "lookup.json"
+    assert case["args"] == {"provider": "synthetic-a"}
+    expect = case["expect"]
+    assert expect["provider"] == "synthetic-a"
+    assert expect["model_ids"] == [
+        "vendor/model-renamed", "vendor/model:free", "vendor/shared"]
+    assert set(expect["models"]) == set(expect["model_ids"])
+    # Flat projected model objects, NOT an all-provider nesting.
+    for raw_id, model in expect["models"].items():
+        assert isinstance(model, dict)
+        assert model["id"] == raw_id
+    assert expect["models"][LIST_FREE_SHARED_ID] == \
+        snap["providers"]["synthetic-a"]["models"][LIST_FREE_SHARED_ID]
+    assert expect["models"][LIST_FREE_SHARED_ID]["context_length"] == 131072
+    assert expect["count"] == 3
+    assert expect["provider_staleness"] == {"synthetic-a": False}
+    assert expect["provider_staleness"]["synthetic-a"] is False
+
+
+def test_list_free_zero_id_provider_selection_is_empty_success(cases_document):
+    case, snap = _list_free_case(cases_document, LIST_FREE_ZERO_PROVIDER_C)
+    assert case["args"] == {"provider": "synthetic-c"}
+    assert snap["providers"]["synthetic-c"]["model_ids"] == []
+    expect = case["expect"]
+    # A registered zero-ID provider is a SUCCESS, never a no-match error.
+    assert expect["ok"] is True
+    assert expect["model_ids"] == []
+    assert expect["models"] == {}
+    assert expect["count"] == 0
+    assert expect["provider_staleness"] == {"synthetic-c": False}
+    # The same zero-ID provider is present (empty array + empty map + zero
+    # count) in the all-provider golden -- dropped by no rule.
+    all_expect = _list_free_case(cases_document, LIST_FREE_LOOKUP_ALL)[0][
+        "expect"]
+    assert all_expect["providers"]["synthetic-c"] == []
+    assert all_expect["models"]["synthetic-c"] == {}
+    assert all_expect["counts"]["synthetic-c"] == 0
+    assert all_expect["provider_staleness"]["synthetic-c"] is False
+
+
+def test_list_free_ordering_all_pins_natural_order_and_shared_metadata(
+        cases_document):
+    case, snap = _list_free_case(cases_document, LIST_FREE_ORDERING_ALL)
+    assert case["fixture"] == "ordering.json"
+    assert case["args"] == {"provider": None}
+    expect = case["expect"]
+    # Provider precedence follows provider_order, never the physical
+    # provider-map order (which starts at synthetic-a).
+    assert snap["provider_order"] == [
+        "synthetic-b", "synthetic-a", "synthetic-c"]
+    b_literal = snap["providers"]["synthetic-b"]["model_ids"]
+    assert b_literal == [
+        "vendor/item02", "vendor/item1", "vendor/item10", "vendor/item2",
+        "vendor/item١", LIST_FREE_LONG_ID_ONE, LIST_FREE_LONG_ID_TWO,
+        "vendor/Ａ", "vendor/😀"]
+    # Lexical snapshot input genuinely differs from the natural output, with
+    # every row retained.
+    assert expect["providers"]["synthetic-b"] == \
+        list(LIST_FREE_ORDERING_NATURAL_B)
+    assert expect["providers"]["synthetic-b"] != b_literal
+    assert sorted(expect["providers"]["synthetic-b"]) == sorted(b_literal)
+    assert expect["providers"]["synthetic-a"] == ["vendor/item2"]
+    assert expect["providers"]["synthetic-c"] == []
+    # The shared raw id stays attached to its own (provider, raw id) pair.
+    assert expect["models"]["synthetic-b"][LIST_FREE_ORDERING_SHARED_ID][
+        "name"] == "Order B Item Two"
+    assert expect["models"]["synthetic-a"][LIST_FREE_ORDERING_SHARED_ID][
+        "name"] == "Order A Item Two"
+    assert expect["models"]["synthetic-b"][LIST_FREE_ORDERING_SHARED_ID] != \
+        expect["models"]["synthetic-a"][LIST_FREE_ORDERING_SHARED_ID]
+    # 10 endpoint pairs must never overwrite the 9 distinct literal raw ids.
+    assert len(b_literal) + 1 == 10
+    assert expect["total_ids"] == 9
+    assert expect["counts"] == {
+        "synthetic-b": 9, "synthetic-a": 1, "synthetic-c": 0}
+    assert expect["n_gateways"] == 3
+    # b.stale=true is a carried-forward flag, preserved independently of the
+    # fixed, non-null observation epoch.
+    assert expect["snapshot_id"] == snap["snapshot_id"]
+    assert expect["tick_epoch"] == snap["tick_epoch"] == 1759200000
+    assert expect["provider_staleness"] == {
+        "synthetic-b": True, "synthetic-a": False, "synthetic-c": False}
+
+
+def test_list_free_projected_models_are_full_model_objects(cases_document):
+    for case in _list_free_cases_checked(cases_document):
+        snap = _case_fixture(case, cases_document)
+        if case["args"].get("provider") is None:
+            maps = [case["expect"]["models"][key]
+                    for key in snap["provider_order"]]
+        else:
+            maps = [case["expect"]["models"]]
+        for models in maps:
+            for raw_id, model in models.items():
+                assert set(model) == MODEL_FIELDS, (
+                    f"{case['id']}/{raw_id}: not a projected model object")
+                assert model["id"] == raw_id
+
+
+# -- wrong-rule probes (rejection evidence ONLY; never an authoring oracle) --
+
+def _wrong_total_ids_counts_pairs(case, snap):
+    """WRONG RULE: total_ids counts endpoint pairs, not distinct raw ids."""
+    case["expect"]["total_ids"] = sum(
+        len(ids) for ids in case["expect"]["providers"].values())
+
+
+def _wrong_total_ids_counts_marker_labels(case, snap):
+    """WRONG RULE: total_ids counts marker-group labels instead of raw ids."""
+    case["expect"]["total_ids"] = len({
+        _strip_marker_contract(raw_id)
+        for ids in case["expect"]["providers"].values() for raw_id in ids})
+
+
+def _wrong_shared_metadata_overwrite(case, snap):
+    """WRONG RULE: a shared raw id's metadata is flattened/copy-across so the
+    beta pair silently carries alpha's conflicting object."""
+    case["expect"]["models"]["synthetic-b"][LIST_FREE_ORDERING_SHARED_ID] = \
+        copy.deepcopy(snap["providers"]["synthetic-a"]["models"][
+            LIST_FREE_ORDERING_SHARED_ID])
+
+
+def _wrong_shared_metadata_swap(case, snap):
+    """WRONG RULE: the two providers' objects for a shared raw id are swapped
+    (each endpoint keeps a real, valid object -- just not its own)."""
+    models = case["expect"]["models"]
+    alpha = models["synthetic-a"][LIST_FREE_ORDERING_SHARED_ID]
+    beta = models["synthetic-b"][LIST_FREE_ORDERING_SHARED_ID]
+    models["synthetic-a"][LIST_FREE_ORDERING_SHARED_ID] = copy.deepcopy(beta)
+    models["synthetic-b"][LIST_FREE_ORDERING_SHARED_ID] = copy.deepcopy(alpha)
+
+
+def _wrong_drop_zero_id_provider(case, snap):
+    """WRONG RULE: a zero-ID provider is omitted ENTIRELY from the response --
+    consistently dropped from every map AND from n_gateways, so only the
+    membership check can catch it."""
+    expect = case["expect"]
+    for field in ("providers", "models", "counts", "provider_staleness"):
+        del expect[field]["synthetic-c"]
+    expect["n_gateways"] = len(snap["provider_order"]) - 1
+    assert expect["n_gateways"] == len(expect["providers"])
+
+
+def _wrong_one_provider_global_staleness(case, snap):
+    """WRONG RULE: the filtered response keeps whole-registry staleness."""
+    case["expect"]["provider_staleness"] = {
+        key: snap["providers"][key]["stale"] for key in snap["provider_order"]}
+
+
+def _wrong_one_provider_all_provider_nesting(case, snap):
+    """WRONG RULE: the filtered response keeps the all-provider models
+    nesting instead of that provider's flat map."""
+    case["expect"]["models"] = {
+        key: copy.deepcopy(snap["providers"][key]["models"])
+        for key in snap["provider_order"]}
+
+
+def _wrong_snapshot_literal_id_order(case, snap):
+    """WRONG RULE: query arrays keep the snapshot's literal code-point order
+    (plain lexical, no digit-run comparison); every row retained and all
+    counts left correct. NOTE: this fixture's physical `models` MAP insertion
+    order already equals the natural order, so a pure declaration-order
+    mutant of that map would be indistinguishable -- the discriminating
+    wrong rule is the lexical snapshot `model_ids` array."""
+    expect = case["expect"]
+    for key in snap["provider_order"]:
+        expect["providers"][key] = list(snap["providers"][key]["model_ids"])
+
+
+def _wrong_staleness_inferred_from_age(case, snap):
+    """WRONG RULE: staleness is inferred from observation age (a fresh tick /
+    this fixed epoch means every provider is healthy)."""
+    case["expect"]["provider_staleness"] = {
+        key: False for key in snap["provider_order"]}
+
+
+def _wrong_provenance_other_snapshot(case, snap):
+    """WRONG RULE: provenance carries another genuine snapshot id."""
+    case["expect"]["snapshot_id"] = _load_strict(LOOKUP_FIXTURE)["snapshot_id"]
+
+
+def _wrong_provenance_invented_tick(case, snap):
+    """WRONG RULE: an invented freshness/download epoch replaces the echoed
+    observation epoch."""
+    case["expect"]["tick_epoch"] = snap["tick_epoch"] + 1
+
+
+LIST_FREE_WRONG_RULE_MUTANTS = (
+    ("total_ids counts endpoint pairs",
+     LIST_FREE_LOOKUP_ALL, _wrong_total_ids_counts_pairs),
+    ("total_ids counts marker labels",
+     LIST_FREE_LOOKUP_ALL, _wrong_total_ids_counts_marker_labels),
+    ("shared-ID metadata flattened across providers",
+     LIST_FREE_ORDERING_ALL, _wrong_shared_metadata_overwrite),
+    ("shared-ID metadata swapped between providers",
+     LIST_FREE_ORDERING_ALL, _wrong_shared_metadata_swap),
+    ("zero-ID provider dropped from every map",
+     LIST_FREE_LOOKUP_ALL, _wrong_drop_zero_id_provider),
+    ("filtered response keeps global staleness",
+     LIST_FREE_PROVIDER_A, _wrong_one_provider_global_staleness),
+    ("filtered response keeps all-provider nesting",
+     LIST_FREE_PROVIDER_A, _wrong_one_provider_all_provider_nesting),
+    ("query arrays keep the lexical snapshot order",
+     LIST_FREE_ORDERING_ALL, _wrong_snapshot_literal_id_order),
+    ("staleness inferred from observation age",
+     LIST_FREE_ORDERING_ALL, _wrong_staleness_inferred_from_age),
+    ("provenance echoes another snapshot",
+     LIST_FREE_ORDERING_ALL, _wrong_provenance_other_snapshot),
+    ("invented epoch instead of the echoed tick",
+     LIST_FREE_ORDERING_ALL, _wrong_provenance_invented_tick),
+)
+
+
+@pytest.mark.parametrize(
+    "label,case_id,mutate", LIST_FREE_WRONG_RULE_MUTANTS,
+    ids=[row[0] for row in LIST_FREE_WRONG_RULE_MUTANTS])
+def test_list_free_wrong_rule_mutants_rejected_on_goldens(
+        cases_document, label, case_id, mutate):
+    case, snap = _copy_list_free_case(cases_document, case_id)
+    # Positive control: the unmutated golden passes its complete checker.
+    _assert_list_free_payload(case, snap)
+    before = copy.deepcopy(case["expect"])
+    mutate(case, snap)
+    assert case["expect"] != before, f"{label}: the mutant changed nothing"
+    with pytest.raises(AssertionError):
+        _assert_list_free_payload(case, snap)
+
+
+def test_list_free_wrong_total_ids_mutants_keep_real_alternative_rules(
+        cases_document):
+    # Both wrong counts are genuinely different from each other and from the
+    # correct literal id count -- not arbitrary truncations.
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_LOOKUP_ALL)
+    correct = case["expect"]["total_ids"]
+    _wrong_total_ids_counts_pairs(case, snap)
+    pairs = case["expect"]["total_ids"]
+    _wrong_total_ids_counts_marker_labels(case, snap)
+    labels = case["expect"]["total_ids"]
+    assert correct == 4 and pairs == 5 and labels == 3
+    assert len({correct, pairs, labels}) == 3
+
+
+def test_list_free_integrity_rejects_bool_scalars_and_local_keys(cases_document):
+    # A bool is not a count: `True == 1` must never pass a count check.
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_PROVIDER_A)
+    case["expect"]["count"] = True
+    with pytest.raises(AssertionError, match="count must be a strict"):
+        _assert_list_free_payload(case, snap)
+
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_LOOKUP_ALL)
+    case["expect"]["counts"]["synthetic-a"] = True
+    with pytest.raises(AssertionError, match="strict non-negative int"):
+        _assert_list_free_payload(case, snap)
+
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_LOOKUP_ALL)
+    case["expect"]["total_ids"] = True
+    with pytest.raises(AssertionError, match="total_ids must be a strict"):
+        _assert_list_free_payload(case, snap)
+
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_ORDERING_ALL)
+    case["expect"]["n_gateways"] = True
+    with pytest.raises(AssertionError, match="n_gateways must be a strict"):
+        _assert_list_free_payload(case, snap)
+
+    # An int-valued stale flag must not pass as a bool (1 == True is True).
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_PROVIDER_A)
+    case["expect"]["provider_staleness"]["synthetic-a"] = 1
+    with pytest.raises(AssertionError, match="strict bools"):
+        _assert_list_free_payload(case, snap)
+
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_LOOKUP_ALL)
+    case["expect"]["provider_staleness"]["synthetic-c"] = 0
+    with pytest.raises(AssertionError, match="strict bool"):
+        _assert_list_free_payload(case, snap)
+
+    # The pure payload never carries a local path/tool/source field.
+    for field, leaked in (("tool", "list_free_models"),
+                          ("state_root", "/tmp/state"),
+                          ("source", {"mode": "file"})):
+        case, snap = _copy_list_free_case(cases_document, LIST_FREE_LOOKUP_ALL)
+        case["expect"][field] = leaked
+        with pytest.raises(AssertionError, match="unexpected response fields"):
+            _assert_list_free_payload(case, snap)
+
+
+def test_list_free_positive_control_consistent_staleness_mutation_passes(
+        cases_document):
+    # A CONSISTENT mutation (snapshot + golden) keeps the checker honest:
+    # flip synthetic-b's stale flag everywhere and re-seal, then require PASS.
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_ORDERING_ALL)
+    assert case["expect"]["provider_staleness"]["synthetic-b"] is True
+    snap["providers"]["synthetic-b"]["stale"] = False
+    _reseal_snapshot(snap)
+    case["expect"]["snapshot_id"] = snap["snapshot_id"]
+    case["expect"]["provider_staleness"]["synthetic-b"] = False
+    _assert_snapshot_contract(snap)
+    _assert_list_free_payload(case, snap)
+
+
+def test_list_free_positive_control_swapped_metadata_on_one_fixture_fails(
+        cases_document):
+    # The metadata probe bites because the lookup fixture's shared raw id
+    # genuinely conflicts across providers (non-vacuous), while an identical
+    # copy would be indistinguishable -- asserted here explicitly.
+    case, snap = _copy_list_free_case(cases_document, LIST_FREE_ORDERING_ALL)
+    a_shared = case["expect"]["models"]["synthetic-a"][
+        LIST_FREE_ORDERING_SHARED_ID]
+    b_shared = case["expect"]["models"]["synthetic-b"][
+        LIST_FREE_ORDERING_SHARED_ID]
+    assert a_shared["context_length"] != b_shared["context_length"] or \
+        a_shared["name"] != b_shared["name"]
+    with pytest.raises(AssertionError, match="not attached to that exact"):
+        _wrong_shared_metadata_overwrite(case, snap)
+        _assert_list_free_payload(case, snap)
+
+
 # ---------- README contract-draft pins ----------
 
 
@@ -4688,3 +5325,31 @@ def test_readme_contract_separates_status_and_snapshot_warning_vocabularies():
     # The two status-only codes stay OUT of the frozen snapshot vocabulary.
     for code in sorted(STATUS_STATUS_ONLY_CODES):
         assert code not in WARNING_CODES
+
+
+def test_readme_contract_freezes_list_free_models_envelope_field_sets():
+    text = _contract_section_text()
+    for field in sorted(LIST_FREE_ALL_FIELDS | LIST_FREE_ONE_FIELDS):
+        assert f"`{field}`" in text, \
+            f"contract section missing list_free_models field {field}"
+    assert "Two **different** exact top-level field sets" in text
+
+
+def test_readme_contract_freezes_list_free_models_bulk_semantics():
+    text = _contract_section_text()
+    for phrase in (
+            "`list_free_models(provider=None)` is the frozen **BULK export tool**",
+            "search_models` with a small",
+            "rows, not characters",
+            "no truncation",
+            "never the endpoint-pair count and never marker-label count",
+            "each array in NATURAL raw-ID order",
+            "including zero-ID providers",
+            "two conflicting per-provider objects",
+            "**not** the all-provider nesting",
+            "never a no-match or missing-provider error",
+            "No global field",
+            "provider staleness, never tick age",
+    ):
+        assert phrase in text, \
+            f"contract section missing bulk rule: {phrase}"
