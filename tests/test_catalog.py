@@ -1858,6 +1858,988 @@ def test_normalization_integrity_rejects_wrong_warning_code():
         _assert_normalization_row(row)
 
 
+# ---------- unit 1c-b2: search success contract (FIXTURE CHECKER + goldens) ----------
+#
+# `search_models` is the metadata-search half of the frozen tool surface. The
+# successful PURE payload, its filter echo, its provider-staleness scope, its
+# endpoint-row projection and its PAGE-scoped counts are frozen here as an
+# executable specification, independently of any runtime query code (which
+# ships in a later unit; nothing here imports or exercises an implementation).
+# Every committed expected payload is LITERAL and hand-authored; the helpers
+# below are a clearly-labelled TEST-LOCAL restatement of the membership,
+# filter, order and cardinality rules over snapshot data (a fixture checker,
+# never production search and never an authoring oracle). No source/cache
+# field appears in the pure payload, and a search miss is still a success.
+
+SEARCH_FIXTURE_NAME = "search-text.json"
+SEARCH_FIXTURE = FIXTURE_DIR / SEARCH_FIXTURE_NAME
+
+# Exact PURE search success payload fields (source/cache data stays OUTSIDE).
+SEARCH_RESPONSE_FIELDS = frozenset({
+    "ok", "query", "filters", "limit", "offset", "snapshot_id",
+    "tick_epoch", "provider_staleness", "endpoints", "total_matches",
+    "returned_count", "next_offset", "counts", "caveats",
+})
+# Exact echoed-filter fields: every supplied raw filter, or null.
+SEARCH_FILTER_FIELDS = frozenset({
+    "provider", "min_context_length", "input_modalities",
+    "supported_parameters",
+})
+# Exact endpoint-row fields: identity+wiring, normalized capability columns,
+# ordered `unknown_fields`, and the complete projected pair `metadata`.
+SEARCH_ENDPOINT_FIELDS = frozenset({
+    "provider", "model_id", "chat_completions_url", "api_type", "stale",
+    "name", "description", "context_length", "input_modalities",
+    "output_modalities", "supported_parameters", "unknown_fields",
+    "metadata",
+})
+# Exact PAGE-scoped count fields (never the global registry or the
+# unpaginated match set).
+SEARCH_COUNT_FIELDS = frozenset({
+    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
+})
+SEARCH_DEFAULT_LIMIT = 50
+SEARCH_DEFAULT_OFFSET = 0
+SEARCH_MAX_LIMIT = 200
+
+# Every hand-authored search scenario that must exist, so an empty search-case
+# set can never make the suite pass vacuously. Never asserts a TOTAL case
+# count (future tools may append cases).
+SEARCH_REQUIRED_CASE_IDS = (
+    "search_metadata_reasoning_text_only",
+    "search_metadata_reasoning_min_context_inclusive",
+    "search_metadata_reasoning_min_context_zero",
+    "search_capability_defaults_both_models",
+    "search_capability_empty_filters_no_constraint",
+    "search_capability_positive_modality_yields_none",
+    "search_capability_positive_parameter_yields_none",
+    "search_capability_min_context_zero_known_only",
+    "search_shared_min_context_a_only",
+    "search_shared_modalities_and_b_only",
+    "search_shared_context_and_image_neither",
+    "search_shared_params_and_a_only",
+    "search_shared_context_and_top_p_neither",
+    "search_provider_b_shared_stale_scope",
+    "search_provider_c_empty_stale_scope",
+    "search_pagination_limit2_offset0",
+    "search_pagination_limit2_offset2_crosses_provider",
+    "search_pagination_limit2_offset4_exhausted",
+    "search_pagination_limit2_offset99_beyond_end",
+    "search_provider_a_limit200_empty_query",
+    "search_text_case_extended_filters_normalize",
+    "search_text_unicode_upper_echo_first",
+    "search_text_unicode_lower_echo_second",
+    "search_text_literal_brackets_not_regex",
+    "search_text_metadata_array_not_searched",
+    "search_text_raw_id_unknown_flags",
+    "search_text_padded_query_not_trimmed",
+)
+
+# Full ordered registry of lookup.json (no filters): provider display order,
+# then natural raw-ID order. Restated here so the pagination pins are
+# non-vacuous and independent of the goldens.
+LOOKUP_ORDERED_PAIRS = (
+    ("synthetic-a", "vendor/model-renamed"),
+    ("synthetic-a", "vendor/model:free"),
+    ("synthetic-a", "vendor/shared"),
+    ("synthetic-b", "vendor/model-free"),
+    ("synthetic-b", "vendor/shared"),
+)
+
+
+@pytest.fixture(scope="module")
+def search_snapshot():
+    return _load_strict(SEARCH_FIXTURE)
+
+
+def _iter_search_cases(cases_doc):
+    return [c for c in cases_doc["cases"] if c["tool"] == "search_models"]
+
+
+def _search_case(cases_document, case_id):
+    case = next(c for c in _iter_search_cases(cases_document)
+                if c["id"] == case_id)
+    return case, _case_fixture(case, cases_document)
+
+
+def _copy_search_case(cases_document, case_id):
+    """Deep-copied search golden + its snapshot, for in-memory mutation
+    positive controls. No committed fixture is ever corrupted."""
+    case = next(c for c in _iter_search_cases(cases_document)
+                if c["id"] == case_id)
+    return copy.deepcopy(case), _case_fixture(case, cases_document)
+
+
+# -- test-local search rule restatement (FIXTURE CHECKER) --
+
+def _search_normalize_array(values):
+    """Reuse the unit 1c-b1 checker: null stays null, else ASCII-lowercase
+    and first-occurrence dedup. NOT production normalization."""
+    return _checker_normalize_array(values)
+
+
+def _search_text_match(needle, raw_id, model):
+    """Literal SUBSTRING over raw ID, name and description only; ASCII-only
+    folding; no regex, no metadata-JSON search. An empty/None query applies
+    no text constraint."""
+    if needle is None or needle == "":
+        return True
+    folded = _ascii_lower(needle)
+    for field in (raw_id, model["name"], model["description"]):
+        if field is not None and folded in _ascii_lower(field):
+            return True
+    return False
+
+
+def _search_context_ok(value, minimum):
+    """Minimum-context predicate: a non-negative filter qualifies only KNOWN
+    safe non-negative integer contexts and compares inclusively. null is
+    UNKNOWN and fails a positive filter (never coerced to 0)."""
+    if minimum is None:
+        return True
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and 0 <= value <= MAX_SAFE_INT and value >= minimum)
+
+
+def _search_array_ok(values, requested):
+    """Modalities/parameters predicate: every requested entry must be present
+    in the normalized upstream array (AND). A null/missing array is UNKNOWN
+    and fails a nonempty positive filter; an empty request applies no
+    constraint; a known empty array satisfies no nonempty request."""
+    if requested is None or len(requested) == 0:
+        return True
+    if values is None:
+        return False
+    normalized = set(_search_normalize_array(values) or [])
+    return all(_ascii_lower(entry) in normalized for entry in requested)
+
+
+def _search_reference_pairs(snap, args):
+    """TEST-LOCAL restatement of the search predicate and the frozen
+    provider/natural ordering over the snapshot. Returns the ordered
+    (provider, raw_id) pairs satisfying ALL active predicates, before
+    pagination. Never authors an expected fixture."""
+    query = args.get("query")
+    provider = args.get("provider")
+    minimum = args.get("min_context_length")
+    req_in = args.get("input_modalities")
+    req_params = args.get("supported_parameters")
+    pairs = []
+    for key in snap["provider_order"]:
+        if provider is not None and key != provider:
+            continue
+        entry = snap["providers"][key]
+        for raw_id in entry["model_ids"]:
+            model = entry["models"][raw_id]
+            if not _search_text_match(query, raw_id, model):
+                continue
+            if not _search_context_ok(model["context_length"], minimum):
+                continue
+            if not _search_array_ok(
+                    model["architecture"]["input_modalities"], req_in):
+                continue
+            if not _search_array_ok(model["supported_parameters"], req_params):
+                continue
+            pairs.append((key, raw_id))
+    pairs.sort(key=lambda pair: (
+        snap["provider_order"].index(pair[0]),
+        _natural_key_contract(pair[1])))
+    return pairs
+
+
+def _assert_search_endpoint_row(endpoint, snap, cid):
+    """Every integrity assertion of one frozen search endpoint row."""
+    assert set(endpoint) == SEARCH_ENDPOINT_FIELDS, (
+        f"{cid}: unexpected endpoint fields "
+        f"{sorted(set(endpoint) ^ SEARCH_ENDPOINT_FIELDS)}")
+    provider = endpoint["provider"]
+    raw_id = endpoint["model_id"]
+    assert provider in snap["providers"], f"{cid}: unknown provider {provider!r}"
+    entry = snap["providers"][provider]
+    assert isinstance(raw_id, str) and raw_id in entry["model_ids"], \
+        f"{cid}: endpoint pair ({provider!r}, {raw_id!r}) is not tracked"
+    model = entry["models"][raw_id]
+    assert endpoint["chat_completions_url"] == entry["chat_completions_url"]
+    assert endpoint["api_type"] == entry["api_type"]
+    assert endpoint["stale"] is entry["stale"]
+    # name/description mirror PUBLIC metadata (description may be null).
+    assert endpoint["name"] == model["name"]
+    assert endpoint["description"] == model["description"]
+    # Normalized capability columns: context echoed unchanged; arrays are the
+    # ASCII-lowercased, first-occurrence-deduplicated unit 1c-b1 values.
+    norm_ctx = model["context_length"]
+    norm_in = _search_normalize_array(
+        model["architecture"]["input_modalities"])
+    norm_out = _search_normalize_array(
+        model["architecture"]["output_modalities"])
+    norm_params = _search_normalize_array(model["supported_parameters"])
+    assert endpoint["context_length"] == norm_ctx, \
+        f"{cid}: context_length must be the normalized (echoed) value"
+    assert endpoint["input_modalities"] == norm_in, \
+        f"{cid}: input_modalities must be the normalized value"
+    assert endpoint["output_modalities"] == norm_out, \
+        f"{cid}: output_modalities must be the normalized value"
+    assert endpoint["supported_parameters"] == norm_params, \
+        f"{cid}: supported_parameters must be the normalized value"
+    normalized = {
+        "context_length": norm_ctx,
+        "input_modalities": norm_in,
+        "output_modalities": norm_out,
+        "supported_parameters": norm_params,
+    }
+    assert endpoint["unknown_fields"] == [
+        field for field in CAPABILITY_FIELDS if normalized[field] is None], \
+        f"{cid}: unknown_fields must be the ordered normalized-null flag list"
+    # metadata is the COMPLETE projected public model of THIS exact pair,
+    # retaining valid original array casing/order/duplicates.
+    assert endpoint["metadata"] == model, (
+        f"{cid}: metadata for pair ({provider!r}, {raw_id!r}) is not the "
+        "projected public model of that exact pair")
+
+
+def _assert_search_payload(case, snap):
+    """Every integrity assertion of the frozen successful PURE search_models
+    payload. Validates the hand-authored golden against its own snapshot with
+    stdlib data operations only — no query implementation is imported and the
+    expected result is never generated by a future implementation."""
+    expect = case["expect"]
+    args = case["args"]
+    cid = case["id"]
+
+    # Exact top-level field set: a stray, source or legacy key is corruption.
+    assert set(expect) == SEARCH_RESPONSE_FIELDS, (
+        f"{cid}: unexpected response fields "
+        f"{sorted(set(expect) ^ SEARCH_RESPONSE_FIELDS)}")
+
+    # Success is explicit — never an error envelope, even for no matches.
+    assert expect["ok"] is True
+    assert expect["query"] == args.get("query"), \
+        f"{cid}: query echo must be the raw argument, never trimmed"
+
+    # Filter echo: each supplied raw filter, or null when omitted; [] stays [].
+    filters = expect["filters"]
+    assert set(filters) == SEARCH_FILTER_FIELDS, \
+        f"{cid}: unexpected filter fields {sorted(set(filters))}"
+    assert filters["provider"] == args.get("provider")
+    assert filters["min_context_length"] == args.get("min_context_length")
+    assert filters["input_modalities"] == args.get("input_modalities")
+    assert filters["supported_parameters"] == args.get("supported_parameters")
+
+    # Effective pagination echo.
+    limit = args.get("limit", SEARCH_DEFAULT_LIMIT)
+    offset = args.get("offset", SEARCH_DEFAULT_OFFSET)
+    assert expect["limit"] == limit
+    assert expect["offset"] == offset
+    assert isinstance(limit, int) and not isinstance(limit, bool) \
+        and 1 <= limit <= SEARCH_MAX_LIMIT, f"{cid}: limit out of range"
+    assert isinstance(offset, int) and not isinstance(offset, bool) \
+        and offset >= 0, f"{cid}: offset out of range"
+
+    # Observation provenance mirrors the consumed snapshot.
+    assert expect["snapshot_id"] == snap["snapshot_id"]
+    assert expect["tick_epoch"] == snap["tick_epoch"]
+
+    # Provider staleness covers the SELECTED provider scope: all snapshot
+    # providers when no provider filter, else exactly the selected provider;
+    # it is retained even on an empty/beyond-end page.
+    selected = (snap["provider_order"] if filters["provider"] is None
+                else [filters["provider"]])
+    assert set(expect["provider_staleness"]) == set(selected), \
+        f"{cid}: provider_staleness scope mismatch"
+    for key in selected:
+        assert expect["provider_staleness"][key] is \
+            snap["providers"][key]["stale"], \
+            f"{cid}: provider staleness mismatch for {key}"
+
+    # Membership, order BEFORE slice, totals, next_offset.
+    all_pairs = _search_reference_pairs(snap, args)
+    page = all_pairs[offset:offset + limit]
+    golden_pairs = [(e["provider"], e["model_id"]) for e in expect["endpoints"]]
+    assert golden_pairs == page, (
+        f"{cid}: search endpoint membership/order violates the reference "
+        "predicate over the snapshot")
+    assert expect["total_matches"] == len(all_pairs), \
+        f"{cid}: total_matches must be the unpaginated match cardinality"
+    assert _counts_are_strict_int(expect["total_matches"]), \
+        f"{cid}: total_matches must be a strict non-negative int"
+    assert expect["returned_count"] == len(expect["endpoints"]), \
+        f"{cid}: returned_count must equal len(endpoints)"
+    assert _counts_are_strict_int(expect["returned_count"]), \
+        f"{cid}: returned_count must be a strict non-negative int"
+    next_off = expect["next_offset"]
+    if offset + len(expect["endpoints"]) < len(all_pairs):
+        assert next_off == offset + len(expect["endpoints"]), \
+            f"{cid}: next_offset must be offset + returned_count"
+    else:
+        assert next_off is None, \
+            f"{cid}: next_offset must be null when exhausted/beyond-end"
+    if next_off is not None:
+        assert _counts_are_strict_int(next_off), \
+            f"{cid}: next_offset must be null or a strict non-negative int"
+
+    # Endpoint rows: exact fields, pair metadata, normalized columns, flags.
+    assert isinstance(expect["endpoints"], list)
+    for endpoint in expect["endpoints"]:
+        _assert_search_endpoint_row(endpoint, snap, cid)
+
+    # Page-scoped counts: describe the RETURNED PAGE, never the registry or
+    # the unpaginated match set; an empty page is all zeros.
+    counts = expect["counts"]
+    assert set(counts) == SEARCH_COUNT_FIELDS, (
+        f"{cid}: unexpected count fields "
+        f"{sorted(set(counts) ^ SEARCH_COUNT_FIELDS)}")
+    for name, value in counts.items():
+        assert _counts_are_strict_int(value), \
+            f"{cid}: counts.{name} must be a strict non-negative int"
+    assert counts["gateways"] == len({p for p, _ in golden_pairs}), \
+        f"{cid}: counts.gateways must be distinct page providers"
+    assert counts["endpoints"] == len(expect["endpoints"])
+    assert counts["distinct_raw_ids"] == len({i for _, i in golden_pairs})
+    assert counts["marker_group_labels"] == len(
+        {_strip_marker_contract(i) for _, i in golden_pairs}), \
+        f"{cid}: counts.marker_group_labels must be distinct page labels"
+
+    # The absence caveat is preserved on every search payload.
+    assert isinstance(expect["caveats"], list) and expect["caveats"]
+    assert ABSENCE_CAVEAT in expect["caveats"]
+
+
+def _search_corrupt_row(snap, provider, raw_id, *, context_length=_MISSING,
+                        input_modalities=_MISSING, output_modalities=_MISSING,
+                        supported_parameters=_MISSING, metadata=_MISSING,
+                        unknown_fields=_MISSING):
+    """CORRUPTION-PROBE ONLY: build one plausible row from snapshot data so a
+    mutation can append/attach a row the reference predicate does not select.
+    Never used to author a committed fixture."""
+    entry = snap["providers"][provider]
+    model = entry["models"][raw_id]
+    ctx = model["context_length"]
+    norm_in = _search_normalize_array(
+        model["architecture"]["input_modalities"])
+    norm_out = _search_normalize_array(
+        model["architecture"]["output_modalities"])
+    norm_params = _search_normalize_array(model["supported_parameters"])
+    if context_length is not _MISSING:
+        ctx = context_length
+    if input_modalities is not _MISSING:
+        norm_in = input_modalities
+    if output_modalities is not _MISSING:
+        norm_out = output_modalities
+    if supported_parameters is not _MISSING:
+        norm_params = supported_parameters
+    normalized = {
+        "context_length": ctx,
+        "input_modalities": norm_in,
+        "output_modalities": norm_out,
+        "supported_parameters": norm_params,
+    }
+    if unknown_fields is _MISSING:
+        unknown = [f for f in CAPABILITY_FIELDS if normalized[f] is None]
+    else:
+        unknown = unknown_fields
+    return {
+        "provider": provider,
+        "model_id": raw_id,
+        "chat_completions_url": entry["chat_completions_url"],
+        "api_type": entry["api_type"],
+        "stale": entry["stale"],
+        "name": model["name"],
+        "description": model["description"],
+        "context_length": ctx,
+        "input_modalities": norm_in,
+        "output_modalities": norm_out,
+        "supported_parameters": norm_params,
+        "unknown_fields": unknown,
+        "metadata": model if metadata is _MISSING else metadata,
+    }
+
+
+# -- fixture integrity --
+
+def test_search_fixture_matches_snapshot_contract(search_snapshot):
+    _assert_snapshot_contract(search_snapshot)
+
+
+def test_search_fixture_shape_is_frozen(search_snapshot):
+    assert search_snapshot["schema_version"] == 1
+    assert search_snapshot["tick_epoch"] == 1759200000
+    assert search_snapshot["cadence_s"] == 3600
+    assert search_snapshot["warnings"] == ["metadata_missing"]
+    assert search_snapshot["provider_order"] == [
+        "synthetic-a", "synthetic-b"]
+    a = search_snapshot["providers"]["synthetic-a"]
+    b = search_snapshot["providers"]["synthetic-b"]
+    assert a["stale"] is False and b["stale"] is True
+    assert a["model_ids"] == ["vendor/literal[ab].*", "vendor/plain"]
+    assert sorted(a["models"]) == a["model_ids"]
+    assert b["model_ids"] == [] and b["models"] == {}
+    # The documented raw text/casing of the two models is frozen literally.
+    literal = a["models"]["vendor/literal[ab].*"]
+    assert literal["name"] == "ÉCHO TEXT"
+    assert literal["description"] == \
+        "Reasoning literal [ab].* token; synthetic prose."
+    assert literal["architecture"]["input_modalities"] == \
+        ["TEXT", "Image", "text"]
+    assert literal["supported_parameters"] == \
+        ["Temperature", "MAX_TOKENS", "temperature"]
+    plain = a["models"]["vendor/plain"]
+    assert plain["name"] == "écho plain"
+    assert plain["context_length"] is None
+    assert plain["pricing"] is None
+
+
+def test_search_fixture_snapshot_id_is_canonical(search_snapshot):
+    body = {k: v for k, v in search_snapshot.items() if k != "snapshot_id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    assert search_snapshot["snapshot_id"] == \
+        hashlib.sha256(canonical).hexdigest()
+
+
+def test_search_fixture_adds_no_package_code(search_snapshot):
+    # A new synthetic provider is addable by DATA alone: the fixture declares
+    # both providers with no python change, and no implementation module is
+    # imported by this file.
+    import sys
+    assert not any(name.startswith("watchdog_catalog")
+                   for name in sys.modules)
+    assert set(search_snapshot["providers"]) == set(
+        search_snapshot["provider_order"])
+
+
+# -- envelope field-set freeze --
+
+def test_search_response_envelope_field_sets_are_frozen(cases_document):
+    assert set(SEARCH_RESPONSE_FIELDS) == {
+        "ok", "query", "filters", "limit", "offset", "snapshot_id",
+        "tick_epoch", "provider_staleness", "endpoints", "total_matches",
+        "returned_count", "next_offset", "counts", "caveats"}
+    assert set(SEARCH_FILTER_FIELDS) == {
+        "provider", "min_context_length", "input_modalities",
+        "supported_parameters"}
+    assert set(SEARCH_ENDPOINT_FIELDS) == {
+        "provider", "model_id", "chat_completions_url", "api_type", "stale",
+        "name", "description", "context_length", "input_modalities",
+        "output_modalities", "supported_parameters", "unknown_fields",
+        "metadata"}
+    assert set(SEARCH_COUNT_FIELDS) == {
+        "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels"}
+    for case in _iter_search_cases(cases_document):
+        _assert_search_payload(case, _case_fixture(case, cases_document))
+
+
+def test_search_goldens_present_unique_and_use_explicit_fixtures(
+        cases_document):
+    cases = _iter_search_cases(cases_document)
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids)), "duplicate search case id"
+    missing = [cid for cid in SEARCH_REQUIRED_CASE_IDS if cid not in ids]
+    assert not missing, f"missing hand-authored search scenarios: {missing}"
+    for case in cases:
+        # Explicit fixture override — never the cases.json default.
+        assert "fixture" in case, f"{case['id']}: needs an explicit fixture"
+        assert "args" in case and isinstance(case["args"], dict)
+        assert "expect" in case and isinstance(case["expect"], dict)
+
+
+def test_search_goldens_pass_complete_checker(cases_document):
+    for case in _iter_search_cases(cases_document):
+        snap = _case_fixture(case, cases_document)
+        _assert_snapshot_contract(snap)
+        _assert_search_payload(case, snap)
+
+
+# -- scenario pins (positive controls: the actual values, not self-consistency) --
+
+def test_search_metadata_reasoning_pins_context_filters(cases_document):
+    # query=reasoning alone: known + unknown + zero context, NOT the null-desc.
+    case, snap = _search_case(cases_document,
+                              "search_metadata_reasoning_text_only")
+    assert case["fixture"] == "metadata-edge-cases.json"
+    assert case["args"] == {"query": "reasoning"}
+    expect = case["expect"]
+    assert [(e["provider"], e["model_id"]) for e in expect["endpoints"]] == [
+        ("synthetic-a", "vendor/known-context"),
+        ("synthetic-a", "vendor/unknown-context"),
+        ("synthetic-a", "vendor/zero-context")]
+    assert {e["model_id"] for e in expect["endpoints"]} == {
+        "vendor/known-context", "vendor/unknown-context", "vendor/zero-context"}
+    assert expect["total_matches"] == 3
+    assert expect["next_offset"] is None
+    assert expect["provider_staleness"] == {
+        "synthetic-a": False, "synthetic-b": True}
+    # unknown-context keeps its null context and carries the unknown flag.
+    unknown = expect["endpoints"][1]
+    assert unknown["context_length"] is None
+    assert unknown["unknown_fields"] == ["context_length"]
+    # zero-context is a KNOWN zero, not unknown.
+    zero = expect["endpoints"][2]
+    assert zero["context_length"] == 0
+    assert zero["unknown_fields"] == []
+
+    # query + min_context_length=65536: inclusive boundary keeps only known.
+    case, snap = _search_case(
+        cases_document, "search_metadata_reasoning_min_context_inclusive")
+    expect = case["expect"]
+    assert case["args"]["min_context_length"] == 65536
+    assert [e["model_id"] for e in expect["endpoints"]] == \
+        ["vendor/known-context"]
+    assert expect["total_matches"] == 1
+    assert expect["filters"]["min_context_length"] == 65536
+
+    # query + min_context_length=0: known + zero, EXCLUDING null (unknown).
+    case, snap = _search_case(cases_document,
+                              "search_metadata_reasoning_min_context_zero")
+    expect = case["expect"]
+    assert case["args"]["min_context_length"] == 0
+    assert [e["model_id"] for e in expect["endpoints"]] == [
+        "vendor/known-context", "vendor/zero-context"]
+    assert "vendor/unknown-context" not in \
+        {e["model_id"] for e in expect["endpoints"]}
+    assert expect["total_matches"] == 2
+
+
+def test_search_capability_defaults_empty_filters_and_unknown(cases_document):
+    # Omitted query/filters: both models, effective defaults 50/0.
+    case, snap = _search_case(cases_document,
+                              "search_capability_defaults_both_models")
+    assert case["fixture"] == "capability-unknown.json"
+    assert case["args"] == {}
+    expect = case["expect"]
+    assert expect["query"] is None
+    assert expect["filters"] == {
+        "provider": None, "min_context_length": None,
+        "input_modalities": None, "supported_parameters": None}
+    assert expect["limit"] == 50 and expect["offset"] == 0
+    assert [e["model_id"] for e in expect["endpoints"]] == [
+        "vendor/known-empty-capabilities", "vendor/unknown-capabilities"]
+    assert expect["total_matches"] == 2
+    assert expect["next_offset"] is None
+
+    # query="" with empty filter arrays: both, echoing the raw empty filters.
+    case, snap = _search_case(cases_document,
+                              "search_capability_empty_filters_no_constraint")
+    expect = case["expect"]
+    assert case["args"] == {"query": "", "input_modalities": [],
+                            "supported_parameters": []}
+    assert expect["query"] == ""
+    assert expect["filters"]["input_modalities"] == []
+    assert expect["filters"]["supported_parameters"] == []
+    assert expect["total_matches"] == 2
+
+    # A positive input_modalities filter yields none (unknown fails; [] empty).
+    case, snap = _search_case(
+        cases_document, "search_capability_positive_modality_yields_none")
+    expect = case["expect"]
+    assert case["args"] == {"input_modalities": ["text"]}
+    assert expect["endpoints"] == []
+    assert expect["total_matches"] == 0
+    assert expect["counts"] == {
+        "gateways": 0, "endpoints": 0, "distinct_raw_ids": 0,
+        "marker_group_labels": 0}
+    assert expect["provider_staleness"] == {
+        "synthetic-a": False, "synthetic-b": True}
+
+    # A positive supported_parameters filter yields none.
+    case, snap = _search_case(
+        cases_document, "search_capability_positive_parameter_yields_none")
+    assert case["expect"]["endpoints"] == []
+    assert case["expect"]["total_matches"] == 0
+
+    # minimum=0 alone keeps only the KNOWN-empty/zero model.
+    case, snap = _search_case(
+        cases_document, "search_capability_min_context_zero_known_only")
+    expect = case["expect"]
+    assert case["args"] == {"min_context_length": 0}
+    assert [e["model_id"] for e in expect["endpoints"]] == \
+        ["vendor/known-empty-capabilities"]
+    assert expect["total_matches"] == 1
+    assert expect["endpoints"][0]["context_length"] == 0
+
+
+def test_search_shared_raw_id_and_without_cross_provider_merge(
+        cases_document):
+    # shared + minimum 65536 -> a only (b context is smaller).
+    case, snap = _search_case(cases_document,
+                              "search_shared_min_context_a_only")
+    assert case["fixture"] == "lookup.json"
+    assert [(e["provider"], e["model_id"]) for e in case["expect"]["endpoints"]] \
+        == [("synthetic-a", "vendor/shared")]
+    # shared + ["text","IMAGE"] -> b only (AND within the array).
+    case, snap = _search_case(cases_document,
+                              "search_shared_modalities_and_b_only")
+    assert [(e["provider"], e["model_id"]) for e in case["expect"]["endpoints"]] \
+        == [("synthetic-b", "vendor/shared")]
+    assert case["args"]["input_modalities"] == ["text", "IMAGE"]
+    # shared + 65536 + ["image"] -> NEITHER (no cross-provider combination).
+    case, snap = _search_case(cases_document,
+                              "search_shared_context_and_image_neither")
+    assert case["expect"]["endpoints"] == []
+    assert case["expect"]["total_matches"] == 0
+    # shared + ["temperature","MAX_TOKENS"] -> a only (AND across entries).
+    case, snap = _search_case(cases_document,
+                              "search_shared_params_and_a_only")
+    assert [(e["provider"], e["model_id"]) for e in case["expect"]["endpoints"]] \
+        == [("synthetic-a", "vendor/shared")]
+    assert case["args"]["supported_parameters"] == \
+        ["temperature", "MAX_TOKENS"]
+    # shared + 65536 + ["top_p"] -> NEITHER.
+    case, snap = _search_case(cases_document,
+                              "search_shared_context_and_top_p_neither")
+    assert case["expect"]["endpoints"] == []
+    # The a-context + b-image merged hit is explicitly excluded above; prove
+    # each satisfiable half exists so the failures are non-vacuous.
+    _, snap = _search_case(cases_document, "search_shared_min_context_a_only")
+    a_meta = snap["providers"]["synthetic-a"]["models"]["vendor/shared"]
+    b_meta = snap["providers"]["synthetic-b"]["models"]["vendor/shared"]
+    assert a_meta["context_length"] >= 65536
+    assert "image" in b_meta["architecture"]["input_modalities"]
+    assert "image" not in a_meta["architecture"]["input_modalities"]
+
+
+def test_search_provider_filter_narrows_staleness_scope(cases_document):
+    # provider=synthetic-b + query=shared -> b only; staleness map is b only.
+    case, snap = _search_case(cases_document,
+                              "search_provider_b_shared_stale_scope")
+    assert case["args"] == {"provider": "synthetic-b", "query": "shared"}
+    expect = case["expect"]
+    assert [(e["provider"], e["model_id"]) for e in expect["endpoints"]] == [
+        ("synthetic-b", "vendor/shared")]
+    assert expect["provider_staleness"] == {"synthetic-b": False}
+    assert expect["filters"]["provider"] == "synthetic-b"
+
+    # provider=synthetic-c (zero IDs) -> empty result, staleness maps still c.
+    case, snap = _search_case(cases_document,
+                              "search_provider_c_empty_stale_scope")
+    expect = case["expect"]
+    assert case["args"] == {"provider": "synthetic-c"}
+    assert expect["endpoints"] == []
+    assert expect["total_matches"] == 0
+    assert expect["provider_staleness"] == {"synthetic-c": False}
+    assert expect["counts"] == {
+        "gateways": 0, "endpoints": 0, "distinct_raw_ids": 0,
+        "marker_group_labels": 0}
+
+
+def test_search_pagination_pages_cross_provider_and_page_counts(
+        cases_document):
+    # Independently derive the ordered registry so the page pins are non-vacuous.
+    _, snap = _search_case(cases_document, "search_pagination_limit2_offset0")
+    derived = tuple(
+        (key, raw_id)
+        for key in snap["provider_order"]
+        for raw_id in snap["providers"][key]["model_ids"])
+    assert derived == LOOKUP_ORDERED_PAIRS
+    assert len(derived) == 5
+
+    page1, _ = _search_case(cases_document, "search_pagination_limit2_offset0")
+    assert [(e["provider"], e["model_id"]) for e in page1["expect"]["endpoints"]] \
+        == [( "synthetic-a", "vendor/model-renamed"),
+            ("synthetic-a", "vendor/model:free")]
+    assert page1["expect"]["total_matches"] == 5
+    assert page1["expect"]["returned_count"] == 2
+    assert page1["expect"]["next_offset"] == 2
+    assert page1["expect"]["counts"] == {
+        "gateways": 1, "endpoints": 2, "distinct_raw_ids": 2,
+        "marker_group_labels": 2}
+
+    page2, _ = _search_case(
+        cases_document, "search_pagination_limit2_offset2_crosses_provider")
+    assert [(e["provider"], e["model_id"]) for e in page2["expect"]["endpoints"]] \
+        == [("synthetic-a", "vendor/shared"),
+            ("synthetic-b", "vendor/model-free")]
+    assert page2["expect"]["total_matches"] == 5
+    assert page2["expect"]["next_offset"] == 4
+    assert page2["expect"]["counts"] == {
+        "gateways": 2, "endpoints": 2, "distinct_raw_ids": 2,
+        "marker_group_labels": 2}
+
+    page3, _ = _search_case(
+        cases_document, "search_pagination_limit2_offset4_exhausted")
+    assert [(e["provider"], e["model_id"]) for e in page3["expect"]["endpoints"]] \
+        == [("synthetic-b", "vendor/shared")]
+    assert page3["expect"]["total_matches"] == 5
+    assert page3["expect"]["next_offset"] is None
+    assert page3["expect"]["counts"] == {
+        "gateways": 1, "endpoints": 1, "distinct_raw_ids": 1,
+        "marker_group_labels": 1}
+
+    page4, _ = _search_case(
+        cases_document, "search_pagination_limit2_offset99_beyond_end")
+    assert page4["expect"]["endpoints"] == []
+    assert page4["expect"]["total_matches"] == 5
+    assert page4["expect"]["returned_count"] == 0
+    assert page4["expect"]["next_offset"] is None
+    assert page4["expect"]["counts"] == {
+        "gateways": 0, "endpoints": 0, "distinct_raw_ids": 0,
+        "marker_group_labels": 0}
+
+    # query="" + provider=synthetic-a + limit=200: empty query no constraint,
+    # permitted upper limit, FILTERED (not global) counts.
+    upper, _ = _search_case(cases_document,
+                            "search_provider_a_limit200_empty_query")
+    expect = upper["expect"]
+    assert upper["args"] == {"query": "", "provider": "synthetic-a",
+                             "limit": 200}
+    assert expect["query"] == ""
+    assert expect["limit"] == 200
+    assert [e["model_id"] for e in expect["endpoints"]] == [
+        "vendor/model-renamed", "vendor/model:free", "vendor/shared"]
+    assert expect["total_matches"] == 3
+    assert expect["returned_count"] == 3
+    assert expect["next_offset"] is None
+    assert expect["provider_staleness"] == {"synthetic-a": False}
+    assert expect["counts"] == {
+        "gateways": 1, "endpoints": 3, "distinct_raw_ids": 3,
+        "marker_group_labels": 3}
+
+
+def test_search_text_normalization_and_literal_substring(cases_document):
+    case, snap = _search_case(
+        cases_document, "search_text_case_extended_filters_normalize")
+    assert case["fixture"] == "search-text.json"
+    expect = case["expect"]
+    assert case["args"] == {
+        "query": "REASONING", "min_context_length": 65536,
+        "input_modalities": ["IMAGE", "text", "IMAGE"],
+        "supported_parameters": ["TEMPERATURE"]}
+    assert expect["query"] == "REASONING"
+    assert expect["filters"]["input_modalities"] == ["IMAGE", "text", "IMAGE"]
+    assert expect["filters"]["supported_parameters"] == ["TEMPERATURE"]
+    assert [e["model_id"] for e in expect["endpoints"]] == \
+        ["vendor/literal[ab].*"]
+    row = expect["endpoints"][0]
+    # Normalized columns but ORIGINAL public metadata + echoed raw filters.
+    assert row["input_modalities"] == ["text", "image"]
+    assert row["output_modalities"] == ["text"]
+    assert row["supported_parameters"] == ["temperature", "max_tokens"]
+    assert row["unknown_fields"] == []
+    assert row["metadata"]["architecture"]["input_modalities"] == \
+        ["TEXT", "Image", "text"]
+    assert row["metadata"]["supported_parameters"] == \
+        ["Temperature", "MAX_TOKENS", "temperature"]
+    assert expect["provider_staleness"] == {
+        "synthetic-a": False, "synthetic-b": True}
+
+    # ÉCHO matches only the first; écho matches only the second (ASCII-only).
+    upper, _ = _search_case(cases_document,
+                            "search_text_unicode_upper_echo_first")
+    assert upper["args"] == {"query": "ÉCHO"}
+    assert [e["model_id"] for e in upper["expect"]["endpoints"]] == \
+        ["vendor/literal[ab].*"]
+    lower, _ = _search_case(cases_document,
+                            "search_text_unicode_lower_echo_second")
+    assert lower["args"] == {"query": "écho"}
+    assert [e["model_id"] for e in lower["expect"]["endpoints"]] == \
+        ["vendor/plain"]
+
+    # "[ab].*" is a literal substring, never a regex.
+    regex, _ = _search_case(cases_document,
+                            "search_text_literal_brackets_not_regex")
+    assert regex["args"] == {"query": "[ab].*"}
+    assert [e["model_id"] for e in regex["expect"]["endpoints"]] == \
+        ["vendor/literal[ab].*"]
+
+    # "Image" occurs only inside the metadata array -> never searched.
+    meta, _ = _search_case(cases_document,
+                           "search_text_metadata_array_not_searched")
+    assert meta["args"] == {"query": "Image"}
+    assert meta["expect"]["endpoints"] == []
+    assert meta["expect"]["total_matches"] == 0
+
+    # vendor/plain via raw ID with all four unknown flags.
+    rawid, _ = _search_case(cases_document,
+                            "search_text_raw_id_unknown_flags")
+    assert rawid["args"] == {"query": "vendor/plain"}
+    row = rawid["expect"]["endpoints"][0]
+    assert row["model_id"] == "vendor/plain"
+    assert row["unknown_fields"] == [
+        "context_length", "input_modalities", "output_modalities",
+        "supported_parameters"]
+    assert row["context_length"] is None
+    assert row["input_modalities"] is None
+
+    # " REASONING " (padded) matches nothing: no trimming.
+    padded, _ = _search_case(cases_document,
+                             "search_text_padded_query_not_trimmed")
+    assert padded["args"] == {"query": " REASONING "}
+    assert padded["expect"]["endpoints"] == []
+    # Non-vacuous: the trimmed query does match.
+    trimmed = " REASONING ".strip().lower()
+    assert trimmed in snap["providers"]["synthetic-a"]["models"][
+        "vendor/literal[ab].*"]["description"].lower()
+
+
+# -- semantic corruption matrix (deep-copied scratch; committed data intact) --
+
+def _corrupt_null_context_as_zero(case, snap):
+    case["expect"]["endpoints"].append(
+        _search_corrupt_row(snap, "synthetic-a", "vendor/unknown-context",
+                            context_length=0, unknown_fields=[]))
+
+
+def _corrupt_null_arrays_to_empty_lost_flags(case, snap):
+    row = case["expect"]["endpoints"][0]
+    row["input_modalities"] = []
+    row["unknown_fields"] = [
+        "context_length", "output_modalities", "supported_parameters"]
+
+
+def _corrupt_cross_provider_merged_hit(case, snap):
+    case["expect"]["endpoints"].append(
+        _search_corrupt_row(snap, "synthetic-a", "vendor/shared",
+                            input_modalities=["text", "image"]))
+
+
+def _corrupt_wrong_provider_metadata(case, snap):
+    row = case["expect"]["endpoints"][0]
+    row["metadata"] = copy.deepcopy(
+        snap["providers"]["synthetic-a"]["models"]["vendor/shared"])
+
+
+def _corrupt_and_replaced_by_or(case, snap):
+    case["expect"]["endpoints"].append(
+        _search_corrupt_row(snap, "synthetic-a", "vendor/shared"))
+
+
+def _corrupt_unicode_folding(case, snap):
+    case["expect"]["endpoints"].append(
+        _search_corrupt_row(snap, "synthetic-a", "vendor/plain"))
+
+
+def _corrupt_regex_match(case, snap):
+    case["expect"]["endpoints"].append(
+        _search_corrupt_row(snap, "synthetic-a", "vendor/plain"))
+
+
+def _corrupt_metadata_text_match(case, snap):
+    case["expect"]["endpoints"].append(
+        _search_corrupt_row(snap, "synthetic-a", "vendor/literal[ab].*"))
+
+
+def _corrupt_slice_before_filter(case, snap):
+    # Artifact of slicing the query-only match list before applying min=0.
+    case["expect"]["endpoints"] = case["expect"]["endpoints"][:1]
+
+
+def _corrupt_unsorted_page_window(case, snap):
+    case["expect"]["endpoints"].reverse()
+
+
+def _corrupt_next_offset_at_exhausted(case, snap):
+    case["expect"]["next_offset"] = 5
+
+
+def _corrupt_next_offset_beyond_end(case, snap):
+    case["expect"]["next_offset"] = 99
+
+
+def _corrupt_bool_count(case, snap):
+    case["expect"]["counts"]["endpoints"] = True
+
+
+def _corrupt_page_counts_use_global(case, snap):
+    case["expect"]["counts"]["distinct_raw_ids"] = 5
+
+
+def _corrupt_drop_zero_id_staleness(case, snap):
+    del case["expect"]["provider_staleness"]["synthetic-b"]
+
+
+SEARCH_CORRUPTIONS = (
+    ("null context treated as zero",
+     "search_metadata_reasoning_min_context_zero", _corrupt_null_context_as_zero),
+    ("null arrays made [] with lost flags",
+     "search_text_raw_id_unknown_flags",
+     _corrupt_null_arrays_to_empty_lost_flags),
+    ("cross-provider a-context+b-image merged",
+     "search_shared_context_and_image_neither",
+     _corrupt_cross_provider_merged_hit),
+    ("wrong-provider metadata on shared raw id",
+     "search_shared_modalities_and_b_only", _corrupt_wrong_provider_metadata),
+    ("AND replaced by OR",
+     "search_shared_modalities_and_b_only", _corrupt_and_replaced_by_or),
+    ("accidental Unicode folding of É/é",
+     "search_text_unicode_upper_echo_first", _corrupt_unicode_folding),
+    ("regex instead of literal substring",
+     "search_text_literal_brackets_not_regex", _corrupt_regex_match),
+    ("JSON-metadata text match",
+     "search_text_metadata_array_not_searched", _corrupt_metadata_text_match),
+    ("slicing before filtering",
+     "search_metadata_reasoning_min_context_zero", _corrupt_slice_before_filter),
+    ("unsorted page window (slice before sort)",
+     "search_pagination_limit2_offset2_crosses_provider",
+     _corrupt_unsorted_page_window),
+    ("next_offset wrong at exhausted page",
+     "search_pagination_limit2_offset4_exhausted",
+     _corrupt_next_offset_at_exhausted),
+    ("next_offset non-null beyond end",
+     "search_pagination_limit2_offset99_beyond_end",
+     _corrupt_next_offset_beyond_end),
+    ("bool count",
+     "search_capability_defaults_both_models", _corrupt_bool_count),
+    ("page counts use global totals",
+     "search_pagination_limit2_offset0", _corrupt_page_counts_use_global),
+    ("dropped zero-ID staleness entry",
+     "search_capability_defaults_both_models", _corrupt_drop_zero_id_staleness),
+)
+
+
+@pytest.mark.parametrize(
+    "label,case_id,mutate", SEARCH_CORRUPTIONS,
+    ids=[c[0] for c in SEARCH_CORRUPTIONS])
+def test_search_integrity_rejects_semantic_corruption(
+        cases_document, label, case_id, mutate):
+    case, snap = _copy_search_case(cases_document, case_id)
+    # The unmutated golden is well-formed before corruption.
+    _assert_search_payload(case, snap)
+    mutate(case, snap)
+    with pytest.raises(AssertionError):
+        _assert_search_payload(case, snap)
+
+
+def test_search_integrity_rejects_bool_scalars_and_extra_keys(cases_document):
+    case, snap = _copy_search_case(cases_document,
+                                   "search_capability_defaults_both_models")
+    case["expect"]["returned_count"] = True
+    with pytest.raises(AssertionError, match="returned_count"):
+        _assert_search_payload(case, snap)
+
+    case, snap = _copy_search_case(cases_document,
+                                   "search_capability_defaults_both_models")
+    case["expect"]["surprise"] = 1
+    with pytest.raises(AssertionError, match="unexpected response fields"):
+        _assert_search_payload(case, snap)
+
+    case, snap = _copy_search_case(cases_document,
+                                   "search_capability_defaults_both_models")
+    case["expect"]["source"] = {"mode": "file"}
+    with pytest.raises(AssertionError, match="unexpected response fields"):
+        _assert_search_payload(case, snap)
+
+    # The critical bool-vs-int guard on a missing page.
+    case, snap = _copy_search_case(cases_document,
+                                   "search_pagination_limit2_offset99_beyond_end")
+    case["expect"]["total_matches"] = True
+    with pytest.raises(AssertionError):
+        _assert_search_payload(case, snap)
+
+
+def test_search_positive_control_consistent_stale_mutation_passes(
+        cases_document):
+    # A CONSISTENT mutation (snapshot + golden) keeps the checker honest:
+    # flip synthetic-b's stale flag everywhere and re-seal, then require PASS.
+    case, snap = _copy_search_case(
+        cases_document, "search_capability_defaults_both_models")
+    assert case["expect"]["provider_staleness"]["synthetic-b"] is True
+    snap["providers"]["synthetic-b"]["stale"] = False
+    _reseal_snapshot(snap)
+    case["expect"]["snapshot_id"] = snap["snapshot_id"]
+    case["expect"]["provider_staleness"]["synthetic-b"] = False
+    _assert_snapshot_contract(snap)
+    _assert_search_payload(case, snap)
+
+
 # ---------- README contract-draft pins ----------
 
 
@@ -1976,3 +2958,33 @@ def test_readme_contract_enumerates_normalized_capability_fields_in_order():
                "`supported_parameters` plus `unknown_fields`")
     assert ordered in text, \
         "normalization capability fields must be listed in the stated order"
+
+
+def test_readme_contract_freezes_search_envelope_field_sets():
+    text = _contract_section_text()
+    for field in sorted(SEARCH_RESPONSE_FIELDS | SEARCH_FILTER_FIELDS
+                        | SEARCH_ENDPOINT_FIELDS | SEARCH_COUNT_FIELDS):
+        assert f"`{field}`" in text, \
+            f"contract section missing search field {field}"
+
+
+def test_readme_contract_freezes_search_semantics():
+    text = _contract_section_text()
+    for phrase in (
+            "search_models(query=None",
+            "literal substring",
+            "ASCII case-insensitive",
+            "no regular expression",
+            "never trimmed",
+            "applies no text constraint",
+            "AND",
+            "Sort, then slice",
+            "returned page",
+            "unpaginated",
+            "zero tracked IDs",
+            "absence caveat",
+            "unsafe UPSTREAM context",
+            "unsafe integers in PUBLIC JSON are rejected",
+    ):
+        assert phrase in text, \
+            f"contract section missing search rule: {phrase}"

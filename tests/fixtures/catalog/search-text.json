@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+  "tick_epoch": 1759200000,
+  "cadence_s": 3600,
+  "provider_order": [
+    "synthetic-a",
+    "synthetic-b"
+  ],
+  "providers": {
+    "synthetic-a": {
+      "display_name": "Synthetic Alpha",
+      "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [
+        "vendor/literal[ab].*",
+        "vendor/plain"
+      ],
+      "models": {
+        "vendor/literal[ab].*": {
+          "id": "vendor/literal[ab].*",
+          "name": "ÉCHO TEXT",
+          "description": "Reasoning literal [ab].* token; synthetic prose.",
+          "context_length": 65536,
+          "architecture": {
+            "input_modalities": [
+              "TEXT",
+              "Image",
+              "text"
+            ],
+            "output_modalities": [
+              "TEXT"
+            ]
+          },
+          "supported_parameters": [
+            "Temperature",
+            "MAX_TOKENS",
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/plain": {
+          "id": "vendor/plain",
+          "name": "écho plain",
+          "description": "No capabilities inferred from branding.",
+          "context_length": null,
+          "architecture": {
+            "input_modalities": null,
+            "output_modalities": null
+          },
+          "supported_parameters": null,
+          "pricing": null
+        }
+      },
+      "stale": false
+    },
+    "synthetic-b": {
+      "display_name": "Synthetic Beta",
+      "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [],
+      "models": {},
+      "stale": true
+    }
+  },
+  "warnings": [
+    "metadata_missing"
+  ]
+}

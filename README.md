@@ -345,6 +345,109 @@ never the global registry. A no-match lookup is an explicit success:
 every snapshot provider, and `counts` is **all zeros** — there is no
 no-match error.
 
+### Success envelope — `search_models` (frozen field sets)
+
+`search_models(query=None, provider=None, min_context_length=None,
+input_modalities=None, supported_parameters=None, limit=50, offset=0)`
+returns the same PURE semantic payload across SDK and browser wrappers; like
+`get_model` it exposes no local filesystem path and no source retrieval/cache
+data (a source layer adds a separate `source` object OUTSIDE this payload).
+Text search is **literal substring** matching over raw ID, name and
+description, folded **ASCII case-insensitive** only; there is
+**no regular expression** support, no fuzzy alias and no JSON-string/metadata
+search. Exact top-level fields:
+
+| Field | Type | Definition |
+|---|---|---|
+| `ok` | bool | Exactly `true` on success — a no-match or beyond-end page is still a success. |
+| `query` | string or null | The supplied raw query echoed unchanged, or `null` when omitted; it is **never trimmed**. |
+| `filters` | object | Echoed raw filter values (exact set below); each is the supplied value or `null` when omitted. |
+| `limit` | int | Effective page size: the supplied `limit` or the default `50`; integer in `1..200`. |
+| `offset` | int | Effective page offset: the supplied `offset` or the default `0`; integer `>= 0`. |
+| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`. |
+| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`; `null` means unknown, never fresh. |
+| `provider_staleness` | map of bool | Staleness scope: every snapshot provider in `provider_order` when no provider filter is given, else exactly the selected provider — **including a selected provider with zero tracked IDs**. Each value is that gateway's carried-forward stale flag (**provider staleness, never tick age**), retained even on an empty or beyond-end page. |
+| `endpoints` | list of object | The `returned page` of matched endpoint pairs, in frozen order (below). |
+| `total_matches` | int | Endpoint pairs satisfying **all** active predicates **before** pagination — the separate `unpaginated` cardinality. |
+| `returned_count` | int | `len(endpoints)` for this page. |
+| `next_offset` | int or null | `offset + returned_count` when that is **less than** `total_matches`; otherwise `null` (including an exhausted or beyond-end page). |
+| `counts` | object | PAGE-scoped cardinalities of the returned page; exact set below. |
+| `caveats` | list of string | Always carries the **absence caveat**. |
+
+`filters` object — exact fields:
+
+| Field | Definition |
+|---|---|
+| `provider` | The one exact provider key to restrict to, echoed raw, or `null` when omitted. An unknown key is an argument error (a later unit). |
+| `min_context_length` | The non-negative integer filter, echoed raw, or `null`; the comparison is inclusive over KNOWN safe non-negative integer contexts, and unknown contexts fail it. |
+| `input_modalities` | The requested modalities, echoed raw (casing/order/duplicates preserved), or `null`; an empty `[]` is echoed as `[]` yet applies no constraint. |
+| `supported_parameters` | The requested parameters, echoed raw, or `null`; an empty `[]` likewise applies no constraint. |
+
+Endpoint object — exact fields:
+
+| Field | Type | Definition |
+|---|---|---|
+| `provider` | string | Provider key of the `(provider, raw model_id)` pair. |
+| `model_id` | string | Raw tracked model ID, unchanged. |
+| `chat_completions_url` | string | The provider's chat-completions URL. |
+| `api_type` | string | The provider's API dialect. |
+| `stale` | bool | This provider's staleness — equals `provider_staleness[provider]`. |
+| `name` | string | The pair's public display name. |
+| `description` | string or null | The pair's public description; `null` when unknown. |
+| `context_length` | int or null | The normalized context value (unknown stays `null`). |
+| `input_modalities` | list of string or null | The normalized input modalities (ASCII-lowercased, first-occurrence deduplicated). |
+| `output_modalities` | list of string or null | The normalized output modalities. |
+| `supported_parameters` | list of string or null | The normalized supported parameters. |
+| `unknown_fields` | list of string | Exactly the four capability fields whose normalized value is `null`, in the frozen order `context_length`, `input_modalities`, `output_modalities`, `supported_parameters`. |
+| `metadata` | object | The complete **projected public model object** of exactly this `(provider, raw model_id)` pair, retaining valid original array casing/order/duplicates — **never the legacy raw metadata**, and never a cross-provider merge. |
+
+`counts` object — exact fields, describing the **returned page** only (never
+the global registry or the unpaginated match set; an empty page is all
+zeros, even when `total_matches` is positive):
+
+| Field | Definition |
+|---|---|
+| `gateways` | Distinct provider keys among the returned page rows. |
+| `endpoints` | Returned page rows (`returned_count`). |
+| `distinct_raw_ids` | Distinct raw `model_id` strings in the page. |
+| `marker_group_labels` | Distinct delimiter-stripped labels in the page — labels, **never** a count of verified underlying models. |
+
+Filtering and pagination semantics:
+
+- The **AND** of the active predicates selects endpoint pairs; each pair is
+  tested independently on its own `(provider, raw model_id)` metadata, so a
+  context from one gateway is never combined with a capability from another.
+- A `min_context_length` filter qualifies only a KNOWN finite, safe,
+  non-negative integer context, compared inclusively; a `null` (unknown)
+  context fails it. An empty or omitted text query applies no text constraint.
+- A modality or parameter filter uses **AND** across its requested entries:
+  **every** requested entry (normalized to ASCII-lowercase) must be present
+  in that endpoint's validated array. A `null`/unknown array fails a nonempty
+  filter; a known empty `[]` satisfies no nonempty request.
+- **Sort, then slice**: order results by provider display order, then natural
+  raw-ID order, and only then apply `offset`/`limit`; `total_matches` is the
+  cardinality **before** that slice.
+- `NaN`/`Infinity`, `bool`-as-integer and unsafe integers in PUBLIC JSON are rejected when parsing (Python and JS share these expectations); but an **unsafe UPSTREAM context** degrades to null (unknown) rather than failing the endpoint — upstream uncertainty never becomes a parsed unsafe integer.
+
+Worked examples (complete payloads live as literal goldens in
+`tests/fixtures/catalog/cases.json`, one `search_models` case per scenario):
+
+- Over `metadata-edge-cases.json`, `query="reasoning"` matches the
+  known-context, unknown-context and zero-context models (but not the
+  null-description one); adding `min_context_length=65536` keeps only the
+  known 65536-context model, while `min_context_length=0` keeps the known and
+  the known-zero models and still excludes the unknown (null) context.
+- Over `lookup.json`, the raw id `vendor/shared` is tracked by two gateways:
+  `query="shared" + min_context_length=65536` yields only synthetic-a's
+  endpoint; `query="shared" + input_modalities=["text","IMAGE"]` yields only
+  synthetic-b's; asking for both at once yields NEITHER (no cross-provider
+  merge).
+- Over `search-text.json`, `query="REASONING"` returns normalized capability
+  arrays while the public `metadata` object keeps its original casing;
+  `query="Image"` yields nothing (the token lives only in the metadata array,
+  which is never searched); and `query=" REASONING "` yields nothing because
+  identifiers and queries are never trimmed.
+
 ## State layout (state/, gitignored)
 
 - `roster.json`: providers + provider_models + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
