@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+  "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
   "tick_epoch": 1759200000,
   "cadence_s": 3600,
   "provider_order": [
@@ -66,8 +66,8 @@
         "vendor/shared": {
           "id": "vendor/shared",
           "name": "Vendor Shared",
-          "description": "Shared raw id tracked by both synthetic providers.",
-          "context_length": 4096,
+          "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
+          "context_length": 131072,
           "architecture": {
             "input_modalities": [
               "text"
@@ -78,7 +78,7 @@
           },
           "supported_parameters": [
             "temperature",
-            "top_p"
+            "max_tokens"
           ],
           "pricing": {
             "prompt": "0",
@@ -121,11 +121,12 @@
         "vendor/shared": {
           "id": "vendor/shared",
           "name": "Vendor Shared",
-          "description": "Shared raw id tracked by both synthetic providers.",
-          "context_length": 4096,
+          "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
+          "context_length": 32768,
           "architecture": {
             "input_modalities": [
-              "text"
+              "text",
+              "image"
             ],
             "output_modalities": [
               "text"

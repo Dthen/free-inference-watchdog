@@ -30,6 +30,17 @@ response/count vocabulary: `cases.json` now carries the frozen
 Provider staleness (a per-gateway carried-forward flag) stays distinct
 from tick age (derived from `tick_epoch`/`cadence_s`); no source
 retrieval/cache field is invented in the pure payload.
+
+The shared-ID audit correction closes an oracle weakness: the two
+providers tracking `vendor/shared` used to carry byte-identical metadata,
+so the per-pair attachment check could not distinguish a wrong-provider
+copy from a correct one. Those two entries now carry intentionally
+conflicting, valid, per-provider metadata (synthetic-a: large text-only
+context; synthetic-b: image input with a smaller context), the goldens
+and canonical hash were recomputed, and in-memory mutation probes prove
+the checker rejects both wrong-provider copies/swaps and merged
+capabilities. This remains fixture/integrity work — no query
+implementation behaviour is added here.
 """
 
 import copy
@@ -581,7 +592,10 @@ def _assert_get_model_payload(case, snap):
         metadata = endpoint["metadata"]
         assert isinstance(metadata, dict)
         assert set(metadata) == MODEL_FIELDS
-        assert metadata == entry["models"][raw_id]
+        assert metadata == entry["models"][raw_id], (
+            f"{case['id']}: metadata for pair ({provider!r}, "
+            f"{raw_id!r}) is not attached to that exact "
+            "(provider, raw model_id) pair")
         assert metadata["id"] == raw_id
         _assert_pricing_contract(metadata["pricing"])
 
@@ -814,6 +828,155 @@ def test_get_model_integrity_positive_control_recognises_true_staleness(
     # ...then break only the payload flag: the assertion must catch it.
     case["expect"]["endpoints"][0]["stale"] = False
     with pytest.raises(AssertionError, match="endpoint staleness"):
+        _assert_get_model_payload(case, snap)
+
+
+# ---------- shared raw-ID per-pair metadata contrast (audit correction) ----------
+#
+# The shared raw id `vendor/shared` is tracked by BOTH synthetic-a and
+# synthetic-b. Before this correction the two metadata objects were
+# byte-identical, so a per-raw-id (or bare dict-equality) check could not
+# tell a wrong-provider attachment from a correct one — an oracle
+# weakness, not a runtime bug. The two entries now carry intentionally
+# conflicting, valid, per-provider metadata so that attachment by
+# (provider, raw model_id) is testable, and the mutation probes below
+# prove the checker bites.
+
+SHARED_CASE_ID = "get_model_shared_raw_id_two_endpoints"
+
+# Positive controls pinned by the audit correction. synthetic-a carries a
+# large context but text-only input; synthetic-b carries image input but a
+# smaller context. Deliberately NO endpoint satisfies BOTH a 65536
+# context minimum and image input — that pair of facts is data for later
+# search tests, not search behaviour now.
+SHARED_A_CONTEXT = 131072
+SHARED_A_MODALITIES = ["text"]
+SHARED_A_PARAMS = ["temperature", "max_tokens"]
+SHARED_B_CONTEXT = 32768
+SHARED_B_MODALITIES = ["text", "image"]
+SHARED_B_PARAMS = ["temperature", "top_p"]
+
+# Substring of the per-pair metadata assertion message in
+# `_assert_get_model_payload`; the mutation probes below must trip THAT
+# assertion specifically, not a field-set, membership or order assertion.
+METADATA_ATTACHMENT_MARKER = "is not attached to that exact"
+
+
+def _shared_case(cases_document):
+    case = next(c for c in _iter_get_model_cases(cases_document)
+                if c["id"] == SHARED_CASE_ID)
+    return case, _case_fixture(case, cases_document)
+
+
+def test_shared_raw_id_case_pairs_carry_conflicting_per_provider_metadata(
+        cases_document):
+    case, snap = _shared_case(cases_document)
+    endpoints = case["expect"]["endpoints"]
+    assert [(e["provider"], e["model_id"]) for e in endpoints] == [
+        ("synthetic-a", "vendor/shared"),
+        ("synthetic-b", "vendor/shared")]
+
+    a_meta = endpoints[0]["metadata"]
+    b_meta = endpoints[1]["metadata"]
+
+    # The actual contrast — not merely "the two dicts differ".
+    assert a_meta["context_length"] == SHARED_A_CONTEXT
+    assert a_meta["architecture"]["input_modalities"] == SHARED_A_MODALITIES
+    assert a_meta["supported_parameters"] == SHARED_A_PARAMS
+    assert b_meta["context_length"] == SHARED_B_CONTEXT
+    assert b_meta["architecture"]["input_modalities"] == SHARED_B_MODALITIES
+    assert b_meta["supported_parameters"] == SHARED_B_PARAMS
+    assert a_meta["description"] != b_meta["description"]
+
+    # Each object is bound to its own provider's stored model and would
+    # NOT be a valid attachment for the other provider.
+    a_entry = snap["providers"]["synthetic-a"]["models"]["vendor/shared"]
+    b_entry = snap["providers"]["synthetic-b"]["models"]["vendor/shared"]
+    assert a_meta == a_entry
+    assert b_meta == b_entry
+    assert a_meta != b_entry
+    assert b_meta != a_entry
+
+    # Both correctly attached objects still pass the full payload
+    # integrity checker (envelope, membership, projection, counts).
+    _assert_get_model_payload(case, snap)
+
+
+def test_shared_raw_id_case_has_no_endpoint_with_large_context_and_image(
+        cases_document):
+    case, _ = _shared_case(cases_document)
+    endpoints = case["expect"]["endpoints"]
+    for endpoint in endpoints:
+        meta = endpoint["metadata"]
+        has_image = "image" in meta["architecture"]["input_modalities"]
+        has_large_context = meta["context_length"] >= 65536
+        assert not (has_image and has_large_context), (
+            f"{endpoint['provider']}: shared pair must not satisfy both "
+            "the 65536 context minimum and image input")
+    # Non-vacuous: each satisfiable half exists somewhere in the pair.
+    assert any(e["metadata"]["context_length"] >= 65536 for e in endpoints)
+    assert any("image" in e["metadata"]["architecture"]["input_modalities"]
+               for e in endpoints)
+
+
+def test_shared_raw_id_integrity_rejects_a_metadata_on_b_endpoint(
+        cases_document):
+    case, snap = _copy_case(cases_document, SHARED_CASE_ID)
+    endpoints = case["expect"]["endpoints"]
+    endpoints[1]["metadata"] = copy.deepcopy(endpoints[0]["metadata"])
+    # Provider/raw-id identity is untouched: only the attachment is wrong.
+    assert [(e["provider"], e["model_id"]) for e in endpoints] == [
+        ("synthetic-a", "vendor/shared"),
+        ("synthetic-b", "vendor/shared")]
+    assert endpoints[1]["metadata"]["id"] == "vendor/shared"
+    with pytest.raises(AssertionError, match=METADATA_ATTACHMENT_MARKER):
+        _assert_get_model_payload(case, snap)
+
+
+def test_shared_raw_id_integrity_rejects_b_metadata_on_a_endpoint(
+        cases_document):
+    case, snap = _copy_case(cases_document, SHARED_CASE_ID)
+    endpoints = case["expect"]["endpoints"]
+    endpoints[0]["metadata"] = copy.deepcopy(endpoints[1]["metadata"])
+    assert [(e["provider"], e["model_id"]) for e in endpoints] == [
+        ("synthetic-a", "vendor/shared"),
+        ("synthetic-b", "vendor/shared")]
+    assert endpoints[0]["metadata"]["id"] == "vendor/shared"
+    with pytest.raises(AssertionError, match=METADATA_ATTACHMENT_MARKER):
+        _assert_get_model_payload(case, snap)
+
+
+def test_shared_raw_id_integrity_rejects_swapped_metadata(cases_document):
+    case, snap = _copy_case(cases_document, SHARED_CASE_ID)
+    endpoints = case["expect"]["endpoints"]
+    a_meta = copy.deepcopy(endpoints[0]["metadata"])
+    b_meta = copy.deepcopy(endpoints[1]["metadata"])
+    endpoints[0]["metadata"] = b_meta
+    endpoints[1]["metadata"] = a_meta
+    assert [(e["provider"], e["model_id"]) for e in endpoints] == [
+        ("synthetic-a", "vendor/shared"),
+        ("synthetic-b", "vendor/shared")]
+    with pytest.raises(AssertionError, match=METADATA_ATTACHMENT_MARKER):
+        _assert_get_model_payload(case, snap)
+
+
+def test_shared_raw_id_integrity_rejects_merged_capabilities(cases_document):
+    case, snap = _copy_case(cases_document, SHARED_CASE_ID)
+    endpoint = case["expect"]["endpoints"][0]  # synthetic-a
+    assert endpoint["provider"] == "synthetic-a"
+    merged = copy.deepcopy(endpoint["metadata"])
+    # Manufacture the single endpoint the contract forbids: synthetic-a's
+    # large context combined with synthetic-b's image input.
+    assert merged["context_length"] == SHARED_A_CONTEXT
+    assert "image" not in merged["architecture"]["input_modalities"]
+    merged["architecture"]["input_modalities"] = copy.deepcopy(
+        SHARED_B_MODALITIES)
+    endpoint["metadata"] = merged
+    assert endpoint["model_id"] == "vendor/shared"
+    assert endpoint["metadata"]["id"] == "vendor/shared"
+    assert endpoint["metadata"] != \
+        snap["providers"]["synthetic-a"]["models"]["vendor/shared"]
+    with pytest.raises(AssertionError, match=METADATA_ATTACHMENT_MARKER):
         _assert_get_model_payload(case, snap)
 
 

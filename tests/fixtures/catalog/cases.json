@@ -1,5 +1,5 @@
 {
-  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone and never generated from an implementation. Unit 1b freezes the get_model exact-ID and marker-lookup cases against lookup.json (oracle case 1 scenario); later units append their own cases to 'cases'. The envelope-freeze correction froze the successful PURE get_model payload: the top-level field set (including provider_staleness), the endpoint field set and the counts cardinalities (exact_matches, endpoints, distinct_raw_ids, marker_group_labels) are final. Counts describe the returned lookup result only.",
+  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone and never generated from an implementation. Unit 1b freezes the get_model exact-ID and marker-lookup cases against lookup.json (oracle case 1 scenario); later units append their own cases to 'cases'. The envelope-freeze correction froze the successful PURE get_model payload: the top-level field set (including provider_staleness), the endpoint field set and the counts cardinalities (exact_matches, endpoints, distinct_raw_ids, marker_group_labels) are final. Counts describe the returned lookup result only. The shared-ID correction gives the two providers tracking vendor/shared intentionally conflicting, valid per-provider metadata (synthetic-a: large text-only context; synthetic-b: image input with a smaller context) so that metadata attachment by (provider, raw model_id) is testable; every snapshot_id was recomputed from the lookup.json fixture body.",
   "fixture": "lookup.json",
   "cases": [
     {
@@ -9,7 +9,7 @@
       "expect": {
         "ok": true,
         "query": "vendor/model",
-        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
         "tick_epoch": 1759200000,
         "exact_matches": {
           "synthetic-a": false,
@@ -100,7 +100,7 @@
       "expect": {
         "ok": true,
         "query": "vendor/model:free",
-        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
         "tick_epoch": 1759200000,
         "exact_matches": {
           "synthetic-a": true,
@@ -193,7 +193,7 @@
       "expect": {
         "ok": true,
         "query": "vendor/shared",
-        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
         "tick_epoch": 1759200000,
         "exact_matches": {
           "synthetic-a": true,
@@ -219,8 +219,8 @@
             "metadata": {
               "id": "vendor/shared",
               "name": "Vendor Shared",
-              "description": "Shared raw id tracked by both synthetic providers.",
-              "context_length": 4096,
+              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
+              "context_length": 131072,
               "architecture": {
                 "input_modalities": [
                   "text"
@@ -231,7 +231,7 @@
               },
               "supported_parameters": [
                 "temperature",
-                "top_p"
+                "max_tokens"
               ],
               "pricing": {
                 "prompt": "0",
@@ -248,11 +248,12 @@
             "metadata": {
               "id": "vendor/shared",
               "name": "Vendor Shared",
-              "description": "Shared raw id tracked by both synthetic providers.",
-              "context_length": 4096,
+              "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
+              "context_length": 32768,
               "architecture": {
                 "input_modalities": [
-                  "text"
+                  "text",
+                  "image"
                 ],
                 "output_modalities": [
                   "text"
@@ -287,7 +288,7 @@
       "expect": {
         "ok": true,
         "query": "vendor/model-renamed",
-        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
         "tick_epoch": 1759200000,
         "exact_matches": {
           "synthetic-a": true,
@@ -350,7 +351,7 @@
       "expect": {
         "ok": true,
         "query": "vendor/does-not-exist",
-        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
         "tick_epoch": 1759200000,
         "exact_matches": {
           "synthetic-a": false,
@@ -382,7 +383,7 @@
       "expect": {
         "ok": true,
         "query": " vendor/model",
-        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
         "tick_epoch": 1759200000,
         "exact_matches": {
           "synthetic-a": false,
