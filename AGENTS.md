@@ -1,7 +1,7 @@
 # AGENTS.md — Free Inference Watchdog
 
 ## Hard rules
-- Python stdlib only (the guarded `mcp` SDK import in mcp_server.py is the sole exception).
+- Python stdlib only (the guarded `mcp` SDK import in mcp_server.py is the sole exception; the `watchdog_catalog/` package's transport module — `server.py` and `__main__.py` — is the only other sanctioned SDK import, per the standalone catalogue architecture).
 - Zero LLM tokens: the cron job is script-mode `--no-agent`; no LLM is ever woken.
 - One tick per invocation: `python3 inference_watchdog.py` fetches, diffs, exits.
 - Empty stdout = healthy-silent; diagnostics go to stderr. Exit codes: 0 normal, 1 partial provider failure / bootstrap refused, 2 fatal.
@@ -45,6 +45,7 @@
 
 ## Dashboard & MCP
 - site/index.html is rebuilt from state/roster.json by build_site.py each tick and COMMITTED+PUSHED by the cron wrapper — GitHub Pages deploys it to models.dthen.xyz via .github/workflows/deploy-dashboard.yml. Other files under site/ stay gitignored.
+- site/catalog.json is a generated, tracked public snapshot of the free-inference catalogue, produced by catalog_export.py from the roster and explicitly projected provider configuration. It is the credential-free contract consumed by the standalone `watchdog_catalog` package and the browser adapters.
 - mcp_server.py exposes list_free_models / get_model / watchdog_status read-only over state/.
 
 ## Update cadence
