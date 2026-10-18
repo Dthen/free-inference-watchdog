@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+  "tick_epoch": 1759200000,
+  "cadence_s": 3600,
+  "provider_order": [
+    "synthetic-a",
+    "synthetic-b",
+    "synthetic-c"
+  ],
+  "providers": {
+    "synthetic-a": {
+      "display_name": "Synthetic Alpha",
+      "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [
+        "vendor/model-renamed",
+        "vendor/model:free",
+        "vendor/shared"
+      ],
+      "models": {
+        "vendor/model-renamed": {
+          "id": "vendor/model-renamed",
+          "name": "Vendor Model Renamed",
+          "description": null,
+          "context_length": 65536,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/model:free": {
+          "id": "vendor/model:free",
+          "name": "Vendor Model",
+          "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
+          "context_length": 131072,
+          "architecture": {
+            "input_modalities": [
+              "text",
+              "image"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature",
+            "max_tokens"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/shared": {
+          "id": "vendor/shared",
+          "name": "Vendor Shared",
+          "description": "Shared raw id tracked by both synthetic providers.",
+          "context_length": 4096,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature",
+            "top_p"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        }
+      },
+      "stale": false
+    },
+    "synthetic-b": {
+      "display_name": "Synthetic Beta",
+      "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [
+        "vendor/model-free",
+        "vendor/shared"
+      ],
+      "models": {
+        "vendor/model-free": {
+          "id": "vendor/model-free",
+          "name": "Vendor Model Free",
+          "description": "Oracle case 1 beta endpoint: text input only.",
+          "context_length": 32768,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "vendor/shared": {
+          "id": "vendor/shared",
+          "name": "Vendor Shared",
+          "description": "Shared raw id tracked by both synthetic providers.",
+          "context_length": 4096,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature",
+            "top_p"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        }
+      },
+      "stale": false
+    },
+    "synthetic-c": {
+      "display_name": "Synthetic Gamma",
+      "chat_completions_url": "https://synthetic-gamma.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [],
+      "models": {},
+      "stale": false
+    }
+  },
+  "warnings": []
+}

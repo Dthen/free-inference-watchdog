@@ -231,6 +231,25 @@ installed package):
 - `watchdog_status()`
 - `search_models(query=None, provider=None, min_context_length=None, input_modalities=None, supported_parameters=None, limit=50, offset=0)`
 
+### Identity, lookup, and ordering (frozen rules)
+
+- `get_model.exact_matches` is **literal raw-ID membership** — case-sensitive,
+  unpadded, exact. `get_model("vendor/model:free")` matches only providers
+  tracking that raw id, never marker-stripped or renamed variants.
+- The separate marker-insensitive lookup strips **only** a delimiter-bounded
+  `free` at the start or end of an id (delimiters `[-:_]`, case-insensitive),
+  with an **empty-result guard**: a strip that would empty the id returns it
+  unchanged. `get_model("vendor/model")` lists every endpoint whose stripped
+  name equals the stripped query, raw ids unchanged.
+- A marker match is **not proof of cross-gateway model identity**; the absence
+  caveat is preserved on every `get_model` payload.
+- Identifiers are **never silently trimmed or repaired**: `" vendor/model "` is
+  not trimmed into a match.
+- Endpoint identity is **`(provider, raw model_id)`**: a raw id shared by two
+  providers is two endpoints, and metadata stays attached to its own pair.
+  Result arrays order by provider display order, then natural raw-ID order
+  (ASCII digit runs compared by digit length and lexical order).
+
 ## State layout (state/, gitignored)
 
 - `roster.json`: providers + provider_models + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.

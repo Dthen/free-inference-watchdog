@@ -1,0 +1,388 @@
+{
+  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone and never generated from an implementation. Unit 1b freezes the get_model exact-ID and marker-lookup cases against lookup.json (oracle case 1 scenario); later units append their own cases to 'cases'. Count key names ('exact_matches', 'endpoints') are provisional until the Task 2/3 implementation units freeze the count vocabulary.",
+  "fixture": "lookup.json",
+  "cases": [
+    {
+      "id": "get_model_marker_base_no_exact",
+      "tool": "get_model",
+      "args": {"model_id": "vendor/model"},
+      "expect": {
+        "ok": true,
+        "query": "vendor/model",
+        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
+        "exact_gateways": [],
+        "endpoints": [
+          {
+            "provider": "synthetic-a",
+            "model_id": "vendor/model:free",
+            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/model:free",
+              "name": "Vendor Model",
+              "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
+              "context_length": 131072,
+              "architecture": {
+                "input_modalities": [
+                  "text",
+                  "image"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature",
+                "max_tokens"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          },
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/model-free",
+            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/model-free",
+              "name": "Vendor Model Free",
+              "description": "Oracle case 1 beta endpoint: text input only.",
+              "context_length": 32768,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          }
+        ],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 0,
+          "endpoints": 2
+        }
+      }
+    },
+    {
+      "id": "get_model_exact_id_alpha_with_marker_endpoints",
+      "tool": "get_model",
+      "args": {"model_id": "vendor/model:free"},
+      "expect": {
+        "ok": true,
+        "query": "vendor/model:free",
+        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-a": true,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
+        "exact_gateways": [
+          "synthetic-a"
+        ],
+        "endpoints": [
+          {
+            "provider": "synthetic-a",
+            "model_id": "vendor/model:free",
+            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/model:free",
+              "name": "Vendor Model",
+              "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
+              "context_length": 131072,
+              "architecture": {
+                "input_modalities": [
+                  "text",
+                  "image"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature",
+                "max_tokens"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          },
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/model-free",
+            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/model-free",
+              "name": "Vendor Model Free",
+              "description": "Oracle case 1 beta endpoint: text input only.",
+              "context_length": 32768,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          }
+        ],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 1,
+          "endpoints": 2
+        }
+      }
+    },
+    {
+      "id": "get_model_shared_raw_id_two_endpoints",
+      "tool": "get_model",
+      "args": {"model_id": "vendor/shared"},
+      "expect": {
+        "ok": true,
+        "query": "vendor/shared",
+        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-a": true,
+          "synthetic-b": true,
+          "synthetic-c": false
+        },
+        "exact_gateways": [
+          "synthetic-a",
+          "synthetic-b"
+        ],
+        "endpoints": [
+          {
+            "provider": "synthetic-a",
+            "model_id": "vendor/shared",
+            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/shared",
+              "name": "Vendor Shared",
+              "description": "Shared raw id tracked by both synthetic providers.",
+              "context_length": 4096,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature",
+                "top_p"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          },
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/shared",
+            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/shared",
+              "name": "Vendor Shared",
+              "description": "Shared raw id tracked by both synthetic providers.",
+              "context_length": 4096,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature",
+                "top_p"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          }
+        ],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 2,
+          "endpoints": 2
+        }
+      }
+    },
+    {
+      "id": "get_model_unrelated_renamed_model_exact_only",
+      "tool": "get_model",
+      "args": {"model_id": "vendor/model-renamed"},
+      "expect": {
+        "ok": true,
+        "query": "vendor/model-renamed",
+        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-a": true,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
+        "exact_gateways": [
+          "synthetic-a"
+        ],
+        "endpoints": [
+          {
+            "provider": "synthetic-a",
+            "model_id": "vendor/model-renamed",
+            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "metadata": {
+              "id": "vendor/model-renamed",
+              "name": "Vendor Model Renamed",
+              "description": null,
+              "context_length": 65536,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          }
+        ],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 1,
+          "endpoints": 1
+        }
+      }
+    },
+    {
+      "id": "get_model_unknown_id_empty_success",
+      "tool": "get_model",
+      "args": {"model_id": "vendor/does-not-exist"},
+      "expect": {
+        "ok": true,
+        "query": "vendor/does-not-exist",
+        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
+        "exact_gateways": [],
+        "endpoints": [],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "get_model_padded_query_not_trimmed",
+      "tool": "get_model",
+      "args": {"model_id": " vendor/model"},
+      "expect": {
+        "ok": true,
+        "query": " vendor/model",
+        "snapshot_id": "e41fa425b8d5fccfc3da639400dde8402ff647f0a435e1c7c8c7ce58be6ee3c1",
+        "tick_epoch": 1759200000,
+        "exact_matches": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
+        "exact_gateways": [],
+        "endpoints": [],
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ],
+        "counts": {
+          "exact_matches": 0,
+          "endpoints": 0
+        }
+      }
+    }
+  ],
+  "marker_strip_rule": [
+    {"raw_id": "vendor/model", "stripped": "vendor/model"},
+    {"raw_id": "vendor/model:free", "stripped": "vendor/model"},
+    {"raw_id": "vendor/model-free", "stripped": "vendor/model"},
+    {"raw_id": "vendor/model_free", "stripped": "vendor/model"},
+    {"raw_id": "free:vendor/model", "stripped": "vendor/model"},
+    {"raw_id": "free_vendor/model", "stripped": "vendor/model"},
+    {"raw_id": "free:vendor/model:free", "stripped": "vendor/model"},
+    {"raw_id": "vendor/model:FREE", "stripped": "vendor/model"},
+    {"raw_id": "vendor/modfree", "stripped": "vendor/modfree"},
+    {"raw_id": "vendor/free", "stripped": "vendor/free"},
+    {"raw_id": "vendor/freetier", "stripped": "vendor/freetier"},
+    {"raw_id": "vendor/free-model", "stripped": "vendor/free-model"},
+    {"raw_id": "freetier", "stripped": "freetier"},
+    {"raw_id": "free", "stripped": "free"},
+    {"raw_id": ":free", "stripped": ":free"},
+    {"raw_id": "free:", "stripped": "free:"},
+    {"raw_id": "vendor/model-renamed", "stripped": "vendor/model-renamed"}
+  ]
+}
