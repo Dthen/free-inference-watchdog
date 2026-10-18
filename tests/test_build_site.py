@@ -413,9 +413,36 @@ def test_strip_free_marker_no_marker_unchanged():
     assert strip_free_marker("vendor-z/zero-priced-model") == "vendor-z/zero-priced-model"
 
 
+def test_strip_free_marker_bare_free_is_not_a_marker():
+    """Bare 'free' is the non-marker CONTROL, not an empty-result case.
+
+    It carries no delimiter, so NEITHER delimiter-bounded regex matches and
+    the id is returned untouched. Deliberately kept separate from the
+    empty-result guard: it never reaches the `s or model_id` fallback, so it
+    cannot detect a regression in that fallback.
+    """
+    from build_site import strip_free_marker
+    assert strip_free_marker("free") == "free"
+
+
+# Delimiter-only inputs: a "free" marker WITH its delimiter, but with nothing
+# else in the id. Each is matched by exactly one of the two delimiter-bounded
+# regexes, so stripping alone would leave "" — these are the inputs the
+# helper's empty-result guard exists for.
+EMPTY_RESULT_GUARD_INPUTS = [
+    ":free",  # trailing colon-delimited marker, nothing before it
+    "-free",  # trailing dash-delimited marker, nothing before it
+    "_free",  # trailing underscore-delimited marker, nothing before it
+    "free:",  # leading colon-delimited marker, nothing after it
+    "free-",  # leading dash-delimited marker, nothing after it
+    "free_",  # leading underscore-delimited marker, nothing after it
+]
+
+
 # Synthetic raw IDs for the idempotence guard — covers every marker form
-# the production helper supports plus boundary and empty-result cases.
-# These are NOT production ids; they exist only to pin the invariant.
+# the production helper supports plus namespace-boundary, non-marker and
+# delimiter-only (empty-result) inputs. These are NOT production ids; they
+# exist only to pin the invariant.
 SYNTHETIC_IDEMPOTENCE_IDS = [
     # Delimiter-bounded trailing markers
     "vendor-x/model-a:free",
@@ -423,12 +450,13 @@ SYNTHETIC_IDEMPOTENCE_IDS = [
     "vendor-x/model-c_free",
     # Delimiter-bounded leading marker
     "free-experiment",
-    # Non-marker identifiers (unchanged)
+    # Non-marker identifiers (unchanged); bare "free" has no delimiter at all
     "vendor-z/zero-priced-model",
+    "free",
     # Namespace boundary (marker in namespace, not at segment boundary)
     "vendor-g/free:free",
-    # Empty-result guard (bare "free" is not a marker)
-    "free",
+    # Empty-result inputs (delimiter-only; the guard returns the original)
+    *EMPTY_RESULT_GUARD_INPUTS,
 ]
 
 
@@ -436,8 +464,8 @@ def test_strip_free_marker_idempotent_on_synthetic_ids():
     """Idempotent: f(f(x)) == f(x) for every synthetic raw id.
 
     Covers all supported marker forms, non-marker identifiers, namespace
-    boundaries, and the empty-result guard. This is a portable invariant
-    test — it does NOT read the live production roster.
+    boundaries, and the delimiter-only empty-result inputs. This is a
+    portable invariant test — it does NOT read the live production roster.
     """
     from build_site import strip_free_marker
     for mid in SYNTHETIC_IDEMPOTENCE_IDS:
@@ -446,10 +474,19 @@ def test_strip_free_marker_idempotent_on_synthetic_ids():
         assert once == twice, f"not idempotent for {mid!r}: {once!r} vs {twice!r}"
 
 
-def test_strip_free_marker_never_returns_empty():
-    """Never returns '' — a bare 'free' returns 'free'."""
+@pytest.mark.parametrize("model_id", EMPTY_RESULT_GUARD_INPUTS)
+def test_strip_free_marker_never_returns_empty(model_id):
+    """Empty-result guard: a delimiter-only input returns its exact original.
+
+    Idempotence alone CANNOT pin this — with the guard removed f(x) == "" and
+    f("") == "" is still idempotent. Only the exact non-empty string returned
+    distinguishes the guarded helper from a fallback-less one.
+    """
     from build_site import strip_free_marker
-    assert strip_free_marker("free") == "free"
+    stripped = strip_free_marker(model_id)
+    assert stripped == model_id, (
+        f"empty-result guard returned {stripped!r}, want {model_id!r}"
+    )
 
 
 # ---------- Task 3: matrix rows grouped by display name ----------
