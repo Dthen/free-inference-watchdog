@@ -72,6 +72,20 @@ an absent property, and an empty array is always a valid array; those facts
 explain the types, not this project's null-means-unknown semantics. Still
 fixture/contract work only — no query/projection/validation implementation
 is imported or exercised.
+
+Unit 1c-b2 correction closes a filter-before-pagination oracle gap: the
+earlier 27 complete search goldens all kept unfiltered pagination separate
+from filtered queries, so a wrong "slice the registry, then filter the page"
+algorithm still matched every one of them. The appended
+search_shared_query_limit2_offset0 golden (query="shared", limit=2, offset=0
+over lookup.json) pins a filtered page that crosses two gateways while sharing
+one literal raw id (total_matches=2, returned_count=2, next_offset=null,
+counts gateways=2 / endpoints=2 / distinct_raw_ids=1 / marker_group_labels=1).
+The matrix's "slicing before filtering" entry now carries a GENUINE rule
+mutant that derives the unfiltered ordered catalogue from snapshot data,
+slices the window BEFORE filtering, and rebuilds a consistent (but wrongly
+empty) page with the correct unpaginated total — so the rejection proves wrong
+membership, never a truncated golden. Still fixture/contract work only.
 """
 
 import copy
@@ -1926,6 +1940,7 @@ SEARCH_REQUIRED_CASE_IDS = (
     "search_pagination_limit2_offset4_exhausted",
     "search_pagination_limit2_offset99_beyond_end",
     "search_provider_a_limit200_empty_query",
+    "search_shared_query_limit2_offset0",
     "search_text_case_extended_filters_normalize",
     "search_text_unicode_upper_echo_first",
     "search_text_unicode_lower_echo_second",
@@ -2593,6 +2608,32 @@ def test_search_pagination_pages_cross_provider_and_page_counts(
         "gateways": 1, "endpoints": 3, "distinct_raw_ids": 3,
         "marker_group_labels": 3}
 
+    # query="shared" + limit=2 + offset=0: the filter must run BEFORE the slice,
+    # so the page is the two shared endpoints (a then b), NOT the first two
+    # unfiltered registry rows. total_matches is the unpaginated match
+    # cardinality; one raw id crossing two gateways gives gateways=2 with
+    # distinct_raw_ids=1 / marker_group_labels=1.
+    filtered, _ = _search_case(cases_document,
+                               "search_shared_query_limit2_offset0")
+    assert filtered["fixture"] == "lookup.json"
+    assert filtered["args"] == {"query": "shared", "limit": 2, "offset": 0}
+    fexpect = filtered["expect"]
+    assert [(e["provider"], e["model_id"])
+            for e in fexpect["endpoints"]] == [
+        ("synthetic-a", "vendor/shared"), ("synthetic-b", "vendor/shared")]
+    assert fexpect["total_matches"] == 2
+    assert fexpect["returned_count"] == 2
+    assert fexpect["next_offset"] is None
+    assert fexpect["counts"] == {
+        "gateways": 2, "endpoints": 2, "distinct_raw_ids": 1,
+        "marker_group_labels": 1}
+    # Non-vacuous: the wrong slice-before-filter window is the first two
+    # UNFILTERED registry rows, which contain NO shared endpoint, so a weaker
+    # self-consistent scenario could not masquerade as this filtered page.
+    assert LOOKUP_ORDERED_PAIRS[:2] == (
+        ("synthetic-a", "vendor/model-renamed"),
+        ("synthetic-a", "vendor/model:free"))
+
 
 def test_search_text_normalization_and_literal_substring(cases_document):
     case, snap = _search_case(
@@ -2718,8 +2759,46 @@ def _corrupt_metadata_text_match(case, snap):
 
 
 def _corrupt_slice_before_filter(case, snap):
-    # Artifact of slicing the query-only match list before applying min=0.
-    case["expect"]["endpoints"] = case["expect"]["endpoints"][:1]
+    """Genuine wrong-order rule mutant (not a golden truncation): derive the
+    UNFILTERED ordered catalogue from snapshot DATA, take the requested
+    offset/limit window BEFORE evaluating the active filters, then keep only
+    matching pairs from that window. Totals stay the CORRECT unpaginated match
+    cardinality; the wrong page's rows/counts/returned_count/next_offset are
+    rebuilt from snapshot data so rejection proves wrong membership, not an
+    unrelated stale count.
+
+    On the appended filtered-page golden (query="shared", limit=2, offset=0)
+    the pre-sliced window is the first two registry rows, which match no
+    "shared" endpoint, so the emitted buggy page is EMPTY while total stays 2.
+    The checker rejects that empty page on membership/order -- the buggy result
+    is never accepted as a valid page."""
+    args = case["args"]
+    offset = args.get("offset", SEARCH_DEFAULT_OFFSET)
+    limit = args.get("limit", SEARCH_DEFAULT_LIMIT)
+    registry = sorted(
+        ((key, raw_id)
+         for key in snap["provider_order"]
+         for raw_id in snap["providers"][key]["model_ids"]),
+        key=lambda pair: (snap["provider_order"].index(pair[0]),
+                          _natural_key_contract(pair[1])))
+    window = registry[offset:offset + limit]
+    matched = set(_search_reference_pairs(snap, args))
+    page = [pair for pair in window if pair in matched]
+    expect = case["expect"]
+    expect["endpoints"] = [
+        _search_corrupt_row(snap, provider, raw_id)
+        for provider, raw_id in page]
+    expect["total_matches"] = len(matched)
+    expect["returned_count"] = len(page)
+    expect["next_offset"] = (
+        offset + len(page) if offset + len(page) < len(matched) else None)
+    expect["counts"] = {
+        "gateways": len({provider for provider, _ in page}),
+        "endpoints": len(page),
+        "distinct_raw_ids": len({raw_id for _, raw_id in page}),
+        "marker_group_labels": len(
+            {_strip_marker_contract(raw_id) for _, raw_id in page}),
+    }
 
 
 def _corrupt_unsorted_page_window(case, snap):
@@ -2766,7 +2845,7 @@ SEARCH_CORRUPTIONS = (
     ("JSON-metadata text match",
      "search_text_metadata_array_not_searched", _corrupt_metadata_text_match),
     ("slicing before filtering",
-     "search_metadata_reasoning_min_context_zero", _corrupt_slice_before_filter),
+     "search_shared_query_limit2_offset0", _corrupt_slice_before_filter),
     ("unsorted page window (slice before sort)",
      "search_pagination_limit2_offset2_crosses_provider",
      _corrupt_unsorted_page_window),

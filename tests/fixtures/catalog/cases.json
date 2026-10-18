@@ -3027,6 +3027,137 @@
           "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
+    },
+    {
+      "id": "search_shared_query_limit2_offset0",
+      "tool": "search_models",
+      "fixture": "lookup.json",
+      "args": {
+        "query": "shared",
+        "limit": 2,
+        "offset": 0
+      },
+      "expect": {
+        "ok": true,
+        "query": "shared",
+        "filters": {
+          "provider": null,
+          "min_context_length": null,
+          "input_modalities": null,
+          "supported_parameters": null
+        },
+        "limit": 2,
+        "offset": 0,
+        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "tick_epoch": 1759200000,
+        "provider_staleness": {
+          "synthetic-a": false,
+          "synthetic-b": false,
+          "synthetic-c": false
+        },
+        "endpoints": [
+          {
+            "provider": "synthetic-a",
+            "model_id": "vendor/shared",
+            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "name": "Vendor Shared",
+            "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
+            "context_length": 131072,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "supported_parameters": [
+              "temperature",
+              "max_tokens"
+            ],
+            "unknown_fields": [],
+            "metadata": {
+              "id": "vendor/shared",
+              "name": "Vendor Shared",
+              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
+              "context_length": 131072,
+              "architecture": {
+                "input_modalities": [
+                  "text"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature",
+                "max_tokens"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          },
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/shared",
+            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+            "api_type": "openai",
+            "stale": false,
+            "name": "Vendor Shared",
+            "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
+            "context_length": 32768,
+            "input_modalities": [
+              "text",
+              "image"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "supported_parameters": [
+              "temperature",
+              "top_p"
+            ],
+            "unknown_fields": [],
+            "metadata": {
+              "id": "vendor/shared",
+              "name": "Vendor Shared",
+              "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
+              "context_length": 32768,
+              "architecture": {
+                "input_modalities": [
+                  "text",
+                  "image"
+                ],
+                "output_modalities": [
+                  "text"
+                ]
+              },
+              "supported_parameters": [
+                "temperature",
+                "top_p"
+              ],
+              "pricing": {
+                "prompt": "0",
+                "completion": "0"
+              }
+            }
+          }
+        ],
+        "total_matches": 2,
+        "returned_count": 2,
+        "next_offset": null,
+        "counts": {
+          "gateways": 2,
+          "endpoints": 2,
+          "distinct_raw_ids": 1,
+          "marker_group_labels": 1
+        },
+        "caveats": [
+          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
+        ]
+      }
     }
   ],
   "marker_strip_rule": [
