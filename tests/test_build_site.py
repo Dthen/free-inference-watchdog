@@ -413,14 +413,34 @@ def test_strip_free_marker_no_marker_unchanged():
     assert strip_free_marker("vendor-z/zero-priced-model") == "vendor-z/zero-priced-model"
 
 
-def test_strip_free_marker_idempotent_on_live_roster():
-    """Idempotent: f(f(x)) == f(x) for every id in the live roster."""
-    import json
+# Synthetic raw IDs for the idempotence guard — covers every marker form
+# the production helper supports plus boundary and empty-result cases.
+# These are NOT production ids; they exist only to pin the invariant.
+SYNTHETIC_IDEMPOTENCE_IDS = [
+    # Delimiter-bounded trailing markers
+    "vendor-x/model-a:free",
+    "vendor-x/model-b-free",
+    "vendor-x/model-c_free",
+    # Delimiter-bounded leading marker
+    "free-experiment",
+    # Non-marker identifiers (unchanged)
+    "vendor-z/zero-priced-model",
+    # Namespace boundary (marker in namespace, not at segment boundary)
+    "vendor-g/free:free",
+    # Empty-result guard (bare "free" is not a marker)
+    "free",
+]
+
+
+def test_strip_free_marker_idempotent_on_synthetic_ids():
+    """Idempotent: f(f(x)) == f(x) for every synthetic raw id.
+
+    Covers all supported marker forms, non-marker identifiers, namespace
+    boundaries, and the empty-result guard. This is a portable invariant
+    test — it does NOT read the live production roster.
+    """
     from build_site import strip_free_marker
-    roster_path = REPO / "state" / "roster.json"
-    roster = json.loads(roster_path.read_text(encoding="utf-8"))
-    all_ids = [mid for models in roster["providers"].values() for mid in models]
-    for mid in all_ids:
+    for mid in SYNTHETIC_IDEMPOTENCE_IDS:
         once = strip_free_marker(mid)
         twice = strip_free_marker(once)
         assert once == twice, f"not idempotent for {mid!r}: {once!r} vs {twice!r}"
@@ -748,49 +768,120 @@ def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
     ]
 
 
-def test_live_roster_groups_match_plan_evidence(tmp_path):
-    """Task 3 live-data guard: the live roster must render as exactly one
-    row per distinct display name (the `name` field from provider_models,
-    or raw id as fallback). Pin the current group count so future
-    roster changes update the pin in the same commit."""
+# Synthetic roster for the rendering guard — multi-provider with shared and
+# distinct raw IDs, explicit display-name metadata, and a missing-name fallback.
+# This is NOT production data; it tests the builder's grouping behavior.
+SYNTHETIC_RENDER_ROSTER = {
+    "tick_epoch": 1787721434,
+    "providers": {
+        "nous": [
+            "vendor-x/poolside-s-2.1:free",      # variant A
+            "vendor-x/standalone-1:free",        # single-variant
+        ],
+        "tokenrouter": [
+            "vendor-x/poolside-s-2.1-free",      # variant B
+        ],
+        "kilo": [
+            "vendor-x/poolside-s-2.1-free",      # variant B (overlap)
+            "vendor-x/poolside-s-2.1:free",      # variant A (overlap)
+            "vendor-x/no-name-fallback:free",    # no provider_models entry
+        ],
+    },
+    "provider_models": {
+        "nous": {
+            "vendor-x/poolside-s-2.1:free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+            "vendor-x/standalone-1:free": {
+                "name": "vendor-x/standalone-1",
+                "context_length": 131072,
+                "architecture": {"input_modalities": ["text"]},
+            },
+        },
+        "tokenrouter": {
+            "vendor-x/poolside-s-2.1-free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+        },
+        "kilo": {
+            "vendor-x/poolside-s-2.1-free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+            "vendor-x/poolside-s-2.1:free": {
+                "name": "vendor-x/poolside-s-2.1",
+                "context_length": 262144,
+                "architecture": {"input_modalities": ["text"]},
+            },
+            # vendor-x/no-name-fallback:free has NO provider_models entry
+            # -> builder falls back to raw id as group name
+        },
+    },
+    "stale_providers": [],
+}
+
+# Expected group labels, stated explicitly and independently of the renderer.
+# The builder groups by provider_models `name` field, falling back to raw id.
+# poolside-s-2.1 and standalone-1 have explicit names; no-name-fallback has
+# none, so its group name is the raw id (with marker).
+EXPECTED_SYNTHETIC_GROUPS = [
+    "vendor-x/no-name-fallback:free",
+    "vendor-x/poolside-s-2.1",
+    "vendor-x/standalone-1",
+]
+
+# Every fixture raw endpoint (gateway, raw_id) must remain reachable in the
+# rendered expansion rows.
+EXPECTED_SYNTHETIC_ENDPOINTS = [
+    ("nous", "vendor-x/poolside-s-2.1:free"),
+    ("nous", "vendor-x/standalone-1:free"),
+    ("tokenrouter", "vendor-x/poolside-s-2.1-free"),
+    ("kilo", "vendor-x/poolside-s-2.1-free"),
+    ("kilo", "vendor-x/poolside-s-2.1:free"),
+    ("kilo", "vendor-x/no-name-fallback:free"),
+]
+
+
+def test_synthetic_roster_groups_match_expected_names(tmp_path):
+    """Rendering guard: a synthetic multi-provider roster renders one row per
+    distinct display name (provider_models `name` or raw-id fallback), and
+    every raw endpoint remains reachable in the expansion.
+
+    This test uses ONLY synthetic fixture data — it does NOT read the live
+    production roster. It tests existing rendering behaviour, not a new
+    model-identity policy.
+    """
     _seed_logo(tmp_path)
-    live_roster_path = REPO / "state" / "roster.json"
-    live_roster = json.loads(live_roster_path.read_text(encoding="utf-8"))
-    proc = _run_builder(live_roster, tmp_path)
+    proc = _run_builder(SYNTHETIC_RENDER_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
-    # Every raw id in the roster must be reachable from a group row's #.
-    # The strongest invariant: every unique display name (from provider_models
-    # name field, or raw id fallback) appears as a row.
-    from build_site import strip_free_marker
-    all_ids = sorted({m for models in live_roster["providers"].values() for m in models})
-    # Compute expected groups: for each id, find its name from provider_models
-    # The builder uses DISPLAY_ORDER to pick the first gateway with a name
-    from build_site import DISPLAY_ORDER
-    provider_models = live_roster.get("provider_models", {})
-    expected_groups = set()
-    for mid in all_ids:
-        name = mid  # fallback: raw id
-        for gw in DISPLAY_ORDER:
-            if mid in live_roster["providers"].get(gw, []):
-                model_info = provider_models.get(gw, {}).get(mid, {})
-                n = model_info.get("name")
-                if n:
-                    name = n
-                    break
-        expected_groups.add(name)
-    expected_groups = sorted(expected_groups)
-    # Each group is in its own <tbody>; collect name-row labels from all
+
+    # Collect rendered group names from all tbodies
     tbodies = re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
     names = []
     for tbody in tbodies:
-        # See _NAME_ROW_RE: the name is the last span's text, not bare markup.
         names.extend(re.findall(_NAME_ROW_RE, tbody))
-    assert names == expected_groups, (
-        f"live roster: groups must equal sorted unique display names.\n"
-        f"  expected ({len(expected_groups)}): {expected_groups}\n"
+
+    # The rendered groups must equal the expected sorted group labels
+    assert names == EXPECTED_SYNTHETIC_GROUPS, (
+        f"synthetic roster: groups must equal sorted unique display names.\n"
+        f"  expected ({len(EXPECTED_SYNTHETIC_GROUPS)}): {EXPECTED_SYNTHETIC_GROUPS}\n"
         f"  got      ({len(names)}): {names}"
     )
+
+    # Every fixture raw endpoint must appear in the rendered expansion rows
+    all_trs = re.findall(r"<tr(?:\s+[^>]*)?>.*?</tr>", html, re.S)
+    expand_rows = [r for r in all_trs if 'class="expand"' in r]
+    for gw, raw_id in EXPECTED_SYNTHETIC_ENDPOINTS:
+        assert any(
+            f'<span class="wire-gw">{gw}</span>' in r and raw_id in r
+            for r in expand_rows
+        ), f"endpoint ({gw}, {raw_id}) not reachable in rendered expansion"
 
 
 # ---------- Task 4: expandable rows with API wiring panel --------------------
