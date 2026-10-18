@@ -262,6 +262,53 @@ valid synthetic snapshot that distinguishes unknown from known-empty.
   object** of the exact `(provider, raw model_id)` pair, **never the legacy
   raw metadata**.
 
+### Structural validation of published snapshots (frozen rules)
+
+A published snapshot **object** is validated strictly, independently of the
+producer. Every structural failure uses one shared envelope: top-level fields
+are **exactly** `ok` and `error`, `ok` strictly `false`, and `error` carrying
+**exactly** `code` and `message` — never a `parameter`, raw value, local path,
+source/cache datum or partial payload. Two literals exist: `invalid_snapshot` /
+`Invalid catalogue snapshot.` and `unsupported_schema_version` /
+`Unsupported catalogue schema version.`
+
+- **Order of checks.** A non-object snapshot, a wrong required-field set and a
+  non-strict-integer `schema_version` (bool, string or `null`) are all
+  `invalid_snapshot`. `unsupported_schema_version` applies **only** when a
+  well-typed strict integer version differs from `1`. The top-level
+  object/required-field/version-TYPE checks precede the version VALUE check,
+  which precedes every v1-specific body check.
+- **Strict published-object rejection versus producer projection.** An
+  already-PUBLISHED snapshot object that is malformed is rejected whole, never
+  repaired, coerced or degraded. Missing or malformed OPTIONAL upstream
+  metadata is a SEPARATE, producer-side boundary: it already projects to
+  `null`/unknown as documented above, and that projection is unchanged.
+- **Hash verification stays load-bearing.** `snapshot_id` must still equal the
+  SHA-256 of the canonical body excluding the field. A well-shaped but wrong
+  64-hex value, and a malformed value, are both rejected; `snapshot_id` is
+  never treated as a merely well-shaped opaque string.
+- **Generic schema versus synthetic fixture policy.** The PUBLIC schema itself
+  permits a legitimately empty registry (`provider_order` empty with
+  `providers` empty), provider keys that are arbitrary nonempty strings (not
+  only `synthetic-*`), and registries in which every provider tracks at least
+  one id. `provider_order` stays unique and must match the provider map keys
+  exactly, and zero-ID providers are permitted and retained (never required).
+  The `synthetic-` namespace, a nonempty registry and at least one zero-ID
+  provider are TEST-FIXTURE POLICY, not public schema rules.
+- **Wiring.** `chat_completions_url` must be a nonempty absolute
+  `http`/`https` URL with a hostname, containing no userinfo, no fragment and
+  no ASCII whitespace or control character; the original string is preserved
+  verbatim. This is purely syntactic — no DNS/network probing, no public-IP
+  allowlist, no provider inference and no URL rewriting. Query strings are
+  not automatically forbidden.
+- **Warning order.** Snapshot warning codes are deduplicated in the frozen
+  vocabulary order; a `null` tick still requires `tick_epoch_unknown`.
+
+This structural contract does NOT settle raw-JSON numeric lexeme handling,
+duplicate-member handling or canonical-language/JS-parity questions: those
+belong to a separate raw-JSON/canonical-boundary unit. No runtime validator,
+package or JS implementation is claimed here.
+
 ### Tool surface (frozen names)
 
 Five tools, names stable; `watchdog_status` reports **published catalogue

@@ -138,6 +138,24 @@ every previously frozen success case's arguments stay accepted. No production
 validator, shared schema, package or runtime code is imported or exercised;
 the frozen constants, README subsection and wrong-rule probes remain contract
 evidence only.
+
+Unit 1d-c2a adds structural-failure fixtures and generic-schema controls.
+`structural-cases.json` is a clearly-labelled structural RULE TABLE (NOT a
+valid snapshot and NOT a query result): each invalid row is a single-fault
+literal set/delete mutation of an existing valid synthetic base, RESEALED so
+hash equality is TRUE before its defect is tested, and carries the COMPLETE
+literal two-field error envelope (`invalid_snapshot` / `Invalid catalogue
+snapshot.`, or `unsupported_schema_version` for a well-typed integer version
+other than 1). The generic `_assert_public_snapshot_contract` was extracted
+from the old validator and enforces public shape/types/canonical-hash/metadata
+while permitting an empty registry, arbitrary nonempty keys and all-nonempty
+registries; `_assert_snapshot_contract` remains the fixture-policy wrapper
+(synthetic namespace, nonempty registry, at least one zero-ID provider) so
+every old call site still runs BOTH layers. Explicit container guards turn
+malformed JSON-compatible input into intended assertion failures. Still
+fixture/contract work only: raw-JSON numeric/depth/duplicate-member handling
+and JS parity remain a separate c2b boundary, and no runtime validator,
+package or query module is imported or exercised.
 """
 
 import copy
@@ -146,6 +164,7 @@ import json
 import math
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -366,29 +385,86 @@ def _natural_key_contract(raw_id):
 # ---------- shared snapshot-contract integrity ----------
 
 
-def _assert_snapshot_contract(snap):
-    """Every integrity assertion of the frozen v1 snapshot contract.
-    Applied to any fixture snapshot: unit 1a pins basic.json, unit 1b
-    pins lookup.json, later units pin their own fixtures."""
-    assert set(snap) == TOP_LEVEL_FIELDS
+def _assert_wiring(url, key):
+    """SYNTACTIC chat-completions wiring validation (unit 1d-c2a): a nonempty
+    absolute `http`/`https` URL with a hostname, no userinfo, no fragment and
+    no ASCII whitespace/control character. Purely syntactic — no DNS/network
+    probing, no public-IP allowlist, no provider inference and no URL
+    rewriting; the original string is preserved verbatim.
+    `urllib.parse.urlsplit` alone does not validate, so its components are
+    checked explicitly."""
+    assert isinstance(url, str) and url, (
+        f"provider {key}: chat_completions_url must be a nonempty string")
+    for ch in url:
+        code = ord(ch)
+        assert not (code <= 0x20 or code == 0x7F), (
+            f"provider {key}: chat_completions_url must not contain ASCII "
+            "whitespace or control characters")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        parts = None
+    assert parts is not None, (
+        f"provider {key}: chat_completions_url is not a parseable URL")
+    assert parts.scheme in ("http", "https"), (
+        f"provider {key}: chat_completions_url must be an absolute http(s) URL")
+    assert parts.netloc and parts.hostname, (
+        f"provider {key}: chat_completions_url must carry a hostname")
+    assert parts.username is None and parts.password is None, (
+        f"provider {key}: chat_completions_url must not carry userinfo")
+    assert not parts.fragment, (
+        f"provider {key}: chat_completions_url must not carry a fragment")
+
+
+def _assert_public_snapshot_contract(snap):
+    """TEST-LOCAL generic checker for the PUBLIC v1 snapshot shape: the frozen
+    field sets, types, canonical-hash equality, projected metadata nullability,
+    warning vocabulary/order and safe numeric bounds.
+
+    The PUBLIC schema itself permits an empty registry, arbitrary nonempty
+    provider keys and all-providers-nonempty registries — the synthetic
+    namespace, the nonempty registry and the zero-ID provider are TEST-FIXTURE
+    POLICY enforced by `_assert_snapshot_contract` below, not here. Container
+    guards are explicit so a malformed JSON-compatible object yields an
+    intended AssertionError, never an incidental
+    TypeError/KeyError/AttributeError."""
+    assert isinstance(snap, dict), "snapshot must be a JSON object"
+    assert set(snap) == TOP_LEVEL_FIELDS, (
+        f"unexpected top-level field set "
+        f"{sorted(set(snap) ^ TOP_LEVEL_FIELDS)}")
 
     version = snap["schema_version"]
-    assert isinstance(version, int) and not isinstance(version, bool)
-    assert version == 1
+    assert isinstance(version, int) and not isinstance(version, bool), \
+        "schema_version must be a strict integer"
+    assert version == 1, "schema_version must be exactly 1"
 
     snapshot_id = snap["snapshot_id"]
-    assert isinstance(snapshot_id, str)
-    assert re.fullmatch(r"[0-9a-f]{64}", snapshot_id)
+    assert isinstance(snapshot_id, str), "snapshot_id must be a string"
+    assert re.fullmatch(r"[0-9a-f]{64}", snapshot_id), \
+        "snapshot_id must be 64 lowercase hex characters"
     body = {k: v for k, v in snap.items() if k != "snapshot_id"}
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
                            ensure_ascii=True).encode("utf-8")
-    assert snapshot_id == hashlib.sha256(canonical).hexdigest()
+    assert snapshot_id == hashlib.sha256(canonical).hexdigest(), \
+        "snapshot_id must equal the canonical body hash"
+
+    warnings = snap["warnings"]
+    assert isinstance(warnings, list), "warnings must be a list"
+    assert all(isinstance(w, str) for w in warnings), \
+        "warning codes must be strings"
+    assert set(warnings) <= WARNING_CODES, (
+        f"unknown warning code(s) {sorted(set(warnings) - WARNING_CODES)}")
+    assert len(warnings) == len(set(warnings)), \
+        "warning codes must be deduplicated"
+    assert warnings == [code for code in WARNING_ORDER
+                        if code in set(warnings)], \
+        "warning codes must follow the frozen vocabulary order"
 
     tick = snap["tick_epoch"]
     if tick is None:
         # Documented nullable observation epoch (unit 1c-c): an unknown tick
         # must be flagged, so a null can never be mistaken for a healthy tick.
-        assert "tick_epoch_unknown" in snap["warnings"], \
+        assert "tick_epoch_unknown" in warnings, \
             "a null tick_epoch requires the tick_epoch_unknown warning"
     else:
         # A non-null tick stays a strict safe non-negative integer; bool/float/
@@ -399,63 +475,75 @@ def _assert_snapshot_contract(snap):
             "tick_epoch must be a safe nonnegative int"
 
     cadence = snap["cadence_s"]
-    assert isinstance(cadence, int) and not isinstance(cadence, bool)
-    assert cadence > 0
+    assert isinstance(cadence, int) and not isinstance(cadence, bool), \
+        "cadence_s must be a strict integer"
+    assert cadence > 0, "cadence_s must be positive"
 
     order = snap["provider_order"]
-    assert isinstance(order, list)
-    assert order, "provider_order must list active providers"
-    assert all(isinstance(key, str) and key for key in order)
+    providers = snap["providers"]
+    assert isinstance(order, list), "provider_order must be a list"
+    assert isinstance(providers, dict), "providers must be a JSON object"
+    assert all(isinstance(key, str) and key for key in order), \
+        "provider_order entries must be nonempty strings"
     assert len(order) == len(set(order)), "provider_order has duplicates"
-    assert set(order) == set(snap["providers"])
+    assert set(order) == set(providers), \
+        "provider_order must exactly match the provider map keys"
 
-    # Contract: provider_order includes providers with zero tracked IDs.
-    empty = [key for key, prov in snap["providers"].items()
-             if not prov["model_ids"]]
-    assert empty, "fixture must include a zero-ID provider"
-    for key in empty:
-        assert key in order
-
-    for key, prov in snap["providers"].items():
-        assert key.startswith(SYNTHETIC_PROVIDER_PREFIX)
-        assert set(prov) == PROVIDER_FIELDS
-        assert isinstance(prov["display_name"], str) and prov["display_name"]
-        assert isinstance(prov["chat_completions_url"], str)
-        assert isinstance(prov["api_type"], str) and prov["api_type"]
+    for key, prov in providers.items():
+        assert isinstance(key, str) and key, \
+            "a provider key must be a nonempty string"
+        assert isinstance(prov, dict), \
+            f"provider {key}: entry must be a JSON object"
+        assert set(prov) == PROVIDER_FIELDS, (
+            f"provider {key}: unexpected field set "
+            f"{sorted(set(prov) ^ PROVIDER_FIELDS)}")
+        assert isinstance(prov["display_name"], str) and prov["display_name"], \
+            f"provider {key}: display_name must be a nonempty string"
+        _assert_wiring(prov["chat_completions_url"], key)
+        assert isinstance(prov["api_type"], str) and prov["api_type"], \
+            f"provider {key}: api_type must be a nonempty string"
         ids = prov["model_ids"]
-        assert isinstance(ids, list)
-        assert all(isinstance(i, str) and i for i in ids)
-        assert ids == sorted(set(ids)), "model_ids must be sorted+deduplicated"
-        assert set(prov["models"]) == set(ids), \
-            "models must be keyed by exactly the tracked raw IDs"
-        assert isinstance(prov["stale"], bool)
+        assert isinstance(ids, list), f"provider {key}: model_ids must be a list"
+        assert all(isinstance(i, str) and i for i in ids), \
+            f"provider {key}: model_ids entries must be nonempty strings"
+        assert ids == sorted(set(ids)), \
+            f"provider {key}: model_ids must be sorted+deduplicated"
+        models = prov["models"]
+        assert isinstance(models, dict), \
+            f"provider {key}: models must be a JSON object"
+        assert set(models) == set(ids), \
+            f"provider {key}: models must be keyed by exactly the tracked raw IDs"
+        assert isinstance(prov["stale"], bool), \
+            f"provider {key}: stale must be a boolean"
 
-    for prov in snap["providers"].values():
-        for raw_id, model in prov["models"].items():
-            assert set(model) == MODEL_FIELDS
-            assert model["id"] == raw_id
-            assert isinstance(model["name"], str) and model["name"]
+        for raw_id, model in models.items():
+            assert isinstance(model, dict), \
+                f"provider {key}: model {raw_id} must be a JSON object"
+            assert set(model) == MODEL_FIELDS, (
+                f"provider {key}/{raw_id}: unexpected projected field set "
+                f"{sorted(set(model) ^ MODEL_FIELDS)}")
+            assert model["id"] == raw_id, \
+                f"provider {key}/{raw_id}: model id must equal its map key"
+            assert isinstance(model["name"], str) and model["name"], \
+                f"provider {key}/{raw_id}: name must be a nonempty string"
             assert model["description"] is None or \
-                isinstance(model["description"], str)
+                isinstance(model["description"], str), \
+                f"provider {key}/{raw_id}: description must be a string or null"
             ctx = model["context_length"]
             assert ctx is None or (
                 isinstance(ctx, int) and not isinstance(ctx, bool)
                 and 0 <= ctx <= MAX_SAFE_INT), \
-                "context_length must be a safe non-negative int or null"
-            assert set(model["architecture"]) == ARCHITECTURE_FIELDS
+                f"provider {key}/{raw_id}: context_length must be a safe " \
+                "non-negative int or null"
+            architecture = model["architecture"]
+            assert isinstance(architecture, dict), \
+                f"provider {key}/{raw_id}: architecture must be a JSON object"
+            assert set(architecture) == ARCHITECTURE_FIELDS, \
+                f"provider {key}/{raw_id}: architecture field set"
             for modality in ("input_modalities", "output_modalities"):
-                _assert_string_list_or_null(model["architecture"][modality])
+                _assert_string_list_or_null(architecture[modality])
             _assert_string_list_or_null(model["supported_parameters"])
             _assert_pricing_contract(model["pricing"])
-
-    warnings = snap["warnings"]
-    assert isinstance(warnings, list)
-    assert all(isinstance(w, str) for w in warnings)
-    assert set(warnings) <= WARNING_CODES
-
-    keys = set(order)
-    assert keys, "fixture must contain providers"
-    assert all(key.startswith(SYNTHETIC_PROVIDER_PREFIX) for key in keys)
 
     def walk(node):
         if isinstance(node, dict):
@@ -468,6 +556,29 @@ def _assert_snapshot_contract(snap):
                 walk(item)
 
     walk(snap)
+
+
+def _assert_snapshot_contract(snap):
+    """TEST-FIXTURE POLICY wrapper around the generic public-snapshot contract
+    (unit 1d-c2a extraction). Runs the FULL generic public contract first,
+    then adds the synthetic FIXTURE policy: every committed fixture snapshot
+    lives in the `synthetic-` provider namespace, is a NONEMPTY registry and
+    keeps at least one zero-ID provider. Existing call sites keep running BOTH
+    layers; this ADDS policy and relaxes no generic assertion."""
+    _assert_public_snapshot_contract(snap)
+
+    order = snap["provider_order"]
+    assert order, "fixture must contain providers"
+    for key in order:
+        assert key.startswith(SYNTHETIC_PROVIDER_PREFIX), \
+            f"fixture provider key must stay in the synthetic namespace: {key}"
+
+    # Contract: provider_order includes providers with zero tracked IDs.
+    providers = snap["providers"]
+    empty = [key for key, prov in providers.items() if not prov["model_ids"]]
+    assert empty, "fixture must include a zero-ID provider"
+    for key in empty:
+        assert key in order
 
 
 # ---------- fixture parsing ----------
@@ -6733,3 +6844,515 @@ def test_readme_freezes_argument_json_integer_boundary_and_separation():
     ):
         assert phrase in text, (
             f"argument subsection missing integer/separation rule: {phrase}")
+
+
+# ---------- unit 1d-c2a: structural snapshot failures and generic controls ----------
+#
+# Contract-only stage. `structural-cases.json` is a clearly-labelled
+# structural RULE TABLE (explicitly NOT a valid snapshot and NOT a query
+# result). Each invalid row names a small literal set/delete mutation of an
+# existing valid synthetic base snapshot, is RESEALED so hash equality is TRUE
+# before the semantic defect is tested, and carries the COMPLETE literal
+# two-field structural error envelope. The validation below is a TEST-LOCAL
+# restatement of the published structural rules — a fixture checker, never
+# production validation, and NO package implementation module is imported.
+# `_assert_public_snapshot_contract` is the generic PUBLIC contract checker
+# (empty registries, arbitrary nonempty keys and all-nonempty registries are
+# legal); `_assert_snapshot_contract` keeps the old fixture-policy wrapper.
+# Raw-JSON numeric/depth/duplicate-member handling and canonical-language/JS
+# parity remain a separate c2b boundary, not settled here.
+
+STRUCTURAL_FIXTURE_NAME = "structural-cases.json"
+STRUCTURAL_TABLE_DOC = FIXTURE_DIR / STRUCTURAL_FIXTURE_NAME
+
+# The two frozen STRUCTURAL error codes and their literal messages. Unlike the
+# argument-error envelope there is NO `parameter` field: `error` is exactly
+# `code` + `message`.
+STRUCTURAL_ERROR_MESSAGES = {
+    "invalid_snapshot": "Invalid catalogue snapshot.",
+    "unsupported_schema_version": "Unsupported catalogue schema version.",
+}
+STRUCTURAL_ENVELOPE_FIELDS = frozenset({"ok", "error"})
+STRUCTURAL_ERROR_FIELDS = frozenset({"code", "message"})
+STRUCTURAL_TABLE_FIELDS = frozenset(
+    {"description", "invalid_cases", "valid_controls"})
+STRUCTURAL_INVALID_ROW_FIELDS = frozenset(
+    {"id", "category", "base_fixture", "changes", "reseal", "expect"})
+STRUCTURAL_VALID_ROW_FIELDS = frozenset(
+    {"id", "category", "base_fixture", "changes", "reseal"})
+# Fields a structural error must NEVER carry: an argument-style parameter, a
+# tool/state path, source/cache data, snapshot provenance, staleness, partial
+# data, counts or a snapshot vocabulary leak.
+STRUCTURAL_FORBIDDEN_FIELDS = frozenset({
+    "parameter", "tool", "state_root", "path", "paths", "source", "cache",
+    "retrieval", "snapshot_id", "tick_epoch", "provider_staleness", "stale",
+    "counts", "partial", "warnings", "providers", "provider_order",
+})
+# The three controls whose ONLY defect is TEST-FIXTURE POLICY, not the public
+# schema: the generic core accepts each, the synthetic wrapper rejects each.
+STRUCTURAL_POLICY_CONTROLS = frozenset({
+    "control_empty_registry",
+    "control_all_provider_nonempty",
+    "control_non_synthetic_provider_key",
+})
+REQUIRED_STRUCTURAL_CATEGORIES = (
+    "top_level", "schema_version", "provider_map", "provider_order",
+    "provider_entry", "provider_scalar", "wiring", "model_ids", "models_map",
+    "model_entry", "published_malformed_optional", "tick_epoch", "cadence",
+    "warnings", "snapshot_id",
+)
+REQUIRED_STRUCTURAL_VALID_CATEGORIES = (
+    "untouched", "nullable_forms", "empty_registry", "all_provider_nonempty",
+    "non_synthetic_provider_key", "warning_order",
+)
+REQUIRED_STRUCTURAL_CASE_IDS = (
+    "top_level_missing_snapshot_id",
+    "version_unsupported_two",
+    "provider_order_duplicate",
+    "model_ids_unsorted",
+    "wiring_userinfo",
+    "hash_valid_format_wrong_value",
+    "model_pricing_extra_key",
+    "control_empty_registry",
+    "control_non_synthetic_provider_key",
+)
+
+
+@pytest.fixture(scope="module")
+def structural_table():
+    assert STRUCTURAL_TABLE_DOC.is_file(), (
+        "structural rule table fixture is missing: "
+        f"{STRUCTURAL_TABLE_DOC.name}")
+    return _load_strict(STRUCTURAL_TABLE_DOC)
+
+
+def _structural_finite(node, cid):
+    """No NaN/Infinity may appear in the structural rule table."""
+    if isinstance(node, bool):
+        return
+    if isinstance(node, float):
+        assert math.isfinite(node), f"{cid}: non-finite number in the table"
+    elif isinstance(node, dict):
+        for value in node.values():
+            _structural_finite(value, cid)
+    elif isinstance(node, list):
+        for value in node:
+            _structural_finite(value, cid)
+
+
+def _structural_apply(snap, changes, cid):
+    """Apply the row's small literal change list. Only `set`, `delete` and the
+    dedicated top-level `replace_root` form exist — no JSON-Patch framework, no
+    unknown-operation fallback."""
+    for change in changes:
+        assert isinstance(change, dict) and isinstance(change.get("op"), str), \
+            f"{cid}: each change must be an object with a string `op`"
+        op = change["op"]
+        if op == "replace_root":
+            snap = copy.deepcopy(change["value"])
+            continue
+        path = change["path"]
+        assert isinstance(path, list) and path and \
+            all(isinstance(c, str) or (isinstance(c, int)
+                                       and not isinstance(c, bool))
+                for c in path), \
+            f"{cid}: change path must be a nonempty list of components"
+        parent = snap
+        for component in path[:-1]:
+            parent = parent[component]
+        if op == "delete":
+            del parent[path[-1]]
+        elif op == "set":
+            parent[path[-1]] = copy.deepcopy(change["value"])
+        else:
+            raise AssertionError(f"{cid}: unknown structural change op {op!r}")
+    return snap
+
+
+def _structural_snapshot(row):
+    """The row's base fixture with its changes applied and — unless the row
+    deliberately probes the hash — resealed, so hash equality is TRUE before
+    the semantic defect is tested."""
+    base = _load_strict(FIXTURE_DIR / row["base_fixture"])
+    snap = _structural_apply(copy.deepcopy(base), row["changes"], row["id"])
+    if row["reseal"]:
+        assert isinstance(snap, dict), \
+            f"{row['id']}: only an object body can be resealed"
+        _reseal_snapshot(snap)
+    return snap
+
+
+def _structural_error(code):
+    return {"ok": False, "error": {
+        "code": code, "message": STRUCTURAL_ERROR_MESSAGES[code]}}
+
+
+def _public_structural_error(snap):
+    """TEST-LOCAL restatement of the frozen STRUCTURAL error precedence:
+    returns the exact two-field semantic envelope for a snapshot the generic
+    public contract rejects, or None when it accepts it. A non-object input, a
+    wrong required-field set and a non-strict-integer version are all
+    `invalid_snapshot`; `unsupported_schema_version` applies ONLY when a
+    well-typed strict integer version differs from 1, so the object/required-
+    field/version-TYPE checks precede the version VALUE check, which precedes
+    every v1-specific body check."""
+    try:
+        _assert_public_snapshot_contract(snap)
+    except AssertionError:
+        if not isinstance(snap, dict) or set(snap) != TOP_LEVEL_FIELDS:
+            return _structural_error("invalid_snapshot")
+        version = snap["schema_version"]
+        if not (isinstance(version, int) and not isinstance(version, bool)):
+            return _structural_error("invalid_snapshot")
+        if version != 1:
+            return _structural_error("unsupported_schema_version")
+        return _structural_error("invalid_snapshot")
+    return None
+
+
+def _assert_structural_envelope(row, expect):
+    cid = row["id"]
+    assert isinstance(expect, dict), f"{cid}: expected a literal error envelope"
+    assert set(expect) == STRUCTURAL_ENVELOPE_FIELDS, (
+        f"{cid}: a structural error must be exactly `ok`+`error`")
+    assert expect["ok"] is False, f"{cid}: `ok` must be strictly false"
+    error = expect["error"]
+    assert isinstance(error, dict) and set(error) == STRUCTURAL_ERROR_FIELDS, (
+        f"{cid}: `error` must be exactly code+message (no parameter)")
+    assert error["code"] in STRUCTURAL_ERROR_MESSAGES, (
+        f"{cid}: unknown structural-error code {error['code']!r}")
+    assert error["message"] == STRUCTURAL_ERROR_MESSAGES[error["code"]], (
+        f"{cid}: error message is not the frozen literal for its code")
+    assert not ((set(expect) | set(error)) & STRUCTURAL_FORBIDDEN_FIELDS), (
+        f"{cid}: structural error leaks a forbidden public/private field")
+
+
+def _structural_row(table, list_name, case_id):
+    return next(r for r in table[list_name] if r["id"] == case_id)
+
+
+# -- table integrity --
+
+
+def test_structural_table_is_a_labelled_rule_table(structural_table):
+    assert set(structural_table) == STRUCTURAL_TABLE_FIELDS, (
+        "structural-cases.json must be a labelled rule table with exactly "
+        "description + the two case lists")
+    description = structural_table["description"]
+    assert isinstance(description, str) and description
+    for clue in ("RULE TABLE", "NOT a valid snapshot", "NOT a query result",
+                 "reseal", "hash equality"):
+        assert clue in description, (
+            f"structural rule table description must state {clue!r}")
+    for key in ("schema_version", "snapshot_id", "provider_order", "providers",
+                "model_ids", "warnings", "tick_epoch", "cadence_s"):
+        assert key not in structural_table, (
+            f"structural rule table must not masquerade as a snapshot ({key})")
+    assert isinstance(structural_table["invalid_cases"], list) \
+        and structural_table["invalid_cases"]
+    assert isinstance(structural_table["valid_controls"], list) \
+        and structural_table["valid_controls"]
+
+
+def test_structural_table_rows_are_wellformed_with_unique_ids(structural_table):
+    seen = set()
+    for row in structural_table["invalid_cases"]:
+        assert set(row) == STRUCTURAL_INVALID_ROW_FIELDS, (
+            f"{row.get('id')}: unexpected invalid-row fields "
+            f"{sorted(set(row) ^ STRUCTURAL_INVALID_ROW_FIELDS)}")
+        assert row["id"] not in seen, f"duplicate case id {row['id']}"
+        seen.add(row["id"])
+        assert isinstance(row["category"], str) and row["category"]
+        assert isinstance(row["base_fixture"], str) and row["base_fixture"]
+        assert isinstance(row["reseal"], bool)
+        assert isinstance(row["changes"], list) and row["changes"]
+        _assert_structural_envelope(row, row["expect"])
+        _structural_finite(row, row["id"])
+    for row in structural_table["valid_controls"]:
+        assert set(row) == STRUCTURAL_VALID_ROW_FIELDS, (
+            f"{row.get('id')}: unexpected valid-row fields "
+            f"{sorted(set(row) ^ STRUCTURAL_VALID_ROW_FIELDS)}")
+        assert row["id"] not in seen, f"duplicate case id {row['id']}"
+        seen.add(row["id"])
+        assert isinstance(row["category"], str) and row["category"]
+        assert isinstance(row["base_fixture"], str) and row["base_fixture"]
+        assert isinstance(row["reseal"], bool)
+        assert isinstance(row["changes"], list)
+        _structural_finite(row, row["id"])
+
+
+def test_structural_table_covers_required_categories_and_cases(structural_table):
+    invalid = structural_table["invalid_cases"]
+    valid = structural_table["valid_controls"]
+    missing = (set(REQUIRED_STRUCTURAL_CATEGORIES)
+               - {row["category"] for row in invalid})
+    assert not missing, (
+        f"structural rule table is missing invalid categories {sorted(missing)}")
+    missing = (set(REQUIRED_STRUCTURAL_VALID_CATEGORIES)
+               - {row["category"] for row in valid})
+    assert not missing, (
+        f"structural rule table is missing valid categories {sorted(missing)}")
+    ids = ({row["id"] for row in invalid} | {row["id"] for row in valid})
+    missing = set(REQUIRED_STRUCTURAL_CASE_IDS) - ids
+    assert not missing, (
+        f"structural rule table is missing required cases {sorted(missing)}")
+    assert STRUCTURAL_POLICY_CONTROLS <= ids
+
+
+def test_structural_base_fixtures_are_valid_synthetic_snapshots(structural_table):
+    # Every row's base fixture, WITHOUT its mutation, is a valid committed
+    # synthetic snapshot under BOTH layers — so each row's small change list is
+    # the sole fault (removing the mutation restores a valid base).
+    for row in structural_table["invalid_cases"] + \
+            structural_table["valid_controls"]:
+        path = FIXTURE_DIR / row["base_fixture"]
+        assert path.is_file(), f"missing base fixture {row['base_fixture']}"
+        _assert_snapshot_contract(_load_strict(path))
+
+
+# -- literal corpus --
+
+
+def test_structural_invalid_cases_reject_with_frozen_envelope(structural_table):
+    for row in structural_table["invalid_cases"]:
+        snap = _structural_snapshot(row)
+        if row["reseal"]:
+            # The resealed body keeps hash equality TRUE, so rejection is never
+            # a first-failure on the hash.
+            body = {k: v for k, v in snap.items() if k != "snapshot_id"}
+            canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=True).encode("utf-8")
+            assert snap["snapshot_id"] == hashlib.sha256(canonical).hexdigest(), (
+                f"{row['id']}: a resealed row must keep hash equality TRUE")
+        # The generic PUBLIC contract rejects the snapshot...
+        with pytest.raises(AssertionError):
+            _assert_public_snapshot_contract(snap)
+        # ...and the frozen precedence yields exactly the row's literal
+        # envelope (the expected reason, never broad exception catching).
+        assert _public_structural_error(snap) == row["expect"], (
+            f"{row['id']}: structural-error envelope mismatch; got "
+            f"{_public_structural_error(snap)!r}")
+
+
+def test_structural_valid_controls_are_generically_accepted(structural_table):
+    for row in structural_table["valid_controls"]:
+        snap = _structural_snapshot(row)
+        # The generic PUBLIC schema accepts every control...
+        _assert_public_snapshot_contract(snap)
+        if row["id"] in STRUCTURAL_POLICY_CONTROLS:
+            # ...while the synthetic fixture policy intentionally rejects the
+            # three controls that leave the synthetic/nonempty/zero-ID policy.
+            with pytest.raises(AssertionError):
+                _assert_snapshot_contract(snap)
+        else:
+            _assert_snapshot_contract(snap)
+
+
+def test_structural_generic_controls_are_really_generic(structural_table):
+    empty = _structural_snapshot(
+        _structural_row(structural_table, "valid_controls",
+                        "control_empty_registry"))
+    assert empty["provider_order"] == [] and empty["providers"] == {}
+    non_synthetic = _structural_snapshot(
+        _structural_row(structural_table, "valid_controls",
+                        "control_non_synthetic_provider_key"))
+    assert "gateway-x" in non_synthetic["providers"]
+    assert "gateway-x" in non_synthetic["provider_order"]
+    assert not non_synthetic["providers"]["gateway-x"][
+        "display_name"].startswith("synthetic")
+    all_nonempty = _structural_snapshot(
+        _structural_row(structural_table, "valid_controls",
+                        "control_all_provider_nonempty"))
+    assert all_nonempty["providers"] \
+        and all(p["model_ids"] for p in all_nonempty["providers"].values())
+    assert "synthetic-c" not in all_nonempty["providers"]
+    assert "synthetic-c" not in all_nonempty["provider_order"]
+    # Old wrapper enforcement survived the extraction: each policy control is
+    # accepted generically but rejected by the fixture-policy wrapper.
+    for cid in sorted(STRUCTURAL_POLICY_CONTROLS):
+        snap = _structural_snapshot(
+            _structural_row(structural_table, "valid_controls", cid))
+        _assert_public_snapshot_contract(snap)
+        with pytest.raises(AssertionError):
+            _assert_snapshot_contract(snap)
+
+
+def test_structural_unsorted_case_is_genuinely_unsorted(structural_table):
+    row = _structural_row(structural_table, "invalid_cases", "model_ids_unsorted")
+    snap = _structural_snapshot(row)
+    ids = snap["providers"]["synthetic-a"]["model_ids"]
+    base_ids = _load_strict(LOOKUP_FIXTURE)["providers"]["synthetic-a"]["model_ids"]
+    # Same multiset as the base, but a genuinely UNSORTED literal permutation
+    # (the three complete raw ids reversed).
+    assert sorted(ids) == sorted(base_ids)
+    assert ids != sorted(ids)
+    assert ids == ["vendor/shared", "vendor/model:free",
+                   "vendor/model-renamed"]
+    # The preflight's ['vendor/item02', 'vendor/item1'] is already code-point
+    # sorted and must never be used as an unsorted case.
+    assert ["vendor/item02", "vendor/item1"] == sorted(
+        ["vendor/item02", "vendor/item1"])
+
+
+# -- wrong-rule probes (rejection evidence ONLY; never an authoring oracle) --
+
+
+def _wrong_hash_only_accepts(snap):
+    """WRONG RULE: accept any object with the right top-level field set whose
+    `snapshot_id` equals the hash of its own body. It cannot see a structural
+    defect carried inside an already-resealed body."""
+    if not isinstance(snap, dict) or set(snap) != TOP_LEVEL_FIELDS:
+        return False
+    body = {k: v for k, v in snap.items() if k != "snapshot_id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    return snap.get("snapshot_id") == hashlib.sha256(canonical).hexdigest()
+
+
+def _wrong_set_only_order(order, providers):
+    """WRONG RULE: provider order validated by set membership only, so a
+    duplicate entry that still covers every key is accepted."""
+    return set(order) == set(providers)
+
+
+def _wrong_membership_only_sorted(ids):
+    """WRONG RULE: `model_ids` checked for membership only — the multiset is
+    compared to its deduplicated set, never to its literal order."""
+    return set(ids) == set(sorted(set(ids)))
+
+
+def _wrong_subset_models(models, ids):
+    """WRONG RULE: a tracked model may be omitted; only an untracked key is
+    rejected."""
+    return set(models) <= set(ids)
+
+
+def _wrong_string_only_wiring(url):
+    """WRONG RULE: any string URL is accepted."""
+    return isinstance(url, str)
+
+
+def _wrong_hash_shape_only(snapshot_id):
+    """WRONG RULE: a well-shaped 64-hex value is accepted as an opaque id."""
+    return isinstance(snapshot_id, str) and \
+        re.fullmatch(r"[0-9a-f]{64}", snapshot_id) is not None
+
+
+def test_structural_wrong_rule_probes_are_rejected(structural_table):
+    def snap_for(case_id):
+        return _structural_snapshot(
+            _structural_row(structural_table, "invalid_cases", case_id))
+
+    # (a) A hash-only validator ACCEPTS a resealed structurally-invalid body...
+    snap = snap_for("provider_map_not_object")
+    assert _wrong_hash_only_accepts(snap) is True
+    with pytest.raises(AssertionError):
+        _assert_public_snapshot_contract(snap)
+
+    # (b) A duplicate provider order passes set-only membership...
+    snap = snap_for("provider_order_duplicate")
+    assert _wrong_set_only_order(
+        snap["provider_order"], snap["providers"]) is True
+    with pytest.raises(AssertionError):
+        _assert_public_snapshot_contract(snap)
+
+    # (c) A consistently omitted tracked model passes a subset rule...
+    snap = snap_for("models_missing_tracked_key")
+    entry = snap["providers"]["synthetic-a"]
+    assert _wrong_subset_models(entry["models"], entry["model_ids"]) is True
+    with pytest.raises(AssertionError):
+        _assert_public_snapshot_contract(snap)
+
+    # (d) An unsorted model_ids array passes a membership-only sorting check...
+    snap = snap_for("model_ids_unsorted")
+    ids = snap["providers"]["synthetic-a"]["model_ids"]
+    assert _wrong_membership_only_sorted(ids) is True
+    with pytest.raises(AssertionError):
+        _assert_public_snapshot_contract(snap)
+
+    # (e) A bad URL passes an isinstance(str) wiring rule...
+    snap = snap_for("wiring_userinfo")
+    url = snap["providers"]["synthetic-a"]["chat_completions_url"]
+    assert _wrong_string_only_wiring(url) is True
+    assert "@" in url
+    with pytest.raises(AssertionError):
+        _assert_public_snapshot_contract(snap)
+
+    # (f) A well-shaped wrong hash passes a shape-only verifier...
+    snap = snap_for("hash_valid_format_wrong_value")
+    assert _wrong_hash_shape_only(snap["snapshot_id"]) is True
+    with pytest.raises(AssertionError):
+        _assert_public_snapshot_contract(snap)
+
+
+# -- README subsection pins --
+
+STRUCTURAL_SECTION = "Structural validation of published snapshots (frozen rules)"
+
+
+def _structural_section_text():
+    """The README body of the structural-validation subsection ONLY (from its
+    `###` heading to the next `###`/`##` heading), so pins here can never be
+    satisfied by tokens from an adjacent section."""
+    text = README.read_text(encoding="utf-8")
+    heading = f"### {STRUCTURAL_SECTION}"
+    assert heading in text, (
+        "README is missing the frozen structural-validation subsection")
+    body = text[text.index(heading):]
+    ends = [i for i in (body.find("\n### ", len(heading)),
+                        body.find("\n## ", len(heading))) if i != -1]
+    return body[:min(ends)] if ends else body
+
+
+def test_readme_structural_subsection_is_itself_scoped():
+    text = " ".join(_structural_section_text().split())
+    assert "fail export" not in text
+    assert "Success envelope" not in text
+    assert "Total ordering rule (frozen)" not in text
+
+
+def test_readme_freezes_structural_error_envelopes_and_precedence():
+    text = " ".join(_structural_section_text().split())
+    for phrase in (
+            "top-level fields are **exactly** `ok` and `error`",
+            "`ok` strictly `false`",
+            "`error` carrying **exactly** `code` and `message`",
+            "`invalid_snapshot` / `Invalid catalogue snapshot.`",
+            "`unsupported_schema_version` / "
+            "`Unsupported catalogue schema version.`",
+            "a non-strict-integer `schema_version` (bool, string or `null`) "
+            "are all `invalid_snapshot`",
+            "`unsupported_schema_version` applies **only** when a well-typed "
+            "strict integer version differs from `1`",
+            "version-TYPE checks precede the version VALUE check",
+            "precedes every v1-specific body check",
+    ):
+        assert phrase in text, (
+            f"structural subsection missing envelope rule: {phrase}")
+
+
+def test_readme_freezes_structural_object_and_generic_rules():
+    text = " ".join(_structural_section_text().split())
+    for phrase in (
+            "rejected whole, never repaired, coerced or degraded",
+            "Hash verification stays load-bearing",
+            "well-shaped but wrong 64-hex value",
+            "never treated as a merely well-shaped opaque string",
+            "permits a legitimately empty registry",
+            "provider keys that are arbitrary nonempty strings (not only "
+            "`synthetic-*`)",
+            "`provider_order` stays unique and must match the provider map "
+            "keys exactly",
+            "zero-ID providers are permitted and retained (never required)",
+            "TEST-FIXTURE POLICY, not public schema rules",
+            "must be a nonempty absolute `http`/`https` URL with a hostname",
+            "no userinfo, no fragment and no ASCII whitespace or control "
+            "character",
+            "no DNS/network probing",
+            "Query strings are not automatically forbidden",
+            "deduplicated in the frozen vocabulary order",
+            "still requires `tick_epoch_unknown`",
+            "does NOT settle raw-JSON numeric lexeme handling",
+    ):
+        assert phrase in text, (
+            f"structural subsection missing rule: {phrase}")
