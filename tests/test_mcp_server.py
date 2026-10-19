@@ -754,3 +754,408 @@ def test_local_snapshot_helper_pipeline(monkeypatch):
 
     # The base mapping is never mutated by any helper path.
     assert base == base_before
+
+
+# ---------- list_free_models local delegation (unit 2j-U1b) ----------
+
+def test_list_free_models_delegates_to_pure_query(monkeypatch, tmp_path):
+    """U1b: the LOCAL ``list_free_models`` reads the roster ONCE, adapts the
+    captured registry plus that same in-memory roster to the validated public
+    snapshot, delegates selection/order/count to the accepted pure query, and
+    restores raw local metadata identity on the way out.
+
+    Fully synthetic module globals plus a synthetic roster written to a real
+    tmp state dir and read back through the REAL ``state.load_roster``. The
+    REAL ``watchdog_catalog.query.list_free_models`` is wrapped directly (the
+    local ``_query`` alias does not exist before the runtime switch), so a
+    missing ACTUAL delegation fails here as a real RED, never as an
+    AttributeError from test setup. Identity assertions compare against the
+    ACTUAL loaded JSON object, never a pre-serialization literal.
+    """
+    import watchdog_catalog.query as real_query
+
+    real_query_list = real_query.list_free_models
+    real_load = mcp_server.state.load_roster
+    real_capture = mcp_server._capture_registry
+
+    # -- synthetic registry: nonalphabetic display order, two tracked providers
+    # sharing a raw id with CONFLICTING raw dicts, plus a zero-ID provider, all
+    # with independent URLs.
+    configs = {
+        "z-last": {"name": "Zeta"},
+        "a-first": {"name": "Alpha"},
+        "m-mid": {"name": "Mu"},
+    }
+    wiring = {
+        "z-last": {"chat_completions_url": "https://z.example/v1/chat/completions",
+                   "api_type": "openai_compatible"},
+        "a-first": {"chat_completions_url": "https://a.example/v1/chat/completions",
+                    "api_type": "openai_compatible"},
+        "m-mid": {"chat_completions_url": "https://m.example/v1/chat/completions",
+                  "api_type": "openai_compatible"},
+    }
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 3600)
+
+    long_id = "9" * 64
+    shared_z = {"name": "Z Shared", "context_length": 8192,
+                "unknown_field": "Z-UNKNOWN",
+                "architecture": {"input_modalities": ["text"]},
+                "params": {"a": 1}, "pricing": {"prompt": "0"}}
+    shared_a = {"name": "A Shared", "context_length": 131072,
+                "unknown_field": "A-UNKNOWN",
+                "architecture": {"input_modalities": ["text", "image"]},
+                "pricing": {"prompt": "0"}}
+    roster_doc = {
+        "tick_epoch": 100,
+        "providers": {
+            "z-last": ["shared/model", "z-extra", "z-extra", "", "empty-meta"],
+            "a-first": ["shared/model", "z2", "z10", " padded ", "non-free",
+                        long_id, "unicode/😀", 3, None, ""],
+            "m-mid": [],
+            "unknown-bad": "not-a-list",
+        },
+        "provider_models": {
+            "z-last": {"shared/model": shared_z, "z-extra": "BAD-CONTAINER",
+                       "empty-meta": {}},
+            "a-first": {"shared/model": shared_a},
+        },
+        "stale_providers": ["z-last"],
+        "private": {"deep": "SENTINEL"},
+    }
+    (tmp_path / "state").mkdir()
+    roster_path = tmp_path / "state" / "roster.json"
+    roster_path.write_text(json.dumps(roster_doc))
+    control = json.loads(roster_path.read_text())
+
+    # -- spies: exactly ONE capture and exactly ONE roster read per request ----
+    captures = []
+    loads = []
+    load_guard: dict = {"count": 0}
+    swap: dict = {"to": None}
+    query_calls = []
+    core_args = []
+    projected = []
+    drop: dict = {"spec": None}
+    backstop: dict = {"args": None}
+
+    def _spy_capture(base):
+        out = real_capture(base)
+        captures.append(out)
+        if swap["to"] is not None:
+            # Replace the module roots AFTER capture: the rest of the request
+            # must still use the already-captured records.
+            mcp_server.PROVIDERS, mcp_server.GATEWAY_WIRING = swap["to"]
+        return out
+
+    def _spy_load(path):
+        out = real_load(path)
+        loads.append(out)
+        load_guard["count"] += 1
+        if load_guard["count"] > 1:
+            raise AssertionError("roster must be loaded exactly once per request")
+        return out
+
+    def _spy_query(snapshot, arguments):
+        call_args = backstop["args"] if backstop["args"] is not None else arguments
+        out = real_query_list(snapshot, call_args)
+        query_calls.append((snapshot, arguments))
+        core_args.append(call_args)
+        projected.append(out)
+        if drop["spec"] is not None and out.get("ok") and "provider" in out:
+            prov, drop_id = drop["spec"]
+            if out["provider"] == prov and drop_id in out["model_ids"]:
+                out = dict(out)
+                out["model_ids"] = [i for i in out["model_ids"] if i != drop_id]
+                out["models"] = {k: v for k, v in out["models"].items()
+                                 if k != drop_id}
+                out["count"] = len(out["model_ids"])
+        return out
+
+    monkeypatch.setattr(mcp_server, "_capture_registry", _spy_capture)
+    monkeypatch.setattr(mcp_server.state, "load_roster", _spy_load)
+    monkeypatch.setattr(real_query, "list_free_models", _spy_query)
+
+    def _reset():
+        captures.clear()
+        loads.clear()
+        query_calls.clear()
+        core_args.clear()
+        projected.clear()
+        load_guard["count"] = 0
+
+    # -- bulk: local selection/order/count follow the returned core result -----
+    _reset()
+    res = mcp_server.list_free_models(root=tmp_path)
+    assert res["ok"] is True
+    assert res["tool"] == "list_free_models"
+    assert res["state_root"] == str(tmp_path.resolve())
+    assert len(captures) == 1 and len(loads) == 1 and len(query_calls) == 1
+    snap, sent_args = query_calls[0]
+    assert sent_args == {"provider": None}
+    assert core_args[0] == {"provider": None}
+    assert snap["provider_order"] == ["z-last", "a-first", "m-mid"]
+    assert set(res) == {"tool", "state_root", "ok", "providers", "models",
+                        "counts", "total_ids", "n_gateways", "snapshot_id",
+                        "tick_epoch", "provider_staleness", "warnings"}
+    assert set(res["providers"]) == {"z-last", "a-first", "m-mid"}
+    assert list(res["providers"]) == ["z-last", "a-first", "m-mid"]
+    assert res["providers"]["z-last"] == ["empty-meta", "shared/model", "z-extra"]
+    assert res["providers"]["a-first"] == [
+        long_id, " padded ", "non-free", "shared/model", "unicode/😀",
+        "z2", "z10"]
+    assert res["providers"]["m-mid"] == []
+    assert res["counts"] == {"z-last": 3, "a-first": 7, "m-mid": 0}
+    assert res["total_ids"] == 9
+    assert res["n_gateways"] == 3
+    assert res["tick_epoch"] == 100
+    assert res["snapshot_id"] == snap["snapshot_id"]
+    assert res["provider_staleness"] == {"z-last": True, "a-first": False,
+                                         "m-mid": False}
+    assert res["warnings"] == snap["warnings"] == [
+        "metadata_missing", "metadata_invalid"]
+    assert res["warnings"] is not snap["warnings"]
+
+    # -- raw metadata restoration: identity, conflicts, empty dict, omission ---
+    loaded = loads[0]
+    raw_z = loaded["provider_models"]["z-last"]["shared/model"]
+    raw_a = loaded["provider_models"]["a-first"]["shared/model"]
+    raw_empty = loaded["provider_models"]["z-last"]["empty-meta"]
+    assert loaded == control                       # source unchanged by value
+    assert set(res["models"]) == {"z-last", "a-first", "m-mid"}
+    assert set(res["models"]["z-last"]) == {"empty-meta", "shared/model"}
+    assert res["models"]["z-last"]["shared/model"] is raw_z
+    assert res["models"]["z-last"]["empty-meta"] is raw_empty
+    assert res["models"]["z-last"]["empty-meta"] == {}
+    assert "z-extra" not in res["models"]["z-last"]     # non-dict omitted
+    assert res["models"]["a-first"] == {"shared/model": raw_a}
+    assert res["models"]["m-mid"] == {}
+    # conflicting shared raw id stays per-provider, never merged or flattened.
+    assert raw_z is not raw_a and raw_z["context_length"] != raw_a["context_length"]
+    # raw local maps stay distinct from the projected query values / snapshot.
+    proj_z = snap["providers"]["z-last"]["models"]["shared/model"]
+    assert "unknown_field" not in proj_z and "params" not in proj_z
+    assert "unknown_field" in raw_z and "params" in raw_z
+    assert raw_z is not proj_z
+    assert res["models"]["z-last"]["shared/model"] is not proj_z
+    # no raw unknown-field leak into the snapshot handed to the real query.
+    assert "unknown_field" not in snap["providers"]["a-first"]["models"]["shared/model"]
+    # the saved core result containers are never mutated by local restoration.
+    assert projected[0]["providers"]["z-last"] == res["providers"]["z-last"]
+    assert "unknown_field" not in projected[0]["models"]["z-last"]["shared/model"]
+
+    # -- single provider success, and a zero-ID provider success ---------------
+    _reset()
+    one = mcp_server.list_free_models(provider="z-last", root=tmp_path)
+    assert one["ok"] is True and one["provider"] == "z-last"
+    assert set(one) == {"tool", "state_root", "ok", "provider", "model_ids",
+                        "models", "count", "snapshot_id", "tick_epoch",
+                        "provider_staleness", "warnings"}
+    assert one["model_ids"] == ["empty-meta", "shared/model", "z-extra"]
+    assert one["count"] == 3
+    assert one["tick_epoch"] == 100
+    assert one["snapshot_id"] == query_calls[0][0]["snapshot_id"]
+    assert one["provider_staleness"] == {"z-last": True}
+    assert one["warnings"] == ["metadata_missing", "metadata_invalid"]
+    one_raw_z = loads[0]["provider_models"]["z-last"]["shared/model"]
+    one_raw_empty = loads[0]["provider_models"]["z-last"]["empty-meta"]
+    assert one["models"]["shared/model"] is one_raw_z
+    assert one["models"]["empty-meta"] is one_raw_empty
+    assert "z-extra" not in one["models"]
+    assert len(captures) == 1 and len(loads) == 1 and len(query_calls) == 1
+    assert core_args[0] == {"provider": "z-last"}
+
+    _reset()
+    zero = mcp_server.list_free_models(provider="m-mid", root=tmp_path)
+    assert zero["ok"] is True and zero["provider"] == "m-mid"
+    assert zero["model_ids"] == [] and zero["count"] == 0
+    assert zero["models"] == {} and zero["provider_staleness"] == {"m-mid": False}
+
+    # -- drop mode: local output FOLLOWS the returned core selection ----------
+    _reset()
+    drop["spec"] = ("z-last", "shared/model")
+    try:
+        dropped = mcp_server.list_free_models(provider="z-last", root=tmp_path)
+    finally:
+        drop["spec"] = None
+    assert dropped["ok"] is True
+    assert dropped["model_ids"] == ["empty-meta", "z-extra"]
+    assert dropped["count"] == 2
+    assert dropped["models"] == {"empty-meta": raw_empty}
+    assert "shared/model" not in dropped["models"]
+    assert dropped["snapshot_id"] == projected[0]["snapshot_id"]
+    # the roster still tracks the removed id, and the SAVED core result is intact
+    assert "shared/model" in loaded["providers"]["z-last"]
+    assert "shared/model" in projected[0]["model_ids"]
+    assert projected[0]["count"] == 3
+
+    # -- legitimately empty captured registry is a valid empty success --------
+    _reset()
+    monkeypatch.setattr(mcp_server, "PROVIDERS", {})
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", {})
+    roster_path.write_text(json.dumps({"tick_epoch": 0, "providers": {}}))
+    empty = mcp_server.list_free_models(root=tmp_path)
+    assert empty["ok"] is True
+    assert empty["providers"] == {} and empty["models"] == {}
+    assert empty["counts"] == {} and empty["total_ids"] == 0
+    assert empty["n_gateways"] == 0
+    assert empty["tick_epoch"] == 0
+    assert empty["warnings"] == []
+    assert len(captures) == 1 and captures[0] == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+    roster_path.write_text(json.dumps(roster_doc))
+
+    # -- exactly one capture stays authoritative when the roots are replaced ---
+    conflicting = {"bogus": {"name": "Bogus"}}
+    conflicting_wiring = {"bogus": {
+        "chat_completions_url": "https://bogus.example/v1/chat/completions",
+        "api_type": "openai_compatible"}}
+    _reset()
+    swap["to"] = (conflicting, conflicting_wiring)
+    kept = mcp_server.list_free_models(root=tmp_path)
+    assert kept["ok"] is True
+    assert len(captures) == 1
+    assert [r["key"] for r in captures[0]] == ["z-last", "a-first", "m-mid"]
+    assert set(kept["providers"]) == {"z-last", "a-first", "m-mid"}
+    assert list(kept["providers"]) == ["z-last", "a-first", "m-mid"]
+    assert kept["counts"] == {"z-last": 3, "a-first": 7, "m-mid": 0}
+    assert "bogus" not in kept["providers"]
+    assert mcp_server.PROVIDERS == conflicting      # the swap really happened
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    _reset()
+    swap["to"] = (conflicting, conflicting_wiring)
+    try:
+        swapped_bad = mcp_server.list_free_models(provider="nope", root=tmp_path)
+    finally:
+        swap["to"] = None
+    assert swapped_bad["ok"] is False
+    assert swapped_bad["valid_providers"] == ["z-last", "a-first", "m-mid"]
+    assert "bogus" not in swapped_bad["valid_providers"]
+    assert swapped_bad["error"] == (
+        "unknown provider 'nope'; valid providers: z-last, a-first, m-mid")
+    assert len(captures) == 1 and loads == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    # -- legacy provider argument boundary, before any state read -------------
+    for bad_provider in (7, True, ["z-last"], {"provider": "z-last"}, "",
+                         " padded ", "Z-LAST", "nope"):
+        _reset()
+        bad_arg = mcp_server.list_free_models(provider=bad_provider, root=tmp_path)
+        assert bad_arg["ok"] is False
+        assert bad_arg["valid_providers"] == ["z-last", "a-first", "m-mid"]
+        assert bad_arg["error"] == (
+            f"unknown provider {bad_provider!r}; valid providers: "
+            "z-last, a-first, m-mid")
+        assert loads == [] and query_calls == []
+
+    # a bad registry ROOT outranks every argument error (capture guard first).
+    monkeypatch.setattr(mcp_server, "PROVIDERS", [])
+    _reset()
+    root_guard = mcp_server.list_free_models(provider=7, root=tmp_path)
+    assert root_guard["ok"] is False
+    assert root_guard["error"] == "Invalid catalogue snapshot."
+    assert set(root_guard) == {"tool", "state_root", "ok", "error"}
+    assert loads == [] and query_calls == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+
+    # -- missing/corrupt state outranks a deferred wiring failure -------------
+    monkeypatch.setattr(mcp_server, "PROVIDERS", {"z-last": {"name": "Zeta"}})
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", {})
+    _reset()
+    missing = mcp_server.list_free_models(root=tmp_path / "nope")
+    assert missing["ok"] is False and "roster" in missing["error"].lower()
+    corrupt_root = tmp_path / "corrupt"
+    (corrupt_root / "state").mkdir(parents=True)
+    (corrupt_root / "state" / "roster.json").write_text("{not json!!")
+    _reset()
+    corrupt = mcp_server.list_free_models(root=corrupt_root)
+    assert corrupt["ok"] is False and "corrupt" in corrupt["error"].lower()
+    # valid state, bad wiring -> structural rejection, never a silent success.
+    _reset()
+    bad_wiring = mcp_server.list_free_models(root=tmp_path)
+    assert bad_wiring["ok"] is False
+    assert bad_wiring["error"] == "Invalid catalogue snapshot."
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 0)
+    _reset()
+    bad_cadence = mcp_server.list_free_models(root=tmp_path)
+    assert bad_cadence["ok"] is False
+    assert bad_cadence["error"] == "Invalid catalogue snapshot."
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 3600)
+
+    # -- both core provider-error codes map to the SAME local provider error ---
+    for core_arg, core_code in (({"provider": "not-captured"}, "unknown_provider"),
+                                ({"provider": 7}, "invalid_arguments")):
+        _reset()
+        backstop["args"] = core_arg
+        try:
+            bs = mcp_server.list_free_models(root=tmp_path)
+        finally:
+            backstop["args"] = None
+        assert bs["ok"] is False
+        assert bs["error"] == (
+            "unknown provider None; valid providers: z-last, a-first, m-mid")
+        assert bs["valid_providers"] == ["z-last", "a-first", "m-mid"]
+        for absent in ("count", "counts", "total_ids", "n_gateways"):
+            assert absent not in bs
+        assert projected[-1]["ok"] is False
+        assert projected[-1]["error"]["code"] == core_code
+
+    # -- bad metadata OUTER container: omission + truthful warning, no fiction -
+    roster_path.write_text(json.dumps({
+        "tick_epoch": 0,
+        "providers": {"z-last": ["shared/model"]},
+        "provider_models": [],
+    }))
+    _reset()
+    bad_meta = mcp_server.list_free_models(root=tmp_path)
+    assert bad_meta["ok"] is True
+    assert bad_meta["providers"]["z-last"] == ["shared/model"]
+    assert bad_meta["models"] == {"z-last": {}, "a-first": {}, "m-mid": {}}
+    assert bad_meta["warnings"] == ["metadata_invalid"]
+    roster_path.write_text(json.dumps(roster_doc))
+
+    # -- freshness, unchanged sources, mutation isolation ---------------------
+    _reset()
+    fresh1 = mcp_server.list_free_models(root=tmp_path)
+    assert len(captures) == 1 and len(loads) == 1 and len(query_calls) == 1
+    assert fresh1["warnings"] == ["metadata_missing", "metadata_invalid"]
+    snap_a, _ = query_calls[0]
+    proj_a = projected[0]
+    load1 = loads[0]
+    assert load1 == control
+    assert captures[0] == [
+        {"key": "z-last", "name": "Zeta",
+         "chat_completions_url": "https://z.example/v1/chat/completions",
+         "api_type": "openai_compatible"},
+        {"key": "a-first", "name": "Alpha",
+         "chat_completions_url": "https://a.example/v1/chat/completions",
+         "api_type": "openai_compatible"},
+        {"key": "m-mid", "name": "Mu",
+         "chat_completions_url": "https://m.example/v1/chat/completions",
+         "api_type": "openai_compatible"},
+    ]
+
+    _reset()
+    fresh2 = mcp_server.list_free_models(root=tmp_path)
+    assert len(loads) == 1
+    assert fresh2["warnings"] == ["metadata_missing", "metadata_invalid"]
+    assert fresh2["warnings"] is not fresh1["warnings"]
+    assert loads[0] == control
+
+    # a local raw mutation touches only the intentionally aliased captured raw
+    # dict -- never the projected snapshot, the saved core result, or a fresh
+    # independently loaded request.
+    fresh1["models"]["z-last"]["shared/model"]["name"] = "MUTATED"
+    assert snap_a["providers"]["z-last"]["models"]["shared/model"]["name"] == "Z Shared"
+    assert proj_a["models"]["z-last"]["shared/model"]["name"] == "Z Shared"
+    assert load1["provider_models"]["z-last"]["shared/model"]["name"] == "MUTATED"
+    _reset()
+    fresh3 = mcp_server.list_free_models(root=tmp_path)
+    assert fresh3["models"]["z-last"]["shared/model"]["name"] == "Z Shared"

@@ -273,6 +273,25 @@ container is `metadata_missing`; a non-null, non-object container is
   object** of the exact `(provider, raw model_id)` pair, **never the legacy
   raw metadata**.
 
+**Local `list_free_models` compatibility (corrected selection, preserved raw metadata).**
+The *unchanged and never weakened* claim in the preceding paragraph is scoped
+strictly to **RAW-METADATA PRESERVATION**: the root-script `list_free_models`
+still returns the original raw tracked metadata dictionaries — unknown upstream
+fields included — for the tracked `(provider, raw model_id)` pairs it selects.
+Its **selection, ordering, count and epoch** semantics are deliberately
+*corrected* rather than preserved: empty and non-string IDs are dropped,
+duplicate IDs collapse, each ID array is in natural raw-ID order (never the
+legacy integer-split sort), and `tick_epoch` is a strict non-negative integer —
+a float or negative epoch becomes `null` and adds `tick_epoch_unknown`. The
+additive `snapshot_id`, `provider_staleness` and `warnings` fields come from the
+validated local snapshot; the `snapshot_id` hash binds that **local sanitized
+public projection**, not the raw metadata dictionaries or any filesystem
+diagnostic, so it can differ from the strictly published feed for the same tick,
+and a structurally invalid raw source can prevent strict publication while this
+local compatibility view still answers. Only `list_free_models` delegates to
+the pure query here; the other local tools keep their own behaviour until their
+own units.
+
 ### Structural validation of published snapshots (frozen rules)
 
 A published snapshot **object** is validated strictly, independently of the

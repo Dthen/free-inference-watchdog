@@ -77,12 +77,13 @@ PROVIDERS = PROVIDER_KEYS
 # watchdog_catalog.query module; the site builder re-exports the same object.
 from config_loader import GATEWAY_WIRING
 from watchdog_catalog.query import strip_free_marker
+from watchdog_catalog import query as _query
 
 # Local-to-public producer adapter plus the pure structural module it composes.
 # Both are pure: importing them pulls no SDK, provider config, state, page
 # renderer or environment access (the producer carries its own fresh-process
 # import audit). The U1a capture/sanitize/snapshot helpers below are their only
-# users so far; those helpers are intentionally not wired into the tools yet.
+# users; list_free_models delegates through them to the pure query.
 from watchdog_catalog import catalog as _catalog
 import catalog_export as _catalog_export
 
@@ -290,57 +291,71 @@ def _local_snapshot(roster, registry, base: dict) -> dict:
 def list_free_models(provider=None, root=None) -> dict:
     """Full roster, or one provider's id list. Structured errors, no raises.
 
+    Local compatibility wrapper: the captured registry and the roster read ONCE
+    through state.py are adapted to the validated public snapshot, and the
+    selection, ordering and counting are delegated to the pure
+    ``watchdog_catalog.query`` core. Only the OUTPUT is adapted back -- the
+    already-selected ``(provider, raw id)`` pairs get their original raw
+    metadata dictionaries restored, and the snapshot provenance
+    (``snapshot_id``, ``provider_staleness``, ``warnings``) is carried through.
+
     Additive: also returns ``models`` — the raw API metadata objects for
     exactly the tracked ids, per gateway ({} when the roster predates
     metadata capture or the model carries none)."""
     r = Path(root).resolve() if root is not None else REPO
     base: dict = {"tool": "list_free_models", "state_root": str(r)}
 
+    # Capture the resolved registry ONCE. A bad registry root outranks every
+    # argument and state error, so a broken local wiring is never masked by a
+    # misspelled provider name.
+    try:
+        registry = _capture_registry(base)
+    except _StateError as exc:
+        return exc.payload
+    # Valid provider names are ONLY the captured records with a nonempty string
+    # key. A malformed captured key stays in the registry for the builder's
+    # later structural rejection but never reaches join() for error formatting.
+    valid_providers = [rec["key"] for rec in registry
+                       if isinstance(rec["key"], str) and rec["key"]]
+
     if provider is not None and (
-            not isinstance(provider, str) or provider not in PROVIDERS):
+            not isinstance(provider, str) or provider not in valid_providers):
         # Arg validation outranks state problems: the caller asked for a
         # specific thing and misspelled it — tell them the valid names.
         return _error(
             base, f"unknown provider {provider!r}; "
-                  f"valid providers: {', '.join(PROVIDERS)}",
-            valid_providers=list(PROVIDERS))
+                  f"valid providers: {', '.join(valid_providers)}",
+            valid_providers=list(valid_providers))
     try:
         roster = _load_roster_checked(r, base)
+        snapshot = _local_snapshot(roster, registry, base)
     except _StateError as exc:
         return exc.payload
 
-    if provider is not None:
-        ids = _clean_ids(roster["providers"].get(provider, []))
-        return {
-            **base,
-            "ok": True,
-            "provider": provider,
-            "model_ids": ids,
-            "models": _model_metadata(roster, provider, ids),
-            "count": len(ids),
-            "tick_epoch": _epoch_or_none(roster),
-        }
+    # Delegate selection/order/count to the pure core ONCE (including the
+    # all-provider case). The whole decoded argument object is passed; the pure
+    # argument validation stays the backstop, never the primary boundary.
+    result = _query.list_free_models(snapshot, {"provider": provider})
+    if not result.get("ok"):
+        # Backstop only: with the real capture/validation above the core cannot
+        # reject the provider here. Map either declared provider argument code
+        # to the SAME existing local provider error, using the OUTER caller's
+        # value (the core envelope carries no value of its own).
+        return _error(
+            base, f"unknown provider {provider!r}; "
+                  f"valid providers: {', '.join(valid_providers)}",
+            valid_providers=list(valid_providers))
 
-    # CANONICAL GATEWAY-KEY SEMANTIC (shared with watchdog_status's
-    # provider_counts): report exactly the known gateways
-    # (config_loader.PROVIDERS), always. Unknown junk roster keys are
-    # ignored; a gateway missing from this tick degrades to an empty list.
-    # n_gateways is therefore a count of KNOWN gateways — not of raw roster
-    # keys on partial state.
-    raw = roster["providers"]
-    cleaned = {gw: _clean_ids(raw.get(gw, [])) for gw in PROVIDERS}
-    union = {mid for ids in cleaned.values() for mid in ids}
-    return {
-        **base,
-        "ok": True,
-        "providers": cleaned,
-        "models": {gw: _model_metadata(roster, gw, ids)
-                   for gw, ids in cleaned.items()},
-        "counts": {gw: len(ids) for gw, ids in cleaned.items()},
-        "total_ids": len(union),
-        "n_gateways": len(PROVIDERS),
-        "tick_epoch": _epoch_or_none(roster),
-    }
+    # Fresh outer mapping: the spy-observed core result is never mutated.
+    out = {**base, **result}
+    out["warnings"] = list(snapshot["warnings"])
+    if provider is not None:
+        out["models"] = _model_metadata(
+            roster, result["provider"], result["model_ids"])
+    else:
+        out["models"] = {gw: _model_metadata(roster, gw, ids)
+                         for gw, ids in result["providers"].items()}
+    return out
 
 
 # ---------- tool: get_model ----------
