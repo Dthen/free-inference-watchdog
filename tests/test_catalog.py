@@ -8100,9 +8100,705 @@ def test_readme_freezes_raw_json_duplicate_depth_and_repair_rules():
             "rule **TABLE** (explicitly **not** a snapshot and **not** a "
             "query result)",
             "adversarial literal lexemes as STRINGS",
-            "canonical language/hash-vector parity unit (c2b2) and JS parity "
-            "remain separate",
+            "the strict snapshot integer-token boundary are frozen separately "
+            "in the typed-encoding subsection below",
+            "JavaScript parity remains a separate concern with no JS "
+            "implementation claimed anywhere",
     ):
         assert phrase in text, (
             f"raw-JSON subsection missing duplicate/depth/repair rule: "
             f"{phrase}")
+
+
+# ---------- unit 1d-c2b2: typed canonical encoding, hash vectors and strict
+# snapshot integer-token controls ----------
+#
+# Contract-only stage. `canonical-cases.json` is a clearly-labelled canonical
+# RULE TABLE (explicitly NOT a snapshot and NOT a query result). Its
+# `canonical_vectors` rows carry an explicit `scope`: a `general_value` row is a
+# general raw-JSON ENCODING SPECIFICATION whose whole value is hashed (a nested
+# `snapshot_id` key is ordinary retained content), never a valid public
+# snapshot; a `snapshot` row is a complete re-sealed public snapshot document
+# hashed with ONLY the root `snapshot_id` excluded. Every literal
+# `canonical_text`/`sha256` is FILE CONTENT, re-derived here by a test-local
+# stdlib reference encoder -- never manufactured by an implementation module.
+# The c2b1 raw guard decides lexical acceptance first; the c2a structural
+# checker and its error helper are reused unchanged. No JavaScript
+# implementation is claimed anywhere; JS parity remains separate.
+
+CANONICAL_FIXTURE_NAME = "canonical-cases.json"
+CANONICAL_TABLE_DOC = FIXTURE_DIR / CANONICAL_FIXTURE_NAME
+
+CANONICAL_TABLE_FIELDS = frozenset(
+    {"description", "canonical_rule", "canonical_vectors", "snapshot_cases"})
+CANONICAL_VECTOR_FIELDS = frozenset(
+    {"id", "category", "scope", "json_text", "canonical_text", "sha256"})
+CANONICAL_SCOPE_GENERAL = "general_value"
+CANONICAL_SCOPE_SNAPSHOT = "snapshot"
+CANONICAL_SCOPES = (CANONICAL_SCOPE_GENERAL, CANONICAL_SCOPE_SNAPSHOT)
+CANONICAL_ACCEPTED_ROW_FIELDS = frozenset(
+    {"id", "category", "json_text", "accepted"})
+CANONICAL_INVALID_ROW_FIELDS = frozenset(
+    {"id", "category", "json_text", "expect"})
+CANONICAL_ASTRIAL_KEY = "synthetic-\U0001F680"
+
+# The one frozen literal the strict-token failures and the hash tamper share.
+CANONICAL_INVALID_SNAPSHOT_ENVELOPE = {
+    "ok": False,
+    "error": {"code": "invalid_snapshot",
+              "message": "Invalid catalogue snapshot."}}
+
+REQUIRED_CANONICAL_VECTOR_CATEGORIES = (
+    "numeric_lexeme_types", "signed_zero", "float_thresholds",
+    "float_underflow_subnormal_rounded", "numeric_strings", "key_sorting",
+    "ensure_ascii_escapes", "equivalent_escapes", "nested_snapshot_id",
+    "snapshot_document",
+)
+REQUIRED_CANONICAL_SNAPSHOT_CATEGORIES = (
+    "snapshot_integer_token_base", "strict_schema_version_token",
+    "strict_tick_epoch_token", "strict_cadence_token",
+    "strict_context_length_token", "strict_schema_version_exponent",
+    "snapshot_hash_tamper",
+)
+REQUIRED_CANONICAL_IDS = (
+    "vec_int_lexeme_one",
+    "vec_float_lexeme_one",
+    "vec_float_lexeme_one_exponent",
+    "vec_signed_zero",
+    "vec_float_thresholds",
+    "vec_subnormal_underflow_rounded",
+    "vec_numeric_strings",
+    "vec_key_sorting_codepoint",
+    "vec_ensure_ascii_escapes",
+    "vec_equivalent_escapes_escaped",
+    "vec_equivalent_escapes_literal",
+    "vec_nested_snapshot_id",
+    "vec_snapshot_float_priced_producer",
+    "vec_snapshot_float_priced_alternate",
+    "snap_case_integer_token_base",
+    "snap_case_schema_version_float",
+    "snap_case_tick_epoch_float",
+    "snap_case_cadence_float",
+    "snap_case_context_length_float",
+    "snap_case_schema_version_exponent",
+    "snap_case_hash_tamper",
+)
+
+# Each strict-token failure case maps to the literal path of its float token,
+# so a captured failure is the strict TYPE check on THAT field -- never an
+# incidental shape/hash error behind the same code.
+STRICT_TOKEN_PATH = {
+    "snap_case_schema_version_float": ("schema_version",),
+    "snap_case_tick_epoch_float": ("tick_epoch",),
+    "snap_case_cadence_float": ("cadence_s",),
+    "snap_case_context_length_float": (
+        "providers", "synthetic-a", "models", "alpha-1:free",
+        "context_length"),
+    "snap_case_schema_version_exponent": ("schema_version",),
+}
+STRICT_INT_PATHS = (
+    ("schema_version",),
+    ("tick_epoch",),
+    ("cadence_s",),
+    ("providers", "synthetic-a", "models", "alpha-1:free", "context_length"),
+)
+
+
+# -- test-local reference canonical encoder (stdlib, never an implementation) --
+
+
+def _canonical_bytes(value):
+    """The frozen reference encoder restated test-local: UTF-8 object keys
+    sorted by Unicode code point, compact `,`/`:` separators, `ensure_ascii`.
+    Never imported from a runtime/parser module."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True).encode("utf-8")
+
+
+def _canonical_sha(value):
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _canonical_body_bytes(doc):
+    assert isinstance(doc, dict), "a snapshot document is a JSON object"
+    body = {k: v for k, v in doc.items() if k != "snapshot_id"}
+    return _canonical_bytes(body)
+
+
+def _load_canonical_table(path=CANONICAL_TABLE_DOC):
+    path = Path(path)
+    assert path.is_file(), (
+        f"canonical rule table fixture is missing: {path.name}")
+    return _load_strict(path)
+
+
+@pytest.fixture(scope="module")
+def canonical_table():
+    return _load_canonical_table()
+
+
+def _canon_vector(table, case_id):
+    return next(r for r in table["canonical_vectors"] if r["id"] == case_id)
+
+
+def _snapshot_case(table, case_id):
+    return next(r for r in table["snapshot_cases"] if r["id"] == case_id)
+
+
+def _canonical_row_text(row):
+    """The reference canonical text for a vector row. Decoded through the c2b1
+    raw guard, so a vector can never be raw-rejected: `snapshot` scope hashes
+    the complete document body (root `snapshot_id` excluded), `general_value`
+    scope hashes the whole decoded value."""
+    decoded = _raw_load(row["json_text"])
+    if row["scope"] == CANONICAL_SCOPE_SNAPSHOT:
+        return _canonical_body_bytes(decoded).decode("utf-8")
+    return _canonical_bytes(decoded).decode("utf-8")
+
+
+def _doc_at(doc, path):
+    node = doc
+    for component in path:
+        node = node[component]
+    return node
+
+
+def _doc_parent(doc, path):
+    node = doc
+    for component in path[:-1]:
+        node = node[component]
+    return node
+
+
+# -- table integrity --
+
+
+def test_canonical_table_is_a_labelled_rule_table(canonical_table):
+    assert set(canonical_table) == CANONICAL_TABLE_FIELDS, (
+        "canonical-cases.json must be a labelled rule table with exactly "
+        "description + canonical_rule + the two case lists")
+    description = canonical_table["description"]
+    assert isinstance(description, str) and description
+    for clue in ("RULE TABLE", "NOT a snapshot", "NOT a query result",
+                 "literal hand-authored FILE CONTENT",
+                 "never computed by an implementation", "`scope`",
+                 "`general_value` row", "`snapshot` row"):
+        assert clue in description, (
+            f"canonical rule table description must state {clue!r}")
+    rule = canonical_table["canonical_rule"]
+    assert isinstance(rule, str) and rule
+    for clue in ("SHA-256 of the canonical BODY excluding only the root "
+                 "snapshot_id",
+                 "sorted object keys by Unicode code point",
+                 "ensure_ascii=True Python encoding",
+                 "Python json.dumps is the reference encoder",
+                 "full canonical hash equality is verified",
+                 "an integer token `1` and a float token `1.0` produce "
+                 "DIFFERENT canonical bytes/hashes",
+                 "float `1.0` and float `1e0` produce the SAME bytes/hash",
+                 "alternate equivalent escapes do not change the canonical "
+                 "body",
+                 "String values, including numeric-looking strings, are never "
+                 "coerced",
+                 "stay strict integer-token fields (booleans excluded)",
+                 "integral float tokens such as 1.0 or 1e0 are not valid "
+                 "strict snapshot integers",
+                 "reject invalid_snapshot"):
+        assert clue in rule, f"canonical rule text must state {clue!r}"
+    for key in sorted(TOP_LEVEL_FIELDS):
+        assert key not in canonical_table, (
+            f"canonical rule table must not masquerade as a snapshot ({key})")
+    assert isinstance(canonical_table["canonical_vectors"], list) \
+        and canonical_table["canonical_vectors"]
+    assert isinstance(canonical_table["snapshot_cases"], list) \
+        and canonical_table["snapshot_cases"]
+
+
+def test_canonical_table_rows_are_wellformed_with_unique_ids(canonical_table):
+    seen = set()
+    for row in canonical_table["canonical_vectors"]:
+        cid = row["id"]
+        assert set(row) == CANONICAL_VECTOR_FIELDS, (
+            f"{cid}: unexpected vector fields "
+            f"{sorted(set(row) ^ CANONICAL_VECTOR_FIELDS)}")
+        assert cid not in seen, f"duplicate case id {cid}"
+        seen.add(cid)
+        assert row["scope"] in CANONICAL_SCOPES, (
+            f"{cid}: unknown scope {row['scope']!r}")
+        assert isinstance(row["category"], str) and row["category"]
+        assert isinstance(row["json_text"], str) and row["json_text"]
+        assert isinstance(row["canonical_text"], str) and row["canonical_text"]
+        assert re.fullmatch(r"[0-9a-f]{64}", row["sha256"]), (
+            f"{cid}: sha256 must be 64 lowercase hex characters")
+        _raw_finite(row, cid)
+    for row in canonical_table["snapshot_cases"]:
+        cid = row["id"]
+        assert cid not in seen, f"duplicate case id across both lists: {cid}"
+        seen.add(cid)
+        if "accepted" in row:
+            assert set(row) == CANONICAL_ACCEPTED_ROW_FIELDS, (
+                f"{cid}: unexpected accepted-row fields {sorted(set(row))}")
+            assert row["accepted"] is True, f"{cid}: `accepted` must be true"
+        else:
+            assert set(row) == CANONICAL_INVALID_ROW_FIELDS, (
+                f"{cid}: unexpected invalid-row fields {sorted(set(row))}")
+            _assert_structural_envelope(row, row["expect"])
+        assert isinstance(row["category"], str) and row["category"]
+        assert isinstance(row["json_text"], str) and row["json_text"]
+        _raw_finite(row, cid)
+
+
+def test_canonical_table_covers_required_categories_and_ids(canonical_table):
+    vectors = canonical_table["canonical_vectors"]
+    cases = canonical_table["snapshot_cases"]
+    missing = (set(REQUIRED_CANONICAL_VECTOR_CATEGORIES)
+               - {row["category"] for row in vectors})
+    assert not missing, (
+        f"canonical table is missing vector categories {sorted(missing)}")
+    missing = (set(REQUIRED_CANONICAL_SNAPSHOT_CATEGORIES)
+               - {row["category"] for row in cases})
+    assert not missing, (
+        f"canonical table is missing snapshot-case categories {sorted(missing)}")
+    ids = {row["id"] for row in vectors} | {row["id"] for row in cases}
+    missing = set(REQUIRED_CANONICAL_IDS) - ids
+    assert not missing, (
+        f"canonical table is missing required cases {sorted(missing)}")
+    assert {row["scope"] for row in vectors} == set(CANONICAL_SCOPES), (
+        "the vector table must exercise BOTH the general_value and snapshot "
+        "scopes")
+
+
+# -- canonical vectors: literal re-derivation --
+
+
+def test_canonical_vectors_rederive_literal_text_and_hash(canonical_table):
+    for row in canonical_table["canonical_vectors"]:
+        cid = row["id"]
+        text = _canonical_row_text(row)
+        assert text == row["canonical_text"], (
+            f"{cid}: canonical_text is not the reference encoding of "
+            f"{row['json_text']!r}")
+        assert hashlib.sha256(text.encode("utf-8")).hexdigest() == \
+            row["sha256"], f"{cid}: sha256 is not the hash of canonical_text"
+        if row["scope"] == CANONICAL_SCOPE_GENERAL:
+            decoded = _raw_load(row["json_text"])
+            assert not (isinstance(decoded, dict)
+                        and set(decoded) == TOP_LEVEL_FIELDS), (
+                f"{cid}: a general-value vector must not be a public snapshot")
+
+
+def test_canonical_vectors_pin_lexeme_and_equivalent_spelling_semantics(
+        canonical_table):
+    int_row = _canon_vector(canonical_table, "vec_int_lexeme_one")
+    flt_row = _canon_vector(canonical_table, "vec_float_lexeme_one")
+    exp_row = _canon_vector(canonical_table, "vec_float_lexeme_one_exponent")
+    # Integer token `1` and float token `1.0` are DIFFERENT typed values.
+    assert type(_raw_load(int_row["json_text"])["n"]) is int
+    assert type(_raw_load(flt_row["json_text"])["n"]) is float
+    assert int_row["canonical_text"] == '{"n":1}'
+    assert flt_row["canonical_text"] == '{"n":1.0}'
+    assert int_row["sha256"] != flt_row["sha256"]
+    # Float `1.0` and float `1e0` share ONE typed value -> identical body/hash.
+    assert exp_row["canonical_text"] == flt_row["canonical_text"]
+    assert exp_row["sha256"] == flt_row["sha256"]
+    # Equivalent escapes (escaped vs literal) share one typed value.
+    esc = _canon_vector(canonical_table, "vec_equivalent_escapes_escaped")
+    lit = _canon_vector(canonical_table, "vec_equivalent_escapes_literal")
+    assert esc["canonical_text"] == lit["canonical_text"]
+    assert esc["sha256"] == lit["sha256"]
+    # Signed zero / thresholds / subnormal-underflow-rounded positive controls.
+    zero = _canon_vector(canonical_table, "vec_signed_zero")
+    assert zero["canonical_text"] == '{"nz":-0.0,"z":0}'
+    thr = _canon_vector(canonical_table, "vec_float_thresholds")
+    assert thr["canonical_text"] == \
+        '{"a":0.1,"b":0.0001,"c":1e-05,"d":1e-07,"e":1000000000000000.0}'
+    sub = _canon_vector(canonical_table, "vec_subnormal_underflow_rounded")
+    assert sub["canonical_text"] == \
+        '{"rounded":1.0,"sub":5e-324,"under":0.0}'
+    # Numeric-looking strings are never coerced.
+    strings = _canon_vector(canonical_table, "vec_numeric_strings")
+    assert '"d":"1.0"' in strings["canonical_text"]
+    assert '"a":"9007199254740992"' in strings["canonical_text"]
+    # Code-point key sorting: integer-looking keys, a BMP high code point and
+    # an astral key last (astral has the greatest code point).
+    keyed = _canon_vector(canonical_table, "vec_key_sorting_codepoint")
+    assert keyed["canonical_text"] == (
+        '{"10":"ten","2":"two","\\ue000":"pua","\\uff21":"bmp",'
+        '"\\ud83d\\ude80":"astral"}')
+    # A nested snapshot_id in a general-value vector is retained content.
+    nested = _canon_vector(canonical_table, "vec_nested_snapshot_id")
+    assert _canonical_row_text(nested) == nested["canonical_text"]
+    assert '"snapshot_id":"cafe"' in nested["canonical_text"]
+
+
+def test_canonical_snapshot_vectors_are_generically_accepted_and_resealed(
+        canonical_table):
+    producer = _canon_vector(
+        canonical_table, "vec_snapshot_float_priced_producer")
+    alternate = _canon_vector(
+        canonical_table, "vec_snapshot_float_priced_alternate")
+    # Raw-lexically accepted AND accepted by the GENERIC public checker (not
+    # subject to the synthetic fixture namespace).
+    a = _raw_load(producer["json_text"])
+    b = _raw_load(alternate["json_text"])
+    _assert_public_snapshot_contract(a)
+    _assert_public_snapshot_contract(b)
+    # Each document's stored snapshot_id equals the literal vector hash, and
+    # both twins share ONE canonical body and hash.
+    assert a["snapshot_id"] == producer["sha256"]
+    assert b["snapshot_id"] == producer["sha256"] == alternate["sha256"]
+    assert _canonical_body_bytes(a) == _canonical_body_bytes(b)
+    assert producer["canonical_text"] == alternate["canonical_text"]
+    # The two texts genuinely differ lexically (alternate float spellings,
+    # whitespace, member order and an equivalent escaped provider key).
+    assert producer["json_text"] != alternate["json_text"]
+    assert "1e0" in alternate["json_text"] and "1e0" not in producer["json_text"]
+    # Float pricing is retained as floats, never dropped or stringified.
+    model = a["providers"]["synthetic-a"]["models"]["alpha-1:free"]
+    assert model["pricing"] == {"prompt": 1.0, "completion": 0.1}
+    assert type(model["pricing"]["prompt"]) is float
+    assert type(model["pricing"]["completion"]) is float
+    # The nonASCII/astral provider key survives verbatim.
+    assert CANONICAL_ASTRIAL_KEY in a["providers"]
+    assert a["providers"][CANONICAL_ASTRIAL_KEY]["model_ids"] == []
+
+
+# -- snapshot_cases: raw acceptance, hash equality, strict tokens --
+
+
+def test_snapshot_cases_are_raw_accepted_and_hash_equal_before_rejection(
+        canonical_table):
+    for row in canonical_table["snapshot_cases"]:
+        cid = row["id"]
+        decoded = _raw_load(row["json_text"])   # raw guard accepts the numbers
+        assert isinstance(decoded, dict), cid
+        recomputed = _canonical_sha(
+            {k: v for k, v in decoded.items() if k != "snapshot_id"})
+        if cid == "snap_case_hash_tamper":
+            assert decoded["snapshot_id"] != recomputed, (
+                f"{cid}: the substantive tamper must keep a STALE hash")
+        else:
+            # The stored hash must match the independently recomputed canonical
+            # body BEFORE any field check, so the later rejection is never a
+            # first-failure on the hash (a mis-reseal cannot hide behind the
+            # same error code).
+            assert decoded["snapshot_id"] == recomputed, (
+                f"{cid}: stored snapshot_id must equal the recomputed "
+                "canonical body hash")
+
+
+def test_snapshot_integer_token_base_and_float_token_failures(canonical_table):
+    base = _snapshot_case(canonical_table, "snap_case_integer_token_base")
+    base_doc = _raw_load(base["json_text"])
+    _assert_public_snapshot_contract(base_doc)
+    for path in STRICT_INT_PATHS:
+        value = _doc_at(base_doc, path)
+        assert isinstance(value, int) and not isinstance(value, bool), path
+    for cid, path in STRICT_TOKEN_PATH.items():
+        row = _snapshot_case(canonical_table, cid)
+        doc = _raw_load(row["json_text"])
+        value = _doc_at(doc, path)
+        # The intended defect is a float token where a strict int is required.
+        assert isinstance(value, float) and not isinstance(value, bool), (
+            f"{cid}: {path} must be a float token")
+        assert value == int(value), f"{cid}: the float token is integral"
+        # Exact literal envelope; strict-TYPE reason, never
+        # unsupported_schema_version and never an unrelated field rule.
+        assert _public_structural_error(doc) == row["expect"] == \
+            CANONICAL_INVALID_SNAPSHOT_ENVELOPE, cid
+        # Restoring the strict integer token and resealing restores acceptance.
+        fixed = copy.deepcopy(doc)
+        _doc_parent(fixed, path)[path[-1]] = int(value)
+        _reseal_snapshot(fixed)
+        _assert_public_snapshot_contract(fixed)
+    # schema_version `1e0` is an equivalent spelling of `1.0` (same canonical
+    # body/hash) yet still wrong-TYPE for a strict snapshot integer.
+    flt = _snapshot_case(canonical_table, "snap_case_schema_version_float")
+    exp = _snapshot_case(canonical_table, "snap_case_schema_version_exponent")
+    assert "1e0" in exp["json_text"] and "1e0" not in flt["json_text"]
+    fdoc = _raw_load(flt["json_text"])
+    edoc = _raw_load(exp["json_text"])
+    assert _canonical_body_bytes(fdoc) == _canonical_body_bytes(edoc)
+    assert fdoc["snapshot_id"] == edoc["snapshot_id"]
+    assert _public_structural_error(edoc) == CANONICAL_INVALID_SNAPSHOT_ENVELOPE
+    # `2.0` is the WRONG TYPE (invalid_snapshot), never
+    # unsupported_schema_version; an integer `2` is the version VALUE failure.
+    wrong_type = copy.deepcopy(base_doc)
+    wrong_type["schema_version"] = 2.0
+    _reseal_snapshot(wrong_type)
+    assert _public_structural_error(wrong_type) == \
+        CANONICAL_INVALID_SNAPSHOT_ENVELOPE
+    wrong_value = copy.deepcopy(base_doc)
+    wrong_value["schema_version"] = 2
+    _reseal_snapshot(wrong_value)
+    assert _public_structural_error(wrong_value) == \
+        _structural_error("unsupported_schema_version")
+
+
+def test_snapshot_float_priced_twins_and_hash_tamper_control(canonical_table):
+    base = _snapshot_case(canonical_table, "snap_case_integer_token_base")
+    tamper = _snapshot_case(canonical_table, "snap_case_hash_tamper")
+    doc = _raw_load(tamper["json_text"])
+    # Well-shaped fields, valid wiring and a well-shaped 64-hex hash -- ONLY the
+    # hash is stale, so shape-only verification accepts it while the real rule
+    # rejects it as invalid_snapshot.
+    assert _wrong_hash_shape_only(doc["snapshot_id"]) is True
+    assert doc["snapshot_id"] != _canonical_sha(
+        {k: v for k, v in doc.items() if k != "snapshot_id"})
+    assert _public_structural_error(doc) == tamper["expect"] == \
+        CANONICAL_INVALID_SNAPSHOT_ENVELOPE
+    fixed = copy.deepcopy(doc)
+    _reseal_snapshot(fixed)
+    _assert_public_snapshot_contract(fixed)
+    # A harmless lexical edit of the accepted base (whitespace/member order)
+    # keeps an identical canonical body and is still accepted...
+    base_doc = _raw_load(base["json_text"])
+    lexically_edited = _raw_load(
+        json.dumps(base_doc, indent=3, sort_keys=True))
+    assert _canonical_body_bytes(lexically_edited) == \
+        _canonical_body_bytes(base_doc)
+    _assert_public_snapshot_contract(lexically_edited)
+    # ...while a substantive value change carrying the OLD hash rejects
+    # invalid_snapshot (its own field rules are otherwise satisfied).
+    substantive = copy.deepcopy(base_doc)
+    substantive["tick_epoch"] += 1
+    assert _public_structural_error(substantive) == \
+        CANONICAL_INVALID_SNAPSHOT_ENVELOPE
+
+
+# -- wrong-rule probes (rejection evidence ONLY; never an authoring oracle) --
+
+
+class _RawLexeme(str):
+    """A numeric token kept verbatim -- the WRONG token-copy rule."""
+
+
+def _emit_node(node, key_order):
+    if isinstance(node, _RawLexeme):
+        return str(node)
+    if isinstance(node, dict):
+        items = sorted(node.items(), key=lambda kv: key_order(kv[0]))
+        return "{" + ",".join(
+            json.dumps(k, ensure_ascii=True) + ":" + _emit_node(v, key_order)
+            for k, v in items) + "}"
+    if isinstance(node, list):
+        return "[" + ",".join(_emit_node(v, key_order) for v in node) + "]"
+    return json.dumps(node, ensure_ascii=True)
+
+
+def _wrong_raw_lexeme_encoder(text):
+    """WRONG RULE: copy each raw numeric lexeme instead of the typed value, so
+    float `1.0` and float `1e0` -- one typed value -- encode differently."""
+    value = json.loads(text, parse_int=_RawLexeme, parse_float=_RawLexeme)
+    return _emit_node(value, lambda k: k)
+
+
+def _wrong_utf16_key_order(value):
+    """WRONG RULE: order object keys by UTF-16 code units (surrogatepass), not
+    by Unicode code point, so an astral key sorts before a BMP high code point."""
+    return sorted(value, key=lambda k: k.encode("utf-16-be", "surrogatepass"))
+
+
+def _wrong_utf16_encoder(text):
+    value = json.loads(text)
+    return _emit_node(
+        value, lambda k: k.encode("utf-16-be", "surrogatepass"))
+
+
+def _coerce_ints(node):
+    if isinstance(node, bool):
+        return node
+    if isinstance(node, float) and node.is_integer():
+        return int(node)
+    if isinstance(node, dict):
+        return {k: _coerce_ints(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_coerce_ints(v) for v in node]
+    return node
+
+
+def _wrong_coercing_encoder(text):
+    """WRONG RULE: collapse integral floats to ints, so integer `1` and float
+    `1.0` encode identically and a strict-field float mutant passes."""
+    return _canonical_bytes(_coerce_ints(json.loads(text))).decode("utf-8")
+
+
+def test_canonical_wrong_rules_are_discriminated(canonical_table):
+    # (a) A hash taken from the RAW FILE BYTES rejects a lexically different
+    #     document that has the same typed values.
+    producer = _canon_vector(
+        canonical_table, "vec_snapshot_float_priced_producer")
+    alternate = _canon_vector(
+        canonical_table, "vec_snapshot_float_priced_alternate")
+    raw_bytes_hash = hashlib.sha256(
+        alternate["json_text"].encode("utf-8")).hexdigest()
+    assert raw_bytes_hash != alternate["sha256"]
+    assert _canonical_sha(
+        {k: v for k, v in _raw_load(alternate["json_text"]).items()
+         if k != "snapshot_id"}) == alternate["sha256"]
+
+    # (b) Raw numeric token-copy distinguishes `1.0` from `1e0` wrongly.
+    one = _canon_vector(canonical_table, "vec_float_lexeme_one")
+    exp = _canon_vector(canonical_table, "vec_float_lexeme_one_exponent")
+    assert _wrong_raw_lexeme_encoder(one["json_text"]) != \
+        _wrong_raw_lexeme_encoder(exp["json_text"])
+    assert one["canonical_text"] == exp["canonical_text"]
+
+    # (c) Int-like-float coercion collapses `1`/`1.0` and accepts a strict-field
+    #     mutant the real rule rejects.
+    int_row = _canon_vector(canonical_table, "vec_int_lexeme_one")
+    assert _wrong_coercing_encoder(int_row["json_text"]) == \
+        _wrong_coercing_encoder(one["json_text"])
+    assert int_row["canonical_text"] != one["canonical_text"]
+    mutant = _raw_load(
+        _snapshot_case(canonical_table,
+                       "snap_case_schema_version_float")["json_text"])
+    assert _public_structural_error(mutant) == \
+        CANONICAL_INVALID_SNAPSHOT_ENVELOPE
+    coerced = _coerce_ints(mutant)
+    _reseal_snapshot(coerced)
+    _assert_public_snapshot_contract(coerced)   # the wrong rule accepts it
+
+    # (d) Naive UTF-16 key sorting differs from the literal code-point vector.
+    keyed = _canon_vector(canonical_table, "vec_key_sorting_codepoint")
+    kv = _raw_load(keyed["json_text"])
+    assert _wrong_utf16_key_order(kv) != sorted(kv)
+    assert _wrong_utf16_encoder(keyed["json_text"]) != keyed["canonical_text"]
+
+    # (e) Omitting ensure_ascii yields different bytes for the escapes vector.
+    escapes = _canon_vector(canonical_table, "vec_ensure_ascii_escapes")
+    ev = _raw_load(escapes["json_text"])
+    assert json.dumps(ev, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False) != escapes["canonical_text"]
+
+    # (f) A shape-only snapshot_id verifier accepts the well-shaped tamper the
+    #     real hash rule rejects.
+    tamper = _raw_load(
+        _snapshot_case(canonical_table, "snap_case_hash_tamper")["json_text"])
+    assert _wrong_hash_shape_only(tamper["snapshot_id"]) is True
+    assert _public_structural_error(tamper) == \
+        CANONICAL_INVALID_SNAPSHOT_ENVELOPE
+
+    # (g) Dropping or stringifying numeric pricing changes body and hash.
+    twin = _raw_load(producer["json_text"])
+    stringified = copy.deepcopy(twin)
+    stringified["providers"]["synthetic-a"]["models"]["alpha-1:free"][
+        "pricing"]["prompt"] = "1.0"
+    assert _canonical_body_bytes(stringified) != _canonical_body_bytes(twin)
+    assert _canonical_sha(
+        {k: v for k, v in stringified.items() if k != "snapshot_id"}) != \
+        producer["sha256"]
+    dropped = copy.deepcopy(twin)
+    del dropped["providers"]["synthetic-a"]["models"]["alpha-1:free"]["pricing"]
+    assert _canonical_body_bytes(dropped) != _canonical_body_bytes(twin)
+
+
+# -- table-integrity corruption probes --
+
+
+def test_canonical_table_integrity_probes_fail_as_intended(canonical_table):
+    # (1) A missing table fails the loading guard -- never a vacuous pass.
+    with pytest.raises(AssertionError, match="missing"):
+        _load_canonical_table(FIXTURE_DIR / "no-such-canonical-table.json")
+
+    # (2) A corrupt literal canonical_text no longer rederives.
+    row = copy.deepcopy(_canon_vector(canonical_table, "vec_int_lexeme_one"))
+    row["canonical_text"] = '{"n":2}'
+    assert _canonical_row_text(row) != row["canonical_text"]
+
+    # (3) A corrupt literal sha256 no longer matches.
+    row = copy.deepcopy(_canon_vector(canonical_table, "vec_signed_zero"))
+    row["sha256"] = "0" * 64
+    assert hashlib.sha256(_canonical_row_text(row).encode("utf-8")) \
+        .hexdigest() != row["sha256"]
+
+    # (4) Renaming/missing a required vector fails the coverage guard.
+    broken = copy.deepcopy(canonical_table)
+    broken["snapshot_cases"] = [
+        r for r in broken["snapshot_cases"]
+        if r["id"] != "snap_case_cadence_float"]
+    broken["canonical_vectors"][0]["id"] = "renamed_vector"
+    ids = {r["id"] for r in broken["canonical_vectors"]} \
+        | {r["id"] for r in broken["snapshot_cases"]}
+    missing = set(REQUIRED_CANONICAL_IDS) - ids
+    assert {"snap_case_cadence_float", "vec_int_lexeme_one"} <= missing, (missing)
+
+    # (5) A semantic tamper (json_text no longer matching its literal) is caught.
+    tampered = copy.deepcopy(_canon_vector(canonical_table,
+                                           "vec_float_lexeme_one"))
+    tampered["json_text"] = '{"n": 1}'
+    assert _canonical_row_text(tampered) != tampered["canonical_text"]
+
+    # (6) Row deep copies never mutate the fixture source.
+    assert _canon_vector(canonical_table,
+                         "vec_int_lexeme_one")["canonical_text"] == '{"n":1}'
+
+
+# -- README subsection pins --
+
+CANONICAL_SECTION = (
+    "Typed canonical encoding and strict snapshot integer tokens (frozen rules)")
+
+
+def _canonical_section_text():
+    """The README body of the frozen typed-canonical subsection ONLY (from its
+    `###` heading to the next `###`/`##` heading), so pins here can never be
+    satisfied by tokens from an adjacent section."""
+    text = README.read_text(encoding="utf-8")
+    heading = f"### {CANONICAL_SECTION}"
+    assert heading in text, (
+        "README is missing the frozen typed-canonical encoding subsection")
+    body = text[text.index(heading):]
+    ends = [i for i in (body.find("\n### ", len(heading)),
+                        body.find("\n## ", len(heading))) if i != -1]
+    return body[:min(ends)] if ends else body
+
+
+def test_readme_canonical_subsection_is_itself_scoped():
+    text = " ".join(_canonical_section_text().split())
+    assert "raw-json-cases.json" not in text
+    assert "MAX_JSON_DEPTH" not in text
+    assert "fail export" not in text
+    assert "Success envelope" not in text
+    assert "Total ordering rule (frozen)" not in text
+
+
+def test_readme_freezes_canonical_encoding_and_strict_token_rules():
+    text = " ".join(_canonical_section_text().split())
+    for phrase in (
+            "`snapshot_id` remains the SHA-256 of the **canonical body**",
+            "with **only** the root `snapshot_id` excluded",
+            "hash equality stays **load-bearing**",
+            "well-shaped but wrong 64-hex value is never accepted as a merely "
+            "opaque id",
+            "produced from the **decoded typed values**, never from the raw "
+            "file bytes",
+            "object keys sorted by Unicode **code point**",
+            "Python's `json.dumps` with those flags is the reference encoder",
+            "re-spelled floats such as `1e0` versus `1.0`",
+            "an integer token `1` and a float token `1.0` are **different** "
+            "typed values and hash differently",
+            "String values, including numeric-looking strings, are never "
+            "coerced",
+            "stay **strict integer tokens**",
+            "an integral **float** token such as `1.0` or `1e0` is **not** a "
+            "valid strict snapshot integer",
+            "is `invalid_snapshot`, never `unsupported_schema_version`",
+            "**different** boundary from the `c1` tool argument table, which "
+            "still accepts `1.0` for integer arguments",
+            "pricing keeps its frozen finite scalar numbers, numeric strings "
+            "and `null`",
+            "never dropped, stringified or coerced to an int",
+            "`tests/fixtures/catalog/canonical-cases.json` is the "
+            "clearly-labelled canonical rule **TABLE**",
+            "a `general_value` row is a general raw-JSON **encoding "
+            "specification** whose whole value is hashed",
+            "a nested `snapshot_id` key is ordinary retained content",
+            "a `snapshot` row is a complete re-sealed snapshot document hashed "
+            "with only the root `snapshot_id` excluded",
+            "literal hand-authored FILE CONTENT",
+            "No runtime encoder, package implementation or JavaScript parity "
+            "is claimed here",
+    ):
+        assert phrase in text, (
+            f"typed-canonical subsection missing rule: {phrase}")

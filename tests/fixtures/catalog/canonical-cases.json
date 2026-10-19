@@ -1,0 +1,198 @@
+{
+  "description": "Canonical encoding/hash rule TABLE (unit 1d-c2b2). This file is a clearly-labelled RULE TABLE -- explicitly NOT a snapshot and NOT a query result. The expected `canonical_text` and `sha256` values are literal hand-authored FILE CONTENT, never computed by an implementation; the test-local stdlib checker rederives them. `canonical_vectors` rows carry an explicit `scope`: a `general_value` row is a general raw-JSON encoding specification whose WHOLE value is hashed (and a nested `snapshot_id` key is ordinary retained content), never a valid public snapshot; a `snapshot` row is a complete re-sealed public snapshot document hashed with ONLY the root `snapshot_id` excluded. `snapshot_cases` rows carry complete literal documents and either `accepted: true` or the complete literal error envelope.",
+  "canonical_rule": "Public snapshot_id is SHA-256 of the canonical BODY excluding only the root snapshot_id: UTF8, sorted object keys by Unicode code point, compact comma/colon separators, ensure_ascii=True Python encoding, finite values. Python json.dumps is the reference encoder and full canonical hash equality is verified, never merely shape or raw file digest. Python integer and float tokens keep their lexical TYPES from JSON decoding: an integer token `1` and a float token `1.0` produce DIFFERENT canonical bytes/hashes, while float `1.0` and float `1e0` produce the SAME bytes/hash; noncanonical spelling, harmless whitespace/object-member order and alternate equivalent escapes do not change the canonical body when the parsed typed values are identical. String values, including numeric-looking strings, are never coerced. Published schema_version/tick_epoch/cadence_s/context_length stay strict integer-token fields (booleans excluded); integral float tokens such as 1.0 or 1e0 are not valid strict snapshot integers and reject invalid_snapshot. An equivalent-spelling snapshot twin keeps identical canonical bytes and snapshot_id.",
+  "canonical_vectors": [
+    {
+      "id": "vec_int_lexeme_one",
+      "category": "numeric_lexeme_types",
+      "scope": "general_value",
+      "json_text": "{\"n\": 1}",
+      "canonical_text": "{\"n\":1}",
+      "sha256": "2bfd14f43d17fc7cea24e0917a8879b4b2f880b8baeec1b9d90fbaad655e71bd"
+    },
+    {
+      "id": "vec_float_lexeme_one",
+      "category": "numeric_lexeme_types",
+      "scope": "general_value",
+      "json_text": "{\"n\": 1.0}",
+      "canonical_text": "{\"n\":1.0}",
+      "sha256": "3b6b06ecd1c968c8e738e0f11c4bb361fca80a9a694de22fe66a05286afbd081"
+    },
+    {
+      "id": "vec_float_lexeme_one_exponent",
+      "category": "numeric_lexeme_types",
+      "scope": "general_value",
+      "json_text": "{\"n\": 1e0}",
+      "canonical_text": "{\"n\":1.0}",
+      "sha256": "3b6b06ecd1c968c8e738e0f11c4bb361fca80a9a694de22fe66a05286afbd081"
+    },
+    {
+      "id": "vec_signed_zero",
+      "category": "signed_zero",
+      "scope": "general_value",
+      "json_text": "{\"z\": 0, \"nz\": -0.0}",
+      "canonical_text": "{\"nz\":-0.0,\"z\":0}",
+      "sha256": "b1813023a85ec7cc70691da4e791bd3f85cbf2f88086b066702527f5aea456be"
+    },
+    {
+      "id": "vec_float_thresholds",
+      "category": "float_thresholds",
+      "scope": "general_value",
+      "json_text": "{\"a\": 0.1, \"b\": 1e-4, \"c\": 1e-5, \"d\": 1e-7, \"e\": 1e15}",
+      "canonical_text": "{\"a\":0.1,\"b\":0.0001,\"c\":1e-05,\"d\":1e-07,\"e\":1000000000000000.0}",
+      "sha256": "c57b593340e0b7f6a164d979eb43c9fd4929bb3dec5959bc29b5e0fbad61645b"
+    },
+    {
+      "id": "vec_subnormal_underflow_rounded",
+      "category": "float_underflow_subnormal_rounded",
+      "scope": "general_value",
+      "json_text": "{\"sub\": 5e-324, \"under\": 1e-400, \"rounded\": 1.0000000000000001}",
+      "canonical_text": "{\"rounded\":1.0,\"sub\":5e-324,\"under\":0.0}",
+      "sha256": "41f7d25e790277f268cd2e62882e82e36d9c9305d3f710a1af9398b43509feac"
+    },
+    {
+      "id": "vec_numeric_strings",
+      "category": "numeric_strings",
+      "scope": "general_value",
+      "json_text": "{\"a\": \"9007199254740992\", \"b\": \"1e16\", \"c\": \"NaN\", \"d\": \"1.0\", \"e\": \"0.1\"}",
+      "canonical_text": "{\"a\":\"9007199254740992\",\"b\":\"1e16\",\"c\":\"NaN\",\"d\":\"1.0\",\"e\":\"0.1\"}",
+      "sha256": "93ad89a337915ef76451b8536688de989dd6e300c3a33609e1b4dc7a8bf12a57"
+    },
+    {
+      "id": "vec_key_sorting_codepoint",
+      "category": "key_sorting",
+      "scope": "general_value",
+      "json_text": "{\"10\": \"ten\", \"2\": \"two\", \"\\uE000\": \"pua\", \"\\uFF21\": \"bmp\", \"\\uD83D\\uDE80\": \"astral\"}",
+      "canonical_text": "{\"10\":\"ten\",\"2\":\"two\",\"\\ue000\":\"pua\",\"\\uff21\":\"bmp\",\"\\ud83d\\ude80\":\"astral\"}",
+      "sha256": "04c9929d63cd21eeae47927c2d89efad52ffa1c1d5617392745ce6d49c2a4b3e"
+    },
+    {
+      "id": "vec_ensure_ascii_escapes",
+      "category": "ensure_ascii_escapes",
+      "scope": "general_value",
+      "json_text": "{\"slash\": \"/\", \"del\": \"\\u007f\", \"ctl\": \"\\u0001\", \"tab\": \"\\t\", \"nl\": \"\\n\", \"bs\": \"\\b\", \"nonascii\": \"caf\u00e9\", \"astral\": \"\ud83d\ude80\", \"lone\": \"\\ud800\"}",
+      "canonical_text": "{\"astral\":\"\\ud83d\\ude80\",\"bs\":\"\\b\",\"ctl\":\"\\u0001\",\"del\":\"\\u007f\",\"lone\":\"\\ud800\",\"nl\":\"\\n\",\"nonascii\":\"caf\\u00e9\",\"slash\":\"/\",\"tab\":\"\\t\"}",
+      "sha256": "7cfabb2a33b4fc54ef9be531a633ce5dab9569c1202850f536eb9a807a04ab85"
+    },
+    {
+      "id": "vec_equivalent_escapes_escaped",
+      "category": "equivalent_escapes",
+      "scope": "general_value",
+      "json_text": "{\"slash\": \"\\/\", \"e\": \"\\u0041\", \"u\": \"caf\\u00e9\"}",
+      "canonical_text": "{\"e\":\"A\",\"slash\":\"/\",\"u\":\"caf\\u00e9\"}",
+      "sha256": "1d7b0a64b1284f2601f47147624543dcbc511529d4ab4fcd76878cbe8c75cb90"
+    },
+    {
+      "id": "vec_equivalent_escapes_literal",
+      "category": "equivalent_escapes",
+      "scope": "general_value",
+      "json_text": "{\"slash\": \"/\", \"e\": \"A\", \"u\": \"caf\u00e9\"}",
+      "canonical_text": "{\"e\":\"A\",\"slash\":\"/\",\"u\":\"caf\\u00e9\"}",
+      "sha256": "1d7b0a64b1284f2601f47147624543dcbc511529d4ab4fcd76878cbe8c75cb90"
+    },
+    {
+      "id": "vec_nested_snapshot_id",
+      "category": "nested_snapshot_id",
+      "scope": "general_value",
+      "json_text": "{\"snapshot_id\": \"0000000000000000000000000000000000000000000000000000000000000000\", \"inner\": {\"snapshot_id\": \"cafe\"}}",
+      "canonical_text": "{\"inner\":{\"snapshot_id\":\"cafe\"},\"snapshot_id\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
+      "sha256": "b066cb6e596bf34bed24fb29905ce00e4be0d7cfc44ae7de7ccb039d23ef42f9"
+    },
+    {
+      "id": "vec_snapshot_float_priced_producer",
+      "category": "snapshot_document",
+      "scope": "snapshot",
+      "json_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-\\ud83d\\ude80\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":0.1,\"prompt\":1.0},\"supported_parameters\":[\"temperature\",\"max_tokens\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\",\"image\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":0.1,\"prompt\":1.0},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-\\ud83d\\ude80\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-rocket.example/v1/chat/completions\",\"display_name\":\"Synthetic Rocket\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1,\"snapshot_id\":\"2c3ba0d7710a3dd45eb956713b7aabc69890c7fa6494ef386c0521080d027660\",\"tick_epoch\":1759200000,\"warnings\":[]}",
+      "canonical_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-\\ud83d\\ude80\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":0.1,\"prompt\":1.0},\"supported_parameters\":[\"temperature\",\"max_tokens\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\",\"image\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":0.1,\"prompt\":1.0},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-\\ud83d\\ude80\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-rocket.example/v1/chat/completions\",\"display_name\":\"Synthetic Rocket\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1,\"tick_epoch\":1759200000,\"warnings\":[]}",
+      "sha256": "2c3ba0d7710a3dd45eb956713b7aabc69890c7fa6494ef386c0521080d027660"
+    },
+    {
+      "id": "vec_snapshot_float_priced_alternate",
+      "category": "snapshot_document",
+      "scope": "snapshot",
+      "json_text": "{\n  \"warnings\" : [ ],\n  \"tick_epoch\" : 1759200000,\n  \"schema_version\" : 1,\n  \"cadence_s\" : 3600,\n  \"snapshot_id\" : \"2c3ba0d7710a3dd45eb956713b7aabc69890c7fa6494ef386c0521080d027660\",\n  \"providers\" : {\n    \"synthetic-\\uD83D\\uDE80\" : {\n      \"stale\" : false,\n      \"api_type\" : \"openai\",\n      \"display_name\" : \"Synthetic Rocket\",\n      \"chat_completions_url\" : \"https://synthetic-rocket.example/v1/chat/completions\",\n      \"model_ids\" : [ ],\n      \"models\" : { }\n    },\n    \"synthetic-a\" : {\n      \"stale\" : false,\n      \"api_type\" : \"openai\",\n      \"display_name\" : \"Synthetic Alpha\",\n      \"chat_completions_url\" : \"https://synthetic-alpha.example/v1/chat/completions\",\n      \"model_ids\" : [ \"alpha-1:free\", \"alpha-2-free\" ],\n      \"models\" : {\n        \"alpha-2-free\" : {\n          \"pricing\" : { \"completion\" : 1e-1, \"prompt\" : 1e0 },\n          \"supported_parameters\" : [ \"temperature\" ],\n          \"architecture\" : {\n            \"output_modalities\" : [ \"text\" ],\n            \"input_modalities\" : [ \"text\", \"image\" ]\n          },\n          \"context_length\" : 8192,\n          \"description\" : null,\n          \"name\" : \"Alpha Two\",\n          \"id\" : \"alpha-2-free\"\n        },\n        \"alpha-1:free\" : {\n          \"pricing\" : { \"completion\" : 1e-1, \"prompt\" : 1e0 },\n          \"supported_parameters\" : [ \"temperature\", \"max_tokens\" ],\n          \"architecture\" : {\n            \"output_modalities\" : [ \"text\" ],\n            \"input_modalities\" : [ \"text\" ]\n          },\n          \"context_length\" : 32768,\n          \"description\" : null,\n          \"name\" : \"Alpha One\",\n          \"id\" : \"alpha-1:free\"\n        }\n      }\n    }\n  },\n  \"provider_order\" : [ \"synthetic-a\", \"synthetic-\\ud83d\\ude80\" ]\n}\n",
+      "canonical_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-\\ud83d\\ude80\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":0.1,\"prompt\":1.0},\"supported_parameters\":[\"temperature\",\"max_tokens\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\",\"image\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":0.1,\"prompt\":1.0},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-\\ud83d\\ude80\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-rocket.example/v1/chat/completions\",\"display_name\":\"Synthetic Rocket\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1,\"tick_epoch\":1759200000,\"warnings\":[]}",
+      "sha256": "2c3ba0d7710a3dd45eb956713b7aabc69890c7fa6494ef386c0521080d027660"
+    }
+  ],
+  "snapshot_cases": [
+    {
+      "id": "snap_case_integer_token_base",
+      "category": "snapshot_integer_token_base",
+      "json_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-b\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-b\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-beta.example/v1/chat/completions\",\"display_name\":\"Synthetic Beta\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1,\"snapshot_id\":\"10fc0280cf2a82fa438ae2fb019bee18ea10ce042e7f080590e78eb86d8aeacf\",\"tick_epoch\":1759200000,\"warnings\":[]}",
+      "accepted": true
+    },
+    {
+      "id": "snap_case_schema_version_float",
+      "category": "strict_schema_version_token",
+      "json_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-b\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-b\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-beta.example/v1/chat/completions\",\"display_name\":\"Synthetic Beta\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1.0,\"snapshot_id\":\"2d4ef0e6dea482fc61e4042f523221be23d0a7730a86f392649f9f12a0208b37\",\"tick_epoch\":1759200000,\"warnings\":[]}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_snapshot",
+          "message": "Invalid catalogue snapshot."
+        }
+      }
+    },
+    {
+      "id": "snap_case_tick_epoch_float",
+      "category": "strict_tick_epoch_token",
+      "json_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-b\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-b\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-beta.example/v1/chat/completions\",\"display_name\":\"Synthetic Beta\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1,\"snapshot_id\":\"0b04902c240d5e4704c10d2004b6283f67b7c3db3b3685d1804e6bccab92fb59\",\"tick_epoch\":1759200000.0,\"warnings\":[]}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_snapshot",
+          "message": "Invalid catalogue snapshot."
+        }
+      }
+    },
+    {
+      "id": "snap_case_cadence_float",
+      "category": "strict_cadence_token",
+      "json_text": "{\"cadence_s\":3600.0,\"provider_order\":[\"synthetic-a\",\"synthetic-b\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-b\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-beta.example/v1/chat/completions\",\"display_name\":\"Synthetic Beta\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1,\"snapshot_id\":\"82e1dc6190fa14d966d74bc5daf54edb4075bc17e8c9c632652568f66b3bdf62\",\"tick_epoch\":1759200000,\"warnings\":[]}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_snapshot",
+          "message": "Invalid catalogue snapshot."
+        }
+      }
+    },
+    {
+      "id": "snap_case_context_length_float",
+      "category": "strict_context_length_token",
+      "json_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-b\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768.0,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-b\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-beta.example/v1/chat/completions\",\"display_name\":\"Synthetic Beta\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1,\"snapshot_id\":\"40e409a3de5d068e5be69aa45ee087f5b8c39c66ebf90a969a77ace3f050febe\",\"tick_epoch\":1759200000,\"warnings\":[]}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_snapshot",
+          "message": "Invalid catalogue snapshot."
+        }
+      }
+    },
+    {
+      "id": "snap_case_schema_version_exponent",
+      "category": "strict_schema_version_exponent",
+      "json_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-b\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-b\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-beta.example/v1/chat/completions\",\"display_name\":\"Synthetic Beta\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1e0,\"snapshot_id\":\"2d4ef0e6dea482fc61e4042f523221be23d0a7730a86f392649f9f12a0208b37\",\"tick_epoch\":1759200000,\"warnings\":[]}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_snapshot",
+          "message": "Invalid catalogue snapshot."
+        }
+      }
+    },
+    {
+      "id": "snap_case_hash_tamper",
+      "category": "snapshot_hash_tamper",
+      "json_text": "{\"cadence_s\":3600,\"provider_order\":[\"synthetic-a\",\"synthetic-b\"],\"providers\":{\"synthetic-a\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-alpha.example/v1/chat/completions\",\"display_name\":\"Synthetic Alpha\",\"model_ids\":[\"alpha-1:free\",\"alpha-2-free\"],\"models\":{\"alpha-1:free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":32768,\"description\":null,\"id\":\"alpha-1:free\",\"name\":\"Alpha One\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]},\"alpha-2-free\":{\"architecture\":{\"input_modalities\":[\"text\"],\"output_modalities\":[\"text\"]},\"context_length\":8192,\"description\":null,\"id\":\"alpha-2-free\",\"name\":\"Alpha Two\",\"pricing\":{\"completion\":\"0\",\"prompt\":\"0\"},\"supported_parameters\":[\"temperature\"]}},\"stale\":false},\"synthetic-b\":{\"api_type\":\"openai\",\"chat_completions_url\":\"https://synthetic-beta.example/v1/chat/completions\",\"display_name\":\"Synthetic Beta\",\"model_ids\":[],\"models\":{},\"stale\":false}},\"schema_version\":1,\"snapshot_id\":\"10fc0280cf2a82fa438ae2fb019bee18ea10ce042e7f080590e78eb86d8aeacf\",\"tick_epoch\":1759200001,\"warnings\":[]}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_snapshot",
+          "message": "Invalid catalogue snapshot."
+        }
+      }
+    }
+  ]
+}

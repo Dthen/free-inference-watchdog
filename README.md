@@ -376,9 +376,51 @@ envelopes are unchanged.
 rule **TABLE** (explicitly **not** a snapshot and **not** a query result)
 holding the adversarial literal lexemes as STRINGS plus their handwritten
 complete expected envelopes or decoded values; `tests/test_catalog.py`
-restates these rules as a test-local stdlib checker. No runtime parser, public
-success envelope or JavaScript implementation is claimed here: the canonical
-language/hash-vector parity unit (c2b2) and JS parity remain separate.
+restates these rules as a test-local stdlib checker. No runtime parser or
+public success envelope is claimed here: the canonical encoding/hash vectors
+and the strict snapshot integer-token boundary are frozen separately in the
+typed-encoding subsection below, and JavaScript parity remains a separate
+concern with no JS implementation claimed anywhere.
+
+### Typed canonical encoding and strict snapshot integer tokens (frozen rules)
+
+The public `snapshot_id` remains the SHA-256 of the **canonical body** — the
+complete snapshot object with **only** the root `snapshot_id` excluded — and
+hash equality stays **load-bearing**: a well-shaped but wrong 64-hex value is
+never accepted as a merely opaque id. The canonical body is produced from the
+**decoded typed values**, never from the raw file bytes or their numeric
+spellings: UTF-8, object keys sorted by Unicode **code point**, compact `,`/`:`
+separators, finite JSON values and `ensure_ascii=True`; Python's `json.dumps`
+with those flags is the reference encoder. A lexical difference that parses to
+identical typed values — re-spelled floats such as `1e0` versus `1.0`,
+harmless whitespace, object-member order, or equivalent string escapes — yields
+an **identical** canonical body and `snapshot_id`, while an integer token `1`
+and a float token `1.0` are **different** typed values and hash differently.
+String values, including numeric-looking strings, are never coerced.
+
+Published snapshot integer-token fields (`schema_version`, `tick_epoch`,
+`cadence_s` and a model's `context_length`) stay **strict integer tokens**:
+booleans are excluded, and an integral **float** token such as `1.0` or `1e0`
+is **not** a valid strict snapshot integer. Such a document is
+`invalid_snapshot`, never `unsupported_schema_version`, which applies only to a
+well-typed strict integer version other than `1`. This is a **different**
+boundary from the `c1` tool argument table, which still accepts `1.0` for
+integer arguments; pricing keeps its frozen finite scalar numbers, numeric
+strings and `null`, and is never dropped, stringified or coerced to an int.
+Unknown capability metadata stays unknown.
+
+`tests/fixtures/catalog/canonical-cases.json` is the clearly-labelled canonical
+rule **TABLE** (explicitly **not** a snapshot and **not** a query result). Its
+`canonical_vectors` rows carry an explicit `scope`: a `general_value` row is a
+general raw-JSON **encoding specification** whose whole value is hashed (a
+nested `snapshot_id` key is ordinary retained content), never a valid public
+snapshot; a `snapshot` row is a complete re-sealed snapshot document hashed
+with only the root `snapshot_id` excluded. The `canonical_text` and `sha256`
+values are literal hand-authored FILE CONTENT, re-derived independently by the
+test-local stdlib checker; the `snapshot_cases` rows carry complete literal
+documents and either `accepted: true` or the complete literal error envelope.
+No runtime encoder, package implementation or JavaScript parity is claimed
+here.
 
 ### Tool surface (frozen names)
 
