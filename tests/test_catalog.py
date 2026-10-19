@@ -2020,7 +2020,8 @@ def _checker_project(raw):
             arch.get("output_modalities", _MISSING))
     else:
         in_ = out_ = None
-        parent_warn = ("metadata_missing" if arch is _MISSING
+        parent_warn = ("metadata_missing"
+                       if arch is _MISSING or arch is None
                        else "metadata_invalid")
         in_warn = out_warn = parent_warn
     params, params_warn = _checker_project_array(
@@ -2177,6 +2178,23 @@ def test_normalization_positive_controls():
     assert rows["context_zero_known"]["normalized"]["context_length"] == 0
     assert rows["context_inclusive_boundary_known"][
         "normalized"]["context_length"] == 65536
+    # An absent OR explicit-null architecture PARENT is unknown
+    # (metadata_missing); a malformed non-null parent is metadata_invalid.
+    # Either way BOTH projected children are null.
+    for raw in (
+            {"context_length": 4096, "supported_parameters": ["temperature"]},
+            {"context_length": 4096, "architecture": None,
+             "supported_parameters": ["temperature"]}):
+        projected, warnings = _checker_project(raw)
+        assert projected["architecture"] == {
+            "input_modalities": None, "output_modalities": None}
+        assert warnings == ["metadata_missing"]
+    projected, warnings = _checker_project(
+        {"context_length": 4096, "architecture": ["text"],
+         "supported_parameters": ["temperature"]})
+    assert projected["architecture"] == {
+        "input_modalities": None, "output_modalities": None}
+    assert warnings == ["metadata_invalid"]
 
 
 def test_normalization_integrity_rejects_missing_unknown_flag():

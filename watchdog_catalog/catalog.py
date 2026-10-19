@@ -509,3 +509,168 @@ def snapshot_hash(snapshot):
     body = {key: value for key, value in snapshot.items()
             if key != "snapshot_id"}
     return hashlib.sha256(canonical_bytes(body)).hexdigest()
+
+
+# ---------- optional capability projection and separate normalization ----------
+#
+# Two small PURE functions extend this module for the optional capability
+# fields. `project_capabilities` degrades one upstream model fragment to the
+# public capability shape (unknown and malformed optional metadata both become
+# ``null`` and NEVER drop an endpoint, coerce a value or leak a private field);
+# `normalize_capabilities` derives the query shape from an already-valid
+# projection. They reuse the module's strict validators without changing their
+# accepted meanings and add no I/O, clock, environment or network access.
+
+#: The four normalized capability fields, in their frozen order; `unknown_fields`
+#: names exactly these, in exactly this order.
+_CAPABILITY_FIELD_ORDER = (
+    "context_length", "input_modalities", "output_modalities",
+    "supported_parameters",
+)
+
+#: The capability-only warning vocabulary, in deduplicated publication order.
+#: `tick_epoch_unknown` is a snapshot-level code and never arises here.
+_CAPABILITY_WARNING_ORDER = ("metadata_missing", "metadata_invalid")
+
+#: Distinguishes an ABSENT upstream member from an explicit JSON ``null``.
+_CAPABILITY_MISSING = object()
+
+#: ASCII-only case fold: A-Z to a-z; every other code point (including an
+#: accented or uppercase non-ASCII letter) stays LITERAL. Deliberately not
+#: ``str.lower``/``str.casefold`` -- Unicode casefolding would collapse a
+#: non-ASCII pair the contract keeps distinct.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                            "abcdefghijklmnopqrstuvwxyz")
+
+
+def _dedup_capability_warnings(codes):
+    """The capability warning codes present in `codes`, deduplicated in the
+    frozen vocabulary order. A fresh list on every call."""
+    present = set(codes)
+    return [code for code in _CAPABILITY_WARNING_ORDER if code in present]
+
+
+def _project_capability_context(value):
+    """Project an upstream context length: a strict non-negative JSON-safe
+    integer is KNOWN; absent/``null`` is unknown (``metadata_missing``) and any
+    other value -- including a float ``1.0``, a bool, a negative, an unsafe
+    integer and a numeric string -- is malformed (``metadata_invalid``). The
+    value is NEVER coerced to a number."""
+    if value is _CAPABILITY_MISSING or value is None:
+        return None, "metadata_missing"
+    if _is_safe_nonneg_int(value):
+        return value, None
+    return None, "metadata_invalid"
+
+
+def _project_capability_array(value):
+    """Project an optional upstream capability array: a list of nonempty
+    strings is COPIED (order, duplicates and casing preserved), ``[]`` is KNOWN
+    empty, absent/``null`` is unknown (``metadata_missing``) and anything else
+    is malformed and rejected WHOLE (``metadata_invalid``) -- never partially
+    salvaged."""
+    if value is _CAPABILITY_MISSING or value is None:
+        return None, "metadata_missing"
+    if _is_string_list_or_null(value):
+        return list(value), None
+    return None, "metadata_invalid"
+
+
+def project_capabilities(raw):
+    """Project one upstream capability fragment to the public capability shape.
+
+    `raw` is an upstream model metadata mapping; any other upstream member is
+    ignored and never returned. The result is a NEW ``(projected, warnings)``
+    pair. ``projected`` carries exactly ``context_length``, ``architecture``
+    (exactly ``input_modalities``/``output_modalities``) and
+    ``supported_parameters``; every container is freshly allocated and every
+    retained array is a copy with its original casing, order and duplicates.
+    ``warnings`` is a fresh, deduplicated list in the frozen vocabulary order.
+
+    Unknown and malformed optional metadata degrade to ``null`` (unknown) and
+    NEVER drop an endpoint, coerce a value or serialize a private/secret field.
+    A non-mapping `raw` is a programming-error ``TypeError``.
+    """
+    if not isinstance(raw, dict):
+        raise TypeError(
+            "project_capabilities() requires an upstream capability mapping")
+    context, context_warn = _project_capability_context(
+        raw.get("context_length", _CAPABILITY_MISSING))
+    architecture = raw.get("architecture", _CAPABILITY_MISSING)
+    if isinstance(architecture, dict):
+        input_, input_warn = _project_capability_array(
+            architecture.get("input_modalities", _CAPABILITY_MISSING))
+        output_, output_warn = _project_capability_array(
+            architecture.get("output_modalities", _CAPABILITY_MISSING))
+    elif architecture is _CAPABILITY_MISSING or architecture is None:
+        # An absent or explicitly-null parent: BOTH children are unknown.
+        input_ = output_ = None
+        input_warn = output_warn = "metadata_missing"
+    else:
+        # A malformed non-null parent makes both children unknown.
+        input_ = output_ = None
+        input_warn = output_warn = "metadata_invalid"
+    params, params_warn = _project_capability_array(
+        raw.get("supported_parameters", _CAPABILITY_MISSING))
+    projected = {
+        "context_length": context,
+        "architecture": {"input_modalities": input_,
+                         "output_modalities": output_},
+        "supported_parameters": params,
+    }
+    warnings = _dedup_capability_warnings(
+        (context_warn, input_warn, output_warn, params_warn))
+    return projected, warnings
+
+
+def _ascii_lower(text):
+    """ASCII-only lowercasing: A-Z fold to a-z; every other code point stays
+    literal. No whitespace trimming and no Unicode casefolding."""
+    return text.translate(_ASCII_FOLD)
+
+
+def _normalize_capability_array(values):
+    """Normalize a KNOWN capability array: ASCII-fold each token and keep the
+    FIRST occurrence of each folded value, preserving order. ``None`` (unknown)
+    stays ``None``; a NEW list is always returned for a known array."""
+    if values is None:
+        return None
+    normalized = []
+    seen = set()
+    for item in values:
+        folded = _ascii_lower(item)
+        if folded not in seen:
+            seen.add(folded)
+            normalized.append(folded)
+    return normalized
+
+
+def normalize_capabilities(projected):
+    """Normalize a valid public capability projection to the query shape.
+
+    Precondition: a valid public capability projection -- either the
+    ``projected`` half of :func:`project_capabilities` or a validated public
+    model object, whose extra identity/display/pricing members are ignored.
+    This is NOT a second raw projection or validator.
+
+    The result is a NEW mapping with exactly ``context_length``,
+    ``input_modalities``, ``output_modalities``, ``supported_parameters`` and
+    ``unknown_fields``. Context is unchanged; each known array is ASCII-folded
+    and first-occurrence deduplicated into a new list; ``None`` stays ``None``.
+    ``unknown_fields`` lists exactly the capability fields whose normalized
+    value is ``None``, in the frozen order -- a known empty ``[]`` is not
+    unknown. The input mapping is never normalized in place.
+    """
+    normalized = {
+        "context_length": projected["context_length"],
+        "input_modalities": _normalize_capability_array(
+            projected["architecture"]["input_modalities"]),
+        "output_modalities": _normalize_capability_array(
+            projected["architecture"]["output_modalities"]),
+        "supported_parameters": _normalize_capability_array(
+            projected["supported_parameters"]),
+    }
+    normalized["unknown_fields"] = [
+        field for field in _CAPABILITY_FIELD_ORDER
+        if normalized[field] is None]
+    return normalized

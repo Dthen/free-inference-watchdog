@@ -37,6 +37,7 @@ keep the process-global module table clean.
 """
 
 import collections
+import copy
 import hashlib
 import json
 import math
@@ -827,6 +828,217 @@ def test_snapshot_hash_matches_literal_vectors_and_retains_nested_ids(
     for bad in ([], "x", None, 1, b"{}"):
         with pytest.raises(TypeError):
             catalog.snapshot_hash(bad)
+
+
+# ---------- optional capability projection + separate normalization ----------
+#
+# `project_capabilities` (raw upstream fragment -> public capability shape +
+# warnings) and `normalize_capabilities` (valid public capability projection ->
+# query shape) are exercised against the SAME independently hand-authored
+# `metadata-normalization.json` rule table that the contract suite's fixture
+# checker pins. The literal row data is the authoritative expected value; the
+# table is loaded with a plain ``json.loads`` (NOT the strict raw loader)
+# because it deliberately carries an unsafe ``2**53`` context token, which the
+# projection must classify unknown without ever coercing it.
+
+NORMALIZATION_TABLE_DOC = FIXTURE_DIR / "metadata-normalization.json"
+
+# The four normalized capability fields and their frozen order (unknown_fields
+# names exactly these, in exactly this order).
+CAPABILITY_FIELD_ORDER = (
+    "context_length", "input_modalities", "output_modalities",
+    "supported_parameters",
+)
+# The capability-only warning order (tick_epoch_unknown is snapshot-level and
+# never arises here).
+CAPABILITY_WARNING_ORDER = ("metadata_missing", "metadata_invalid")
+PROJECTED_CAPABILITY_FIELDS = frozenset(
+    {"context_length", "architecture", "supported_parameters"})
+PROJECTED_ARCHITECTURE_FIELDS = frozenset(
+    {"input_modalities", "output_modalities"})
+NORMALIZED_CAPABILITY_FIELDS = frozenset(CAPABILITY_FIELD_ORDER) | {
+    "unknown_fields"}
+
+
+@pytest.fixture(scope="module")
+def normalization_rows():
+    doc = _load_table(NORMALIZATION_TABLE_DOC)
+    return {row["id"]: row for row in doc["rows"]}
+
+
+def test_project_capabilities_matches_every_literal_table_row(
+        normalization_rows):
+    catalog = _catalog
+    assert len(normalization_rows) == 22, "the rule table must carry 22 rows"
+    for cid, row in normalization_rows.items():
+        raw = copy.deepcopy(row["raw"])
+        before = copy.deepcopy(raw)
+        projected, warnings = catalog.project_capabilities(raw)
+        assert set(projected) == PROJECTED_CAPABILITY_FIELDS, cid
+        assert set(projected["architecture"]) == \
+            PROJECTED_ARCHITECTURE_FIELDS, cid
+        assert projected == row["projected"], cid
+        assert warnings == row["warnings"], cid
+        assert raw == before, cid  # the raw fragment is never mutated
+
+
+def test_normalize_capabilities_matches_every_literal_table_row(
+        normalization_rows):
+    catalog = _catalog
+    assert len(normalization_rows) == 22, "the rule table must carry 22 rows"
+    for cid, row in normalization_rows.items():
+        projected = copy.deepcopy(row["projected"])
+        before = copy.deepcopy(projected)
+        normalized = catalog.normalize_capabilities(projected)
+        assert set(normalized) == NORMALIZED_CAPABILITY_FIELDS, cid
+        assert normalized == row["normalized"], cid
+        assert normalized["unknown_fields"] == [
+            field for field in CAPABILITY_FIELD_ORDER
+            if normalized[field] is None], cid
+        assert projected == before, cid  # never normalized in place
+    # A valid full public MODEL (extra identity/display/pricing members) is a
+    # valid projection input and those extra members are ignored.
+    model = {
+        "id": "vendor/example",
+        "name": "Example",
+        "description": "ignored",
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["TEXT"],
+                         "output_modalities": None},
+        "supported_parameters": ["Temperature"],
+        "pricing": {"prompt": "0", "completion": "0"},
+    }
+    before = copy.deepcopy(model)
+    assert catalog.normalize_capabilities(model) == {
+        "context_length": 4096,
+        "input_modalities": ["text"],
+        "output_modalities": None,
+        "supported_parameters": ["temperature"],
+        "unknown_fields": ["output_modalities"],
+    }
+    assert model == before
+
+
+def test_capability_projection_edges_distinguish_unknown_from_malformed():
+    catalog = _catalog
+    project = catalog.project_capabilities
+    # An absent OR explicit-null architecture PARENT is unknown
+    # (metadata_missing); a malformed non-null parent is metadata_invalid.
+    # Either way BOTH children project to null.
+    for raw in (
+            {"context_length": 4096, "supported_parameters": ["temperature"]},
+            {"context_length": 4096, "architecture": None,
+             "supported_parameters": ["temperature"]}):
+        projected, warnings = project(raw)
+        assert projected["architecture"] == {
+            "input_modalities": None, "output_modalities": None}
+        assert warnings == ["metadata_missing"]
+    projected, warnings = project(
+        {"context_length": 4096, "architecture": ["text"],
+         "supported_parameters": ["temperature"]})
+    assert projected["architecture"] == {
+        "input_modalities": None, "output_modalities": None}
+    assert warnings == ["metadata_invalid"]
+    # A float context (1.0) is malformed, never coerced.
+    projected, warnings = project(
+        {"context_length": 1.0,
+         "architecture": {"input_modalities": [], "output_modalities": ["text"]},
+         "supported_parameters": []})
+    assert projected["context_length"] is None
+    assert projected["architecture"]["input_modalities"] == []
+    assert projected["architecture"]["output_modalities"] == ["text"]
+    assert projected["supported_parameters"] == []
+    assert warnings == ["metadata_invalid"]
+    # Unknown (null) and known-empty ([]) stay distinct: only the null field is
+    # flagged unknown, and a known zero context is KNOWN.
+    normalized = catalog.normalize_capabilities(
+        {"context_length": 0,
+         "architecture": {"input_modalities": [],
+                          "output_modalities": None},
+         "supported_parameters": []})
+    assert normalized["context_length"] == 0
+    assert normalized["input_modalities"] == []
+    assert normalized["unknown_fields"] == ["output_modalities"]
+    # A malformed array is rejected WHOLE, never partially salvaged.
+    projected, _ = project(
+        {"context_length": 4096,
+         "architecture": {"input_modalities": ["text", 5],
+                          "output_modalities": ["text"]},
+         "supported_parameters": ["temperature"]})
+    assert projected["architecture"]["input_modalities"] is None
+    assert projected["architecture"]["output_modalities"] == ["text"]
+    # Whitespace tokens are valid and untrimmed; non-ASCII case pairs stay
+    # literal (never Unicode-folded) in the public projection.
+    projected, warnings = project(
+        {"context_length": 4096,
+         "architecture": {"input_modalities": ["\u00c9", "\u00e9"],
+                          "output_modalities": [" Text "]},
+         "supported_parameters": [" TEXT ", " text "]})
+    assert warnings == []
+    assert projected["architecture"]["input_modalities"] == ["\u00c9", "\u00e9"]
+    assert projected["architecture"]["output_modalities"] == [" Text "]
+    # Extra upstream members (including a private-looking one) are ignored and
+    # never serialized into the projection.
+    projected, warnings = project(
+        {"context_length": 4096, "api_key": "secret",
+         "architecture": {"input_modalities": ["text"],
+                          "output_modalities": ["text"], "extra": 1},
+         "supported_parameters": ["temperature"], "note": "ignored"})
+    assert set(projected) == PROJECTED_CAPABILITY_FIELDS
+    assert set(projected["architecture"]) == PROJECTED_ARCHITECTURE_FIELDS
+    assert warnings == []
+    # Cross-field warning order and dedup: metadata_missing precedes
+    # metadata_invalid and each code appears once.
+    _, warnings = project(
+        {"context_length": None,
+         "architecture": {"input_modalities": "text",
+                          "output_modalities": None},
+         "supported_parameters": "temperature"})
+    assert warnings == ["metadata_missing", "metadata_invalid"]
+    # A non-mapping raw is a programming-error TypeError, never a public code.
+    for bad in ([], "x", None, 1, b"{}", ("t",)):
+        with pytest.raises(TypeError):
+            project(bad)
+
+
+def test_capability_functions_never_alias_or_mutate_their_inputs():
+    catalog = _catalog
+    shared = ["temperature"]
+    raw = {
+        "context_length": 4096,
+        "architecture": {"input_modalities": shared,
+                         "output_modalities": shared},
+        "supported_parameters": shared,
+    }
+    projected, warnings = catalog.project_capabilities(raw)
+    # Every retained array is a NEW list, and the two architecture children are
+    # not the same object even when upstream shared one.
+    assert projected["architecture"]["input_modalities"] is not shared
+    assert projected["supported_parameters"] is not shared
+    assert projected["architecture"]["input_modalities"] is not \
+        projected["architecture"]["output_modalities"]
+    projected["architecture"]["input_modalities"].append("vision")
+    projected["supported_parameters"].append("seed")
+    warnings.append("metadata_invalid")
+    assert raw == {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["temperature"],
+                         "output_modalities": ["temperature"]},
+        "supported_parameters": ["temperature"],
+    }
+    # A later call is unaffected by mutating an earlier result.
+    projected2, warnings2 = catalog.project_capabilities(raw)
+    assert projected2["architecture"]["input_modalities"] == ["temperature"]
+    assert warnings2 == []
+    # Normalization returns new lists and a fresh unknown_fields each call.
+    normalized = catalog.normalize_capabilities(projected2)
+    normalized["input_modalities"].append("audio")
+    normalized["unknown_fields"].append("context_length")
+    again = catalog.normalize_capabilities(projected2)
+    assert again["input_modalities"] == ["temperature"]
+    assert again["unknown_fields"] == []
+    assert projected2["architecture"]["input_modalities"] == ["temperature"]
+    assert projected2["supported_parameters"] == ["temperature"]
 
 
 # ---------- import isolation: silent, side-effect-free package root ----------
