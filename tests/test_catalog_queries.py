@@ -23,15 +23,11 @@ bytes and therefore never manufactures a structural envelope. Grouped loops
 keep the added test count proportional to the coherent boundaries rather than
 to the individual table rows.
 
-The real package is imported LAZILY (inside the test bodies, via
-:func:`_catalog`). pytest imports every test module during COLLECTION, so a
-module-level ``import watchdog_catalog`` would place the package in
-``sys.modules`` before the frozen contract-only suite's data-only guards
-(``test_*_adds_*_without_package_code``) run; those guards assert the package
-is absent, and this unit must not weaken or reorder them. Resolving the runtime
-inside the test bodies preserves genuine import-failure RED while leaving each
-guard's "no implementation module imported by that file" assertion truthfully
-intact.
+The real package is imported normally at module level. The frozen
+contract-only suite proves its own isolation in a fresh interpreter (with the
+implementation package blocked) rather than by inspecting this process's
+``sys.modules``, so this module needs no lazy import and must not use one to
+keep the process-global module table clean.
 """
 
 import hashlib
@@ -44,6 +40,8 @@ from pathlib import Path
 
 import pytest
 
+from watchdog_catalog import catalog as _catalog
+
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO / "tests" / "fixtures" / "catalog"
 RAW_TABLE_DOC = FIXTURE_DIR / "raw-json-cases.json"
@@ -51,22 +49,6 @@ CANONICAL_TABLE_DOC = FIXTURE_DIR / "canonical-cases.json"
 
 INVALID_JSON = "invalid_json"
 INVALID_JSON_MESSAGE = "Invalid catalogue JSON."
-
-_CATALOG = None
-
-
-def _catalog():
-    """The real pure runtime module, imported on first use (see module doc).
-
-    Deferring this import keeps ``sys.modules`` free of ``watchdog_catalog*``
-    while the earlier contract-only suite runs; the genuine import-failure RED
-    is preserved because every test resolves the runtime before asserting.
-    """
-    global _CATALOG
-    if _CATALOG is None:
-        import watchdog_catalog.catalog as _runtime
-        _CATALOG = _runtime
-    return _CATALOG
 
 
 # The five strict-float snapshot-case rows and the literal path of the offending
@@ -149,7 +131,7 @@ def _nested_mixed(n):
 
 
 def _assert_invalid(text, cid=None):
-    catalog = _catalog()
+    catalog = _catalog
     with pytest.raises(catalog.CatalogError) as excinfo:
         catalog.load_json(text)
     err = excinfo.value
@@ -180,7 +162,7 @@ def test_raw_invalid_rows_reject_with_the_single_literal_envelope(raw_table):
 def test_raw_valid_rows_decode_to_expected_typed_values(raw_table):
     assert raw_table["valid_controls"], "the raw rule table must carry rows"
     assert len(raw_table["valid_controls"]) == 27
-    catalog = _catalog()
+    catalog = _catalog
     load_json = catalog.load_json
     for row in raw_table["valid_controls"]:
         cid = row["id"]
@@ -207,7 +189,7 @@ def test_raw_valid_rows_decode_to_expected_typed_values(raw_table):
 
 
 def test_raw_numeric_safety_and_duplicate_policy_are_notation_independent():
-    catalog = _catalog()
+    catalog = _catalog
     load_json = catalog.load_json
     assert catalog.MAX_SAFE_INT == 9007199254740991
     # The safe range is inclusive at both ends.
@@ -239,7 +221,7 @@ def test_raw_numeric_safety_and_duplicate_policy_are_notation_independent():
 
 
 def test_raw_container_depth_bound_is_inclusive_and_huge_depth_rejected():
-    catalog = _catalog()
+    catalog = _catalog
     load_json = catalog.load_json
     assert catalog.MAX_JSON_DEPTH == 64
     for build in (_nested_array, _nested_object, _nested_mixed):
@@ -257,7 +239,7 @@ def test_raw_container_depth_bound_is_inclusive_and_huge_depth_rejected():
 
 
 def test_raw_huge_integer_lexeme_rejects_without_changing_int_limits():
-    load_json = _catalog().load_json
+    load_json = _catalog.load_json
     huge = "9" * 5000
     int_before = sys.get_int_max_str_digits()
     rec_before = sys.getrecursionlimit()
@@ -274,7 +256,7 @@ def test_raw_huge_integer_lexeme_rejects_without_changing_int_limits():
 # ---------- typed canonical bytes: frozen rule-table rows ----------
 
 def test_canonical_vectors_match_the_literal_text_and_sha(canonical_table):
-    catalog = _catalog()
+    catalog = _catalog
     load_json = catalog.load_json
     canonical_bytes = catalog.canonical_bytes
     assert canonical_table["canonical_vectors"], "the table must carry rows"
@@ -293,7 +275,7 @@ def test_canonical_vectors_match_the_literal_text_and_sha(canonical_table):
 
 
 def test_canonical_lexeme_types_and_float_priced_snapshot_twins(canonical_table):
-    catalog = _catalog()
+    catalog = _catalog
     load_json = catalog.load_json
     canonical_bytes = catalog.canonical_bytes
     vec = {r["id"]: r for r in canonical_table["canonical_vectors"]}
@@ -330,7 +312,7 @@ def test_canonical_lexeme_types_and_float_priced_snapshot_twins(canonical_table)
 
 def test_canonical_snapshot_cases_are_raw_accepted_with_hash_preconditions(
         canonical_table):
-    catalog = _catalog()
+    catalog = _catalog
     load_json = catalog.load_json
     canonical_bytes = catalog.canonical_bytes
     assert canonical_table["snapshot_cases"], "the table must carry rows"
@@ -364,7 +346,7 @@ def test_canonical_snapshot_cases_are_raw_accepted_with_hash_preconditions(
 
 
 def test_canonical_bytes_encoder_flags_and_no_key_exclusion():
-    catalog = _catalog()
+    catalog = _catalog
     canonical_bytes = catalog.canonical_bytes
     # The documented public names hang off the submodule exactly as imported.
     assert catalog.load_json is catalog.load_json

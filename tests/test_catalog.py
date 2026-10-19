@@ -162,7 +162,10 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -579,6 +582,125 @@ def _assert_snapshot_contract(snap):
     assert empty, "fixture must include a zero-ID provider"
     for key in empty:
         assert key in order
+
+
+# ---------- independent contract/reference isolation ----------
+
+# Fresh-interpreter probe. It BLOCKS every `watchdog_catalog` import through a
+# meta-path finder, then loads the actual CONTRACT module (this file) and runs
+# its test-local fixture checkers on the given fixture. The independent
+# contract/reference must not depend on importing the runtime package — no
+# matter what OTHER test modules have already imported into the PARENT process.
+# That is exactly why an in-process ``"watchdog_catalog" in sys.modules``
+# assertion is the wrong oracle: it observes process-global state shared with
+# every other test module, not the contract module's own behaviour.
+_ISOLATION_PROBE = r'''
+import importlib
+import importlib.util
+import json
+import sys
+
+WATCHDOG_PREFIX = "watchdog_catalog"
+
+
+class _RuntimeBlocker:
+    """Refuse to resolve the implementation package or any of its submodules,
+    so a contract/reference that imports it fails for the intended
+    blocked-import reason rather than by accident."""
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == WATCHDOG_PREFIX or fullname.startswith(
+                WATCHDOG_PREFIX + "."):
+            raise ImportError(
+                "blocked import of the implementation package: {!r}".format(
+                    fullname))
+        return None
+
+
+def _load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+contract_path, fixture_path, checker_names = (
+    sys.argv[1], sys.argv[2], json.loads(sys.argv[3]))
+
+blocker = _RuntimeBlocker()
+sys.meta_path.insert(0, blocker)
+
+report = {
+    "blocker_installed": sys.meta_path[0] is blocker,
+    "blocker_control": None,
+    "blocked_import_error": None,
+    "leaked_modules": [],
+    "checks": {},
+}
+
+# Positive control: the blocker genuinely rejects the implementation package
+# that PYTHONPATH makes resolvable, so a clean load below is meaningful.
+try:
+    importlib.import_module(WATCHDOG_PREFIX)
+except ImportError as exc:
+    report["blocker_control"] = "ImportError: " + str(exc)
+else:
+    report["blocker_control"] = "NOT-BLOCKED"
+
+try:
+    contract = _load(contract_path, "_contract_reference_under_check")
+    fixture = contract._load_strict(fixture_path)
+    for checker_name in checker_names:
+        getattr(contract, checker_name)(fixture)
+        report["checks"][checker_name] = "ok"
+except ImportError as exc:  # the intended failure: the reference imported it
+    report["blocked_import_error"] = str(exc)
+
+report["leaked_modules"] = [
+    name for name in sys.modules
+    if name == WATCHDOG_PREFIX or name.startswith(WATCHDOG_PREFIX + ".")
+]
+
+sys.stdout.write(json.dumps(report))
+'''
+
+
+def _assert_contract_reference_is_independent(fixture_path, checker_names):
+    """Executable proof that the independent CONTRACT/reference module and its
+    test-local fixture checkers do not depend on importing the implementation
+    package — whatever OTHER test modules have already imported into this
+    process.
+
+    A fresh interpreter loads THIS contract module and runs the named
+    test-local checkers on ``fixture_path`` while every ``watchdog_catalog``
+    import is blocked. It must block the runtime (positive control), import
+    nothing from it, run the reference checks cleanly and exit 0. This
+    exercises the independent reference itself; an in-process ``sys.modules``
+    snapshot would be vacuous.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _ISOLATION_PROBE,
+         str(Path(__file__).resolve()), str(fixture_path),
+         json.dumps(list(checker_names))],
+        cwd=str(REPO),
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": str(REPO),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        capture_output=True, text=True, timeout=120)
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["blocker_installed"] is True
+    assert report["blocker_control"] != "NOT-BLOCKED", \
+        "the runtime-blocker positive control did not fire"
+    assert report["blocked_import_error"] is None, (
+        "the independent contract/reference imported the implementation "
+        f"package: {report['blocked_import_error']}")
+    assert report["leaked_modules"] == [], report["leaked_modules"]
+    assert report["checks"] == {name: "ok" for name in checker_names}, \
+        report["checks"]
 
 
 # ---------- fixture parsing ----------
@@ -2519,11 +2641,11 @@ def test_search_fixture_snapshot_id_is_canonical(search_snapshot):
 
 def test_search_fixture_adds_no_package_code(search_snapshot):
     # A new synthetic provider is addable by DATA alone: the fixture declares
-    # both providers with no python change, and no implementation module is
-    # imported by this file.
-    import sys
-    assert not any(name.startswith("watchdog_catalog")
-                   for name in sys.modules)
+    # both providers with no python change, and the independent contract
+    # reference validates this snapshot while the implementation package is
+    # blocked in a fresh interpreter.
+    _assert_contract_reference_is_independent(
+        SEARCH_FIXTURE, ("_assert_snapshot_contract",))
     assert set(search_snapshot["providers"]) == set(
         search_snapshot["provider_order"])
 
@@ -4116,11 +4238,11 @@ def test_ordering_fixture_long_runs_match_the_vector_table(
 def test_ordering_fixture_adds_a_provider_without_package_code(
         ordering_snapshot):
     # A third synthetic provider is added by DATA alone: the fixture declares
-    # all three providers with no python change, and this file imports no
-    # implementation module.
-    import sys
-    assert not any(name.startswith("watchdog_catalog")
-                   for name in sys.modules)
+    # all three providers with no python change, and the independent contract
+    # reference validates it while the implementation package is blocked in a
+    # fresh interpreter.
+    _assert_contract_reference_is_independent(
+        ORDERING_FIXTURE, ("_assert_snapshot_contract",))
     assert set(ordering_snapshot["providers"]) == set(
         ordering_snapshot["provider_order"])
     assert len(ordering_snapshot["provider_order"]) == 3
@@ -5473,9 +5595,12 @@ def test_extension_fixture_snapshot_id_is_canonical(extension_snapshot):
 
 def test_extension_fixture_adds_a_provider_without_package_code(
         extension_snapshot):
-    import sys
-    assert not any(name.startswith("watchdog_catalog")
-                   for name in sys.modules)
+    # A fourth synthetic provider is added by DATA alone: the fixture declares
+    # it with no python change, and the independent contract reference
+    # validates it while the implementation package is blocked in a fresh
+    # interpreter.
+    _assert_contract_reference_is_independent(
+        EXTENSION_FIXTURE, ("_assert_snapshot_contract",))
     assert set(extension_snapshot["providers"]) == set(
         extension_snapshot["provider_order"])
     assert len(extension_snapshot["provider_order"]) == 4
