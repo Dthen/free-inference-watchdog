@@ -1827,3 +1827,344 @@ def test_endpoint_key_orders_by_provider_precedence_then_natural_raw_id():
     assert record_key(duplicates[0]) == record_key(duplicates[1])
     stable = sorted(duplicates, key=record_key)
     assert stable[0] is duplicates[0] and stable[1] is duplicates[1]
+
+
+# ---------- pure list_free_models: bulk/single success goldens ----------
+#
+# `watchdog_catalog.query.list_free_models(snapshot, arguments)` is the pure
+# core of the frozen BULK `list_free_models` tool. It takes an already-VALIDATED
+# public snapshot (the load_snapshot / source boundary owns validation -- this
+# core performs no re-hash, no I/O and no clock) plus the whole DECODED argument
+# object, and returns either the frozen success payload or the shared
+# argument-error envelope. It never raises into the semantic caller for a
+# malformed argument and never mutates its inputs.
+#
+# Every expected payload below is the INDEPENDENTLY authored `cases.json` golden
+# for the `list_free_models` tool (hand-written from the contract, never from an
+# implementation), and the two exact top-level field sets are the frozen README
+# tables (README.md, "Success envelope -- list_free_models").
+
+LIST_FREE_CASES_DOC = FIXTURE_DIR / "cases.json"
+
+# The two DIFFERENT exact top-level field sets, one per variant.
+LIST_FREE_ALL_FIELDS = frozenset({
+    "ok", "providers", "models", "counts", "total_ids", "n_gateways",
+    "snapshot_id", "tick_epoch", "provider_staleness"})
+LIST_FREE_ONE_FIELDS = frozenset({
+    "ok", "provider", "model_ids", "models", "count", "snapshot_id",
+    "tick_epoch", "provider_staleness"})
+
+
+def _list_free_cases(doc):
+    return [case for case in doc["cases"] if case["tool"] == "list_free_models"]
+
+
+def _validated_snapshot(name):
+    """The load_snapshot-validated precondition snapshot for a fixture name."""
+    text = (FIXTURE_DIR / name).read_text(encoding="utf-8")
+    return _catalog.load_snapshot(text)
+
+
+def test_list_free_models_success_goldens_match_every_literal_case():
+    """All five frozen `list_free_models` goldens reproduce EXACTLY -- deep
+    semantic equality plus the exact top-level field set per variant -- with
+    strict scalar types, omission/null equivalence on one shared fixture, the
+    registered zero-ID success and a compact empty-registry control."""
+    from watchdog_catalog.query import list_free_models
+
+    doc = _decode_doc(LIST_FREE_CASES_DOC)
+    cases = _list_free_cases(doc)
+    # Count and id uniqueness are asserted so a dropped or duplicated golden
+    # cannot shrink the loop and still pass.
+    assert len(cases) == 5, len(cases)
+    assert len({case["id"] for case in cases}) == 5
+    all_provider = 0
+    one_provider = 0
+    for case in cases:
+        cid = case["id"]
+        # Per-case fixture override; NEVER a wrong-fixture fallback.
+        fixture = case.get("fixture", doc["fixture"])
+        snapshot = _validated_snapshot(fixture)
+        before = copy.deepcopy(snapshot)
+        result = list_free_models(snapshot, case["args"])
+        expect = case["expect"]
+        # Deep semantic equality AND the exact top-level field set.
+        assert result == expect, cid
+        assert set(result) == set(expect), cid
+        if "providers" in expect:
+            all_provider += 1
+            assert set(result) == LIST_FREE_ALL_FIELDS, cid
+            assert "provider" not in result and "model_ids" not in result, cid
+        else:
+            one_provider += 1
+            assert set(result) == LIST_FREE_ONE_FIELDS, cid
+            for leaked in ("providers", "counts", "total_ids", "n_gateways"):
+                assert leaked not in result, (cid, leaked)
+        # Strict scalar types: ok is exactly True; every count is a strict
+        # non-negative int (a bool is never a count); every stale flag a bool.
+        assert result["ok"] is True, cid
+        assert type(result["snapshot_id"]) is str, cid
+        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
+        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
+        for flag in result["provider_staleness"].values():
+            assert type(flag) is bool, cid
+        if "count" in result:
+            assert type(result["count"]) is int, cid
+            assert result["count"] >= 0, cid
+        for value in result.get("counts", {}).values():
+            assert type(value) is int, cid
+            assert value >= 0, cid
+        for key in ("total_ids", "n_gateways"):
+            if key in result:
+                assert type(result[key]) is int, cid
+        assert snapshot == before, cid  # never mutated
+    # Two all-provider goldens and three one-provider goldens, every one seen.
+    assert (all_provider, one_provider) == (2, 3), (all_provider, one_provider)
+
+    # Omission (`{}`) and explicit `{"provider": None}` are the SAME all-provider
+    # export, asserted on ONE shared fixture (the two goldens above use
+    # different fixtures, so this equivalence needs its own control).
+    lookup = _validated_snapshot("lookup.json")
+    omitted = list_free_models(lookup, {})
+    null = list_free_models(lookup, {"provider": None})
+    assert omitted == null
+    assert set(omitted) == LIST_FREE_ALL_FIELDS
+
+    # A registered zero-ID provider is a success with empty containers.
+    zero = list_free_models(lookup, {"provider": "synthetic-c"})
+    assert zero["model_ids"] == [] and zero["models"] == {} and zero["count"] == 0
+    assert zero["provider_staleness"] == {"synthetic-c": False}
+
+    # A legitimately EMPTY registry is a valid all-provider control, built from
+    # an existing valid fixture and resealed with the test-local json/hashlib
+    # oracle, then re-validated before the query.
+    empty = _decode_doc(FIXTURE_DIR / "lookup.json")
+    empty["provider_order"] = []
+    empty["providers"] = {}
+    _reseal(empty)
+    assert _catalog.validate_snapshot(empty) is empty
+    whole = list_free_models(empty, {})
+    assert set(whole) == LIST_FREE_ALL_FIELDS
+    assert whole["providers"] == {} and whole["models"] == {}
+    assert whole["counts"] == {} and whole["provider_staleness"] == {}
+    assert whole["total_ids"] == 0 and whole["n_gateways"] == 0
+    assert whole["ok"] is True
+
+
+# ---------- pure list_free_models: the provider argument boundary ----------
+#
+# The four `list_free_models` invalid rows of `argument-cases.json` carry the
+# COMPLETE literal semantic envelope; the three valid controls record
+# acceptance only. The programmatic rows below are compact literal restatements
+# of the frozen README rules (object -> unknown-key -> provider type ->
+# provider membership), including the unknown-key precedence that makes
+# `parameter` null even when the provider itself would also be wrong.
+
+LIST_FREE_ARG_DOC = FIXTURE_DIR / "argument-cases.json"
+
+INVALID_ARGUMENTS = "invalid_arguments"
+INVALID_ARGUMENTS_MESSAGE = "Invalid tool arguments."
+UNKNOWN_PROVIDER = "unknown_provider"
+UNKNOWN_PROVIDER_MESSAGE = "Unknown provider."
+ARGUMENT_MESSAGES = {
+    INVALID_ARGUMENTS: INVALID_ARGUMENTS_MESSAGE,
+    UNKNOWN_PROVIDER: UNKNOWN_PROVIDER_MESSAGE,
+}
+
+
+def _argument_envelope(code, parameter):
+    return {"ok": False,
+            "error": {"code": code, "message": ARGUMENT_MESSAGES[code],
+                      "parameter": parameter}}
+
+
+def _assert_argument_envelope(result, code, parameter, cid):
+    assert result == _argument_envelope(code, parameter), cid
+    assert set(result) == {"ok", "error"}, cid
+    assert result["ok"] is False, cid
+    assert set(result["error"]) == {"code", "message", "parameter"}, cid
+    assert result["error"]["code"] == code, cid
+    assert result["error"]["message"] == ARGUMENT_MESSAGES[code], cid
+    assert result["error"]["parameter"] == parameter, cid
+    return result
+
+
+def test_list_free_models_argument_boundary_matches_literal_rows_and_rules():
+    """The four frozen invalid rows and three valid controls reproduce their
+    literal classification, and the compact programmatic rows pin the frozen
+    object -> unknown-key -> provider type -> membership precedence, the
+    no-coercion provider rules and the fresh non-reflecting envelope."""
+    from watchdog_catalog.query import list_free_models
+
+    doc = _decode_doc(LIST_FREE_ARG_DOC)
+    invalid = [row for row in doc["invalid_cases"]
+               if row["tool"] == "list_free_models"]
+    valid = [row for row in doc["valid_controls"]
+             if row["tool"] == "list_free_models"]
+    assert len(invalid) == 4, [row["id"] for row in invalid]
+    assert {row["id"] for row in invalid} == {
+        "unknown_arg_list_free_models", "unknown_provider_list_free_models",
+        "provider_wrong_type", "provider_wrong_case"}
+    assert len(valid) == 3, [row["id"] for row in valid]
+
+    for row in invalid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        args = copy.deepcopy(row["args"])
+        before = copy.deepcopy(args)
+        result = list_free_models(snapshot, args)
+        # The literal, independently-authored envelope is reproduced exactly.
+        assert result == row["expect"], cid
+        assert args == before, cid  # the argument object is never mutated
+        error = result["error"]
+        assert result["ok"] is False, cid
+        assert set(result) == {"ok", "error"}, cid
+        assert set(error) == {"code", "message", "parameter"}, cid
+        # No hostile key/value reflection and no extra provenance field.
+        for hostile in ("tool", "state_root", "source", "path", "cache",
+                        "snapshot_id", "count", "partial", "staleness"):
+            assert hostile not in result and hostile not in error, (cid, hostile)
+        assert error["code"] in ARGUMENT_MESSAGES, cid
+
+    # The three valid controls are ACCEPTED (ok True); the complete success
+    # oracles are the five independent goldens above, so this pins acceptance.
+    for row in valid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        result = list_free_models(snapshot, copy.deepcopy(row["args"]))
+        assert result["ok"] is True, cid
+
+    # A whole argument object that is not a JSON object is invalid_arguments/
+    # null -- None, a list, a number, a string, a bool, a tuple and bytes.
+    lookup = _validated_snapshot("lookup.json")
+    for args in (None, [], 5, "x", False, 1.0, (), b"{}"):
+        _assert_argument_envelope(list_free_models(lookup, args),
+                                  INVALID_ARGUMENTS, None, repr(args))
+
+    # A non-null provider of the wrong type (bool/int/float/list/dict) is
+    # invalid_arguments(provider); empty/padded/wrong-case/absent strings are
+    # unknown_provider(provider) -- never coerced, trimmed or case-repaired.
+    for bad in (True, False, 5, 1.5, [], ["synthetic-a"], {}, {"a": 1}):
+        _assert_argument_envelope(list_free_models(lookup, {"provider": bad}),
+                                  INVALID_ARGUMENTS, "provider", repr(bad))
+    for bad in ("", " synthetic-a ", "synthetic-a ", " synthetic-a",
+                "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"):
+        _assert_argument_envelope(list_free_models(lookup, {"provider": bad}),
+                                  UNKNOWN_PROVIDER, "provider", bad)
+
+    # Unknown-key precedence: ANY unknown key rejects with parameter null BEFORE
+    # the provider type or membership check, so an unknown key combined with a
+    # wrong-typed provider AND with an unknown provider both yield null.
+    _assert_argument_envelope(
+        list_free_models(lookup, {"provider": 5, "bogus": 1}),
+        INVALID_ARGUMENTS, None, "unknown-key before provider type")
+    _assert_argument_envelope(
+        list_free_models(lookup, {"provider": "synthetic-z", "bogus": 1}),
+        INVALID_ARGUMENTS, None, "unknown-key before provider membership")
+    _assert_argument_envelope(
+        list_free_models(lookup, {"bogus": 1}),
+        INVALID_ARGUMENTS, None, "unknown-key alone")
+    _assert_argument_envelope(
+        list_free_models(lookup, {"provider": "synthetic-a", "bogus": 1}),
+        INVALID_ARGUMENTS, None, "unknown-key with a valid provider")
+
+    # `{}` and `{"provider": None}` are accepted, and the error envelope is a
+    # FRESH object on every call (never a shared module-level constant).
+    assert list_free_models(lookup, {})["ok"] is True
+    assert list_free_models(lookup, {"provider": None})["ok"] is True
+    first = list_free_models(lookup, {"provider": "synthetic-z"})
+    first["error"]["code"] = "mutated"
+    first["ok"] = True
+    second = list_free_models(lookup, {"provider": "synthetic-z"})
+    assert second == _argument_envelope(UNKNOWN_PROVIDER, "provider")
+    assert second is not first
+
+
+# ---------- pure list_free_models: freshness + deep output isolation ----------
+#
+# A public output is never a window onto the cached snapshot: every container,
+# array and selected projected model object (with its nested architecture /
+# parameter / pricing containers) is freshly allocated, so a caller mutating a
+# returned payload can never corrupt the snapshot or another call.
+
+def test_list_free_models_outputs_are_fresh_and_deeply_isolated():
+    from watchdog_catalog.query import list_free_models
+
+    lookup = _validated_snapshot("lookup.json")
+    before = copy.deepcopy(lookup)
+
+    # (a) All-provider form: fresh containers/arrays, and each selected model
+    #     object and its nested containers unaliased to the snapshot and to a
+    #     second call.
+    whole = list_free_models(lookup, {})
+    again = list_free_models(lookup, {})
+    assert lookup == before
+    assert whole == again
+    assert whole["providers"] is not lookup["providers"]
+    assert whole["models"] is not lookup["providers"]
+    assert whole["counts"] is not lookup["providers"]
+    assert whole["provider_staleness"] is not lookup["providers"]
+    for provider, ids in whole["providers"].items():
+        source = lookup["providers"][provider]
+        assert ids is not source["model_ids"], provider
+        assert whole["models"][provider] is not source["models"], provider
+        assert whole["counts"][provider] == len(source["model_ids"]), provider
+        for raw_id in source["model_ids"]:
+            got = whole["models"][provider][raw_id]
+            src = source["models"][raw_id]
+            assert got is not src, (provider, raw_id)
+            assert got["architecture"] is not src["architecture"], raw_id
+            assert got["supported_parameters"] is not src["supported_parameters"]
+            assert got["pricing"] is not src["pricing"]
+            assert again["models"][provider][raw_id] is not got, raw_id
+
+    # Mutating the returned payload leaves the snapshot, the earlier result and
+    # a brand-new call all unchanged.
+    shared = whole["models"]["synthetic-a"]["vendor/shared"]
+    shared["architecture"]["input_modalities"].append("vision")
+    shared["supported_parameters"].append("seed")
+    shared["pricing"]["prompt"] = "999"
+    whole["providers"]["synthetic-a"].append("injected")
+    whole["counts"]["synthetic-a"] = 99
+    whole["provider_staleness"]["synthetic-a"] = True
+    assert lookup == before
+    assert again["models"]["synthetic-a"]["vendor/shared"][
+        "architecture"]["input_modalities"] == ["text"]
+    assert again["models"]["synthetic-a"]["vendor/shared"][
+        "supported_parameters"] == ["temperature", "max_tokens"]
+    assert again["models"]["synthetic-a"]["vendor/shared"][
+        "pricing"] == {"prompt": "0", "completion": "0"}
+    assert again["providers"]["synthetic-a"] == [
+        "vendor/model-renamed", "vendor/model:free", "vendor/shared"]
+    third = list_free_models(lookup, {})
+    assert third == again
+
+    # (b) One-provider form and the registered zero-ID containers are fresh too,
+    #     and the known metadata casing/order/type is preserved verbatim (no
+    #     reprojection).
+    single = list_free_models(lookup, {"provider": "synthetic-a"})
+    source_a = lookup["providers"]["synthetic-a"]
+    assert single["models"] is not source_a["models"]
+    assert single["model_ids"] is not source_a["model_ids"]
+    assert single["provider_staleness"] is not lookup["providers"]
+    assert single["models"]["vendor/model:free"]["architecture"][
+        "input_modalities"] == ["text", "image"]
+    assert type(single["models"]["vendor/model:free"]["context_length"]) is int
+    single["model_ids"].append("injected")
+    single["models"]["vendor/model:free"]["architecture"][
+        "input_modalities"].append("audio")
+    single["provider_staleness"]["synthetic-a"] = True
+    assert lookup == before
+    assert single["model_ids"] is not list_free_models(
+        lookup, {"provider": "synthetic-a"})["model_ids"]
+
+    zero = list_free_models(lookup, {"provider": "synthetic-c"})
+    source_c = lookup["providers"]["synthetic-c"]
+    assert zero["model_ids"] is not source_c["model_ids"]
+    assert zero["models"] is not source_c["models"]
+    assert zero["provider_staleness"] is not lookup["providers"]
+    zero["model_ids"].append("injected")
+    zero["provider_staleness"]["synthetic-c"] = True
+    assert lookup == before
+    assert zero["model_ids"] is not list_free_models(
+        lookup, {"provider": "synthetic-c"})["model_ids"]

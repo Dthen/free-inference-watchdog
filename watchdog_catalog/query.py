@@ -7,6 +7,7 @@ credential resolution or SDK import. ``build_site.strip_free_marker`` and
 than carrying a second copy.
 """
 
+import copy
 import re
 
 # Regexes for strip_free_marker: match "free" only at a segment boundary
@@ -84,3 +85,106 @@ def endpoint_key(provider_order, provider: str, raw_id: str):
     import beyond the module's existing ``re``.
     """
     return (provider_order.index(provider), natural_key(raw_id))
+
+
+# -- pure list-free-models query: bulk/single success + argument boundary --
+
+#: The two frozen argument-error codes and their literal public messages.
+_INVALID_ARGUMENTS = "invalid_arguments"
+_UNKNOWN_PROVIDER = "unknown_provider"
+_ARGUMENT_MESSAGES = {
+    _INVALID_ARGUMENTS: "Invalid tool arguments.",
+    _UNKNOWN_PROVIDER: "Unknown provider.",
+}
+
+
+def _argument_error(code, parameter):
+    """The shared frozen argument-error envelope.
+
+    Top-level fields are exactly ``ok`` and ``error``; ``ok`` is strictly
+    ``False``; ``error`` carries exactly ``code``, ``message`` and ``parameter``.
+    ``parameter`` is the offending KNOWN signature parameter name, or ``None``
+    for a non-object argument or an unknown argument name. The envelope never
+    reflects an arbitrary supplied key or hostile value and carries no ``tool``,
+    path, ``source``, cache, provenance, staleness, partial-data or count field.
+    A NEW object is returned on every call, so a caller can never mutate shared
+    state.
+    """
+    return {"ok": False,
+            "error": {"code": code, "message": _ARGUMENT_MESSAGES[code],
+                      "parameter": parameter}}
+
+
+def list_free_models(snapshot, arguments):
+    """The pure core of the frozen BULK ``list_free_models`` tool.
+
+    ``snapshot`` is an already-VALIDATED public snapshot object -- the
+    ``load_snapshot`` / source / adapter boundary owns raw, structural and hash
+    validation, so this function performs NO validation, NO hash recompute, NO
+    I/O and NO clock read. ``arguments`` is the whole DECODED argument object (a
+    JSON object), passed explicitly rather than splatted as keyword arguments.
+
+    Returns the frozen success payload directly -- never raising into the
+    semantic caller for a malformed argument. With ``provider`` omitted or
+    ``null`` the all-provider export carries exactly ``ok``, ``providers``,
+    ``models``, ``counts``, ``total_ids``, ``n_gateways``, ``snapshot_id``,
+    ``tick_epoch`` and ``provider_staleness``; with one exact registered
+    ``provider`` the one-provider export carries exactly ``ok``, ``provider``,
+    ``model_ids``, ``models``, ``count``, ``snapshot_id``, ``tick_epoch`` and
+    ``provider_staleness``.
+
+    Argument validation is deterministic and in the frozen order: the argument
+    must be a JSON object; then ANY unknown key is rejected (``parameter``
+    ``None``); then a non-``null`` provider that is not a string is
+    ``invalid_arguments``; then a string absent from ``provider_order`` is
+    ``unknown_provider`` (empty, padded and wrong-case keys are never repaired).
+
+    Every returned container, array and selected projected model object (with
+    its nested architecture/parameter/pricing containers) is freshly allocated
+    (the model values are deep-copied), so a caller mutating a result can never
+    corrupt the snapshot or another call. The inputs are never mutated, and the
+    array order is the accepted :func:`natural_key` order -- never the legacy
+    sort and never the snapshot's literal code-point order.
+    """
+    if not isinstance(arguments, dict):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+    if any(key not in ("provider",) for key in arguments):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+    provider = arguments.get("provider")
+    if provider is not None and not isinstance(provider, str):
+        return _argument_error(_INVALID_ARGUMENTS, "provider")
+    order = snapshot["provider_order"]
+    providers = snapshot["providers"]
+    if provider is not None and provider not in order:
+        return _argument_error(_UNKNOWN_PROVIDER, "provider")
+    if provider is not None:
+        entry = providers[provider]
+        model_ids = sorted(entry["model_ids"], key=natural_key)
+        models = copy.deepcopy(
+            {raw_id: entry["models"][raw_id] for raw_id in entry["model_ids"]})
+        return {
+            "ok": True,
+            "provider": provider,
+            "model_ids": model_ids,
+            "models": models,
+            "count": len(model_ids),
+            "snapshot_id": snapshot["snapshot_id"],
+            "tick_epoch": snapshot["tick_epoch"],
+            "provider_staleness": {provider: entry["stale"]},
+        }
+    return {
+        "ok": True,
+        "providers": {p: sorted(providers[p]["model_ids"], key=natural_key)
+                      for p in order},
+        "models": {
+            p: copy.deepcopy({raw_id: providers[p]["models"][raw_id]
+                              for raw_id in providers[p]["model_ids"]})
+            for p in order},
+        "counts": {p: len(providers[p]["model_ids"]) for p in order},
+        "total_ids": len({raw_id for p in order
+                          for raw_id in providers[p]["model_ids"]}),
+        "n_gateways": len(order),
+        "snapshot_id": snapshot["snapshot_id"],
+        "tick_epoch": snapshot["tick_epoch"],
+        "provider_staleness": {p: providers[p]["stale"] for p in order},
+    }
