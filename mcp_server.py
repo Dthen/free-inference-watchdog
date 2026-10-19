@@ -78,6 +78,14 @@ PROVIDERS = PROVIDER_KEYS
 from config_loader import GATEWAY_WIRING
 from watchdog_catalog.query import strip_free_marker
 
+# Local-to-public producer adapter plus the pure structural module it composes.
+# Both are pure: importing them pulls no SDK, provider config, state, page
+# renderer or environment access (the producer carries its own fresh-process
+# import audit). The U1a capture/sanitize/snapshot helpers below are their only
+# users so far; those helpers are intentionally not wired into the tools yet.
+from watchdog_catalog import catalog as _catalog
+import catalog_export as _catalog_export
+
 # Tick cadence, duplicated from inference_watchdog.DEFAULT_CADENCE_S
 # (cross-reference): importing the watchdog module for one integer would
 # drag its whole runtime into the MCP server, so this stays a literal.
@@ -168,6 +176,113 @@ def _error(base: dict, message: str, **extra) -> dict:
     out["error"] = message
     out.update(extra)
     return out
+
+
+def _capture_registry(base: dict) -> list:
+    """Capture the resolved local registry ONCE as four-field public records.
+
+    Reads the existing ``PROVIDERS`` and ``GATEWAY_WIRING`` module roots (both
+    already resolved by the legacy config loader) and returns a NEW list of NEW
+    dicts carrying exactly ``key``/``name``/``chat_completions_url``/``api_type``
+    in PROVIDERS insertion order. Only the two ROOTS are guarded: a non-dict
+    root raises the existing ``_StateError`` with the fixed, non-reflective
+    structural message. A missing or malformed per-key config/wiring does NOT
+    raise during capture -- its required wiring slots are forced to ``None`` so
+    the accepted builder rejects it later, after the caller's argument and state
+    validation have run. ``name`` is read only from a dict config (an
+    empty/non-string name is a legitimate accepted fallback and never discards
+    good wiring). Every other config/wiring member (tokens, auth, base_url,
+    private objects, ...) is dropped and never traversed, copied or serialized;
+    no credential, key or URL is re-derived and no I/O happens.
+    """
+    configs = PROVIDERS
+    wiring = GATEWAY_WIRING
+    if not isinstance(configs, dict) or not isinstance(wiring, dict):
+        raise _StateError(_error(base, "Invalid catalogue snapshot."))
+    records = []
+    for key in configs:
+        config = configs.get(key)
+        wiring_entry = wiring.get(key)
+        name = config.get("name") if isinstance(config, dict) else None
+        if isinstance(config, dict) and isinstance(wiring_entry, dict):
+            url = wiring_entry.get("chat_completions_url")
+            api_type = wiring_entry.get("api_type")
+        else:
+            # A non-dict config OR wiring forces the required slots to None, so
+            # a malformed config can never hide behind optional-name fallback or
+            # otherwise-valid wiring. Left for the accepted builder to reject.
+            url = None
+            api_type = None
+        records.append({
+            "key": key,
+            "name": name,
+            "chat_completions_url": url,
+            "api_type": api_type,
+        })
+    return records
+
+
+def _presanitized_roster(roster, registry) -> dict:
+    """Build the LOCAL-only shallow sanitized roster for the accepted adapter.
+
+    ``roster`` is one captured roster observation; ``registry`` is the captured
+    four-field record list (a precondition -- this helper never walks the module
+    globals again). A non-dict ``roster`` or a missing/non-dict ``providers``
+    map raises the accepted ``catalog.CatalogError`` (``invalid_snapshot``)
+    rather than degrading corruption to a false empty success; the public caller
+    still runs its own ``_load_roster_checked`` first.
+
+    The result is a NEW shallow root dict plus a NEW ``providers`` map keyed by
+    EXACTLY the captured registry keys in captured order. A missing/non-list
+    value becomes ``[]``; a list keeps only NONEMPTY ``str`` IDs, literal and
+    untrimmed, preserving duplicates and input order HERE (the accepted adapter
+    owns canonical sorted/set; the pure query owns natural order). Unknown
+    providers are excluded even when malformed. Every other root member is
+    passed through by reference, so the accepted projector still sees the ACTUAL
+    absent/None/malformed metadata containers and the caller keeps the original
+    raw objects for later restoration. The input roster is never mutated.
+    """
+    if not isinstance(roster, dict):
+        raise _catalog.CatalogError(_catalog.INVALID_SNAPSHOT)
+    raw_providers = roster.get("providers")
+    if not isinstance(raw_providers, dict):
+        raise _catalog.CatalogError(_catalog.INVALID_SNAPSHOT)
+    clean = dict(roster)  # NEW shallow root; untouched members alias by reference
+    providers = {}
+    for record in registry:
+        key = record["key"]
+        source = raw_providers.get(key)
+        if isinstance(source, list):
+            providers[key] = [mid for mid in source
+                              if isinstance(mid, str) and mid]
+        else:
+            providers[key] = []
+    clean["providers"] = providers
+    return clean
+
+
+def _local_snapshot(roster, registry, base: dict) -> dict:
+    """Assemble the validated public snapshot from captured in-memory inputs.
+
+    Uses the SUPPLIED captured ``registry`` (it never recaptures), builds the
+    local-only sanitized roster ONCE through :func:`_presanitized_roster`, then
+    calls the accepted producer's ``catalog_export.build_snapshot`` ONCE with
+    the frozen ``CADENCE_S``. Returns the EXACT validated object the accepted
+    builder returns -- no clone, reseal, revalidation or second query algorithm.
+
+    Only the accepted ``catalog.CatalogError`` is caught, from either the
+    sanitizer or the builder, and mapped to the existing fixed local
+    ``_StateError`` payload (base + ``ok`` False + the string error); a bad
+    cadence, record, key, wiring or root therefore stays truthful instead of
+    becoming an empty success. No state, clock, pending-queue or filesystem
+    access happens here, and no input is mutated.
+    """
+    try:
+        clean = _presanitized_roster(roster, registry)
+        return _catalog_export.build_snapshot(
+            registry, clean, cadence_s=CADENCE_S)
+    except _catalog.CatalogError:
+        raise _StateError(_error(base, "Invalid catalogue snapshot."))
 
 
 # ---------- tool: list_free_models ----------
