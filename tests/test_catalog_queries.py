@@ -2168,3 +2168,349 @@ def test_list_free_models_outputs_are_fresh_and_deeply_isolated():
     assert lookup == before
     assert zero["model_ids"] is not list_free_models(
         lookup, {"provider": "synthetic-c"})["model_ids"]
+
+
+# ---------- pure get_model: literal membership + separate marker endpoints ----------
+#
+# `watchdog_catalog.query.get_model(snapshot, arguments)` is the pure core of the
+# frozen `get_model` tool. It takes an already-VALIDATED public snapshot (the
+# load_snapshot / source boundary owns validation -- this core performs no
+# re-hash, no I/O and no clock) plus the whole DECODED argument object, and
+# returns either the frozen success payload or the shared argument-error
+# envelope. It never raises into the semantic caller for a malformed argument
+# and never mutates its inputs.
+#
+# Every expected payload below is the INDEPENDENTLY authored `cases.json` golden
+# for the `get_model` tool (hand-written from the contract, never from an
+# implementation), and the three exact field sets are the frozen README tables
+# (README.md, "Success envelope -- get_model").
+
+GET_MODEL_CASES_DOC = FIXTURE_DIR / "cases.json"
+GET_MODEL_ARG_DOC = FIXTURE_DIR / "argument-cases.json"
+
+GET_MODEL_FIELDS = frozenset({
+    "ok", "query", "snapshot_id", "tick_epoch", "exact_matches",
+    "exact_gateways", "provider_staleness", "endpoints", "caveats", "counts"})
+GET_MODEL_ENDPOINT_FIELDS = frozenset({
+    "provider", "model_id", "chat_completions_url", "api_type", "stale",
+    "metadata"})
+GET_MODEL_COUNT_FIELDS = frozenset({
+    "exact_matches", "endpoints", "distinct_raw_ids", "marker_group_labels"})
+GET_MODEL_CAVEAT = (
+    "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a "
+    "missing exact id does NOT prove the model is unavailable there.")
+
+
+def _get_model_cases(doc):
+    return [case for case in doc["cases"] if case["tool"] == "get_model"]
+
+
+def test_get_model_success_goldens_match_every_literal_case():
+    """All thirteen frozen `get_model` goldens reproduce EXACTLY -- deep
+    semantic equality plus the exact top-level/endpoint/count field sets -- with
+    strict scalar types, literal provenance, untouched inputs, and a compact
+    empty-registry control."""
+    from watchdog_catalog.query import get_model
+
+    doc = _decode_doc(GET_MODEL_CASES_DOC)
+    cases = _get_model_cases(doc)
+    # Count and id uniqueness are asserted so a dropped or duplicated golden
+    # cannot shrink the loop and still pass.
+    assert len(cases) == 13, len(cases)
+    assert len({case["id"] for case in cases}) == 13
+    for case in cases:
+        cid = case["id"]
+        # Per-case fixture override; NEVER a wrong-fixture fallback.
+        fixture = case.get("fixture", doc["fixture"])
+        snapshot = _validated_snapshot(fixture)
+        before = copy.deepcopy(snapshot)
+        args = copy.deepcopy(case["args"])
+        args_before = copy.deepcopy(args)
+        result = get_model(snapshot, args)
+        expect = case["expect"]
+        # Deep semantic equality AND the exact top-level field set.
+        assert result == expect, cid
+        assert set(result) == set(expect), cid
+        assert set(result) == GET_MODEL_FIELDS, cid
+        # Strict scalar types and literal provenance: ok is exactly True, the
+        # query is the raw argument verbatim, and the provenance slots echo the
+        # consumed snapshot.
+        assert result["ok"] is True, cid
+        assert type(result["query"]) is str, cid
+        assert result["query"] == args["model_id"], cid
+        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
+        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
+        # exact_matches / provider_staleness carry ONE entry per provider_order
+        # provider -- including the registered zero-ID provider.
+        assert set(result["exact_matches"]) == \
+            set(snapshot["provider_order"]), cid
+        assert set(result["provider_staleness"]) == \
+            set(snapshot["provider_order"]), cid
+        for flag in result["exact_matches"].values():
+            assert type(flag) is bool, cid
+        for flag in result["provider_staleness"].values():
+            assert type(flag) is bool, cid
+        assert result["exact_gateways"] == \
+            [p for p in snapshot["provider_order"]
+             if result["exact_matches"][p]], cid
+        for endpoint in result["endpoints"]:
+            assert set(endpoint) == GET_MODEL_ENDPOINT_FIELDS, cid
+            assert type(endpoint["stale"]) is bool, cid
+            assert endpoint["stale"] == \
+                result["provider_staleness"][endpoint["provider"]], cid
+            source = snapshot["providers"][endpoint["provider"]]
+            assert endpoint["chat_completions_url"] == \
+                source["chat_completions_url"], cid
+            assert endpoint["api_type"] == source["api_type"], cid
+            assert endpoint["metadata"] == \
+                source["models"][endpoint["model_id"]], cid
+        assert set(result["counts"]) == GET_MODEL_COUNT_FIELDS, cid
+        for value in result["counts"].values():
+            assert type(value) is int, cid  # a bool is never a count
+            assert value >= 0, cid
+        assert result["counts"]["exact_matches"] == \
+            len(result["exact_gateways"]), cid
+        assert result["counts"]["endpoints"] == len(result["endpoints"]), cid
+        assert result["counts"]["distinct_raw_ids"] == \
+            len({e["model_id"] for e in result["endpoints"]}), cid
+        assert result["caveats"] == [GET_MODEL_CAVEAT], cid
+        assert snapshot == before, cid  # never mutated
+        assert args == args_before, cid
+
+    # A legitimately EMPTY registry is a valid control, built from an existing
+    # valid fixture and resealed with the test-local json/hashlib oracle, then
+    # re-validated before the query.
+    empty = _decode_doc(FIXTURE_DIR / "lookup.json")
+    empty["provider_order"] = []
+    empty["providers"] = {}
+    _reseal(empty)
+    assert _catalog.validate_snapshot(empty) is empty
+    whole = get_model(empty, {"model_id": "vendor/shared"})
+    assert set(whole) == GET_MODEL_FIELDS
+    assert whole["ok"] is True
+    assert whole["exact_matches"] == {} and whole["exact_gateways"] == []
+    assert whole["provider_staleness"] == {} and whole["endpoints"] == []
+    assert whole["counts"] == {"exact_matches": 0, "endpoints": 0,
+                               "distinct_raw_ids": 0,
+                               "marker_group_labels": 0}
+    assert whole["caveats"] == [GET_MODEL_CAVEAT]
+
+
+# ---------- pure get_model: the required model_id argument boundary ----------
+#
+# The eight `get_model` invalid rows of `argument-cases.json` carry the COMPLETE
+# literal semantic envelope; the two valid controls record acceptance only. The
+# programmatic rows below are compact literal restatements of the frozen README
+# rules (object -> unknown-key -> required model_id type/blankness), including
+# the unknown-key precedence that makes `parameter` null even when the required
+# id itself would also be wrong.
+
+def test_get_model_argument_boundary_matches_literal_rows_and_rules():
+    """The eight frozen invalid rows and two valid controls reproduce their
+    literal classification, and the compact programmatic rows pin the frozen
+    object -> unknown-key -> required-string -> blank precedence, the explicit
+    ASCII blank set, the never-trimmed/case-folded identifier and the fresh
+    non-reflecting envelope."""
+    from watchdog_catalog.query import get_model
+
+    doc = _decode_doc(GET_MODEL_ARG_DOC)
+    invalid = [row for row in doc["invalid_cases"]
+               if row["tool"] == "get_model"]
+    valid = [row for row in doc["valid_controls"] if row["tool"] == "get_model"]
+    assert len(invalid) == 8, [row["id"] for row in invalid]
+    assert {row["id"] for row in invalid} == {
+        "args_number_not_object", "unknown_arg_get_model", "model_id_missing",
+        "model_id_null", "model_id_number", "model_id_empty",
+        "model_id_ascii_blank", "precedence_unknown_key_before_required"}
+    assert len(valid) == 2, [row["id"] for row in valid]
+
+    for row in invalid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        args = copy.deepcopy(row["args"])
+        before = copy.deepcopy(args)
+        result = get_model(snapshot, args)
+        # The literal, independently-authored envelope is reproduced exactly.
+        assert result == row["expect"], cid
+        assert args == before, cid  # the argument object is never mutated
+        error = result["error"]
+        assert result["ok"] is False, cid
+        assert set(result) == {"ok", "error"}, cid
+        assert set(error) == {"code", "message", "parameter"}, cid
+        # No hostile key/value reflection and no extra provenance field.
+        for hostile in ("tool", "state_root", "source", "path", "cache",
+                        "snapshot_id", "count", "partial", "staleness",
+                        "query", "endpoints"):
+            assert hostile not in result and hostile not in error, (cid, hostile)
+        assert error["code"] in ARGUMENT_MESSAGES, cid
+
+    # The two valid controls are ACCEPTED (ok True); the complete success
+    # oracles are the thirteen independent goldens above, so this pins
+    # acceptance and the literal retained query.
+    for row in valid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        result = get_model(snapshot, copy.deepcopy(row["args"]))
+        assert result["ok"] is True, cid
+        assert result["query"] == row["args"]["model_id"], cid
+
+    lookup = _validated_snapshot("lookup.json")
+
+    # A whole argument object that is not a JSON object is invalid_arguments/
+    # null -- None, a list, a number, a string, a bool, a tuple and bytes.
+    for args in (None, [], 5, "x", False, 1.0, (), b"{}"):
+        _assert_argument_envelope(get_model(lookup, args),
+                                  INVALID_ARGUMENTS, None, repr(args))
+
+    # A missing or wrong-typed required model_id (null/bool/int/float/list/dict)
+    # is invalid_arguments(model_id) -- never coerced.
+    _assert_argument_envelope(get_model(lookup, {}),
+                              INVALID_ARGUMENTS, "model_id", "missing")
+    for bad in (None, True, False, 5, 1.5, [], ["vendor/shared"], {}, {"a": 1}):
+        _assert_argument_envelope(get_model(lookup, {"model_id": bad}),
+                                  INVALID_ARGUMENTS, "model_id", repr(bad))
+
+    # Empty and ASCII-blank-only strings are invalid_arguments(model_id): every
+    # class of the explicit U+0009..U+000D + U+0020 set, alone and combined.
+    for blank in ("", " ", "\t", "\n", "\r", "\v", "\f", " \t\n\r\v\f",
+                  "\t \n", "  "):
+        _assert_argument_envelope(get_model(lookup, {"model_id": blank}),
+                                  INVALID_ARGUMENTS, "model_id", repr(blank))
+
+    # Unknown-key precedence: ANY unknown key rejects with parameter null BEFORE
+    # the required model_id check -- even `provider`, which is NOT a get_model
+    # key and is therefore never a filter.
+    for args in ({"bogus": 1}, {"model_id": 5, "bogus": 1},
+                 {"model_id": "", "bogus": 1}, {"provider": "synthetic-a"},
+                 {"model_id": "vendor/shared", "provider": "synthetic-a"},
+                 {"model_id": "vendor/shared", "bogus": 1},
+                 {"bogus": 1, "provider": "synthetic-z"}):
+        _assert_argument_envelope(get_model(lookup, args),
+                                  INVALID_ARGUMENTS, None, repr(args))
+
+    # The retained identifier is never trimmed, case-folded or repaired: a
+    # padded nonblank query stays literal, wrong case is not folded, and
+    # non-ASCII code points (NBSP U+00A0, EM SPACE U+2003, FILE SEPARATOR
+    # U+001C) are literal NONBLANK queries -- ACCEPTED, a success with no match,
+    # zero counts and the caveat. The ASCII blank set is never widened.
+    for query in (" vendor/shared ", "VENDOR/SHARED", "Vendor/Shared",
+                  "\u00a0", "\u2003", "\u001c", "\u00a0\u2003"):
+        result = get_model(lookup, {"model_id": query})
+        assert result["ok"] is True, repr(query)
+        assert result["query"] == query, repr(query)
+        assert result["counts"] == {"exact_matches": 0, "endpoints": 0,
+                                    "distinct_raw_ids": 0,
+                                    "marker_group_labels": 0}, repr(query)
+        assert result["exact_gateways"] == [] and result["endpoints"] == [], \
+            repr(query)
+        assert result["caveats"] == [GET_MODEL_CAVEAT], repr(query)
+
+
+# ---------- pure get_model: freshness + deep output isolation ----------
+#
+# A public output is never a window onto the cached snapshot: every container,
+# array and matched endpoint metadata object (with its nested architecture /
+# parameter / pricing containers) is freshly allocated, so a caller mutating a
+# returned payload can never corrupt the snapshot or another call.
+
+def test_get_model_outputs_are_fresh_and_deeply_isolated():
+    from watchdog_catalog.query import get_model
+
+    lookup = _validated_snapshot("lookup.json")
+    before = copy.deepcopy(lookup)
+
+    # (a) Two independent calls on the same shared raw ID: fresh containers and
+    #     each endpoint metadata object (and its nested containers) unaliased to
+    #     the snapshot and to the other call.
+    first = get_model(lookup, {"model_id": "vendor/shared"})
+    second = get_model(lookup, {"model_id": "vendor/shared"})
+    assert lookup == before
+    assert first == second
+    assert first["exact_matches"] is not second["exact_matches"]
+    assert first["exact_gateways"] is not second["exact_gateways"]
+    assert first["provider_staleness"] is not second["provider_staleness"]
+    assert first["endpoints"] is not second["endpoints"]
+    assert first["counts"] is not second["counts"]
+    assert first["caveats"] is not second["caveats"]
+    for index, endpoint in enumerate(first["endpoints"]):
+        provider = endpoint["provider"]
+        raw_id = endpoint["model_id"]
+        source = lookup["providers"][provider]["models"][raw_id]
+        other = second["endpoints"][index]["metadata"]
+        assert endpoint["metadata"] is not source, (provider, raw_id)
+        assert endpoint["metadata"] is not other, (provider, raw_id)
+        assert endpoint["metadata"]["architecture"] is not source["architecture"]
+        assert endpoint["metadata"]["supported_parameters"] is not \
+            source["supported_parameters"]
+        assert endpoint["metadata"]["pricing"] is not source["pricing"]
+        assert endpoint["metadata"]["architecture"] is not \
+            other["architecture"]
+
+    # Mutating the returned payload deeply leaves the snapshot, the earlier
+    # independent result and a brand-new call all unchanged.
+    shared_a = first["endpoints"][0]["metadata"]
+    shared_a["architecture"]["input_modalities"].append("vision")
+    shared_a["supported_parameters"].append("seed")
+    shared_a["pricing"]["prompt"] = "999"
+    first["exact_matches"]["synthetic-a"] = False
+    first["exact_gateways"].append("injected")
+    first["provider_staleness"]["synthetic-a"] = True
+    first["endpoints"].append("injected")
+    first["counts"]["endpoints"] = 99
+    first["caveats"].append("injected")
+    assert lookup == before
+    meta_a = second["endpoints"][0]["metadata"]
+    assert meta_a["architecture"]["input_modalities"] == ["text"]
+    assert meta_a["supported_parameters"] == ["temperature", "max_tokens"]
+    assert meta_a["pricing"] == {"prompt": "0", "completion": "0"}
+    assert second["exact_matches"] == {"synthetic-a": True, "synthetic-b": True,
+                                       "synthetic-c": False}
+    assert second["counts"]["endpoints"] == 2
+    assert second["caveats"] == [GET_MODEL_CAVEAT]
+    third = get_model(lookup, {"model_id": "vendor/shared"})
+    assert third == second
+
+    # (b) The marker-insensitive lookup isolates each matched endpoint's
+    #     metadata independently, and the two providers of a shared raw id never
+    #     share a metadata object.
+    base = get_model(lookup, {"model_id": "vendor/model"})
+    assert [e["model_id"] for e in base["endpoints"]] == \
+        ["vendor/model:free", "vendor/model-free"]
+    a_meta = base["endpoints"][0]["metadata"]
+    b_meta = base["endpoints"][1]["metadata"]
+    assert a_meta is not b_meta
+    assert a_meta is not \
+        lookup["providers"]["synthetic-a"]["models"]["vendor/model:free"]
+    assert b_meta is not \
+        lookup["providers"]["synthetic-b"]["models"]["vendor/model-free"]
+    a_meta["architecture"]["input_modalities"].append("audio")
+    assert b_meta["architecture"]["input_modalities"] == ["text"]
+    assert lookup == before
+    assert get_model(lookup, {"model_id": "vendor/model"})["endpoints"][0][
+        "metadata"]["architecture"]["input_modalities"] == ["text", "image"]
+
+    # (c) A no-match success has fresh mutable containers and the caveat, and a
+    #     fresh error envelope is returned on every call (mutate then recall).
+    empty = get_model(lookup, {"model_id": "vendor/does-not-exist"})
+    empty["exact_matches"]["synthetic-a"] = True
+    empty["exact_gateways"].append("injected")
+    empty["provider_staleness"]["synthetic-a"] = True
+    empty["endpoints"].append("injected")
+    empty["counts"]["endpoints"] = 7
+    empty["caveats"].append("injected")
+    assert lookup == before
+    fresh = get_model(lookup, {"model_id": "vendor/does-not-exist"})
+    assert fresh["exact_matches"] == {"synthetic-a": False,
+                                      "synthetic-b": False,
+                                      "synthetic-c": False}
+    assert fresh["exact_gateways"] == [] and fresh["endpoints"] == []
+    assert fresh["counts"] == {"exact_matches": 0, "endpoints": 0,
+                               "distinct_raw_ids": 0, "marker_group_labels": 0}
+    assert fresh["caveats"] == [GET_MODEL_CAVEAT]
+
+    first_error = get_model(lookup, {"model_id": ""})
+    first_error["error"]["code"] = "mutated"
+    first_error["ok"] = True
+    second_error = get_model(lookup, {"model_id": ""})
+    assert second_error == _argument_envelope(INVALID_ARGUMENTS, "model_id")
+    assert second_error is not first_error

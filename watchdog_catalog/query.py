@@ -188,3 +188,112 @@ def list_free_models(snapshot, arguments):
         "tick_epoch": snapshot["tick_epoch"],
         "provider_staleness": {p: providers[p]["stale"] for p in order},
     }
+
+
+# -- pure get-model query: literal membership + separate marker endpoints --
+
+#: The explicit ASCII blank set the required ``model_id`` predicate uses:
+#: U+0009..U+000D (tab, LF, VT, FF, CR) and U+0020 (space). It is NEVER widened
+#: with Python's default ``str.strip`` / ``str.isspace``, which also match
+#: Unicode whitespace (NBSP U+00A0, EM SPACE U+2003, ...) and would wrongly
+#: reject a literal non-ASCII query.
+_ASCII_BLANKS = " \t\n\r\v\f"
+
+#: The frozen absence caveat carried on EVERY ``get_model`` success payload --
+#: including a no-match success. It is a labelling caution, never a proof of
+#: cross-gateway model identity.
+_ABSENCE_CAVEAT = (
+    "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a "
+    "missing exact id does NOT prove the model is unavailable there."
+)
+
+
+def get_model(snapshot, arguments):
+    """The pure core of the frozen ``get_model`` tool.
+
+    ``snapshot`` is an already-VALIDATED public snapshot object -- the
+    ``load_snapshot`` / source / adapter boundary owns raw, structural and hash
+    validation, so this function performs NO validation, NO hash recompute, NO
+    I/O and NO clock read. ``arguments`` is the whole DECODED argument object (a
+    JSON object), passed explicitly rather than splatted as keyword arguments.
+
+    Returns the frozen success payload directly -- never raising into the
+    semantic caller for a malformed argument. The payload carries exactly
+    ``ok``, ``query``, ``snapshot_id``, ``tick_epoch``, ``exact_matches``,
+    ``exact_gateways``, ``provider_staleness``, ``endpoints``, ``caveats`` and
+    ``counts``.
+
+    ``exact_matches`` is LITERAL raw-ID membership -- case-sensitive, unpadded,
+    exact -- one entry per snapshot provider in ``provider_order`` including
+    zero-ID providers; ``exact_gateways`` lists the matching providers in that
+    display order. ``endpoints`` is the SEPARATE marker-insensitive lookup:
+    every tracked ``(provider, raw model_id)`` pair whose
+    :func:`strip_free_marker` equals the stripped query, with raw ids unchanged
+    and metadata kept attached to its own pair. Endpoints order by provider
+    display order then the accepted :func:`natural_key` raw-ID order. A marker
+    match is never proof of cross-gateway identity.
+
+    Argument validation is deterministic and in the frozen order: the argument
+    must be a JSON object; then ANY unknown key is rejected (``parameter``
+    ``None``); then the required ``model_id`` must be a string containing at
+    least one character outside the explicit ASCII blank set -- empty or
+    ASCII-blank-only strings are ``invalid_arguments`` (``parameter``
+    ``model_id``). The retained identifier is never trimmed, case-folded or
+    repaired; the ASCII blank set is never widened to Unicode whitespace.
+
+    Every returned container, array and matched endpoint metadata object (with
+    its nested architecture/parameter/pricing containers) is freshly allocated
+    (the metadata values are deep-copied), so a caller mutating a result can
+    never corrupt the snapshot or another call. The inputs are never mutated and
+    the caveat list is fresh on every success.
+    """
+    if not isinstance(arguments, dict):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+    if any(key not in ("model_id",) for key in arguments):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+    query = arguments.get("model_id")
+    if not isinstance(query, str) or not query.strip(_ASCII_BLANKS):
+        return _argument_error(_INVALID_ARGUMENTS, "model_id")
+
+    order = snapshot["provider_order"]
+    providers = snapshot["providers"]
+    marker_query = strip_free_marker(query)
+
+    exact_matches = {}
+    exact_gateways = []
+    endpoints = []
+    for provider in order:
+        entry = providers[provider]
+        matched = query in entry["model_ids"]
+        exact_matches[provider] = matched
+        if matched:
+            exact_gateways.append(provider)
+        for raw_id in sorted(entry["model_ids"], key=natural_key):
+            if strip_free_marker(raw_id) == marker_query:
+                endpoints.append({
+                    "provider": provider,
+                    "model_id": raw_id,
+                    "chat_completions_url": entry["chat_completions_url"],
+                    "api_type": entry["api_type"],
+                    "stale": entry["stale"],
+                    "metadata": copy.deepcopy(entry["models"][raw_id]),
+                })
+
+    return {
+        "ok": True,
+        "query": query,
+        "snapshot_id": snapshot["snapshot_id"],
+        "tick_epoch": snapshot["tick_epoch"],
+        "exact_matches": exact_matches,
+        "exact_gateways": exact_gateways,
+        "provider_staleness": {p: providers[p]["stale"] for p in order},
+        "endpoints": endpoints,
+        "caveats": [_ABSENCE_CAVEAT],
+        "counts": {
+            "exact_matches": len(exact_gateways),
+            "endpoints": len(endpoints),
+            "distinct_raw_ids": len({e["model_id"] for e in endpoints}),
+            "marker_group_labels": len({strip_free_marker(e["model_id"])
+                                        for e in endpoints}),
+        },
+    }
