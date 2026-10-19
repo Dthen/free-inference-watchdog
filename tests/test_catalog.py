@@ -480,7 +480,8 @@ def _assert_public_snapshot_contract(snap):
     cadence = snap["cadence_s"]
     assert isinstance(cadence, int) and not isinstance(cadence, bool), \
         "cadence_s must be a strict integer"
-    assert cadence > 0, "cadence_s must be positive"
+    assert 0 < cadence <= MAX_SAFE_INT, \
+        "cadence_s must be a strict positive raw-safe integer"
 
     order = snap["provider_order"]
     providers = snap["providers"]
@@ -549,6 +550,8 @@ def _assert_public_snapshot_contract(snap):
             _assert_pricing_contract(model["pricing"])
 
     def walk(node):
+        """Guard every serialized FIELD NAME against the private/roster
+        blacklist and recurse into every value."""
         if isinstance(node, dict):
             for key, value in node.items():
                 assert key not in FORBIDDEN_KEYS, \
@@ -558,7 +561,35 @@ def _assert_public_snapshot_contract(snap):
             for item in node:
                 walk(item)
 
-    walk(snap)
+    def walk_provider_entry(provider):
+        """A provider entry's serialized field names stay guarded, EXCEPT that
+        its `models` map's OWN keys are raw tracked model IDs — an identifier
+        namespace, not serialized field names. Every value is still walked, so
+        a leaked private field inside a model, its architecture or its pricing
+        still rejects."""
+        for key, value in provider.items():
+            if key == "models":
+                for model in value.values():
+                    walk(model)
+            else:
+                assert key not in FORBIDDEN_KEYS, \
+                    f"private/roster key leaked into snapshot: {key}"
+                walk(value)
+
+    # The root object's serialized field names are guarded; its `providers`
+    # map's OWN keys are provider identifiers — an arbitrary-nonempty-string
+    # namespace (review decision CD-1), so a literal `auth`/`config`/`api_key`
+    # provider key is legal while a leaked private FIELD never is.
+    for key, value in snap.items():
+        assert key not in FORBIDDEN_KEYS, \
+            f"private/roster key leaked into snapshot: {key}"
+        if key == "providers":
+            for provider_key, provider in value.items():
+                assert isinstance(provider_key, str) and provider_key, \
+                    "a provider key must be a nonempty string"
+                walk_provider_entry(provider)
+        else:
+            walk(value)
 
 
 def _assert_snapshot_contract(snap):
@@ -7317,6 +7348,132 @@ def test_structural_unsorted_case_is_genuinely_unsorted(structural_table):
     # sorted and must never be used as an unsorted case.
     assert ["vendor/item02", "vendor/item1"] == sorted(
         ["vendor/item02", "vendor/item1"])
+
+
+# -- CD-1: provider-map keys and models-map keys are identifier namespaces --
+
+
+IDENTIFIER_NAMES = ('auth', 'config', 'api_key')
+PROTOTYPE_NAMES = ('__proto__', 'constructor')
+
+
+def _renamed_identifiers_snapshot():
+    """A RESEALED in-memory copy of `lookup.json` whose provider-map keys and
+    raw tracked model ids are literal FORBIDDEN_KEYS names plus the
+    prototype-looking names, in a shape a real gateway could legitimately
+    publish. Identifier namespaces are NOT serialized field names, so the
+    generic public contract must accept EVERY one of them (review decision
+    CD-1). No fixture file is modified."""
+    snap = _load_strict(LOOKUP_FIXTURE)
+    providers = snap['providers']
+    renamed = {}
+    for literal, source in zip(IDENTIFIER_NAMES, snap['provider_order']):
+        entry = copy.deepcopy(providers[source])
+        for index, raw_id in enumerate(list(entry['model_ids'])):
+            replacement = (PROTOTYPE_NAMES[index] if index < len(
+                PROTOTYPE_NAMES) else 'auth')
+            model = entry['models'].pop(raw_id)
+            model['id'] = replacement
+            entry['models'][replacement] = model
+        # Raw ids stay unique and literal code-point sorted.
+        entry['model_ids'] = sorted(entry['models'])
+        renamed[literal] = entry
+    snap['providers'] = renamed
+    snap['provider_order'] = list(IDENTIFIER_NAMES)
+    return _reseal_snapshot(snap)
+
+
+def test_structural_identifier_namespaces_are_not_private_field_names():
+    # The 13-member blacklist itself is UNCHANGED; only its scope is corrected.
+    assert len(FORBIDDEN_KEYS) == 13, sorted(FORBIDDEN_KEYS)
+    assert FORBIDDEN_KEYS == frozenset({
+        'config', '_token', 'auth', 'env', 'token_file', 'access_token',
+        'api_key', 'pending_alerts', 'ratelimits', 'probe',
+        'stale_providers', 'transients', 'unconfirmed'})
+
+    snap = _renamed_identifiers_snapshot()
+    # The identifier collisions keep the snapshot genuinely hash-consistent, so
+    # acceptance (or rejection) is never decided by the hash.
+    body = {k: v for k, v in snap.items() if k != 'snapshot_id'}
+    canonical = json.dumps(body, sort_keys=True, separators=(',', ':'),
+                           ensure_ascii=True).encode('utf-8')
+    assert snap['snapshot_id'] == hashlib.sha256(canonical).hexdigest()
+
+    # A literal `auth`/`config`/`api_key` PROVIDER KEY is a legal identifier...
+    assert snap['provider_order'] == ['auth', 'config', 'api_key']
+    assert set(snap['providers']) == set(IDENTIFIER_NAMES)
+    # ...and so is a literal `__proto__`/`constructor`/`auth` RAW MODEL ID.
+    assert snap['providers']['auth']['model_ids'] == sorted(
+        PROTOTYPE_NAMES + ('auth',))
+    assert set(snap['providers']['auth']['models']) == \
+        set(snap['providers']['auth']['model_ids'])
+    assert snap['providers']['config']['model_ids'] == sorted(
+        PROTOTYPE_NAMES)
+
+    # The generic PUBLIC contract accepts every identifier namespace...
+    _assert_public_snapshot_contract(snap)
+    # ...while the synthetic FIXTURE POLICY wrapper still rejects the
+    # non-synthetic provider keys (the policy layer is unchanged).
+    with pytest.raises(AssertionError):
+        _assert_snapshot_contract(snap)
+
+
+def test_structural_leaked_private_fields_still_reject_at_every_level():
+    base = _load_strict(LOOKUP_FIXTURE)
+    model_path = ['providers', 'synthetic-a', 'models', 'vendor/shared']
+
+    def leaked(path, name):
+        snap = copy.deepcopy(base)
+        parent = snap
+        for component in path:
+            parent = parent[component]
+        parent[name] = 1
+        return _reseal_snapshot(snap)
+
+    # Every one of the 13 blacklist names as an extra MODEL field: one compact
+    # loop, not 13 test functions.
+    for name in sorted(FORBIDDEN_KEYS):
+        with pytest.raises(AssertionError):
+            _assert_public_snapshot_contract(leaked(model_path, name))
+
+    # A leaked private FIELD at each of the five object levels still rejects.
+    for snap in (
+            leaked([], 'auth'),
+            leaked(['providers', 'synthetic-a'], 'config'),
+            leaked(model_path, 'api_key'),
+            leaked(model_path + ['architecture'], 'access_token'),
+            leaked(model_path + ['pricing'], 'token_file')):
+        with pytest.raises(AssertionError):
+            _assert_public_snapshot_contract(snap)
+
+    # Control: the untouched, consistently resealed base is accepted.
+    _assert_public_snapshot_contract(_reseal_snapshot(copy.deepcopy(base)))
+
+
+def test_structural_native_snapshot_integers_stay_raw_safe():
+    """The notation-independent raw rule already rejects unsafe integer
+    LEXEMES; the generic contract bounds the same fields at the NATIVE
+    structural boundary, so a direct-native `cadence_s` is a strict positive
+    raw-safe integer (review decision: safe cadence gap)."""
+    base = _load_strict(LOOKUP_FIXTURE)
+
+    def with_cadence(value):
+        snap = copy.deepcopy(base)
+        snap['cadence_s'] = value
+        return _reseal_snapshot(snap)
+
+    # The safe ceiling is INCLUSIVE and accepted.
+    _assert_public_snapshot_contract(with_cadence(MAX_SAFE_INT))
+    # One past the ceiling, an unbounded native integer, a bool (True/False)
+    # and a float all reject, hash equality notwithstanding.
+    for value in (MAX_SAFE_INT + 1, 2 ** 200, True, False, 1.0, 3600.0):
+        snap = with_cadence(value)
+        body = {k: v for k, v in snap.items() if k != 'snapshot_id'}
+        canonical = json.dumps(body, sort_keys=True, separators=(',', ':'),
+                               ensure_ascii=True).encode('utf-8')
+        assert snap['snapshot_id'] == hashlib.sha256(canonical).hexdigest()
+        with pytest.raises(AssertionError):
+            _assert_public_snapshot_contract(snap)
 
 
 # -- wrong-rule probes (rejection evidence ONLY; never an authoring oracle) --

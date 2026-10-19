@@ -1,27 +1,33 @@
-"""Runtime tests for the pure raw-JSON boundary and typed canonical bytes
-(unit 2a1).
+"""Runtime tests for the pure raw-JSON boundary, typed canonical bytes (unit
+2a1) and the strict public snapshot validator / hash provenance (unit 2a2).
 
 These tests exercise ONLY the public runtime API of the side-effect-free
-package root and its pure raw module:
+package root and its pure raw + structural module:
 
     watchdog_catalog.catalog.MAX_SAFE_INT
     watchdog_catalog.catalog.MAX_JSON_DEPTH
     watchdog_catalog.catalog.CatalogError
     watchdog_catalog.catalog.load_json
     watchdog_catalog.catalog.canonical_bytes
+    watchdog_catalog.catalog.INVALID_SNAPSHOT
+    watchdog_catalog.catalog.UNSUPPORTED_SCHEMA_VERSION
+    watchdog_catalog.catalog.validate_snapshot
+    watchdog_catalog.catalog.load_snapshot
+    watchdog_catalog.catalog.snapshot_hash
 
 They read the frozen, independently-authored RULE TABLES by path
-(``tests/fixtures/catalog/raw-json-cases.json`` and ``canonical-cases.json``)
-and compare each literal row against the runtime functions. They never import
+(``tests/fixtures/catalog/raw-json-cases.json``, ``canonical-cases.json`` and
+``structural-cases.json``) plus the committed snapshot fixtures, and compare
+each literal row against the runtime functions. They never import
 ``tests/test_catalog.py`` or any of its private checkers, and no production
 module imports them.
 
-Structural snapshot validation, provenance/hashing policy and the
-``invalid_snapshot`` / ``unsupported_schema_version`` envelopes are LATER
-units: this file proves only the raw lexical boundary and the typed canonical
-bytes and therefore never manufactures a structural envelope. Grouped loops
-keep the added test count proportional to the coherent boundaries rather than
-to the individual table rows.
+The structural layer is exercised through a SMALL TEST-LOCAL path setter and
+reseal helper built on independent ``json.dumps``/``hashlib`` calls: expected
+envelopes come from the literal table rows, never from runtime-derived hashes,
+and every fixture file stays byte-identical. Grouped loops keep the added test
+count proportional to the coherent boundaries rather than to the individual
+table rows.
 
 The real package is imported normally at module level. The frozen
 contract-only suite proves its own isolation in a fresh interpreter (with the
@@ -30,6 +36,7 @@ implementation package blocked) rather than by inspecting this process's
 keep the process-global module table clean.
 """
 
+import collections
 import hashlib
 import json
 import math
@@ -46,13 +53,34 @@ REPO = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO / "tests" / "fixtures" / "catalog"
 RAW_TABLE_DOC = FIXTURE_DIR / "raw-json-cases.json"
 CANONICAL_TABLE_DOC = FIXTURE_DIR / "canonical-cases.json"
+STRUCTURAL_TABLE_DOC = FIXTURE_DIR / "structural-cases.json"
 
 INVALID_JSON = "invalid_json"
 INVALID_JSON_MESSAGE = "Invalid catalogue JSON."
+INVALID_SNAPSHOT = "invalid_snapshot"
+UNSUPPORTED_SCHEMA_VERSION = "unsupported_schema_version"
+STRUCTURAL_MESSAGES = {
+    INVALID_SNAPSHOT: "Invalid catalogue snapshot.",
+    UNSUPPORTED_SCHEMA_VERSION: "Unsupported catalogue schema version.",
+}
 
+# The nine committed public snapshot fixtures: every one of them is a valid
+# publication and must be accepted, unchanged, by the structural layer.
+SNAPSHOT_FIXTURES = (
+    "basic.json",
+    "capability-unknown.json",
+    "lookup.json",
+    "metadata-edge-cases.json",
+    "ordering.json",
+    "provider-extension.json",
+    "search-text.json",
+    "status-short-cadence.json",
+    "status-unknown-time.json",
+)
 
 # The five strict-float snapshot-case rows and the literal path of the offending
-# float token; unit 2a2 owns their ``invalid_snapshot`` classification.
+# float token; this unit's ``load_snapshot`` classifies their
+# ``invalid_snapshot`` envelope.
 STRICT_FLOAT_PATH = {
     "snap_case_schema_version_float": ("schema_version",),
     "snap_case_tick_epoch_float": ("tick_epoch",),
@@ -328,11 +356,13 @@ def test_canonical_snapshot_cases_are_raw_accepted_with_hash_preconditions(
         else:
             assert decoded["snapshot_id"] == recomputed, cid
         if "expect" in row:
-            # Structural classification is deferred to unit 2a2: the raw layer
-            # accepts these and produces NO envelope itself.
+            # Structural classification stays a SEPARATE layer: the raw layer
+            # accepts these and produces NO envelope itself, and this unit's
+            # load_snapshot is what composes raw acceptance with the structural
+            # envelope asserted in the structural group below.
             assert row["expect"]["error"]["code"] == "invalid_snapshot", cid
     # The strict-token inputs load with FLOAT tokens intact (never coerced to
-    # int) -- the precondition unit 2a2 will classify invalid_snapshot.
+    # int) -- the precondition the structural layer classifies invalid_snapshot.
     for cid, path in STRICT_FLOAT_PATH.items():
         row = _row(canonical_table["snapshot_cases"], cid)
         value = _doc_at(load_json(row["json_text"]), path)
@@ -363,13 +393,468 @@ def test_canonical_bytes_encoder_flags_and_no_key_exclusion():
             canonical_bytes({"x": bad})
 
 
+# ---------- structural validation: literal table rows and fixtures ----------
+
+# Small TEST-LOCAL change applier + reseal helper. Independent stdlib only
+# (json/hashlib); no ``tests/test_catalog.py`` private helper is imported and no
+# production module is used to build the expected value.
+
+
+def _decode_doc(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _canonical_text(body):
+    return json.dumps(body, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True).encode("utf-8")
+
+
+def _reseal(snap):
+    """Reseal a mutated in-memory copy: `snapshot_id` becomes the canonical
+    body hash, so hash equality is TRUE before the semantic defect is tested."""
+    body = {k: v for k, v in snap.items() if k != "snapshot_id"}
+    snap["snapshot_id"] = hashlib.sha256(_canonical_text(body)).hexdigest()
+    return snap
+
+
+def _apply_changes(snap, changes):
+    for change in changes:
+        op = change["op"]
+        if op == "replace_root":
+            snap = change["value"]
+            continue
+        path = change["path"]
+        parent = snap
+        for component in path[:-1]:
+            parent = parent[component]
+        if op == "delete":
+            del parent[path[-1]]
+        else:
+            assert op == "set", op
+            parent[path[-1]] = change["value"]
+    return snap
+
+
+def _structural_snapshot(row):
+    snap = _apply_changes(_decode_doc(FIXTURE_DIR / row["base_fixture"]),
+                          row["changes"])
+    return _reseal(snap) if row["reseal"] else snap
+
+
+def _mutate(base, path, value):
+    """A fresh copy of `base` with one literal slot replaced."""
+    snap = json.loads(json.dumps(base))
+    parent = snap
+    for component in path[:-1]:
+        parent = parent[component]
+    parent[path[-1]] = value
+    return snap
+
+
+def _assert_rejected(snapshot, code, cid):
+    catalog = _catalog
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        catalog.validate_snapshot(snapshot)
+    err = excinfo.value
+    expect = {"ok": False,
+              "error": {"code": code, "message": STRUCTURAL_MESSAGES[code]}}
+    assert err.code == code, cid
+    assert err.message == STRUCTURAL_MESSAGES[code], cid
+    assert str(err) == STRUCTURAL_MESSAGES[code], cid
+    assert err.to_payload() == expect, cid
+    payload = err.to_payload()
+    assert set(payload) == {"ok", "error"}, cid
+    assert payload["ok"] is False, cid
+    assert set(payload["error"]) == {"code", "message"}, cid
+    assert err.code != INVALID_JSON, cid
+    return err
+
+
+@pytest.fixture(scope="module")
+def structural_table():
+    return _decode_doc(STRUCTURAL_TABLE_DOC)
+
+
+def test_structural_error_literals_and_envelopes_are_frozen():
+    catalog = _catalog
+    assert catalog.INVALID_SNAPSHOT == INVALID_SNAPSHOT
+    assert catalog.UNSUPPORTED_SCHEMA_VERSION == UNSUPPORTED_SCHEMA_VERSION
+    for code, message in STRUCTURAL_MESSAGES.items():
+        err = catalog.CatalogError(code)
+        assert err.code == code
+        assert err.message == message
+        assert str(err) == message
+        payload = err.to_payload()
+        assert payload == {"ok": False,
+                           "error": {"code": code, "message": message}}
+        assert set(payload) == {"ok", "error"}
+        # Never an argument-style `parameter`, never a raw value or path.
+        assert set(payload["error"]) == {"code", "message"}
+        assert payload["ok"] is False
+        assert err.to_payload() is not err.to_payload()
+    # The DEFAULT code stays the raw one, so the 2a1 surface is unchanged.
+    assert catalog.CatalogError().code == INVALID_JSON
+
+
+def test_structural_invalid_rows_reject_with_the_frozen_envelope(
+        structural_table):
+    rows = structural_table["invalid_cases"]
+    assert len(rows) == 57
+    for row in rows:
+        snap = _structural_snapshot(row)
+        if row["reseal"]:
+            body = {k: v for k, v in snap.items() if k != "snapshot_id"}
+            assert snap["snapshot_id"] == \
+                hashlib.sha256(_canonical_text(body)).hexdigest(), row["id"]
+        err = _assert_rejected(snap, row["expect"]["error"]["code"], row["id"])
+        # The literal, independently-authored envelope is reproduced exactly.
+        assert err.to_payload() == row["expect"], row["id"]
+
+
+def test_structural_valid_controls_are_accepted_identically_and_unmutated(
+        structural_table):
+    rows = structural_table["valid_controls"]
+    assert len(rows) == 10
+    catalog = _catalog
+    for row in rows:
+        snap = _structural_snapshot(row)
+        before = json.loads(json.dumps(snap))
+        assert catalog.validate_snapshot(snap) is snap, row["id"]
+        assert snap == before, row["id"]
+        assert catalog.load_snapshot(json.dumps(snap)) == snap, row["id"]
+
+
+def test_committed_snapshot_fixtures_validate_identically():
+    catalog = _catalog
+    for name in SNAPSHOT_FIXTURES:
+        text = (FIXTURE_DIR / name).read_text(encoding="utf-8")
+        doc = catalog.load_json(text)
+        before = json.loads(json.dumps(doc))
+        assert catalog.validate_snapshot(doc) is doc, name
+        assert doc == before, name
+        assert catalog.load_snapshot(text) == doc, name
+
+
+def test_canonical_snapshot_cases_classify_via_load_snapshot(canonical_table):
+    rows = canonical_table["snapshot_cases"]
+    assert len(rows) == 7
+    catalog = _catalog
+    base = _row(rows, "snap_case_integer_token_base")
+    accepted = catalog.load_snapshot(base["json_text"])
+    assert isinstance(accepted, dict) and base.get("expect") is None
+    strict_float = 0
+    for row in rows:
+        if row["id"] == "snap_case_integer_token_base":
+            continue
+        if row["id"] in STRICT_FLOAT_PATH:
+            strict_float += 1
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            catalog.load_snapshot(row["json_text"])
+        err = excinfo.value
+        assert err.code == INVALID_SNAPSHOT, row["id"]
+        assert err.to_payload() == row["expect"], row["id"]
+    assert strict_float == 5
+    # The tampered row is a genuine body/hash mismatch, not a shape accident.
+    tamper = _row(rows, "snap_case_hash_tamper")
+    doc = catalog.load_json(tamper["json_text"])
+    body = {k: v for k, v in doc.items() if k != "snapshot_id"}
+    assert doc["snapshot_id"] != catalog.snapshot_hash(body)
+
+
+def test_raw_faults_precede_structural_validation(raw_table):
+    catalog = _catalog
+    for row in raw_table["invalid_cases"]:
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            catalog.load_snapshot(row["json_text"])
+        err = excinfo.value
+        assert err.code == INVALID_JSON, row["id"]
+        assert err.to_payload() == row["expect"], row["id"]
+
+
+def test_raw_valid_documents_reach_the_structural_layer(raw_table):
+    catalog = _catalog
+    non_objects = 0
+    for row in raw_table["valid_controls"]:
+        decoded = catalog.load_json(row["json_text"])  # lexically accepted
+        if not isinstance(decoded, dict):
+            non_objects += 1
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            catalog.load_snapshot(row["json_text"])
+        assert excinfo.value.code == INVALID_SNAPSHOT, row["id"]
+    assert non_objects, "the raw table must carry non-object roots"
+    for text in ("null", "[]", "true", "42", "1.5", '"x"',
+                 "-9007199254740991", "{}", '{"A":1,"a":2}'):
+        _assert_rejected(catalog.load_json(text), INVALID_SNAPSHOT, text)
+
+
+def test_structural_precedence_matrix_on_native_values():
+    catalog = _catalog
+    base = _decode_doc(FIXTURE_DIR / "lookup.json")
+
+    # (a) Non-object roots, including tuple/bytes/UserDict, never escape.
+    for root in (None, [], "x", 1, 1.5, True, (), b"{}",
+                 collections.UserDict(base)):
+        _assert_rejected(root, INVALID_SNAPSHOT, f"root {root!r}")
+
+    # (b) Wrong required-field set both ways.
+    for mutate in (lambda s: s.pop("cadence_s"),
+                   lambda s: s.__setitem__("surprise", 1),
+                   lambda s: s.pop("snapshot_id")):
+        snap = json.loads(json.dumps(base))
+        mutate(snap)
+        _assert_rejected(snap, INVALID_SNAPSHOT, "field set")
+
+    # (c) A non-strict-integer version TYPE is invalid_snapshot.
+    for value in (True, False, "1", None, 1.0, 1e0):
+        _assert_rejected(_mutate(base, ("schema_version",), value),
+                         INVALID_SNAPSHOT, f"version type {value!r}")
+
+    # (d) A well-typed integer version != 1 is unsupported_schema_version EVEN
+    #     with a malformed body and a wrong hash: the value check precedes
+    #     every v1 body check and the hash.
+    for value in (2, 0, -1, catalog.MAX_SAFE_INT):
+        snap = _mutate(base, ("schema_version",), value)
+        snap["providers"] = []
+        snap["snapshot_id"] = "0" * 64
+        _assert_rejected(snap, UNSUPPORTED_SCHEMA_VERSION, f"version {value}")
+
+    # (e) Version 1: a malformed body, a wrong 64-hex hash and a malformed hash
+    #     are each invalid_snapshot.
+    _assert_rejected(_mutate(base, ("providers",), []),
+                     INVALID_SNAPSHOT, "malformed body")
+    _assert_rejected(_mutate(base, ("snapshot_id",), "0" * 64),
+                     INVALID_SNAPSHOT, "wrong 64-hex hash")
+    _assert_rejected(_mutate(base, ("snapshot_id",), "not-a-hash"),
+                     INVALID_SNAPSHOT, "malformed hash")
+    _assert_rejected(_mutate(base, ("provider_order",), ["synthetic-a"]),
+                     INVALID_SNAPSHOT, "order/map mismatch")
+
+    # (f) Accepting control: the untouched snapshot is returned BY IDENTITY.
+    assert catalog.validate_snapshot(base) is base
+
+
+def test_structural_native_body_guards_reject_without_incidental_errors():
+    catalog = _catalog
+    base = _decode_doc(FIXTURE_DIR / "lookup.json")
+    model = ("providers", "synthetic-a", "models", "vendor/shared")
+    cases = (
+        (("providers",), []),
+        (("providers", "synthetic-a"), "oops"),
+        ((model[0], model[1], "models"), []),
+        (model + ("architecture",), []),
+        (model + ("pricing",), []),
+        (("warnings",), {}),
+        (("providers",), {1: {}}),
+        (("providers", "synthetic-a", "models"), {7: {}}),
+        (("tick_epoch",), float("nan")),
+        (("tick_epoch",), float("inf")),
+        (("tick_epoch",), catalog.MAX_SAFE_INT + 1),
+        (("cadence_s",), float("nan")),
+        (("cadence_s",), 0),
+        (("cadence_s",), catalog.MAX_SAFE_INT + 1),
+        (("cadence_s",), 2 ** 200),
+        (("cadence_s",), 3600.0),
+        (model + ("context_length",), float("nan")),
+        (model + ("context_length",), catalog.MAX_SAFE_INT + 1),
+        (model + ("context_length",), True),
+        (model + ("pricing", "prompt"), float("nan")),
+        (model + ("pricing", "prompt"), float("inf")),
+        (model + ("pricing", "prompt"), catalog.MAX_SAFE_INT + 1),
+    )
+    for path, value in cases:
+        snap = _mutate(base, path, value)
+        _assert_rejected(snap, INVALID_SNAPSHOT, f"{path} = {value!r}")
+
+    # A non-JSON native in an otherwise-shaped slot rejects as invalid_snapshot
+    # and is left EXACTLY as supplied -- never repaired, coerced or replaced.
+    for field in ("providers", "warnings", "tick_epoch", "cadence_s",
+                  "provider_order", "snapshot_id"):
+        marker = object()
+        snap = json.loads(json.dumps(base))
+        snap[field] = marker
+        _assert_rejected(snap, INVALID_SNAPSHOT, f"{field} = object()")
+        assert snap[field] is marker, field
+
+
+def test_structural_generic_registry_shapes_and_identifiers_are_accepted():
+    catalog = _catalog
+    base = _decode_doc(FIXTURE_DIR / "lookup.json")
+
+    # (a) Identifier namespaces: a literal `auth` provider key and literal
+    #     `__proto__`/`constructor`/`auth` raw tracked ids are LEGAL.
+    snap = json.loads(json.dumps(base))
+    entry = snap["providers"].pop("synthetic-b")
+    for index, raw_id in enumerate(list(entry["model_ids"])):
+        replacement = ("__proto__", "constructor")[index]
+        model = entry["models"].pop(raw_id)
+        model["id"] = replacement
+        entry["models"][replacement] = model
+    entry["model_ids"] = sorted(entry["models"])
+    snap["providers"]["auth"] = entry
+    snap["provider_order"] = ["synthetic-a", "auth", "synthetic-c"]
+    _reseal(snap)
+    assert catalog.validate_snapshot(snap) is snap
+    assert snap["providers"]["auth"]["model_ids"] == ["__proto__", "constructor"]
+
+    # (b) A legitimately empty registry.
+    snap = json.loads(json.dumps(base))
+    snap["provider_order"] = []
+    snap["providers"] = {}
+    _reseal(snap)
+    assert catalog.validate_snapshot(snap) is snap
+
+    # (c) A registry in which every provider tracks at least one id.
+    snap = json.loads(json.dumps(base))
+    del snap["providers"]["synthetic-c"]
+    snap["provider_order"] = ["synthetic-a", "synthetic-b"]
+    _reseal(snap)
+    assert catalog.validate_snapshot(snap) is snap
+
+
+def test_structural_wiring_is_syntactic_and_preserved_verbatim():
+    catalog = _catalog
+    base = _decode_doc(FIXTURE_DIR / "lookup.json")
+    path = ("providers", "synthetic-a", "chat_completions_url")
+    accepted = (
+        "https://host.example/v1/chat/completions?x=1",
+        "https://host.example/v1/chat/completions?",
+        "http://[::1]:8000/v1/chat/completions",
+        "http://[::1]/v1/chat/completions",
+        "HTTP://EXAMPLE.COM/v1/chat/completions",
+        "https://host.example/v1/chat/completions#",
+    )
+    for url in accepted:
+        snap = _mutate(base, path, url)
+        _reseal(snap)
+        assert catalog.validate_snapshot(snap) is snap, url
+        # The ORIGINAL string is preserved verbatim -- never normalized.
+        assert snap["providers"]["synthetic-a"]["chat_completions_url"] == url
+    rejected = (
+        "", "   https://host.example/v1", "https://host.example/v1 ",
+        "https://host.example/v1\n", "https://ho\tst.example/v1",
+        "https://host.example/v1\x7f", "/v1/chat/completions",
+        "ftp://host.example/v1", "https://user@host.example/v1",
+        "https://user:pass@host.example/v1", "https://host.example/v1#frag",
+        "https://host.example/v1#%20", "http://::1/v1", 5, True, None,
+    )
+    for url in rejected:
+        snap = _mutate(base, path, url)
+        _reseal(snap)
+        _assert_rejected(snap, INVALID_SNAPSHOT, f"wiring {url!r}")
+
+
+def test_structural_pricing_literals_are_validated_but_never_normalized():
+    catalog = _catalog
+    base = _decode_doc(FIXTURE_DIR / "lookup.json")
+    path = ("providers", "synthetic-a", "models", "vendor/shared", "pricing")
+    accepted = (
+        None,
+        {"prompt": 0.5, "completion": None},
+        {"prompt": "0.001", "completion": "1e-5"},
+        {"prompt": " 1.5 ", "completion": "1_000"},
+        {"prompt": "-0", "completion": "+1.5"},
+        {"prompt": "١٢٣", "completion": "１２３"},
+        {"prompt": 9007199254740991, "completion": "9007199254740992"},
+        {"prompt": 1.0, "completion": -0.0},
+    )
+    for pricing in accepted:
+        snap = _mutate(base, path, pricing)
+        _reseal(snap)
+        assert catalog.validate_snapshot(snap) is snap, pricing
+        stored = snap["providers"]["synthetic-a"]["models"]["vendor/shared"][
+            "pricing"]
+        assert stored == pricing, pricing
+        if pricing is not None:
+            for key in ("prompt", "completion"):
+                assert type(stored[key]) is type(pricing[key]), pricing
+                assert repr(stored[key]) == repr(pricing[key]), pricing
+    rejected = (
+        {"prompt": True, "completion": "0"},
+        {"prompt": "abc", "completion": "0"},
+        {"prompt": "nan", "completion": "0"},
+        {"prompt": "inf", "completion": "0"},
+        {"prompt": "1e400", "completion": "0"},
+        {"prompt": float("nan"), "completion": "0"},
+        {"prompt": float("inf"), "completion": "0"},
+        {"prompt": [], "completion": "0"},
+        {"prompt": {"a": 1}, "completion": "0"},
+        {"prompt": "0"},
+        {"prompt": "0", "completion": "0", "extra": "x"},
+        "free",
+        0,
+    )
+    for pricing in rejected:
+        snap = _mutate(base, path, pricing)
+        _reseal(snap)
+        _assert_rejected(snap, INVALID_SNAPSHOT, f"pricing {pricing!r}")
+
+
+def test_snapshot_hash_matches_literal_vectors_and_retains_nested_ids(
+        canonical_table):
+    catalog = _catalog
+    vectors = {row["id"]: row for row in canonical_table["canonical_vectors"]}
+    snapshot_scoped = [row for row in canonical_table["canonical_vectors"]
+                       if row["scope"] == "snapshot"]
+    assert len(snapshot_scoped) == 2
+    for row in snapshot_scoped:
+        doc = catalog.load_json(row["json_text"])
+        body = {k: v for k, v in doc.items() if k != "snapshot_id"}
+        assert '"snapshot_id"' not in row["canonical_text"], row["id"]
+        assert catalog.snapshot_hash(doc) == row["sha256"], row["id"]
+        assert catalog.snapshot_hash(body) == row["sha256"], row["id"]
+        assert catalog.snapshot_hash(doc) == hashlib.sha256(
+            row["canonical_text"].encode("utf-8")).hexdigest(), row["id"]
+        # Sealing then setting the root id is not circular.
+        sealed = dict(body)
+        sealed["snapshot_id"] = catalog.snapshot_hash(body)
+        assert catalog.snapshot_hash(sealed) == catalog.snapshot_hash(body)
+
+    # ONLY the root snapshot_id is excluded: a NESTED one is content and stays
+    # bound into the digest.
+    nested = catalog.load_json(vectors["vec_nested_snapshot_id"]["json_text"])
+    body = {k: v for k, v in nested.items() if k != "snapshot_id"}
+    assert body == {"inner": {"snapshot_id": "cafe"}}
+    assert catalog.snapshot_hash(nested) == hashlib.sha256(
+        b'{"inner":{"snapshot_id":"cafe"}}').hexdigest()
+    without_nested = {"inner": {}}
+    assert catalog.snapshot_hash(nested) != catalog.snapshot_hash(
+        without_nested)
+
+    # A non-dict argument is a programming error, never a public code.
+    for bad in ([], "x", None, 1, b"{}"):
+        with pytest.raises(TypeError):
+            catalog.snapshot_hash(bad)
+
+
 # ---------- import isolation: silent, side-effect-free package root ----------
 
+# Application/operator modules a fresh import of the package must never pull in,
+# and the application data files it must never open. Shared by both fresh-process
+# audits below so the two import ORDERS are audited against one literal list.
+FORBIDDEN_IMPORTS = [
+    "mcp", "mcp_server", "build_site", "state", "config_loader",
+    "providers", "inference_watchdog", "notify", "envfile", "diffing",
+    "detection", "alive", "pending_removals", "probe_select",
+    "probe_state", "probe_zero_credit", "anthropic", "httpx", "requests",
+    "watchdog_catalog.query", "watchdog_catalog.server",
+    "watchdog_catalog.adapter",
+]
+DATA_PATTERNS = ["/.env", "roster", "tools.json", "catalog.json",
+                 "/state/", "/providers/"]
+# Package-first and catalog-first, each in its OWN fresh process: the audit must
+# not depend on which entry point a consumer reaches the package through.
+IMPORT_ORDERS = (
+    ["watchdog_catalog", "watchdog_catalog.catalog"],
+    ["watchdog_catalog.catalog", "watchdog_catalog"],
+)
+
 _PROBE = r'''
-import json, os, sys
+import importlib, json, os, sys
 
 forbidden_prefixes = json.loads(os.environ["WC_FORBIDDEN"])
 data_patterns = json.loads(os.environ["WC_DATA_PATTERNS"])
+import_order = json.loads(os.environ.get(
+    "WC_IMPORT_ORDER", '["watchdog_catalog", "watchdog_catalog.catalog"]'))
 
 forbidden_imports = []
 application_opens = []
@@ -397,8 +882,8 @@ def _audit(name, args):
 
 sys.addaudithook(_audit)
 
-import watchdog_catalog
-import watchdog_catalog.catalog
+for module_name in import_order:
+    importlib.import_module(module_name)
 
 assert "watchdog_catalog" in sys.modules
 assert "watchdog_catalog.catalog" in sys.modules
@@ -443,19 +928,9 @@ def test_package_import_is_silent_and_side_effect_free(tmp_path):
     # (b) An audit-hooked import touches no operator module, application data
     #     file or network facility. Mandatory module source/bytecode reads are
     #     allowed; only application data and operator/SDK imports are trapped.
-    forbidden = [
-        "mcp", "mcp_server", "build_site", "state", "config_loader",
-        "providers", "inference_watchdog", "notify", "envfile", "diffing",
-        "detection", "alive", "pending_removals", "probe_select",
-        "probe_state", "probe_zero_credit", "anthropic", "httpx", "requests",
-        "watchdog_catalog.query", "watchdog_catalog.server",
-        "watchdog_catalog.adapter",
-    ]
-    data_patterns = ["/.env", "roster", "tools.json", "catalog.json",
-                     "/state/", "/providers/"]
     env = dict(base_env)
-    env["WC_FORBIDDEN"] = json.dumps(forbidden)
-    env["WC_DATA_PATTERNS"] = json.dumps(data_patterns)
+    env["WC_FORBIDDEN"] = json.dumps(FORBIDDEN_IMPORTS)
+    env["WC_DATA_PATTERNS"] = json.dumps(DATA_PATTERNS)
     probe = subprocess.run(
         [sys.executable, "-B", "-c", _PROBE],
         cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120)
@@ -465,3 +940,34 @@ def test_package_import_is_silent_and_side_effect_free(tmp_path):
     assert report["leaked_modules"] == [], report["leaked_modules"]
     assert report["application_opens"] == [], report["application_opens"]
     assert report["network_events"] == [], report["network_events"]
+
+
+def test_package_import_audit_is_import_order_independent(tmp_path):
+    """The audit holds for BOTH fresh-process entry points: importing the
+    submodule directly (catalog-first) and importing the package first. A
+    lazy/ordered import must never become the way a forbidden module slips in."""
+    home = tmp_path / "home"
+    home.mkdir()
+    cwd = tmp_path / "neutral-cwd"
+    cwd.mkdir()
+    base_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "PYTHONPATH": str(REPO),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    for order in IMPORT_ORDERS:
+        env = dict(base_env)
+        env["WC_FORBIDDEN"] = json.dumps(FORBIDDEN_IMPORTS)
+        env["WC_DATA_PATTERNS"] = json.dumps(DATA_PATTERNS)
+        env["WC_IMPORT_ORDER"] = json.dumps(order)
+        probe = subprocess.run(
+            [sys.executable, "-B", "-c", _PROBE],
+            cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120)
+        assert probe.returncode == 0, (order, probe.stderr)
+        assert probe.stderr == "", (order, probe.stderr)
+        report = json.loads(probe.stdout)
+        assert report["forbidden_imports"] == [], (order, report)
+        assert report["leaked_modules"] == [], (order, report)
+        assert report["application_opens"] == [], (order, report)
+        assert report["network_events"] == [], (order, report)

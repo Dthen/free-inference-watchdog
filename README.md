@@ -294,13 +294,17 @@ source/cache datum or partial payload. Two literals exist: `invalid_snapshot` /
   one id. `provider_order` stays unique and must match the provider map keys
   exactly, and zero-ID providers are permitted and retained (never required).
   The `synthetic-` namespace, a nonempty registry and at least one zero-ID
-  provider are TEST-FIXTURE POLICY, not public schema rules.
+  provider are TEST-FIXTURE POLICY, not public schema rules. Provider-map keys
+  and model-map keys are identifier namespaces, not serialized field names; a
+  literal identifier such as `auth` is allowed, but an extra private field is
+  not.
 - **Wiring.** `chat_completions_url` must be a nonempty absolute
   `http`/`https` URL with a hostname, containing no userinfo, no fragment and
   no ASCII whitespace or control character; the original string is preserved
   verbatim. This is purely syntactic — no DNS/network probing, no public-IP
   allowlist, no provider inference and no URL rewriting. Query strings are
-  not automatically forbidden.
+  not automatically forbidden. An empty fragment component (a trailing `#`
+  delimiter) is permitted; nonempty fragments are rejected.
 - **Warning order.** Snapshot warning codes are deduplicated in the frozen
   vocabulary order; a `null` tick still requires `tick_epoch_unknown`.
 
