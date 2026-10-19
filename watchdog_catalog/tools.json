@@ -1,7 +1,7 @@
 [
   {
     "name": "list_free_models",
-    "description": "BULK export of the published free-model catalogue: every tracked raw model id per gateway, each array in provider display order then natural raw-ID order, including gateways that track zero ids. There is no hard universal output cap and never any truncation, so bulk output may exceed the guidance below. For routine lookups prefer search_models with an explicit small limit of 1-5 rows, then get_model for details of one raw id. Optional provider narrows the export to one exact registered key.",
+    "description": "BULK export of the published free-model catalogue: every tracked raw model id grouped per gateway, each raw-ID array in natural raw-ID order, including gateways that track zero ids. There is no hard universal output cap and never any truncation, so bulk output may exceed the guidance below. For routine lookups prefer search_models with an explicit small limit of 1-5 rows, then get_model for details of one raw id. Optional provider narrows the export to one exact registered key.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -38,7 +38,7 @@
   },
   {
     "name": "list_endpoints",
-    "description": "BULK export of published endpoints: for each selected gateway, its chat-completions wiring plus every tracked raw model id with its projected public metadata, arrays in provider display order then natural raw-ID order, including gateways tracking zero ids. There is no hard universal output cap and never any truncation. For routine use prefer search_models with an explicit small limit of 1-5 rows, then get_model. Optional provider narrows to one exact registered key.",
+    "description": "BULK export of published endpoints: for each selected gateway, its chat-completions wiring plus every tracked raw model id with its projected public metadata, grouped per gateway with each raw-ID array in natural raw-ID order, including gateways tracking zero ids. There is no hard universal output cap and never any truncation. For routine use prefer search_models with an explicit small limit of 1-5 rows, then get_model. Optional provider narrows to one exact registered key.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -57,7 +57,7 @@
   },
   {
     "name": "watchdog_status",
-    "description": "Published catalogue health for the current snapshot: tick age from the snapshot epoch and cadence, per-gateway staleness, whole-catalogue and tracked-pair coverage counts, and the snapshot warning codes. This reports the published catalogue only, never live or private operator or cron health, and it never probes a gateway. It takes no arguments and never consults a clock.",
+    "description": "Published catalogue health for the current snapshot: tick age from the snapshot epoch and cadence, per-gateway staleness, whole-catalogue and tracked-pair coverage counts, and the snapshot warning codes plus the derived status-only codes. This reports the published catalogue only, never live or private operator or cron health, and it never probes a gateway. It takes no arguments, exposes no public clock parameter and performs no wall-clock lookup.",
     "inputSchema": {
       "type": "object",
       "properties": {},
@@ -67,7 +67,7 @@
   },
   {
     "name": "search_models",
-    "description": "Search the same published metadata: a sorted, paginated page of endpoints. Filters are a literal substring query over ids and names, one exact registered provider, a minimum context length, and capability arrays; unknown filter values are reported as such. Sorted then sliced, so totals are unpaginated match counts. Optional arguments omit cleanly: query, provider, min_context_length, input_modalities and supported_parameters default to null, limit to 50 and offset to 0.",
+    "description": "Search published metadata: a sorted, paginated endpoint page. Filters are a literal substring query over ids, names and descriptions, an exact registered provider, a minimum context length and capability arrays. An unknown provider errors; an unmatched capability value or unknown endpoint metadata yields no matches. Sorted then sliced, so totals are unpaginated. Optional arguments: query, provider, min_context_length, input_modalities and supported_parameters default null; limit 50, offset 0.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -77,7 +77,7 @@
             "null"
           ],
           "default": null,
-          "description": "Literal, untrimmed substring over raw ids and names. Any string is allowed, including empty or whitespace; null or omitted applies no filter."
+          "description": "Literal, untrimmed substring over ids, names and descriptions. Any string is allowed, including empty or whitespace; null applies no filter."
         },
         "provider": {
           "type": [
