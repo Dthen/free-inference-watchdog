@@ -2908,3 +2908,385 @@ def test_list_endpoints_outputs_are_fresh_and_deeply_isolated():
     second_error = list_endpoints(lookup, {"provider": ""})
     assert second_error == _argument_envelope(UNKNOWN_PROVIDER, "provider")
     assert second_error is not first_error
+
+
+# ---------- pure watchdog_status: fixed-clock status + coverage ----------
+#
+# `watchdog_status` is the WHOLE-CATALOGUE status query: its payload reports
+# published-catalogue health, never private operator health, so it carries no
+# local path/state_root/source/cache timestamp. The fixed test clock is a
+# case-level `now` injected as a REQUIRED keyword-only argument into the core --
+# it is never a tool argument (`args` is `{}` on every golden) and never a
+# wall-clock lookup. Every expected payload below is the INDEPENDENTLY authored
+# `cases.json` golden (hand-written from the contract, never from an
+# implementation); the exact field sets are the frozen README tables
+# (README.md, "Success envelope -- watchdog_status").
+
+STATUS_CASES_DOC = FIXTURE_DIR / "cases.json"
+STATUS_ARG_DOC = FIXTURE_DIR / "argument-cases.json"
+
+# The exact top-level field set, the exact whole-catalogue count field set and
+# the exact metadata-coverage field set.
+STATUS_FIELDS = frozenset({
+    "ok", "snapshot_id", "tick_epoch", "cadence_s", "last_tick_age_s",
+    "tick_fresh", "provider_staleness", "provider_counts", "metadata_coverage",
+    "counts", "pending_alerts", "site_published", "site_publish_age_s",
+    "warnings"})
+STATUS_COUNT_FIELDS = frozenset({
+    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels"})
+STATUS_COVERAGE_FIELDS = frozenset({
+    "endpoints", "context_length_known", "input_modalities_known",
+    "output_modalities_known", "supported_parameters_known",
+    "description_known"})
+# The frozen status warning order: the snapshot THREE codes followed by the two
+# derived status-only codes (five is unreachable in one payload because the
+# derived codes are mutually exclusive).
+STATUS_WARNING_ORDER = (
+    "tick_epoch_unknown", "metadata_missing", "metadata_invalid",
+    "tick_epoch_future", "tick_stale")
+
+
+def test_watchdog_status_success_goldens_match_every_literal_case():
+    """All nine frozen `watchdog_status` goldens reproduce EXACTLY -- deep
+    semantic equality plus the exact top-level/count/coverage field sets -- with
+    strict scalar types, literal provenance, independent counts/coverage
+    recomputation, the inclusive one-cadence freshness boundary, every-provider
+    (zero-ID included) staleness/count maps, strictly-null unobservables, the
+    frozen warning order and untouched inputs, plus four valid in-memory
+    controls."""
+    from watchdog_catalog.query import watchdog_status, strip_free_marker
+
+    doc = _decode_doc(STATUS_CASES_DOC)
+    cases = [case for case in doc["cases"]
+             if case["tool"] == "watchdog_status"]
+    # Count and id uniqueness are asserted so a dropped or duplicated golden
+    # cannot shrink the loop and still pass.
+    assert len(cases) == 9, len(cases)
+    assert len({case["id"] for case in cases}) == 9
+    assert {case["id"] for case in cases} == {
+        "status_capability_unknown_epoch_now_fresh",
+        "status_metadata_age_below_cadence_fresh",
+        "status_metadata_age_at_cadence_fresh",
+        "status_metadata_age_just_over_cadence_stale",
+        "status_lookup_old_tick_stale_healthy_providers",
+        "status_lookup_future_epoch_not_stale",
+        "status_unknown_time_missing_epoch",
+        "status_short_cadence_age_at_cadence_fresh",
+        "status_short_cadence_age_just_over_stale"}
+    for case in cases:
+        cid = case["id"]
+        # Every status case is argument-free with its own literal case-level
+        # clock.
+        assert case["args"] == {}, cid
+        assert type(case["now"]) is int and case["now"] >= 0, cid
+        # Per-case fixture override; NEVER a wrong-fixture fallback.
+        fixture = case.get("fixture", doc["fixture"])
+        snapshot = _validated_snapshot(fixture)
+        before = copy.deepcopy(snapshot)
+        args = copy.deepcopy(case["args"])
+        result = watchdog_status(snapshot, args, now=case["now"])
+        expect = case["expect"]
+        # Deep semantic equality AND the exact frozen field sets.
+        assert result == expect, cid
+        assert set(result) == set(expect), cid
+        assert set(result) == STATUS_FIELDS, cid
+        assert set(result["counts"]) == STATUS_COUNT_FIELDS, cid
+        assert set(result["metadata_coverage"]) == STATUS_COVERAGE_FIELDS, cid
+        # Strict scalar types: ok is exactly True, tick_fresh a strict bool,
+        # the age null or a strict int.
+        assert result["ok"] is True, cid
+        assert type(result["tick_fresh"]) is bool, cid
+        assert result["last_tick_age_s"] is None or \
+            type(result["last_tick_age_s"]) is int, cid
+        # Provenance echoes the consumed snapshot verbatim (a future epoch is
+        # never repaired); cadence is snapshot data, never a hardcoded 3600.
+        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
+        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
+        assert result["cadence_s"] == snapshot["cadence_s"], cid
+        # Inclusive freshness: age 0 and age == cadence are fresh; a null or
+        # future tick is null age and not fresh, never clamped to a healthy 0.
+        tick = snapshot["tick_epoch"]
+        cadence = snapshot["cadence_s"]
+        now = case["now"]
+        if tick is None or tick > now:
+            assert result["last_tick_age_s"] is None, cid
+            assert result["tick_fresh"] is False, cid
+        else:
+            assert result["last_tick_age_s"] == now - tick, cid
+            assert result["tick_fresh"] is (now - tick <= cadence), cid
+        # Provider maps cover EVERY provider_order key, zero-ID providers
+        # included, in display order.
+        assert list(result["provider_staleness"]) == \
+            list(snapshot["provider_order"]), cid
+        assert list(result["provider_counts"]) == \
+            list(snapshot["provider_order"]), cid
+        for provider in snapshot["provider_order"]:
+            entry = snapshot["providers"][provider]
+            assert result["provider_staleness"][provider] == entry["stale"], \
+                (cid, provider)
+            assert type(result["provider_staleness"][provider]) is bool, \
+                (cid, provider)
+            assert result["provider_counts"][provider] == \
+                len(entry["model_ids"]), (cid, provider)
+            assert type(result["provider_counts"][provider]) is int, \
+                (cid, provider)
+            assert result["provider_counts"][provider] >= 0, (cid, provider)
+        # Whole-catalogue counts recomputed independently from the snapshot.
+        pairs = [raw_id for provider in snapshot["provider_order"]
+                 for raw_id in snapshot["providers"][provider]["model_ids"]]
+        assert result["counts"] == {
+            "gateways": len(snapshot["provider_order"]),
+            "endpoints": len(pairs),
+            "distinct_raw_ids": len(set(pairs)),
+            "marker_group_labels": len({strip_free_marker(raw_id)
+                                        for raw_id in pairs})}, cid
+        # Metadata coverage recomputed independently over the global tracked-pair
+        # denominator: a known 0 / [] / "" counts, a null does not.
+        coverage = {"endpoints": len(pairs), "context_length_known": 0,
+                    "input_modalities_known": 0, "output_modalities_known": 0,
+                    "supported_parameters_known": 0, "description_known": 0}
+        for provider in snapshot["provider_order"]:
+            entry = snapshot["providers"][provider]
+            for raw_id in entry["model_ids"]:
+                model = entry["models"][raw_id]
+                architecture = model["architecture"]
+                if model["context_length"] is not None:
+                    coverage["context_length_known"] += 1
+                if architecture["input_modalities"] is not None:
+                    coverage["input_modalities_known"] += 1
+                if architecture["output_modalities"] is not None:
+                    coverage["output_modalities_known"] += 1
+                if model["supported_parameters"] is not None:
+                    coverage["supported_parameters_known"] += 1
+                if model["description"] is not None:
+                    coverage["description_known"] += 1
+        assert result["metadata_coverage"] == coverage, cid
+        for value in result["metadata_coverage"].values():
+            assert type(value) is int and value >= 0, cid
+        assert result["metadata_coverage"]["endpoints"] == \
+            result["counts"]["endpoints"], cid
+        assert result["metadata_coverage"]["endpoints"] >= \
+            max(result["metadata_coverage"].values()), cid
+        # The three unobservables are STRICTLY null -- never 0 or False.
+        assert result["pending_alerts"] is None, cid
+        assert result["site_published"] is None, cid
+        assert result["site_publish_age_s"] is None, cid
+        # Warnings are the deduplicated snapshot-plus-derived union in the frozen
+        # status order, stable strings only.
+        assert result["warnings"] == [code for code in STATUS_WARNING_ORDER
+                                      if code in set(result["warnings"])], cid
+        assert len(result["warnings"]) == len(set(result["warnings"])), cid
+        assert all(isinstance(code, str) for code in result["warnings"]), cid
+        # Inputs are never mutated.
+        assert snapshot == before, cid
+        assert args == case["args"], cid
+
+    # Valid controls, built in-memory from existing valid fixtures and resealed
+    # with the test-local json/hashlib oracle, then re-validated BEFORE the
+    # query. (1) epoch 0 with now 0 is a VALID fresh observation, never
+    # "missing", and adds no warning.
+    zero_epoch = _decode_doc(FIXTURE_DIR / "lookup.json")
+    zero_epoch["tick_epoch"] = 0
+    _reseal(zero_epoch)
+    assert _catalog.validate_snapshot(zero_epoch) is zero_epoch
+    at_zero = watchdog_status(zero_epoch, {}, now=0)
+    assert at_zero["last_tick_age_s"] == 0
+    assert at_zero["tick_fresh"] is True
+    assert at_zero["warnings"] == []
+
+    # (2) A legitimately EMPTY registry is a valid all-provider control with
+    # empty provider maps and a fully zeroed counts/coverage pair.
+    empty = _decode_doc(FIXTURE_DIR / "lookup.json")
+    empty["provider_order"] = []
+    empty["providers"] = {}
+    _reseal(empty)
+    assert _catalog.validate_snapshot(empty) is empty
+    whole = watchdog_status(empty, {}, now=1759200000)
+    assert set(whole) == STATUS_FIELDS
+    assert whole["ok"] is True
+    assert whole["provider_staleness"] == {} and whole["provider_counts"] == {}
+    assert whole["counts"] == {"gateways": 0, "endpoints": 0,
+                               "distinct_raw_ids": 0, "marker_group_labels": 0}
+    assert whole["metadata_coverage"] == {
+        "endpoints": 0, "context_length_known": 0, "input_modalities_known": 0,
+        "output_modalities_known": 0, "supported_parameters_known": 0,
+        "description_known": 0}
+
+    # (3) A known-empty description string ("") counts as known, so all five
+    # tracked pairs are description-known.
+    empty_desc = _decode_doc(FIXTURE_DIR / "lookup.json")
+    empty_desc["providers"]["synthetic-a"]["models"][
+        "vendor/model-renamed"]["description"] = ""
+    _reseal(empty_desc)
+    assert _catalog.validate_snapshot(empty_desc) is empty_desc
+    described = watchdog_status(empty_desc, {}, now=1759200000)
+    assert described["metadata_coverage"]["description_known"] == 5
+
+    # (4) The maximal FOUR-code composition: the snapshot THREE codes plus one
+    # derived status code, in the frozen order (a full five is unreachable
+    # because tick_epoch_future and tick_stale are mutually exclusive).
+    composed = _decode_doc(FIXTURE_DIR / "lookup.json")
+    composed["warnings"] = ["tick_epoch_unknown", "metadata_missing",
+                            "metadata_invalid"]
+    _reseal(composed)
+    assert _catalog.validate_snapshot(composed) is composed
+    stale = watchdog_status(composed, {}, now=1759203601)
+    assert stale["warnings"] == ["tick_epoch_unknown", "metadata_missing",
+                                 "metadata_invalid", "tick_stale"]
+    future = watchdog_status(composed, {}, now=1759199999)
+    assert future["warnings"] == ["tick_epoch_unknown", "metadata_missing",
+                                  "metadata_invalid", "tick_epoch_future"]
+
+
+# ---------- pure watchdog_status: the empty public argument boundary ----------
+#
+# `watchdog_status` has NO public arguments: only `{}` is accepted, and ANY key
+# (including `now`, `provider` and `limit`) is an unknown argument. The one
+# invalid row of `argument-cases.json` carries the COMPLETE literal envelope;
+# the one valid control records acceptance only. The programmatic rows are
+# compact literal restatements of the frozen README rules.
+
+def test_watchdog_status_argument_boundary_matches_literal_rows_and_rules():
+    """The one frozen invalid row and one valid control reproduce their literal
+    classification, and the compact programmatic rows pin the frozen object ->
+    any-unknown-key precedence, the never-reflecting fresh envelope and the fact
+    that the fixed clock is a keyword-only harness input, never an argument."""
+    from watchdog_catalog.query import watchdog_status
+
+    doc = _decode_doc(STATUS_ARG_DOC)
+    invalid = [row for row in doc["invalid_cases"]
+               if row["tool"] == "watchdog_status"]
+    valid = [row for row in doc["valid_controls"]
+             if row["tool"] == "watchdog_status"]
+    assert len(invalid) == 1, [row["id"] for row in invalid]
+    assert invalid[0]["id"] == "unknown_arg_watchdog_status"
+    assert invalid[0]["args"] == {"now": 1759200000}
+    assert len(valid) == 1, [row["id"] for row in valid]
+    assert valid[0]["id"] == "valid_omitted_watchdog_status"
+    assert valid[0]["args"] == {}
+
+    for row in invalid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        args = copy.deepcopy(row["args"])
+        before = copy.deepcopy(args)
+        result = watchdog_status(snapshot, args, now=1759200000)
+        # The literal, independently-authored envelope is reproduced exactly.
+        assert result == row["expect"], cid
+        assert args == before, cid  # the argument object is never mutated
+        error = result["error"]
+        assert result["ok"] is False, cid
+        assert set(result) == {"ok", "error"}, cid
+        assert set(error) == {"code", "message", "parameter"}, cid
+        # No hostile key/value reflection and no provenance/count field.
+        for hostile in ("tool", "state_root", "source", "path", "cache",
+                        "snapshot_id", "count", "counts", "partial",
+                        "staleness", "provider_staleness", "warnings"):
+            assert hostile not in result and hostile not in error, (cid, hostile)
+        assert error["code"] == INVALID_ARGUMENTS, cid
+        assert error["parameter"] is None, cid
+
+    for row in valid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        result = watchdog_status(snapshot, copy.deepcopy(row["args"]),
+                                 now=1759200000)
+        assert result["ok"] is True, cid
+
+    lookup = _validated_snapshot("lookup.json")
+
+    # A whole argument object that is not a JSON object is invalid_arguments/
+    # null -- None, a list, a number, a string, a bool, a tuple and bytes.
+    for args in (None, [], 5, "x", False, 1.0, (), b"{}"):
+        _assert_argument_envelope(watchdog_status(lookup, args, now=0),
+                                  INVALID_ARGUMENTS, None, repr(args))
+
+    # ANY key is unknown, so every key -- including `now`, `provider` and
+    # `limit` -- rejects with parameter null; the fixed clock never enters the
+    # argument object.
+    for key in ("now", "provider", "limit", "hostile", "snapshot_id"):
+        _assert_argument_envelope(
+            watchdog_status(lookup, {key: 1759200000}, now=0),
+            INVALID_ARGUMENTS, None, key)
+    _assert_argument_envelope(
+        watchdog_status(lookup, {"now": 1759200000, "provider": "synthetic-a"},
+                        now=0),
+        INVALID_ARGUMENTS, None, "two unknown keys")
+    assert watchdog_status(lookup, {}, now=0)["ok"] is True
+
+    # The error envelope is a FRESH object on every call, never reflects a
+    # hostile value, and is independent of the clock (validation runs before any
+    # clock use).
+    first = watchdog_status(lookup, {"now": 1759200000}, now=0)
+    first["error"]["code"] = "mutated"
+    first["ok"] = True
+    second = watchdog_status(lookup, {"now": 1759200000}, now=0)
+    assert second == _argument_envelope(INVALID_ARGUMENTS, None)
+    assert second is not first
+    assert watchdog_status(lookup, {"now": "hostile"}, now=0) == \
+        _argument_envelope(INVALID_ARGUMENTS, None)
+    assert watchdog_status(lookup, {"now": 1759200000}, now=999999999) == \
+        _argument_envelope(INVALID_ARGUMENTS, None)
+
+
+# ---------- pure watchdog_status: freshness + isolation + clock invariance ----
+
+def test_watchdog_status_outputs_are_fresh_and_isolated_and_clock_invariant():
+    """A status payload is never a window onto the cached snapshot: every
+    mutable outer map/list is freshly allocated, so a caller mutating a result
+    can never corrupt the snapshot or another call. On ONE snapshot the
+    clock-independent provider/counts/coverage/provenance fields are IDENTICAL
+    across four clocks while only last_tick_age_s/tick_fresh/warnings move."""
+    from watchdog_catalog.query import watchdog_status
+
+    lookup = _validated_snapshot("lookup.json")
+    before = copy.deepcopy(lookup)
+
+    # (a) Two calls are equal but every mutable outer container is distinct.
+    first = watchdog_status(lookup, {}, now=1759203601)
+    second = watchdog_status(lookup, {}, now=1759203601)
+    assert lookup == before
+    assert first == second
+    for field in ("provider_staleness", "provider_counts", "metadata_coverage",
+                  "counts", "warnings"):
+        assert first[field] is not second[field], field
+
+    # (b) Mutating a returned payload deeply leaves the snapshot, an earlier
+    #     independent result and a brand-new call all unchanged.
+    first["provider_staleness"]["synthetic-a"] = True
+    first["provider_counts"]["synthetic-a"] = 99
+    first["metadata_coverage"]["endpoints"] = 99
+    first["counts"]["gateways"] = 99
+    first["warnings"].append("injected")
+    assert lookup == before
+    assert second["provider_staleness"]["synthetic-a"] is False
+    assert second["provider_counts"]["synthetic-a"] == 3
+    assert second["counts"]["gateways"] == 3
+    assert second["warnings"] == ["tick_stale"]
+    third = watchdog_status(lookup, {}, now=1759203601)
+    assert third == second
+
+    # (c) Clock invariance: future, exactly-tick, at-cadence and just-over.
+    clocks = (1759199999, 1759200000, 1759203600, 1759203601)
+    results = [watchdog_status(lookup, {}, now=clock) for clock in clocks]
+    for field in ("provider_staleness", "provider_counts", "metadata_coverage",
+                  "counts", "snapshot_id", "tick_epoch", "cadence_s"):
+        baseline = results[0][field]
+        for result in results[1:]:
+            assert result[field] == baseline, field
+    # Only the clock-derived fields move, exactly as the inclusive boundary and
+    # the status/snapshot warning split dictate.
+    assert [result["last_tick_age_s"] for result in results] == \
+        [None, 0, 3600, 3601]
+    assert [result["tick_fresh"] for result in results] == \
+        [False, True, True, False]
+    assert [result["warnings"] for result in results] == \
+        [["tick_epoch_future"], [], [], ["tick_stale"]]
+
+    # (d) A fresh error envelope is returned on every call (mutate then recall).
+    first_error = watchdog_status(lookup, {"now": 0}, now=0)
+    first_error["error"]["code"] = "mutated"
+    first_error["ok"] = True
+    second_error = watchdog_status(lookup, {"now": 0}, now=0)
+    assert second_error == _argument_envelope(INVALID_ARGUMENTS, None)
+    assert second_error is not first_error

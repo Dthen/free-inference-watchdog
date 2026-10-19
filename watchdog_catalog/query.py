@@ -396,3 +396,174 @@ def list_endpoints(snapshot, arguments):
         "provider_staleness": {key: providers[key]["stale"]
                                for key in selected},
     }
+
+
+# -- pure whole-catalogue status query: fixed-clock freshness + coverage --
+
+#: The explicit status-only warning order: the frozen snapshot THREE codes
+#: (``tick_epoch_unknown``, ``metadata_missing``, ``metadata_invalid``) followed
+#: by the two derived status codes (``tick_epoch_future``, ``tick_stale``). A
+#: status payload unions the snapshot warnings with its derived codes and emits
+#: this order; the two derived codes are mutually exclusive, so at most four
+#: codes appear in one payload. Snapshot documents never carry the status-only
+#: codes.
+_STATUS_WARNING_ORDER = (
+    "tick_epoch_unknown", "metadata_missing", "metadata_invalid",
+    "tick_epoch_future", "tick_stale",
+)
+
+
+def watchdog_status(snapshot, arguments, *, now):
+    """The pure core of the frozen ``watchdog_status`` tool.
+
+    ``snapshot`` is an already-VALIDATED public snapshot object -- the
+    ``load_snapshot`` / source / adapter boundary owns raw, structural and hash
+    validation, so this function performs NO validation, NO hash recompute, NO
+    I/O and NO clock read. ``arguments`` is the whole DECODED argument object (a
+    JSON object), passed explicitly rather than splatted as keyword arguments.
+
+    ``now`` is the REQUIRED keyword-only fixed test clock: a strict non-negative
+    safe-integer epoch in seconds. It is a programming PRECONDITION (mirroring
+    the snapshot precondition), never a public argument -- a wrapper later owns
+    capturing and normalizing ``time.time()`` into this int, and this core never
+    reads a clock itself. Keyword-only and defaultless keep it structurally
+    impossible to pass as a tool argument.
+
+    Returns the frozen success payload directly -- never raising into the
+    semantic caller for a malformed argument. The payload carries exactly
+    ``ok``, ``snapshot_id``, ``tick_epoch``, ``cadence_s``, ``last_tick_age_s``,
+    ``tick_fresh``, ``provider_staleness``, ``provider_counts``,
+    ``metadata_coverage``, ``counts``, ``pending_alerts``, ``site_published``,
+    ``site_publish_age_s`` and ``warnings``. ``ok`` is exactly ``True``: the
+    valid snapshot was queried successfully, NOT that its observations are fresh
+    or that every provider is healthy.
+
+    ``last_tick_age_s`` is ``now - tick_epoch`` (a strict int) for a known
+    non-future tick, else ``None`` for a null or future tick -- never clamped to
+    a healthy zero. ``tick_fresh`` is the inclusive one-cadence boundary:
+    ``True`` exactly when the age is known and ``<= cadence_s`` (age ``0`` and
+    age ``== cadence_s`` are both fresh), else ``False``; it is always a strict
+    bool. ``cadence_s`` is snapshot data, never a hardcoded ``3600``, and a
+    recent fetch never replaces ``tick_epoch`` or resets the age.
+
+    ``provider_staleness`` is a ``bool`` map for EVERY ``provider_order`` key
+    (zero-ID providers included) equal to each gateway's carried-forward stale
+    flag, unchanged by the clock; ``provider_counts`` is the matching strict
+    non-negative int map of each gateway's ``len(model_ids)``. The two are
+    INDEPENDENT health signals: staleness may be ``True`` during a fresh tick
+    and all providers may be ``False`` during an old tick.
+
+    ``counts`` is the WHOLE-CATALOGUE cardinality object (exactly ``gateways``,
+    ``endpoints``, ``distinct_raw_ids`` and ``marker_group_labels``): every
+    configured provider including zero-ID ones, every tracked ``(provider, raw
+    ID)`` pair, the literal union of raw IDs and the distinct
+    :func:`strip_free_marker` labels -- labels, never verified underlying model
+    identities. This scope deliberately differs from search's page-scoped
+    counts. ``metadata_coverage`` reports coverage of the stated metadata fields
+    over the global tracked-pair denominator (exactly ``endpoints``,
+    ``context_length_known``, ``input_modalities_known``,
+    ``output_modalities_known``, ``supported_parameters_known`` and
+    ``description_known``): a tracked pair counts when its projected field is
+    non-``None`` -- a known ``0``, a known empty ``[]`` and a known ``""``
+    description count, a ``null`` does not.
+
+    ``pending_alerts``, ``site_published`` and ``site_publish_age_s`` are each
+    STRICTLY ``None`` in this pure published-catalogue payload; ``False`` or
+    ``0`` would falsely claim observed operator state. ``warnings`` unions the
+    snapshot warnings (never removed) with the derived ``tick_epoch_unknown``
+    (null epoch), ``tick_epoch_future`` (future epoch) and ``tick_stale`` (known
+    age strictly greater than ``cadence_s``), deduplicated in the frozen
+    ``_STATUS_WARNING_ORDER``; a fresh known epoch adds no status warning, and a
+    null or future epoch is never ``tick_stale``.
+
+    Argument validation is deterministic and in the frozen order: the argument
+    must be a JSON object; then ANY unknown key is rejected (``parameter``
+    ``None``) -- ``watchdog_status`` has NO public arguments, so only ``{}`` is
+    accepted. Validation runs before any clock use.
+
+    Every returned map and the warnings list is freshly allocated and the
+    snapshot is never mutated (the warnings are copied through a ``set``); the
+    metadata itself is never returned, so no registry deep-copy is needed and a
+    caller mutating a result can never corrupt the snapshot or another call.
+    """
+    if not isinstance(arguments, dict):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+    # No public arguments: only the empty object is accepted.
+    if any(key not in () for key in arguments):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+
+    order = snapshot["provider_order"]
+    providers = snapshot["providers"]
+    cadence = snapshot["cadence_s"]
+    tick = snapshot["tick_epoch"]
+
+    if tick is None or tick > now:
+        last_tick_age_s = None
+        tick_fresh = False
+    else:
+        last_tick_age_s = now - tick
+        tick_fresh = last_tick_age_s <= cadence
+
+    endpoints = 0
+    distinct_raw_ids = set()
+    marker_group_labels = set()
+    coverage = {
+        "endpoints": 0,
+        "context_length_known": 0,
+        "input_modalities_known": 0,
+        "output_modalities_known": 0,
+        "supported_parameters_known": 0,
+        "description_known": 0,
+    }
+    for provider in order:
+        entry = providers[provider]
+        for raw_id in entry["model_ids"]:
+            endpoints += 1
+            distinct_raw_ids.add(raw_id)
+            marker_group_labels.add(strip_free_marker(raw_id))
+            model = entry["models"][raw_id]
+            if model["context_length"] is not None:
+                coverage["context_length_known"] += 1
+            architecture = model["architecture"]
+            if architecture["input_modalities"] is not None:
+                coverage["input_modalities_known"] += 1
+            if architecture["output_modalities"] is not None:
+                coverage["output_modalities_known"] += 1
+            if model["supported_parameters"] is not None:
+                coverage["supported_parameters_known"] += 1
+            if model["description"] is not None:
+                coverage["description_known"] += 1
+    coverage["endpoints"] = endpoints
+
+    present = set(snapshot["warnings"])  # never mutate the snapshot warnings
+    if tick is None:
+        present.add("tick_epoch_unknown")
+    elif tick > now:
+        present.add("tick_epoch_future")
+    elif now - tick > cadence:
+        present.add("tick_stale")
+    warnings = [code for code in _STATUS_WARNING_ORDER if code in present]
+
+    return {
+        "ok": True,
+        "snapshot_id": snapshot["snapshot_id"],
+        "tick_epoch": tick,
+        "cadence_s": cadence,
+        "last_tick_age_s": last_tick_age_s,
+        "tick_fresh": tick_fresh,
+        "provider_staleness": {provider: providers[provider]["stale"]
+                               for provider in order},
+        "provider_counts": {provider: len(providers[provider]["model_ids"])
+                            for provider in order},
+        "metadata_coverage": coverage,
+        "counts": {
+            "gateways": len(order),
+            "endpoints": endpoints,
+            "distinct_raw_ids": len(distinct_raw_ids),
+            "marker_group_labels": len(marker_group_labels),
+        },
+        "pending_alerts": None,
+        "site_published": None,
+        "site_publish_age_s": None,
+        "warnings": warnings,
+    }
