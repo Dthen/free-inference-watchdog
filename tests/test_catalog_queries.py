@@ -2514,3 +2514,397 @@ def test_get_model_outputs_are_fresh_and_deeply_isolated():
     second_error = get_model(lookup, {"model_id": ""})
     assert second_error == _argument_envelope(INVALID_ARGUMENTS, "model_id")
     assert second_error is not first_error
+
+
+# ---------- pure list_endpoints: selected-scope endpoints + counts alias ----------
+#
+# `watchdog_catalog.query.list_endpoints(snapshot, arguments)` is the pure core
+# of the frozen `list_endpoints` tool. It takes an already-VALIDATED public
+# snapshot (the load_snapshot / source boundary owns validation -- this core
+# performs no re-hash, no I/O and no clock) plus the whole DECODED argument
+# object, and returns either the frozen success payload or the shared
+# argument-error envelope. It never raises into the semantic caller for a
+# malformed argument and never mutates its inputs.
+#
+# Every expected payload below is the INDEPENDENTLY authored `cases.json` golden
+# for the `list_endpoints` tool (hand-written from the contract, never from an
+# implementation), and the three exact field sets are the frozen README tables
+# (README.md, "Success envelope -- list_endpoints").
+
+LIST_ENDPOINTS_CASES_DOC = FIXTURE_DIR / "cases.json"
+LIST_ENDPOINTS_ARG_DOC = FIXTURE_DIR / "argument-cases.json"
+
+# The ONE exact top-level field set for BOTH the all-provider and the
+# provider-filtered variant, the exact gateway-entry field set and the exact
+# count field set.
+ENDPOINT_FIELDS = frozenset({
+    "ok", "gateways", "counts", "provider", "snapshot_id", "tick_epoch",
+    "provider_staleness"})
+ENDPOINT_GATEWAY_FIELDS = frozenset({
+    "chat_completions_url", "api_type", "model_ids", "models"})
+ENDPOINT_COUNT_FIELDS = frozenset({
+    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
+    "models"})
+
+
+def _endpoint_cases(doc):
+    return [case for case in doc["cases"] if case["tool"] == "list_endpoints"]
+
+
+def test_list_endpoints_success_goldens_match_every_literal_case():
+    """All five frozen `list_endpoints` goldens reproduce EXACTLY -- deep
+    semantic equality plus the exact top-level/gateway/count field sets -- with
+    strict scalar types, literal provenance, untouched inputs, omission/null
+    equivalence on one shared fixture, a programmatic arbitrary-data-key
+    selection and a compact empty-registry control."""
+    from watchdog_catalog.query import list_endpoints
+
+    doc = _decode_doc(LIST_ENDPOINTS_CASES_DOC)
+    cases = _endpoint_cases(doc)
+    # Count and id uniqueness are asserted so a dropped or duplicated golden
+    # cannot shrink the loop and still pass.
+    assert len(cases) == 5, len(cases)
+    assert len({case["id"] for case in cases}) == 5
+    assert {case["id"] for case in cases} == {
+        "endpoints_lookup_all", "endpoints_lookup_provider_a",
+        "endpoints_lookup_zero_provider_c", "endpoints_ordering_all",
+        "endpoints_extension_all"}
+    for case in cases:
+        cid = case["id"]
+        # Per-case fixture override; NEVER a wrong-fixture fallback.
+        fixture = case.get("fixture", doc["fixture"])
+        snapshot = _validated_snapshot(fixture)
+        before = copy.deepcopy(snapshot)
+        result = list_endpoints(snapshot, case["args"])
+        expect = case["expect"]
+        # Deep semantic equality AND the exact field sets.
+        assert result == expect, cid
+        assert set(result) == set(expect), cid
+        assert set(result) == ENDPOINT_FIELDS, cid
+        # Strict scalar types and literal provenance: ok is exactly True and the
+        # provenance slots echo the consumed snapshot verbatim.
+        assert result["ok"] is True, cid
+        assert type(result["snapshot_id"]) is str, cid
+        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
+        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
+        # `provider` echoes the exact selected key, else strictly null.
+        args_provider = case["args"].get("provider")
+        assert result["provider"] == args_provider, cid
+        assert result["provider"] is None or type(result["provider"]) is str
+        # Selected scope: gateways and provider_staleness carry exactly the
+        # selected provider keys, zero-ID providers INCLUDED.
+        selected = [args_provider] if args_provider is not None \
+            else list(snapshot["provider_order"])
+        assert set(result["gateways"]) == set(selected), cid
+        assert set(result["provider_staleness"]) == set(selected), cid
+        for flag in result["provider_staleness"].values():
+            assert type(flag) is bool, cid
+        # Each gateway entry has the exact field set, the same raw-ID
+        # membership as its source (order pinned by the golden above), its own
+        # projected metadata map and never a cross-provider merge.
+        for p in selected:
+            entry = result["gateways"][p]
+            assert set(entry) == ENDPOINT_GATEWAY_FIELDS, (cid, p)
+            source = snapshot["providers"][p]
+            assert entry["chat_completions_url"] == \
+                source["chat_completions_url"], (cid, p)
+            assert entry["api_type"] == source["api_type"], (cid, p)
+            assert sorted(entry["model_ids"]) == sorted(source["model_ids"]), \
+                (cid, p)
+            assert set(entry["models"]) == set(source["model_ids"]), (cid, p)
+            for raw_id in source["model_ids"]:
+                assert entry["models"][raw_id] == source["models"][raw_id], \
+                    (cid, p, raw_id)
+        # The counts object has the exact field set; every value is a strict
+        # non-negative int (a bool is never a count). Counts describe the
+        # SELECTED scope only, and `models` is the documented legacy alias
+        # equal to `marker_group_labels`.
+        assert set(result["counts"]) == ENDPOINT_COUNT_FIELDS, cid
+        pairs = [raw_id for p in selected
+                 for raw_id in snapshot["providers"][p]["model_ids"]]
+        for value in result["counts"].values():
+            assert type(value) is int, cid
+            assert value >= 0, cid
+        assert result["counts"]["gateways"] == len(selected), cid
+        assert result["counts"]["endpoints"] == len(pairs), cid
+        assert result["counts"]["distinct_raw_ids"] == len(set(pairs)), cid
+        assert result["counts"]["models"] == \
+            result["counts"]["marker_group_labels"], cid
+        assert snapshot == before, cid  # inputs never mutated
+
+    # Omission (`{}`) and explicit `{"provider": None}` are the SAME
+    # all-provider export, asserted on ONE shared fixture (the goldens above use
+    # different fixtures, so this equivalence needs its own control).
+    lookup = _validated_snapshot("lookup.json")
+    omitted = list_endpoints(lookup, {})
+    null = list_endpoints(lookup, {"provider": None})
+    assert omitted == null
+    assert set(omitted) == ENDPOINT_FIELDS
+    assert omitted["provider"] is None
+
+    # A programmatic selection by an ARBITRARY data key proves membership is
+    # driven by `snapshot.provider_order` alone -- no provider enum or package
+    # code knows "synthetic-d". Selecting it yields ONLY synthetic-d, its own
+    # metadata and 1/1/1/1/1 counts.
+    ext = _validated_snapshot("provider-extension.json")
+    assert "synthetic-d" in ext["provider_order"]
+    only_d = list_endpoints(ext, {"provider": "synthetic-d"})
+    assert set(only_d["gateways"]) == {"synthetic-d"}
+    assert set(only_d["provider_staleness"]) == {"synthetic-d"}
+    assert only_d["provider"] == "synthetic-d"
+    assert only_d["counts"] == {"gateways": 1, "endpoints": 1,
+                                "distinct_raw_ids": 1,
+                                "marker_group_labels": 1, "models": 1}
+    assert only_d["gateways"]["synthetic-d"]["model_ids"] == ["vendor/shared"]
+    assert only_d["gateways"]["synthetic-d"]["models"]["vendor/shared"] == \
+        ext["providers"]["synthetic-d"]["models"]["vendor/shared"]
+
+    # A registered zero-ID provider is a success with empty containers and a
+    # zeroed counts object (the gateway entry still exists).
+    zero = list_endpoints(lookup, {"provider": "synthetic-c"})
+    assert set(zero["gateways"]) == {"synthetic-c"}
+    assert zero["gateways"]["synthetic-c"]["model_ids"] == []
+    assert zero["gateways"]["synthetic-c"]["models"] == {}
+    assert zero["counts"] == {"gateways": 1, "endpoints": 0,
+                              "distinct_raw_ids": 0, "marker_group_labels": 0,
+                              "models": 0}
+    assert zero["provider_staleness"] == {"synthetic-c": False}
+
+    # A legitimately EMPTY registry is a valid all-provider control, built from
+    # an existing valid fixture and resealed with the test-local json/hashlib
+    # oracle, then re-validated before the query.
+    empty = _decode_doc(FIXTURE_DIR / "lookup.json")
+    empty["provider_order"] = []
+    empty["providers"] = {}
+    _reseal(empty)
+    assert _catalog.validate_snapshot(empty) is empty
+    whole = list_endpoints(empty, {})
+    assert set(whole) == ENDPOINT_FIELDS
+    assert whole["ok"] is True
+    assert whole["gateways"] == {} and whole["provider_staleness"] == {}
+    assert whole["provider"] is None
+    assert whole["counts"] == {"gateways": 0, "endpoints": 0,
+                               "distinct_raw_ids": 0, "marker_group_labels": 0,
+                               "models": 0}
+
+
+# ---------- pure list_endpoints: the provider argument boundary ----------
+#
+# The three `list_endpoints` invalid rows of `argument-cases.json` carry the
+# COMPLETE literal semantic envelope; the two valid controls record acceptance
+# only. The programmatic rows below are compact literal restatements of the
+# frozen README rules (object -> unknown-key -> provider type -> provider
+# membership), including the unknown-key precedence that makes `parameter` null
+# even when the provider itself would also be wrong.
+
+def test_list_endpoints_argument_boundary_matches_literal_rows_and_rules():
+    """The three frozen invalid rows and two valid controls reproduce their
+    literal classification, and the compact programmatic rows pin the frozen
+    object -> unknown-key -> provider type -> membership precedence, the
+    no-coercion provider rules and the fresh non-reflecting envelope."""
+    from watchdog_catalog.query import list_endpoints
+
+    doc = _decode_doc(LIST_ENDPOINTS_ARG_DOC)
+    invalid = [row for row in doc["invalid_cases"]
+               if row["tool"] == "list_endpoints"]
+    valid = [row for row in doc["valid_controls"]
+             if row["tool"] == "list_endpoints"]
+    assert len(invalid) == 3, [row["id"] for row in invalid]
+    assert {row["id"] for row in invalid} == {
+        "unknown_arg_list_endpoints", "unknown_provider_list_endpoints",
+        "provider_empty"}
+    assert len(valid) == 2, [row["id"] for row in valid]
+
+    for row in invalid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        args = copy.deepcopy(row["args"])
+        before = copy.deepcopy(args)
+        result = list_endpoints(snapshot, args)
+        # The literal, independently-authored envelope is reproduced exactly.
+        assert result == row["expect"], cid
+        assert args == before, cid  # the argument object is never mutated
+        error = result["error"]
+        assert result["ok"] is False, cid
+        assert set(result) == {"ok", "error"}, cid
+        assert set(error) == {"code", "message", "parameter"}, cid
+        # No hostile key/value reflection and no extra provenance/count field.
+        for hostile in ("tool", "state_root", "source", "path", "cache",
+                        "snapshot_id", "count", "gateways", "partial",
+                        "staleness", "provider_staleness"):
+            assert hostile not in result and hostile not in error, (cid, hostile)
+        assert error["code"] in ARGUMENT_MESSAGES, cid
+
+    # The two valid controls are ACCEPTED (ok True); the complete success
+    # oracles are the five independent goldens above, so this pins acceptance.
+    for row in valid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        result = list_endpoints(snapshot, copy.deepcopy(row["args"]))
+        assert result["ok"] is True, cid
+
+    lookup = _validated_snapshot("lookup.json")
+
+    # A whole argument object that is not a JSON object is invalid_arguments/
+    # null -- None, a list, a number, a string, a bool, a tuple and bytes.
+    for args in (None, [], 5, "x", False, 1.0, (), b"{}"):
+        _assert_argument_envelope(list_endpoints(lookup, args),
+                                  INVALID_ARGUMENTS, None, repr(args))
+
+    # A non-null provider of the wrong type (bool/int/float/list/dict) is
+    # invalid_arguments(provider) -- never coerced.
+    for bad in (True, False, 5, 1.5, [], ["synthetic-a"], {}, {"a": 1}):
+        _assert_argument_envelope(list_endpoints(lookup, {"provider": bad}),
+                                  INVALID_ARGUMENTS, "provider", repr(bad))
+
+    # Empty/padded/wrong-case/absent strings are unknown_provider(provider) --
+    # never trimmed, padded-repaired or case-folded.
+    for bad in ("", " synthetic-a ", "synthetic-a ", " synthetic-a",
+                "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"):
+        _assert_argument_envelope(list_endpoints(lookup, {"provider": bad}),
+                                  UNKNOWN_PROVIDER, "provider", bad)
+
+    # Unknown-key precedence: ANY unknown key rejects with parameter null BEFORE
+    # the provider type or membership check, so an unknown key combined with a
+    # wrong-typed provider AND with an unknown provider both yield null.
+    _assert_argument_envelope(
+        list_endpoints(lookup, {"provider": 5, "limit": 5}),
+        INVALID_ARGUMENTS, None, "unknown-key before provider type")
+    _assert_argument_envelope(
+        list_endpoints(lookup, {"provider": "synthetic-z", "bogus": 1}),
+        INVALID_ARGUMENTS, None, "unknown-key before provider membership")
+    _assert_argument_envelope(
+        list_endpoints(lookup, {"provider": None, "limit": 5}),
+        INVALID_ARGUMENTS, None, "unknown-key with a null provider")
+    _assert_argument_envelope(
+        list_endpoints(lookup, {"provider": "synthetic-a", "limit": 5}),
+        INVALID_ARGUMENTS, None, "unknown-key with a valid provider")
+
+    # `{}` and `{"provider": None}` are accepted, and the error envelope is a
+    # FRESH object on every call (never a shared module-level constant).
+    assert list_endpoints(lookup, {})["ok"] is True
+    assert list_endpoints(lookup, {"provider": None})["ok"] is True
+    first = list_endpoints(lookup, {"provider": "synthetic-z"})
+    first["error"]["code"] = "mutated"
+    first["ok"] = True
+    second = list_endpoints(lookup, {"provider": "synthetic-z"})
+    assert second == _argument_envelope(UNKNOWN_PROVIDER, "provider")
+    assert second is not first
+
+
+# ---------- pure list_endpoints: freshness + deep output isolation ----------
+#
+# A public output is never a window onto the cached snapshot: every container,
+# gateway entry, raw-ID array and projected model object (with its nested
+# architecture / parameter / pricing containers) is freshly allocated, so a
+# caller mutating a returned payload can never corrupt the snapshot or another
+# call.
+
+def test_list_endpoints_outputs_are_fresh_and_deeply_isolated():
+    from watchdog_catalog.query import list_endpoints
+
+    lookup = _validated_snapshot("lookup.json")
+    before = copy.deepcopy(lookup)
+
+    # (a) All-provider form: fresh containers, and each gateway's model_ids /
+    #     models (and nested model containers) unaliased to the snapshot and to
+    #     a second call.
+    whole = list_endpoints(lookup, {})
+    again = list_endpoints(lookup, {})
+    assert lookup == before
+    assert whole == again
+    assert whole["gateways"] is not again["gateways"]
+    assert whole["counts"] is not again["counts"]
+    assert whole["provider_staleness"] is not again["provider_staleness"]
+    for provider in lookup["provider_order"]:
+        source = lookup["providers"][provider]
+        entry = whole["gateways"][provider]
+        assert entry is not source, provider
+        assert entry["model_ids"] is not source["model_ids"], provider
+        assert entry["models"] is not source["models"], provider
+        assert again["gateways"][provider] is not entry, provider
+        for raw_id in source["model_ids"]:
+            got = entry["models"][raw_id]
+            src = source["models"][raw_id]
+            assert got is not src, (provider, raw_id)
+            assert got["architecture"] is not src["architecture"], raw_id
+            assert got["supported_parameters"] is not src["supported_parameters"]
+            assert got["pricing"] is not src["pricing"]
+            assert again["gateways"][provider]["models"][raw_id] is not got
+
+    # Mutating the returned payload deeply leaves the snapshot, the earlier
+    # independent result and a brand-new call all unchanged.
+    shared = whole["gateways"]["synthetic-a"]["models"]["vendor/shared"]
+    shared["architecture"]["input_modalities"].append("vision")
+    shared["supported_parameters"].append("seed")
+    shared["pricing"]["prompt"] = "999"
+    whole["gateways"]["synthetic-a"]["model_ids"].append("injected")
+    whole["counts"]["endpoints"] = 99
+    whole["provider_staleness"]["synthetic-a"] = True
+    assert lookup == before
+    again_shared = again["gateways"]["synthetic-a"]["models"]["vendor/shared"]
+    assert again_shared["architecture"]["input_modalities"] == ["text"]
+    assert again_shared["supported_parameters"] == ["temperature", "max_tokens"]
+    assert again_shared["pricing"] == {"prompt": "0", "completion": "0"}
+    assert again["gateways"]["synthetic-a"]["model_ids"] == [
+        "vendor/model-renamed", "vendor/model:free", "vendor/shared"]
+    third = list_endpoints(lookup, {})
+    assert third == again
+
+    # (b) Single-provider and registered zero-ID containers are fresh too, and
+    #     the known metadata casing/order/type is preserved verbatim (no
+    #     reprojection).
+    single = list_endpoints(lookup, {"provider": "synthetic-a"})
+    source_a = lookup["providers"]["synthetic-a"]
+    single_a = single["gateways"]["synthetic-a"]
+    assert single_a["model_ids"] is not source_a["model_ids"]
+    assert single_a["models"] is not source_a["models"]
+    assert single["provider_staleness"] is not lookup["providers"]
+    assert single_a["models"]["vendor/model:free"]["architecture"][
+        "input_modalities"] == ["text", "image"]
+    assert type(single_a["models"]["vendor/model:free"]["context_length"]) is int
+    single_a["model_ids"].append("injected")
+    single_a["models"]["vendor/model:free"]["architecture"][
+        "input_modalities"].append("audio")
+    single["provider_staleness"]["synthetic-a"] = True
+    assert lookup == before
+    assert single_a["model_ids"] is not list_endpoints(
+        lookup, {"provider": "synthetic-a"})["gateways"]["synthetic-a"][
+            "model_ids"]
+
+    zero = list_endpoints(lookup, {"provider": "synthetic-c"})
+    source_c = lookup["providers"]["synthetic-c"]
+    zero_c = zero["gateways"]["synthetic-c"]
+    assert zero_c["model_ids"] is not source_c["model_ids"]
+    assert zero_c["models"] is not source_c["models"]
+    assert zero["provider_staleness"] is not lookup["providers"]
+    zero_c["model_ids"].append("injected")
+    zero["provider_staleness"]["synthetic-c"] = True
+    assert lookup == before
+    assert zero_c["model_ids"] is not list_endpoints(
+        lookup, {"provider": "synthetic-c"})["gateways"]["synthetic-c"][
+            "model_ids"]
+
+    # (c) A provider added by DATA alone (synthetic-d) isolates its own metadata
+    #     exactly like the registry providers.
+    ext = _validated_snapshot("provider-extension.json")
+    ext_before = copy.deepcopy(ext)
+    only_d = list_endpoints(ext, {"provider": "synthetic-d"})
+    d_source = ext["providers"]["synthetic-d"]
+    d_entry = only_d["gateways"]["synthetic-d"]
+    assert d_entry["models"] is not d_source["models"]
+    assert d_entry["models"]["vendor/shared"] is not \
+        d_source["models"]["vendor/shared"]
+    assert d_entry["models"]["vendor/shared"]["architecture"] is not \
+        d_source["models"]["vendor/shared"]["architecture"]
+    d_entry["models"]["vendor/shared"]["architecture"][
+        "input_modalities"].append("audio")
+    assert ext == ext_before
+
+    # (d) A fresh error envelope is returned on every call (mutate then recall).
+    first_error = list_endpoints(lookup, {"provider": ""})
+    first_error["error"]["code"] = "mutated"
+    first_error["ok"] = True
+    second_error = list_endpoints(lookup, {"provider": ""})
+    assert second_error == _argument_envelope(UNKNOWN_PROVIDER, "provider")
+    assert second_error is not first_error

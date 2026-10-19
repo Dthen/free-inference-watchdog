@@ -297,3 +297,102 @@ def get_model(snapshot, arguments):
                                         for e in endpoints}),
         },
     }
+
+
+# -- pure endpoint-list query: selected-scope endpoints + provider-filtered counts --
+
+
+def list_endpoints(snapshot, arguments):
+    """The pure core of the frozen ``list_endpoints`` tool.
+
+    ``snapshot`` is an already-VALIDATED public snapshot object -- the
+    ``load_snapshot`` / source / adapter boundary owns raw, structural and hash
+    validation, so this function performs NO validation, NO hash recompute, NO
+    I/O and NO clock read. ``arguments`` is the whole DECODED argument object (a
+    JSON object), passed explicitly rather than splatted as keyword arguments.
+
+    Returns the frozen success payload directly -- never raising into the
+    semantic caller for a malformed argument. The payload carries exactly
+    ``ok``, ``gateways``, ``counts``, ``provider``, ``snapshot_id``,
+    ``tick_epoch`` and ``provider_staleness`` for BOTH the all-provider and the
+    provider-filtered variant.
+
+    ``gateways`` maps each SELECTED provider key -- all ``provider_order`` keys
+    when ``provider`` is omitted or ``null``, else exactly the one known
+    selected provider, a registered zero-ID provider included -- to the exact
+    gateway entry ``chat_completions_url``, ``api_type``, ``model_ids`` and
+    ``models``. ``model_ids`` is that provider's complete raw ID array in the
+    accepted :func:`natural_key` order (unchanged strings, never marker labels),
+    and ``models`` maps every tracked raw ID to its complete projected public
+    model object -- never the legacy raw metadata and never a merged
+    cross-provider object.
+
+    ``counts`` carries exactly ``gateways`` (the number of selected providers,
+    zero-ID providers included), ``endpoints`` (selected ``(provider, raw ID)``
+    pairs), ``distinct_raw_ids`` (selected literal raw strings),
+    ``marker_group_labels`` (selected delimiter-stripped labels using the frozen
+    :func:`strip_free_marker` guard) and ``models`` -- the documented legacy
+    alias equal to ``marker_group_labels``, never a verified underlying model
+    identity. No registry-wide total leaks into a filtered response, and a
+    zero-ID single provider yields ``gateways`` 1 with every other count zero.
+
+    Argument validation is deterministic and in the frozen order: the argument
+    must be a JSON object; then ANY unknown key is rejected (``parameter``
+    ``None``); then a non-``null`` provider that is not a string is
+    ``invalid_arguments``; then a string absent from ``provider_order`` is
+    ``unknown_provider`` (empty, padded and wrong-case keys are never repaired).
+
+    Every returned container, gateway entry, raw-ID array and selected model
+    object (with its nested architecture/parameter/pricing containers) is
+    freshly allocated (the model values are deep-copied), so a caller mutating a
+    result can never corrupt the snapshot or another call. The inputs are never
+    mutated.
+    """
+    if not isinstance(arguments, dict):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+    if any(key not in ("provider",) for key in arguments):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+    provider = arguments.get("provider")
+    if provider is not None and not isinstance(provider, str):
+        return _argument_error(_INVALID_ARGUMENTS, "provider")
+    order = snapshot["provider_order"]
+    providers = snapshot["providers"]
+    if provider is not None and provider not in order:
+        return _argument_error(_UNKNOWN_PROVIDER, "provider")
+    selected = [provider] if provider is not None else list(order)
+
+    gateways = {}
+    endpoints = 0
+    distinct_raw_ids = set()
+    marker_group_labels = set()
+    for key in selected:
+        entry = providers[key]
+        model_ids = sorted(entry["model_ids"], key=natural_key)
+        gateways[key] = {
+            "chat_completions_url": entry["chat_completions_url"],
+            "api_type": entry["api_type"],
+            "model_ids": model_ids,
+            "models": copy.deepcopy({raw_id: entry["models"][raw_id]
+                                     for raw_id in entry["model_ids"]}),
+        }
+        for raw_id in entry["model_ids"]:
+            endpoints += 1
+            distinct_raw_ids.add(raw_id)
+            marker_group_labels.add(strip_free_marker(raw_id))
+    labels = len(marker_group_labels)
+    return {
+        "ok": True,
+        "gateways": gateways,
+        "counts": {
+            "gateways": len(selected),
+            "endpoints": endpoints,
+            "distinct_raw_ids": len(distinct_raw_ids),
+            "marker_group_labels": labels,
+            "models": labels,
+        },
+        "provider": provider,
+        "snapshot_id": snapshot["snapshot_id"],
+        "tick_epoch": snapshot["tick_epoch"],
+        "provider_staleness": {key: providers[key]["stale"]
+                               for key in selected},
+    }
