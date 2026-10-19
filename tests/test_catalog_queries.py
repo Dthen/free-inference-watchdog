@@ -663,6 +663,9 @@ def test_structural_native_body_guards_reject_without_incidental_errors():
     )
     for path, value in cases:
         snap = _mutate(base, path, value)
+        # Reseal so the hash is consistent and ONLY the body guard can reject:
+        # a stale snapshot_id would let a dropped numeric bound hide behind it.
+        _reseal(snap)
         _assert_rejected(snap, INVALID_SNAPSHOT, f"{path} = {value!r}")
 
     # A non-JSON native in an otherwise-shaped slot rejects as invalid_snapshot
