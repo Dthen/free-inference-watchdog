@@ -1186,3 +1186,329 @@ def test_package_import_audit_is_import_order_independent(tmp_path):
         assert report["leaked_modules"] == [], (order, report)
         assert report["application_opens"] == [], (order, report)
         assert report["network_events"] == [], (order, report)
+
+
+# ---------- full public model projection ----------
+#
+# `project_model` composes the accepted capability projection with the three
+# identity/display/pricing members into ONE complete public model object. Every
+# expected value below is an INDEPENDENT literal restatement of the frozen
+# contract (the README projected-model field table), never derived from a
+# runtime helper.
+
+PUBLIC_MODEL_FIELDS = frozenset(
+    {"id", "name", "description", "context_length", "architecture",
+     "supported_parameters", "pricing"})
+PUBLIC_ARCHITECTURE_FIELDS = frozenset(
+    {"input_modalities", "output_modalities"})
+PUBLIC_PRICING_FIELDS = frozenset({"prompt", "completion"})
+
+# A complete, all-known upstream fragment used as the positive control.
+_KNOWN_FRAGMENT = {
+    "name": "Vendor Known",
+    "description": "A known model.",
+    "context_length": 4096,
+    "architecture": {"input_modalities": ["text"],
+                     "output_modalities": ["text"]},
+    "supported_parameters": ["temperature"],
+    "pricing": {"prompt": "0", "completion": 0},
+}
+
+
+def _known_fragment():
+    return json.loads(json.dumps(_KNOWN_FRAGMENT))
+
+
+def _fragment(**overrides):
+    raw = _known_fragment()
+    raw.update(overrides)
+    return raw
+
+
+def _fragment_without(*keys):
+    raw = _known_fragment()
+    for key in keys:
+        raw.pop(key, None)
+    return raw
+
+
+def test_project_model_identity_name_description_and_raw_degradation():
+    catalog = _catalog
+    project = catalog.project_model
+
+    # (a) Tracked-key authority: a mismatched, non-string or absent upstream
+    #     `id` is ignored and contributes NO warning.
+    for upstream_id in ("upstream/other", 5, None, ["x"]):
+        model, warnings = project("vendor/key", _fragment(id=upstream_id))
+        assert model["id"] == "vendor/key", upstream_id
+        assert warnings == [], upstream_id
+    model, warnings = project("vendor/key", _fragment_without("id"))
+    assert model["id"] == "vendor/key"
+    assert warnings == []
+
+    # (b) Always exactly the seven public fields.
+    model, _ = project("vendor/key", _known_fragment())
+    assert set(model) == PUBLIC_MODEL_FIELDS
+    assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
+    assert set(model["pricing"]) == PUBLIC_PRICING_FIELDS
+
+    # (c) `name`: the upstream value iff a NONEMPTY string (verbatim, including
+    #     whitespace and non-ASCII); otherwise the tracked key.
+    assert project("k", _fragment(name="  spaced  "))[0]["name"] == "  spaced  "
+    assert project("k", _fragment(name="\u03a9"))[0]["name"] == "\u03a9"
+    for bad in (None, "", True, False, 0, 5, 1.5, [], {}, ["x"]):
+        model, warnings = project("tracked/fallback", _fragment(name=bad))
+        assert model["name"] == "tracked/fallback", bad
+        assert warnings == [], bad
+    assert project("tracked/missing", _fragment_without("name"))[0]["name"] == \
+        "tracked/missing"
+
+    # (d) `description`: any string (including "") is retained verbatim; every
+    #     non-string (or an absent member) degrades to null -- never `""`, and
+    #     never a warning.
+    assert project("k", _fragment(description=""))[0]["description"] == ""
+    assert project("k", _fragment(description="text"))[0]["description"] == "text"
+    for bad in (None, True, False, 0, 5, 1.5, [], {}, ["x"]):
+        model, warnings = project("k", _fragment(description=bad))
+        assert model["description"] is None, bad
+        assert warnings == [], bad
+    assert project("k", _fragment_without("description"))[0]["description"] \
+        is None
+
+    # (e) An invalid tracked id is a PROGRAMMING error (TypeError), never a
+    #     public envelope and never a partially-projected model.
+    for bad_id in ("", None, 5, 1.5, True, ["x"], ("x",), b"x", {}):
+        with pytest.raises(TypeError):
+            project(bad_id, _known_fragment())
+
+    # (f) An absent argument, an explicit null and an ACTUAL empty dict are the
+    #     same all-unknown model, and the container is metadata_missing.
+    all_unknown = {
+        "id": "vendor/absent",
+        "name": "vendor/absent",
+        "description": None,
+        "context_length": None,
+        "architecture": {"input_modalities": None, "output_modalities": None},
+        "supported_parameters": None,
+        "pricing": None,
+    }
+    for raw in (None, {}):
+        model, warnings = project("vendor/absent", raw)
+        assert model == all_unknown, raw
+        assert warnings == ["metadata_missing"], raw
+    assert project("vendor/absent") == project("vendor/absent", None)
+
+    # (g) A non-null NON-DICT container is MALFORMED, not missing: the same
+    #     all-unknown model, but ONLY metadata_invalid -- never manufactured
+    #     missing-field warnings. Classification is `is not None`, NOT
+    #     truthiness, so false/0/[]/"" are all non-null and therefore invalid.
+    for raw in ([], ["text"], False, 0, 0.0, "", "text", ("x",), b"x"):
+        model, warnings = project("vendor/bad-container", raw)
+        assert model == {
+            "id": "vendor/bad-container",
+            "name": "vendor/bad-container",
+            "description": None,
+            "context_length": None,
+            "architecture": {"input_modalities": None,
+                             "output_modalities": None},
+            "supported_parameters": None,
+            "pricing": None,
+        }, raw
+        assert warnings == ["metadata_invalid"], raw
+
+
+def test_project_model_pricing_projection_and_scalar_type_preservation():
+    catalog = _catalog
+    project = catalog.project_model
+
+    def pricing_of(value):
+        return project("k", _fragment(pricing=value))[0]["pricing"]
+
+    # (a) Whole-object null when pricing is unknown overall: absent, explicit
+    #     null or any non-object value.
+    assert pricing_of(None) is None
+    assert project("k", _fragment_without("pricing"))[0]["pricing"] is None
+    for wrong in ("free", 0, 0.0, True, False, [], ["0"], ("x",)):
+        assert pricing_of(wrong) is None, wrong
+
+    # (b) A present pricing OBJECT always yields EXACTLY prompt+completion, even
+    #     empty or both-null; extra upstream keys are dropped, never leaked.
+    for value, expect in (
+            ({}, {"prompt": None, "completion": None}),
+            ({"prompt": None, "completion": None},
+             {"prompt": None, "completion": None}),
+            ({"prompt": "0", "completion": "0"},
+             {"prompt": "0", "completion": "0"}),
+            ({"prompt": "0", "completion": True},
+             {"prompt": "0", "completion": None}),
+            ({"prompt": "0.5", "completion": "abc"},
+             {"prompt": "0.5", "completion": None}),
+            ({"prompt": "0", "completion": "0", "image": "0", "request": 1},
+             {"prompt": "0", "completion": "0"})):
+        got = pricing_of(value)
+        assert got == expect, value
+        assert set(got) == PUBLIC_PRICING_FIELDS, value
+
+    # (c) An invalid individual scalar degrades to null; a valid SIBLING
+    #     survives unchanged.
+    invalid = (True, False, float("nan"), float("inf"), float("-inf"),
+               9007199254740992, -9007199254740992, 9007199254740992.0,
+               "abc", "nan", "inf", "1e400", [], {}, ["0"])
+    for bad in invalid:
+        got = pricing_of({"prompt": bad, "completion": "0.5"})
+        assert got["prompt"] is None, bad
+        assert got["completion"] == "0.5", bad
+        assert type(got["completion"]) is str, bad
+
+    # (d) Valid scalars keep their ORIGINAL TYPE and spelling: int 1, float 1.0
+    #     and string "1" are three DISTINCT retained values (equality alone
+    #     cannot pin this -- assert type identity). No coercion, no zero default.
+    got = pricing_of({"prompt": 1, "completion": 1.0})
+    assert got["prompt"] == 1 and type(got["prompt"]) is int
+    assert got["completion"] == 1.0 and type(got["completion"]) is float
+    got = pricing_of({"prompt": "1", "completion": "0"})
+    assert got["prompt"] == "1" and type(got["prompt"]) is str
+    assert type(got["completion"]) is str
+    # None vs 0 vs 0.0 vs "0" stay four DISTINCT values.
+    got = pricing_of({"prompt": None, "completion": 0})
+    assert got["prompt"] is None
+    assert got["completion"] == 0 and type(got["completion"]) is int
+    got = pricing_of({"prompt": 0.0, "completion": "0"})
+    assert got["prompt"] == 0.0 and type(got["prompt"]) is float
+    assert got["completion"] == "0" and type(got["completion"]) is str
+    # Finite numeric-string spellings are kept VERBATIM (no trim, no rewrite):
+    # the permissive float-probe edge is preserved, never tightened.
+    for spelling in (" 1.5 ", "1_000", "\u0661\u0662\u0663", "-0", "+1.5",
+                     "1e-5", "0.001"):
+        got = pricing_of({"prompt": spelling, "completion": spelling})
+        assert got["prompt"] == spelling, spelling
+        assert type(got["prompt"]) is str, spelling
+    # Negative finite prices are accepted (the existing predicate, unchanged).
+    got = pricing_of({"prompt": -1.5, "completion": "-0.5"})
+    assert got["prompt"] == -1.5 and type(got["prompt"]) is float
+    assert got["completion"] == "-0.5"
+    # No free-price inference: two unknown scalars stay null, never 0.
+    assert pricing_of({"prompt": "abc", "completion": "abc"}) == {
+        "prompt": None, "completion": None}
+
+
+def test_project_model_composes_capabilities_and_isolates_warnings(
+        normalization_rows):
+    catalog = _catalog
+    project = catalog.project_model
+    assert len(normalization_rows) == 22
+
+    # (a) Every literal capability row, projected through project_model with an
+    #     explicit synthetic tracked id, reproduces its capability fragment, its
+    #     warnings and its normalized fields EXACTLY. Each row's `raw` carries
+    #     only capability members, so its warnings are the model's warnings.
+    for cid, row in normalization_rows.items():
+        model, warnings = project("synthetic/tracked-id", row["raw"])
+        assert model["context_length"] == row["projected"]["context_length"], cid
+        assert model["architecture"] == row["projected"]["architecture"], cid
+        assert model["supported_parameters"] == \
+            row["projected"]["supported_parameters"], cid
+        assert warnings == row["warnings"], cid
+        assert catalog.normalize_capabilities(model) == row["normalized"], cid
+
+    # (b) Warning isolation: with all FOUR capabilities known, a missing,
+    #     malformed or null name/description/pricing NEVER contributes a code.
+    complete = {
+        "context_length": 4096,
+        "architecture": {"input_modalities": ["text"],
+                         "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"],
+    }
+    for extra in ({}, {"name": None}, {"name": 5}, {"description": 5},
+                  {"description": None}, {"pricing": "free"},
+                  {"pricing": None}, {"pricing": {"prompt": True}},
+                  {"name": [], "description": {}, "pricing": []}):
+        model, warnings = project("k", dict(complete, **extra))
+        assert warnings == [], extra
+        assert set(model) == PUBLIC_MODEL_FIELDS, extra
+
+    # (c) Mixed missing/invalid capability data warns in the frozen order, each
+    #     code exactly once.
+    _, warnings = project("k", {
+        "context_length": None,
+        "architecture": {"input_modalities": "text",
+                         "output_modalities": None},
+        "supported_parameters": "temperature",
+    })
+    assert warnings == ["metadata_missing", "metadata_invalid"]
+
+
+def test_project_model_is_pure_unaliased_and_validates_in_a_strict_snapshot():
+    catalog = _catalog
+    project = catalog.project_model
+
+    # (a) No aliasing: every retained container/list is a NEW object, and
+    #     mutating a returned collection never touches the input or a later call.
+    shared = ["temperature"]
+    pricing = {"prompt": "0", "completion": "0"}
+    raw = {
+        "name": "N",
+        "description": "D",
+        "context_length": 4096,
+        "architecture": {"input_modalities": shared,
+                         "output_modalities": shared},
+        "supported_parameters": shared,
+        "pricing": pricing,
+        "api_key": "secret",          # ignored extras must never be serialized
+        "note": "ignored",
+    }
+    before = copy.deepcopy(raw)
+    model, warnings = project("vendor/shared", raw)
+    assert raw == before
+    assert model["architecture"]["input_modalities"] is not shared
+    assert model["supported_parameters"] is not shared
+    assert model["architecture"]["input_modalities"] is not \
+        model["architecture"]["output_modalities"]
+    assert model["pricing"] is not pricing
+    # Ignored extras (including nested extras) never leak into the projection.
+    assert set(model) == PUBLIC_MODEL_FIELDS
+    assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
+    assert set(model["pricing"]) == PUBLIC_PRICING_FIELDS
+    # Mutate the returned collections: input and a fresh call are unaffected.
+    model["architecture"]["input_modalities"].append("vision")
+    model["supported_parameters"].append("seed")
+    model["pricing"]["prompt"] = "999"
+    warnings.append("metadata_invalid")
+    assert raw == before
+    again, again_warnings = project("vendor/shared", raw)
+    assert again["architecture"]["input_modalities"] == ["temperature"]
+    assert again["supported_parameters"] == ["temperature"]
+    assert again["pricing"] == {"prompt": "0", "completion": "0"}
+    assert again_warnings == []
+    # Nested extras on architecture/pricing are dropped, never interpreted.
+    nested = project("k", _fragment(
+        architecture={"input_modalities": ["text"],
+                      "output_modalities": ["text"], "extra": 1},
+        pricing={"prompt": "0", "completion": "0", "image": "0"}))[0]
+    assert set(nested["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
+    assert set(nested["pricing"]) == PUBLIC_PRICING_FIELDS
+
+    # (b) Every projected model independently satisfies the unchanged public
+    #     validator, with the exact literal field set asserted separately.
+    known, known_warnings = project("vendor/shared", _known_fragment())
+    assert set(known) == PUBLIC_MODEL_FIELDS
+    assert known_warnings == []
+    assert catalog._is_model("vendor/shared", known)
+    degraded, degraded_warnings = project("vendor/shared", None)
+    assert set(degraded) == PUBLIC_MODEL_FIELDS
+    assert degraded_warnings == ["metadata_missing"]
+    assert catalog._is_model("vendor/shared", degraded)
+
+    # (c) Strict-snapshot integration: a synthetic COPY of an existing fixture
+    #     with projected models embedded and independently resealed passes the
+    #     unchanged public validator and the load_snapshot roundtrip. The
+    #     json/hashlib reseal helper is the hash oracle, never a production one.
+    snap = _decode_doc(FIXTURE_DIR / "lookup.json")
+    snap["providers"]["synthetic-a"]["models"]["vendor/shared"] = known
+    snap["providers"]["synthetic-b"]["models"]["vendor/shared"] = degraded
+    _reseal(snap)
+    body = {k: v for k, v in snap.items() if k != "snapshot_id"}
+    assert snap["snapshot_id"] == hashlib.sha256(
+        _canonical_text(body)).hexdigest()
+    assert catalog.validate_snapshot(snap) is snap
+    assert catalog.load_snapshot(json.dumps(snap)) == snap

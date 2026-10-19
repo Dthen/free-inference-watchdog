@@ -674,3 +674,115 @@ def normalize_capabilities(projected):
         field for field in _CAPABILITY_FIELD_ORDER
         if normalized[field] is None]
     return normalized
+
+
+# ---------- full public model projection ----------
+#
+# `project_model` composes the accepted capability projection with the identity,
+# display and pricing members into one complete public model object. It is a
+# PURE function: no I/O, clock, environment, network or application import, and
+# it never mutates or aliases its inputs. Unknown/malformed OPTIONAL metadata
+# degrades to ``null`` (unknown) and never drops the endpoint, coerces a value
+# or leaks a private field.
+
+def _project_pricing_scalar(value):
+    """One projected pricing scalar: the value preserved VERBATIM when the
+    frozen :func:`_is_finite_scalar` predicate accepts it, else ``None``.
+
+    `None` (individually unknown) and a finite numeric or numeric-string scalar
+    are retained with their ORIGINAL type and spelling; a `bool`, a non-finite
+    number, a native unsafe integer/integral-unsafe float and any non-scalar are
+    invalid and become ``None``. No coercion, string rewrite, zero default or
+    free-price inference is ever performed.
+    """
+    return value if _is_finite_scalar(value) else None
+
+
+def _project_pricing(value):
+    """Project an upstream ``pricing`` member to the public pricing shape.
+
+    Absent, explicitly-``null`` or non-object pricing is unknown OVERALL and
+    projects to the whole-object ``None``. A mapping -- even an empty one, even
+    with both scalars ``null`` -- projects to a NEW mapping with EXACTLY
+    ``prompt`` and ``completion``: each scalar is projected individually, so a
+    valid sibling survives an invalid one. Extra upstream keys are discarded,
+    never leaked or interpreted.
+    """
+    if not isinstance(value, dict):
+        return None
+    return {
+        "prompt": _project_pricing_scalar(value.get("prompt")),
+        "completion": _project_pricing_scalar(value.get("completion")),
+    }
+
+
+def _project_name(raw_id, fragment):
+    """The public display name: the upstream value iff a NONEMPTY string (kept
+    verbatim -- no trim, HTML sanitizing or Unicode folding), else the tracked
+    key. An empty, non-string or absent name falls back to ``raw_id`` so the
+    endpoint is never lost."""
+    name = fragment.get("name")
+    if isinstance(name, str) and name:
+        return name
+    return raw_id
+
+
+def _project_description(fragment):
+    """The public description: any upstream string (including ``""``) is
+    retained verbatim; every non-string (or an absent member) degrades to
+    ``None``. Name/description degradation never contributes a warning."""
+    description = fragment.get("description")
+    return description if isinstance(description, str) else None
+
+
+def project_model(raw_id, raw=None):
+    """Project one tracked raw id + its upstream fragment to the public model.
+
+    ``raw_id`` is the TRACKED key from the provider's ``models`` map and is
+    authoritative: ``raw['id']`` is ignored regardless of value, type or
+    absence, with no warning. Any nonempty string is accepted literally (no
+    trim, marker parsing, lookup/grouping/alias/allowlist, provider inference or
+    credential check); a non-string or empty ``raw_id`` is a programming-error
+    ``TypeError``.
+
+    ``raw`` is the upstream metadata mapping, or ``None``/absent when the
+    roster carries no object for this tracked id. The result is a NEW
+    ``(model, warnings)`` pair. ``model`` has exactly ``id``, ``name``,
+    ``description``, ``context_length``, ``architecture``,
+    ``supported_parameters`` and ``pricing``; the four capability members come
+    from ONE :func:`project_capabilities` call and every container/list is
+    freshly allocated.
+
+    ``warnings`` carries the capability warning codes ONLY (a fresh,
+    deduplicated list in the frozen vocabulary order). A missing/absent/empty
+    model metadata container is ``metadata_missing``; a non-null NON-DICT
+    container is MALFORMED and is ``metadata_invalid`` ALONE -- never
+    manufactured missing-field warnings. Name, description and pricing
+    degradation never contribute a code.
+    """
+    if not isinstance(raw_id, str) or not raw_id:
+        raise TypeError(
+            "project_model() requires a nonempty tracked model id")
+    if isinstance(raw, dict):
+        fragment = raw
+        override_warnings = None
+    else:
+        # Absent, explicit ``None`` and an ACTUAL empty dict are all "unknown";
+        # a non-null NON-DICT container is malformed. Neither is a throw, and
+        # the model is never dropped or salvaged.
+        fragment = {}
+        override_warnings = (
+            None if raw is None else ["metadata_invalid"])
+    projected, capability_warnings = project_capabilities(fragment)
+    model = {
+        "id": raw_id,
+        "name": _project_name(raw_id, fragment),
+        "description": _project_description(fragment),
+        "context_length": projected["context_length"],
+        "architecture": projected["architecture"],
+        "supported_parameters": projected["supported_parameters"],
+        "pricing": _project_pricing(fragment.get("pricing")),
+    }
+    warnings = (capability_warnings if override_warnings is None
+                else override_warnings)
+    return model, warnings

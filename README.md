@@ -233,6 +233,17 @@ rules (an upstream capability fragment, never a valid snapshot or public
 query response); `tests/fixtures/catalog/capability-unknown.json` is the
 valid synthetic snapshot that distinguishes unknown from known-empty.
 
+Full-model projection takes the tracked map key as the authoritative `id`; a
+missing, empty or non-string display name falls back to that key, while any
+description string (including `""`) is retained. Missing, null or non-object
+pricing is whole-null; a pricing object is projected per scalar, including `{}`
+to `{"prompt":null,"completion":null}`.
+
+For a model metadata object, warning codes describe its four capability fields,
+not name/description/pricing degradation. A missing/null model metadata
+container is `metadata_missing`; a non-null, non-object container is
+`metadata_invalid`, without manufacturing additional missing-field warnings.
+
 ### Warning codes (frozen vocabulary)
 
 | Code | Meaning |
