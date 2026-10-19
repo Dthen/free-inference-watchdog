@@ -603,6 +603,26 @@ def test_local_snapshot_helper_pipeline(monkeypatch):
     assert clean_hostile["providers"] == {"z-last": []}
     assert clean_hostile["provider_models"] is None
 
+    # Legitimate empty roots are a VALID empty registry, not a structural
+    # error: capture yields [] and the local pipeline still produces a
+    # validated empty snapshot. The captured [] is fed straight through.
+    monkeypatch.setattr(mcp_server, "PROVIDERS", {})
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", {})
+    empty_registry = mcp_server._capture_registry(base)
+    assert empty_registry == []
+    empty_snap = mcp_server._local_snapshot(
+        {"tick_epoch": 0, "providers": {}}, empty_registry, base)
+    assert empty_snap["schema_version"] == 1
+    assert empty_snap["cadence_s"] == 3600
+    assert empty_snap["tick_epoch"] == 0
+    assert empty_snap["provider_order"] == []
+    assert empty_snap["providers"] == {}
+    assert empty_snap["warnings"] == []
+    # The accepted boundary accepts that exact object back, unchanged.
+    assert _catalog.validate_snapshot(empty_snap) is empty_snap
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
     # -- Phase C: wrap the REAL accepted builder; forbid other boundaries -----
     real_build = _export_mod.build_snapshot
     calls = []
