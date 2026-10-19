@@ -2,7 +2,7 @@
 2a1) and the strict public snapshot validator / hash provenance (unit 2a2).
 
 These tests exercise ONLY the public runtime API of the side-effect-free
-package root and its pure raw + structural module:
+package root and its pure raw + structural + query modules:
 
     watchdog_catalog.catalog.MAX_SAFE_INT
     watchdog_catalog.catalog.MAX_JSON_DEPTH
@@ -14,6 +14,7 @@ package root and its pure raw + structural module:
     watchdog_catalog.catalog.validate_snapshot
     watchdog_catalog.catalog.load_snapshot
     watchdog_catalog.catalog.snapshot_hash
+    watchdog_catalog.query.strip_free_marker
 
 They read the frozen, independently-authored RULE TABLES by path
 (``tests/fixtures/catalog/raw-json-cases.json``, ``canonical-cases.json`` and
@@ -1062,6 +1063,15 @@ IMPORT_ORDERS = (
     ["watchdog_catalog", "watchdog_catalog.catalog"],
     ["watchdog_catalog.catalog", "watchdog_catalog"],
 )
+# The pure query module is a second, EXPLICIT entry point: importing it directly
+# is allowed, so for its two orders ONLY "watchdog_catalog.query" is dropped from
+# the forbidden set (the requested module itself). Every other prefix, data-file
+# and socket rule stays identical, and the original package/catalog orders above
+# keep the full list — including the query entry.
+QUERY_IMPORT_ORDERS = (
+    ["watchdog_catalog", "watchdog_catalog.query"],
+    ["watchdog_catalog.query", "watchdog_catalog"],
+)
 
 _PROBE = r'''
 import importlib, json, os, sys
@@ -1100,8 +1110,12 @@ sys.addaudithook(_audit)
 for module_name in import_order:
     importlib.import_module(module_name)
 
+# Root plus every explicitly requested entry point is resident; the query-only
+# orders do not require an irrelevant eager catalog import, while the original
+# package/catalog orders still assert catalog presence.
 assert "watchdog_catalog" in sys.modules
-assert "watchdog_catalog.catalog" in sys.modules
+for module_name in import_order:
+    assert module_name in sys.modules, module_name
 
 # Belt-and-suspenders: no forbidden module is resident, whether freshly
 # imported or already pre-loaded before the audit hook was installed.
@@ -1158,9 +1172,10 @@ def test_package_import_is_silent_and_side_effect_free(tmp_path):
 
 
 def test_package_import_audit_is_import_order_independent(tmp_path):
-    """The audit holds for BOTH fresh-process entry points: importing the
-    submodule directly (catalog-first) and importing the package first. A
-    lazy/ordered import must never become the way a forbidden module slips in."""
+    """The audit holds for BOTH fresh-process package/catalog entry points —
+    importing the submodule directly (catalog-first) and importing the package
+    first — and for the separate, EXPLICIT query entry point. A lazy/ordered
+    import must never become the way a forbidden module slips in."""
     home = tmp_path / "home"
     home.mkdir()
     cwd = tmp_path / "neutral-cwd"
@@ -1186,6 +1201,36 @@ def test_package_import_audit_is_import_order_independent(tmp_path):
         assert report["leaked_modules"] == [], (order, report)
         assert report["application_opens"] == [], (order, report)
         assert report["network_events"] == [], (order, report)
+
+    # The query module is the requested module in its own two orders, so ONLY its
+    # own name is dropped from the forbidden set; the original package/catalog
+    # orders above still forbid it, and every other rule stays identical.
+    assert "watchdog_catalog.query" in FORBIDDEN_IMPORTS
+    query_forbidden = [p for p in FORBIDDEN_IMPORTS
+                       if p != "watchdog_catalog.query"]
+    for order in QUERY_IMPORT_ORDERS:
+        env = dict(base_env)
+        env["WC_FORBIDDEN"] = json.dumps(query_forbidden)
+        env["WC_DATA_PATTERNS"] = json.dumps(DATA_PATTERNS)
+        env["WC_IMPORT_ORDER"] = json.dumps(order)
+        probe = subprocess.run(
+            [sys.executable, "-B", "-c", _PROBE],
+            cwd=str(cwd), env=env, capture_output=True, text=True, timeout=120)
+        assert probe.returncode == 0, (order, probe.stderr)
+        assert probe.stderr == "", (order, probe.stderr)
+        report = json.loads(probe.stdout)
+        assert report["forbidden_imports"] == [], (order, report)
+        assert report["leaked_modules"] == [], (order, report)
+        assert report["application_opens"] == [], (order, report)
+        assert report["network_events"] == [], (order, report)
+
+    # A plain explicit query import from a neutral cwd + clean HOME is silent.
+    plain = subprocess.run(
+        [sys.executable, "-B", "-c", "import watchdog_catalog.query"],
+        cwd=str(cwd), env=base_env, capture_output=True, text=True, timeout=120)
+    assert plain.returncode == 0, plain.stderr
+    assert plain.stdout == "", plain.stdout
+    assert plain.stderr == "", plain.stderr
 
 
 # ---------- full public model projection ----------
@@ -1512,3 +1557,66 @@ def test_project_model_is_pure_unaliased_and_validates_in_a_strict_snapshot():
         _canonical_text(body)).hexdigest()
     assert catalog.validate_snapshot(snap) is snap
     assert catalog.load_snapshot(json.dumps(snap)) == snap
+
+
+# ---------- pure free-marker helper: literal corpus + compatibility edges ----------
+#
+# `watchdog_catalog.query.strip_free_marker` is the pure, stdlib-only marker
+# helper extracted from build_site. The 17 expected values below are the
+# INDEPENDENTLY authored rows of cases.json's `marker_strip_rule` table (never a
+# runtime helper or another test module); the fallback controls and compatibility
+# edges are literal characterizations of the frozen README contract.
+
+MARKER_CASES_DOC = FIXTURE_DIR / "cases.json"
+
+# Delimiter-only ids (a "free" segment with its delimiter but nothing else) plus
+# the bare non-marker control. Each expected value is a literal restatement of
+# the empty-result guard: a strip that would empty the id returns it unchanged,
+# and bare "free" carries no delimiter so neither delimiter-bounded regex matches.
+MARKER_FALLBACK_CONTROLS = {
+    ":free": ":free",
+    "-free": "-free",
+    "_free": "_free",
+    "free:": "free:",
+    "free-": "free-",
+    "free_": "free_",
+    "free": "free",
+}
+
+# Controller characterization edges pinning the regex semantics the public
+# algorithm must preserve: '$' matches at end OR before a single final newline
+# (so one trailing '\n' survives stripping, two do not); stripping is ONE suffix
+# pass then ONE prefix pass (never recursive or global); a mid-token 'free', an
+# unmatched leading/trailing space and a 'free' inside the namespace are never
+# markers.
+MARKER_COMPAT_EDGES = {
+    "free-free-X-free-free": "free-X-free",
+    "vendor/x:free\n": "vendor/x\n",
+    "vendor/x:free\n\n": "vendor/x:free\n\n",
+    "free:": "free:",
+    " free-x ": " free-x ",
+    "vendor/freebie": "vendor/freebie",
+    "FREE-X:free": "X",
+}
+
+
+def test_strip_free_marker_matches_literal_corpus_and_compat_edges():
+    """The pure helper reproduces all 17 frozen marker rows unchanged and holds
+    the delimiter-only empty-result guard plus the characterized regex edges."""
+    from watchdog_catalog.query import strip_free_marker
+
+    rows = _load_table(MARKER_CASES_DOC)["marker_strip_rule"]
+    # Count and uniqueness are asserted so a silently dropped or duplicated row
+    # cannot shrink the loop and still pass.
+    assert len(rows) == 17, len(rows)
+    assert len({row["raw_id"] for row in rows}) == 17
+    for row in rows:
+        raw_id, stripped = row["raw_id"], row["stripped"]
+        assert strip_free_marker(raw_id) == stripped, (
+            f"marker rule mismatch for {raw_id!r}: want {stripped!r}")
+    for raw_id, want in MARKER_FALLBACK_CONTROLS.items():
+        assert strip_free_marker(raw_id) == want, (
+            f"fallback control mismatch for {raw_id!r}: want {want!r}")
+    for raw_id, want in MARKER_COMPAT_EDGES.items():
+        assert strip_free_marker(raw_id) == want, (
+            f"compat edge mismatch for {raw_id!r}: want {want!r}")

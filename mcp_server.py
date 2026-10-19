@@ -73,9 +73,10 @@ PROVIDERS = PROVIDER_KEYS
 
 # Gateway wiring (base URL, api_type) and the free-marker stripper
 # — imported from their single sources of truth so MCP tools and the site
-# builder never drift.
+# builder never drift. The stripper lives in the pure, side-effect-free
+# watchdog_catalog.query module; the site builder re-exports the same object.
 from config_loader import GATEWAY_WIRING
-from build_site import strip_free_marker
+from watchdog_catalog.query import strip_free_marker
 
 # Tick cadence, duplicated from inference_watchdog.DEFAULT_CADENCE_S
 # (cross-reference): importing the watchdog module for one integer would

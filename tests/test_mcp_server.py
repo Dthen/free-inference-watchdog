@@ -293,6 +293,10 @@ def test_get_model_returns_endpoints_for_grouped_name(state_dir):
     assert "chat_completions_url" in ep
     assert "auth" not in ep, "Bearer auth field dropped from wiring displays"
     assert "api_type" in ep
+    # The MCP server imports the pure query helper directly: it must be the SAME
+    # function object as the query module, never a copied wrapper.
+    from watchdog_catalog.query import strip_free_marker as core_strip_free_marker
+    assert mcp_server.strip_free_marker is core_strip_free_marker
 
 
 def test_get_model_raw_variant_returns_same_endpoints(state_dir):

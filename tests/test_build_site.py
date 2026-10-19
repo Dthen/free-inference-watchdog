@@ -467,7 +467,11 @@ def test_strip_free_marker_idempotent_on_synthetic_ids():
     boundaries, and the delimiter-only empty-result inputs. This is a
     portable invariant test — it does NOT read the live production roster.
     """
+    from watchdog_catalog.query import strip_free_marker as core_strip_free_marker
     from build_site import strip_free_marker
+    # Compatibility re-export: the site builder exposes the SAME function object
+    # as the pure query module, never a copied wrapper.
+    assert strip_free_marker is core_strip_free_marker
     for mid in SYNTHETIC_IDEMPOTENCE_IDS:
         once = strip_free_marker(mid)
         twice = strip_free_marker(once)
