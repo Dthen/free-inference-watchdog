@@ -811,8 +811,9 @@ def test_list_free_models_delegates_to_pure_query(monkeypatch, tmp_path):
         "tick_epoch": 100,
         "providers": {
             "z-last": ["shared/model", "z-extra", "z-extra", "", "empty-meta"],
-            "a-first": ["shared/model", "z2", "z10", " padded ", "non-free",
-                        long_id, "unicode/😀", 3, None, ""],
+            "a-first": ["shared/model", "z2", "z10", "z02", "z\u0669",
+                        " padded ", "non-free", long_id, "unicode/😀", 3,
+                        None, ""],
             "m-mid": [],
             "unknown-bad": "not-a-list",
         },
@@ -904,10 +905,10 @@ def test_list_free_models_delegates_to_pure_query(monkeypatch, tmp_path):
     assert res["providers"]["z-last"] == ["empty-meta", "shared/model", "z-extra"]
     assert res["providers"]["a-first"] == [
         long_id, " padded ", "non-free", "shared/model", "unicode/😀",
-        "z2", "z10"]
+        "z2", "z02", "z10", "z\u0669"]
     assert res["providers"]["m-mid"] == []
-    assert res["counts"] == {"z-last": 3, "a-first": 7, "m-mid": 0}
-    assert res["total_ids"] == 9
+    assert res["counts"] == {"z-last": 3, "a-first": 9, "m-mid": 0}
+    assert res["total_ids"] == 11
     assert res["n_gateways"] == 3
     assert res["tick_epoch"] == 100
     assert res["snapshot_id"] == snap["snapshot_id"]
@@ -1020,7 +1021,7 @@ def test_list_free_models_delegates_to_pure_query(monkeypatch, tmp_path):
     assert [r["key"] for r in captures[0]] == ["z-last", "a-first", "m-mid"]
     assert set(kept["providers"]) == {"z-last", "a-first", "m-mid"}
     assert list(kept["providers"]) == ["z-last", "a-first", "m-mid"]
-    assert kept["counts"] == {"z-last": 3, "a-first": 7, "m-mid": 0}
+    assert kept["counts"] == {"z-last": 3, "a-first": 9, "m-mid": 0}
     assert "bogus" not in kept["providers"]
     assert mcp_server.PROVIDERS == conflicting      # the swap really happened
     monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
@@ -1107,18 +1108,20 @@ def test_list_free_models_delegates_to_pure_query(monkeypatch, tmp_path):
         assert projected[-1]["ok"] is False
         assert projected[-1]["error"]["code"] == core_code
 
-    # -- bad metadata OUTER container: omission + truthful warning, no fiction -
-    roster_path.write_text(json.dumps({
-        "tick_epoch": 0,
-        "providers": {"z-last": ["shared/model"]},
-        "provider_models": [],
-    }))
-    _reset()
-    bad_meta = mcp_server.list_free_models(root=tmp_path)
-    assert bad_meta["ok"] is True
-    assert bad_meta["providers"]["z-last"] == ["shared/model"]
-    assert bad_meta["models"] == {"z-last": {}, "a-first": {}, "m-mid": {}}
-    assert bad_meta["warnings"] == ["metadata_invalid"]
+    # -- bad metadata container: an OUTER list OR a provider-level list both
+    # degrade to omission + a truthful warning, never fabricated metadata.
+    for bad_provider_models in ([], {"z-last": []}):
+        roster_path.write_text(json.dumps({
+            "tick_epoch": 0,
+            "providers": {"z-last": ["shared/model"]},
+            "provider_models": bad_provider_models,
+        }))
+        _reset()
+        bad_meta = mcp_server.list_free_models(root=tmp_path)
+        assert bad_meta["ok"] is True
+        assert bad_meta["providers"]["z-last"] == ["shared/model"]
+        assert bad_meta["models"] == {"z-last": {}, "a-first": {}, "m-mid": {}}
+        assert bad_meta["warnings"] == ["metadata_invalid"]
     roster_path.write_text(json.dumps(roster_doc))
 
     # -- freshness, unchanged sources, mutation isolation ---------------------
