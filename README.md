@@ -498,6 +498,67 @@ missing or malformed OPTIONAL upstream metadata still degrades to
 compatibility adapter still preserves raw tracked metadata at its own
 boundary. Neither is changed by this argument contract.
 
+### Shared tool definitions (frozen resource)
+
+`watchdog_catalog/tools.json` is the transport-independent, data-only
+shared definition of the five known tools: a bare JSON array of exactly
+five objects, each with exactly `name`, `description` and `inputSchema`.
+It is the reviewed cross-runtime contract and the single source for the
+shared tool descriptions and the browser tool definitions; it is **not**
+an `input_schema` argument to any SDK `add_tool` call, and no wrapper
+metadata, annotations, titles, output schemas, callbacks, sources or
+provider list appears anywhere in the resource. No per-tool private input
+(the clock, source, URL, path, cache or config) is ever exposed as a tool
+argument.
+
+Each `inputSchema` is a plain JSON Schema 2020-12 subset object — an
+object schema with an explicit `type` of `object`, a `properties` map, a
+`required` list and `additionalProperties` **false** — using only the
+portable keywords `type` (including nullable type arrays), `properties`,
+`required`, `additionalProperties`, `items`, `minLength`, `pattern`,
+`minimum`, `maximum`, `default` and `description`. There are no `$ref`
+or `$defs`, no custom executable validators, no provider enums and no
+`oneOf` boilerplate. Unknown schema keywords are never silently ignored
+by the schema checker.
+
+The schemas are **static** while provider membership stays **dynamic**:
+`provider` is a nullable, unconstrained string with `default` `null` and
+**no** `enum`, `minLength` or `pattern`, so empty, padded and unknown
+provider strings pass static typing and are rejected at runtime by the
+existing `unknown_provider` query check against each snapshot's
+`provider_order` — no stale provider enum is embedded in an installed
+package. `limit` defaults to `50` and `offset` to `0`, must be present
+integers (never `null`) and are never repaired. Omitted and `null` stay
+distinct: an omission may apply a default, but the default is never
+injected into, or coerced onto, the retained arguments.
+
+The **JSON Schema integer** input boundary is value based — a finite
+numeric value with zero fractional part, so `1.0` is the integer `1` —
+and is **separate** from the strict snapshot integer lexeme rule, where
+an integral float token such as `1.0` is not a valid strict snapshot
+integer. `true`, `"1"`, `1.5`, unsafe integers and non-finite numbers
+are rejected tool arguments.
+
+The local text budgets — **500** characters per tool description,
+**150** per parameter description and **30** per tool or parameter name
+— are inclusive local quality gates, **not** protocol hard limits: the
+official tool-definition API does not reject larger text, so these are
+revisited if that API later adds normative limits.
+
+The `list_free_models` and `list_endpoints` descriptions state that they
+are **bulk** exports and advise routine use of `search_models` with an
+explicit small `limit` **1-5** followed by `get_model` for details; they
+never imply a hard universal output cap or truncation, so bulk output may
+exceed that guidance. `watchdog_status` describes **published catalogue
+health** only — never live or private operator or cron health, and never a
+provider probe.
+
+This subsection scopes to the shared **data** resource alone: packaging
+the file as package data, embedding it in HTML, comparing it against MCP
+SDK schema generation, and the native browser registration annotations
+remain their own later units. No runtime, package, SDK or browser
+integration is claimed here.
+
 ### Identity, lookup, and ordering (frozen rules)
 
 - `get_model.exact_matches` is **literal raw-ID membership** — case-sensitive,

@@ -8800,5 +8800,770 @@ def test_readme_freezes_canonical_encoding_and_strict_token_rules():
             "No runtime encoder, package implementation or JavaScript parity "
             "is claimed here",
     ):
-        assert phrase in text, (
-            f"typed-canonical subsection missing rule: {phrase}")
+        assert phrase in text, \
+            f"typed-canonical subsection missing rule: {phrase}"
+
+
+# ---------- unit 1d-d: shared tool definitions, static schema subset and text budgets ----------
+#
+# Contract-only stage. `watchdog_catalog/tools.json` is the DATA-ONLY shared
+# definition of the five known tools: a bare JSON array of exactly five objects
+# with exact keys `name`, `description`, `inputSchema`. The checker below is a
+# TEST-LOCAL evaluator for the DECLARED JSON Schema subset only — a subset
+# restatement, never a general JSON Schema engine and never production
+# validation (stdlib + pytest only; no `jsonschema` dependency). The file is
+# read BY PATH as JSON and no package implementation module is imported. The
+# static schema is compared against the frozen c1 ARGUMENT_SIGNATURES /
+# _validate_tool_arguments runtime reference; provider MEMBERSHIP is the one
+# frozen rule that cannot live in a static schema (no stale provider enum), so
+# a row may be statically accepted and still rejected at runtime.
+
+TOOLS_DOC = REPO / "watchdog_catalog" / "tools.json"
+
+TOOL_DEF_NAMES = (
+    "list_free_models", "get_model", "list_endpoints", "watchdog_status",
+    "search_models",
+)
+TOOL_NAME_MAX = 30
+TOOL_DESCRIPTION_MAX = 500
+PARAMETER_DESCRIPTION_MAX = 150
+
+# Frozen per-tool property ORDER and REQUIRED set (static signature), matching
+# the c1 ARGUMENT_SIGNATURES: the two bulk tools take a single optional
+# `provider`, `get_model` requires `model_id`, `watchdog_status` takes nothing
+# and `search_models` takes the seven optional filters in frozen order.
+TOOL_SCHEMA_SIGNATURES = {
+    "list_free_models": (("provider",), ()),
+    "get_model": (("model_id",), ("model_id",)),
+    "list_endpoints": (("provider",), ()),
+    "watchdog_status": ((), ()),
+    "search_models": (
+        ("query", "provider", "min_context_length", "input_modalities",
+         "supported_parameters", "limit", "offset"),
+        ()),
+}
+
+# The DECLARED JSON Schema subset. Any keyword outside this set — `enum`,
+# `oneOf`, `$ref`, `minItems`, ... — is reported, never silently ignored.
+DECLARED_SCHEMA_KEYWORDS = frozenset({
+    "type", "properties", "required", "additionalProperties", "items",
+    "minLength", "pattern", "minimum", "maximum", "default", "description",
+})
+DECLARED_TYPES = frozenset({"object", "string", "integer", "array", "null"})
+
+# The frozen portable, UNANCHORED pattern for `model_id`: at least one
+# character OUTSIDE the ASCII blank set U+0009..U+000D / U+0020. Non-ASCII
+# code points stay literal (not Unicode-wide `\s`, not `strip`/`trim`).
+MODEL_ID_PATTERN = "[^\\u0009-\\u000D\\u0020]"
+
+
+@pytest.fixture(scope="module")
+def tools_document():
+    assert TOOLS_DOC.is_file(), (
+        "shared tool-definition resource is missing: "
+        "watchdog_catalog/tools.json")
+    return _load_strict(TOOLS_DOC)
+
+
+def _tools_by_name(tools):
+    return {tool["name"]: tool for tool in tools}
+
+
+def _within_budget(text, limit):
+    """Inclusive text budget: a nonempty string of at most `limit` characters
+    (characters, not UTF-8 bytes). Used by the checker AND the boundary
+    controls, so a name-length failure is provably budget-related."""
+    return isinstance(text, str) and 0 < len(text) <= limit
+
+
+def _instance_is_type(value, type_name):
+    """Value-based JSON Schema type test. `bool` is never an integer; a finite
+    float with zero fractional part IS the same JSON integer value as its
+    `int` twin (so `1.0` passes `integer`, and an out-of-range `1.0` still
+    fails a numeric bound)."""
+    if type_name == "null":
+        return value is None
+    if type_name == "string":
+        return isinstance(value, str)
+    if type_name == "array":
+        return isinstance(value, list)
+    if type_name == "object":
+        return isinstance(value, dict)
+    if type_name == "integer":
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return True
+        if isinstance(value, float):
+            return math.isfinite(value) and value == math.trunc(value)
+        return False
+    raise AssertionError(f"undeclared type name {type_name!r}")
+
+
+def _declared_type_list(schema, context):
+    types = schema.get("type")
+    if isinstance(types, str):
+        types = [types]
+    assert isinstance(types, list) and types and \
+        all(t in DECLARED_TYPES for t in types), (
+        f"{context}: `type` must be a declared type name or list of them")
+    assert len(set(types)) == len(types), f"{context}: duplicate type names"
+    return types
+
+
+def _assert_schema_node(schema, context):
+    """Structural validation of ONE DECLARED schema node (keyword whitelist,
+    declared type names, keyword value shapes), recursing into `properties` and
+    `items`. An undeclared keyword anywhere is an assertion failure, never
+    silently ignored."""
+    assert isinstance(schema, dict), f"{context}: schema node must be an object"
+    unknown = set(schema) - DECLARED_SCHEMA_KEYWORDS
+    assert not unknown, (
+        f"{context}: undeclared schema keyword(s) {sorted(unknown)}")
+    types = _declared_type_list(schema, context)
+    for bound in ("minimum", "maximum"):
+        if bound in schema:
+            assert isinstance(schema[bound], (int, float)) and \
+                not isinstance(schema[bound], bool), (
+                f"{context}: {bound} must be a number")
+    if "minLength" in schema:
+        assert isinstance(schema["minLength"], int) and \
+            not isinstance(schema["minLength"], bool) and \
+            schema["minLength"] >= 0, (
+            f"{context}: minLength must be a non-negative integer")
+    if "pattern" in schema:
+        assert isinstance(schema["pattern"], str) and schema["pattern"], (
+            f"{context}: pattern must be a nonempty string")
+    if "items" in schema:
+        assert "array" in types, f"{context}: items requires the array type"
+        _assert_schema_node(schema["items"], f"{context}.items")
+    if "properties" in schema:
+        assert isinstance(schema["properties"], dict), (
+            f"{context}: properties must be an object")
+        for key, sub in schema["properties"].items():
+            assert isinstance(key, str) and key, (
+                f"{context}: property names must be nonempty strings")
+            _assert_schema_node(sub, f"{context}.{key}")
+    if "required" in schema:
+        assert isinstance(schema["required"], list) and \
+            all(isinstance(r, str) for r in schema["required"]), (
+            f"{context}: required must be a list of parameter names")
+    if "description" in schema:
+        assert isinstance(schema["description"], str) and schema["description"], (
+            f"{context}: description must be a nonempty string")
+
+
+def _schema_declared_fail(schema, instance, path):
+    """TEST-LOCAL read-only evaluation of ONE declared-subset schema node:
+    returns None when `instance` satisfies it, else a short reason naming the
+    violated keyword. Nothing is coerced, trimmed, repaired or default-injected
+    — `default` is metadata that never participates in validation."""
+    types = _declared_type_list(schema, path or "root")
+    if not any(_instance_is_type(instance, t) for t in types):
+        return f"{path or 'root'}:type"
+    if "integer" in types and _instance_is_type(instance, "integer"):
+        if "minimum" in schema and instance < schema["minimum"]:
+            return f"{path or 'root'}:minimum"
+        if "maximum" in schema and instance > schema["maximum"]:
+            return f"{path or 'root'}:maximum"
+    if "string" in types and _instance_is_type(instance, "string"):
+        if "minLength" in schema and len(instance) < schema["minLength"]:
+            return f"{path or 'root'}:minLength"
+        if "pattern" in schema and \
+                re.search(schema["pattern"], instance) is None:
+            return f"{path or 'root'}:pattern"
+    if "array" in types and _instance_is_type(instance, "array"):
+        items = schema.get("items")
+        if items is not None:
+            for index, item in enumerate(instance):
+                reason = _schema_declared_fail(items, item, f"{path}[{index}]")
+                if reason is not None:
+                    return reason
+    if "object" in types and _instance_is_type(instance, "object"):
+        props = schema.get("properties", {})
+        for name in schema.get("required", []):
+            if name not in instance:
+                return f"{path or 'root'}:required.{name}"
+        if schema.get("additionalProperties") is False:
+            for name in instance:
+                if name not in props:
+                    return f"{path or 'root'}:additionalProperties.{name}"
+        for name, value in instance.items():
+            if name in props:
+                reason = _schema_declared_fail(
+                    props[name], value, f"{path}.{name}" if path else name)
+                if reason is not None:
+                    return reason
+    return None
+
+
+def _static_schema_error(tools, tool, args):
+    """TEST-LOCAL read-only evaluator for the tool's DECLARED static schema:
+    None when `args` satisfies it, else a short reason string. Provider
+    MEMBERSHIP is deliberately NOT a static constraint, so an unknown provider
+    string satisfies the schema — the c1 runtime reference rejects it
+    separately, and the evaluator performs no snapshot membership lookup."""
+    schema = _tools_by_name(tools)[tool]["inputSchema"]
+    return _schema_declared_fail(schema, args, "")
+
+
+def _assert_tool_schema_semantics(name, schema):
+    """Pin the frozen static semantics of ONE tool's `inputSchema`: property
+    order, required set, nullability, defaults and numeric/string bounds."""
+    expected_params, expected_required = TOOL_SCHEMA_SIGNATURES[name]
+    props = schema["properties"]
+    assert tuple(props) == expected_params, (
+        f"{name}: properties must be exactly {list(expected_params)} in order")
+    assert schema["required"] == list(expected_required), (
+        f"{name}: required must be exactly {list(expected_required)}")
+    for param, sub in props.items():
+        types = _declared_type_list(sub, f"{name}.{param}")
+        if param == "model_id":
+            assert types == ["string"], f"{name}.model_id: type must be string"
+            assert "default" not in sub, (
+                f"{name}.model_id: a required string must not carry a default")
+            assert sub.get("pattern") == MODEL_ID_PATTERN, (
+                f"{name}.model_id: pattern must be the frozen nonblank pattern")
+            assert set(sub) == {"type", "pattern", "description"}, (
+                f"{name}.model_id: only type/pattern/description are declared")
+        elif param in ("provider", "query"):
+            assert types == ["string", "null"], (
+                f"{name}.{param}: type must be [string, null]")
+            assert "default" in sub and sub["default"] is None, (
+                f"{name}.{param}: default must be explicit null")
+            for banned in ("minLength", "pattern", "enum"):
+                assert banned not in sub, (
+                    f"{name}.{param}: {banned} must not constrain it")
+        elif param == "min_context_length":
+            assert types == ["integer", "null"], (
+                f"{name}.min_context_length: type must be [integer, null]")
+            assert sub.get("minimum") == 0, (
+                f"{name}.min_context_length: minimum must be 0")
+            assert sub.get("maximum") == MAX_SAFE_INT, (
+                f"{name}.min_context_length: maximum must be the safe bound")
+            assert "default" in sub and sub["default"] is None, (
+                f"{name}.min_context_length: default must be explicit null")
+        elif param in ("input_modalities", "supported_parameters"):
+            assert types == ["array", "null"], (
+                f"{name}.{param}: type must be [array, null]")
+            assert sub.get("items") == {"type": "string", "minLength": 1}, (
+                f"{name}.{param}: items must be nonempty strings")
+            assert "default" in sub and sub["default"] is None, (
+                f"{name}.{param}: default must be explicit null")
+        elif param == "limit":
+            assert types == ["integer"], (
+                f"{name}.limit: type must be the non-null integer")
+            assert sub.get("minimum") == 1, f"{name}.limit: minimum must be 1"
+            assert sub.get("maximum") == 200, (
+                f"{name}.limit: maximum must be 200")
+            assert sub.get("default") == 50, f"{name}.limit: default must be 50"
+        elif param == "offset":
+            assert types == ["integer"], (
+                f"{name}.offset: type must be the non-null integer")
+            assert sub.get("minimum") == 0, f"{name}.offset: minimum must be 0"
+            assert sub.get("maximum") == MAX_SAFE_INT, (
+                f"{name}.offset: maximum must be the safe bound")
+            assert sub.get("default") == 0, f"{name}.offset: default must be 0"
+        else:
+            raise AssertionError(f"{name}: unexpected parameter {param!r}")
+
+
+def _assert_tool_definitions(tools):
+    """Complete integrity of the shared tool-definition resource: a bare array
+    of exactly five objects with exact keys in frozen name order, per-tool text
+    budgets, DECLARED-subset schema shape and frozen static semantics. Message
+    text is specific so a mutation is discriminated by its intended failure."""
+    assert isinstance(tools, list), "tools.json must be a bare JSON array"
+    assert len(tools) == len(TOOL_DEF_NAMES), (
+        "tools.json must carry exactly the five known tools")
+    for tool in tools:
+        assert isinstance(tool, dict), "each tool definition must be an object"
+        assert set(tool) == {"name", "description", "inputSchema"}, (
+            "each tool definition must carry exactly name, description and "
+            "inputSchema")
+    assert tuple(t["name"] for t in tools) == TOOL_DEF_NAMES, (
+        "tool definitions must appear in the frozen name order")
+    for tool in tools:
+        name = tool["name"]
+        assert name in ARGUMENT_SIGNATURES, f"unknown tool name {name!r}"
+        assert _within_budget(name, TOOL_NAME_MAX), (
+            f"{name}: tool name exceeds the {TOOL_NAME_MAX}-character budget")
+        assert _within_budget(tool["description"], TOOL_DESCRIPTION_MAX), (
+            f"{name}: tool description exceeds the "
+            f"{TOOL_DESCRIPTION_MAX}-character budget")
+        schema = tool["inputSchema"]
+        _assert_schema_node(schema, name)
+        assert schema.get("type") == "object", (
+            f"{name}: inputSchema must declare type 'object'")
+        assert schema.get("additionalProperties") is False, (
+            f"{name}: additionalProperties must be false")
+        for param, sub in schema["properties"].items():
+            assert _within_budget(param, TOOL_NAME_MAX), (
+                f"{name}.{param}: parameter name exceeds the "
+                f"{TOOL_NAME_MAX}-character budget")
+            assert _within_budget(sub.get("description"),
+                                  PARAMETER_DESCRIPTION_MAX), (
+                f"{name}.{param}: parameter description exceeds the "
+                f"{PARAMETER_DESCRIPTION_MAX}-character budget")
+        _assert_tool_schema_semantics(name, schema)
+    return tools
+
+
+# -- resource shape and text budgets --
+
+
+def test_tools_json_is_a_bare_five_tool_array(tools_document):
+    assert isinstance(tools_document, list), \
+        "tools.json must be a bare JSON array, not a wrapped object"
+    assert len(tools_document) == 5
+    _assert_tool_definitions(tools_document)
+
+
+def test_tool_definition_names_and_keys_are_frozen(tools_document):
+    assert [t["name"] for t in tools_document] == list(TOOL_DEF_NAMES)
+    for tool in tools_document:
+        assert set(tool) == {"name", "description", "inputSchema"}
+        assert tool["description"] and \
+            tool["description"].strip() == tool["description"]
+        assert isinstance(tool["inputSchema"], dict)
+
+
+def test_tool_definition_budgets_are_inclusive_quality_gates(tools_document):
+    # The three local budgets, pinned to this project's numbers.
+    assert (TOOL_DESCRIPTION_MAX, PARAMETER_DESCRIPTION_MAX, TOOL_NAME_MAX) \
+        == (500, 150, 30)
+    # Exact-limit values PASS and one-over values FAIL, on the same predicate
+    # the checker uses, so a budget failure is provably budget-related.
+    for limit in (TOOL_DESCRIPTION_MAX, PARAMETER_DESCRIPTION_MAX,
+                  TOOL_NAME_MAX):
+        assert _within_budget("x" * limit, limit)
+        assert not _within_budget("x" * (limit + 1), limit)
+        assert not _within_budget("", limit)
+    # The committed resource respects every budget.
+    for tool in tools_document:
+        assert len(tool["description"]) <= TOOL_DESCRIPTION_MAX
+        for param, sub in tool["inputSchema"]["properties"].items():
+            assert len(param) <= TOOL_NAME_MAX
+            assert len(sub["description"]) <= PARAMETER_DESCRIPTION_MAX
+
+
+# -- frozen static schema shape and semantics --
+
+
+def test_tool_schemas_are_object_schemas_with_declared_keywords_only(
+        tools_document):
+    for tool in tools_document:
+        schema = tool["inputSchema"]
+        _assert_schema_node(schema, tool["name"])
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is False
+        assert isinstance(schema["required"], list)
+
+
+def test_tool_definition_signatures_match_frozen_argument_contract(
+        tools_document):
+    for tool in tools_document:
+        name = tool["name"]
+        schema = tool["inputSchema"]
+        assert set(schema["properties"]) == set(ARGUMENT_SIGNATURES[name]), (
+            f"{name}: schema properties must match the frozen signature")
+        assert set(schema["required"]) <= set(schema["properties"])
+        if name == "get_model":
+            assert schema["required"] == ["model_id"]
+        else:
+            assert schema["required"] == []
+        if name == "watchdog_status":
+            assert schema["properties"] == {}
+
+
+def test_tool_schemas_declare_no_provider_enum_anywhere(tools_document):
+    def walk(node, path):
+        if isinstance(node, dict):
+            assert "enum" not in node, f"provider enum smuggled in at {path}"
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]")
+    walk(tools_document, "tools.json")
+
+
+# -- static-versus-dynamic compatibility with the frozen c1 contract --
+
+
+def test_static_schema_accepts_every_c1_valid_control(tools_document,
+                                                      argument_table):
+    for row in argument_table["valid_controls"]:
+        assert _static_schema_error(
+            tools_document, row["tool"], row["args"]) is None, (
+            f"{row['id']}: a frozen valid control must satisfy the static "
+            "schema")
+
+
+def test_static_schema_accepts_every_existing_query_case(tools_document,
+                                                         cases_document):
+    for case in cases_document["cases"]:
+        assert _static_schema_error(
+            tools_document, case["tool"], case["args"]) is None, (
+            f"{case['id']}: frozen success arguments must satisfy the static "
+            "schema")
+
+
+def _membership_substituted(row, snap):
+    """TEST-ONLY abstraction for membership-independent rules: deep-copy the
+    row's args and replace an unknown string provider with a registered key, so
+    the c1 runtime reference can be re-run without its membership fault. This is
+    NOT argument repair in the product; the original fixture and row are never
+    mutated."""
+    args = copy.deepcopy(row["args"])
+    provider = args.get("provider")
+    if isinstance(provider, str) and provider not in snap["provider_order"]:
+        args["provider"] = snap["provider_order"][0]
+    return args
+
+
+def test_static_schema_validates_every_invalid_argument_row(tools_document,
+                                                            argument_table):
+    static_rejects = 0
+    membership_only = 0
+    for row in argument_table["invalid_cases"]:
+        snap = _load_strict(FIXTURE_DIR / row["fixture"])
+        reason = _static_schema_error(tools_document, row["tool"], row["args"])
+        if reason is None:
+            # Statically accepted: the ONLY admissible fault is provider
+            # membership, which is deliberately not frozen in the schema.
+            assert row["expect"]["error"]["code"] == "unknown_provider", (
+                f"{row['id']}: statically accepted with no membership fault")
+            substituted = _membership_substituted(row, snap)
+            assert _validate_tool_arguments(
+                row["tool"], substituted, snap) is None, (
+                f"{row['id']}: a static accept must isolate a pure membership "
+                "fault")
+            membership_only += 1
+        else:
+            static_rejects += 1
+    # Non-vacuous both ways: genuine static faults are rejected, and the
+    # membership-only rows are a strict, non-empty subset of the invalid rows.
+    assert static_rejects > 0 and membership_only > 0
+    assert static_rejects + membership_only \
+        == len(argument_table["invalid_cases"])
+
+
+def test_unknown_provider_row_with_a_later_static_fault_is_still_rejected(
+        tools_document, argument_table):
+    # Its FIRST frozen error is unknown_provider, but the args ALSO carry a
+    # genuine static fault (min_context_length -1), so the static schema
+    # rejects it and substituting a registered provider does NOT rescue it.
+    row = next(r for r in argument_table["invalid_cases"]
+               if r["id"] == "precedence_provider_before_context")
+    snap = _load_strict(FIXTURE_DIR / row["fixture"])
+    assert _static_schema_error(
+        tools_document, row["tool"], row["args"]) is not None
+    rescued = _validate_tool_arguments(
+        row["tool"], _membership_substituted(row, snap), snap)
+    assert rescued is not None and \
+        rescued["error"]["code"] == "invalid_arguments"
+    # Membership-ONLY rows remain a distinct, statically-accepted set: each is
+    # statically accepted, rejected by the runtime reference as unknown_provider,
+    # and rescued by membership substitution alone.
+    for case_id in ("unknown_provider_search_models", "provider_padded",
+                    "provider_empty", "provider_wrong_case"):
+        only = next(r for r in argument_table["invalid_cases"]
+                    if r["id"] == case_id)
+        only_snap = _load_strict(FIXTURE_DIR / only["fixture"])
+        assert _static_schema_error(
+            tools_document, only["tool"], only["args"]) is None, case_id
+        rejected = _validate_tool_arguments(
+            only["tool"], only["args"], only_snap)
+        assert rejected is not None and \
+            rejected["error"]["code"] == "unknown_provider", case_id
+        assert _validate_tool_arguments(
+            only["tool"], _membership_substituted(only, only_snap),
+            only_snap) is None, case_id
+
+
+# -- data-only provider extension and membership-independent evaluator --
+
+
+def test_data_only_extension_provider_is_statically_accepted(tools_document):
+    snap = _load_strict(EXTENSION_FIXTURE)
+    assert EXTENSION_NEW_PROVIDER in snap["provider_order"]
+    for tool in PROVIDER_TAKING_TOOLS:
+        args = {"provider": EXTENSION_NEW_PROVIDER}
+        # Added by DATA alone: no tools.json edit, no evaluator change.
+        assert _static_schema_error(tools_document, tool, args) is None
+        assert _validate_tool_arguments(tool, args, snap) is None
+
+
+def test_provider_strings_are_statically_accepted_but_dynamically_rejected(
+        tools_document):
+    snap = _load_strict(LOOKUP_FIXTURE)
+    for value in ("", " synthetic-a ", "Synthetic-A", "synthetic-z"):
+        for tool in PROVIDER_TAKING_TOOLS:
+            args = {"provider": value}
+            assert _static_schema_error(tools_document, tool, args) is None, (
+                f"{tool}: {value!r} must pass static typing")
+            result = _validate_tool_arguments(tool, args, snap)
+            assert result is not None and \
+                result["error"]["code"] == "unknown_provider", (
+                f"{tool}: {value!r} must be rejected at runtime")
+    # A non-string provider is a genuine STATIC type fault.
+    for tool in PROVIDER_TAKING_TOOLS:
+        assert _static_schema_error(
+            tools_document, tool, {"provider": 5}) is not None
+
+
+# -- explicit static edges --
+
+
+def test_static_json_integer_value_semantics(tools_document):
+    accepted = {"min_context_length": 1.0, "limit": 1.0, "offset": 1.0}
+    assert _static_schema_error(
+        tools_document, "search_models", accepted) is None
+    for param, value in (
+            ("limit", True), ("limit", "1"), ("limit", 1.5), ("limit", None),
+            ("offset", True), ("offset", "0"), ("offset", 0.5),
+            ("offset", None), ("min_context_length", True),
+            ("min_context_length", "65536"), ("min_context_length", 1.5),
+            ("min_context_length", -1)):
+        assert _static_schema_error(
+            tools_document, "search_models", {param: value}) is not None, (
+            f"{param}={value!r} must be statically rejected")
+
+
+def test_static_safe_integer_bounds_and_pagination_range(tools_document):
+    for param in ("min_context_length", "offset"):
+        assert _static_schema_error(
+            tools_document, "search_models", {param: MAX_SAFE_INT}) is None
+        assert _static_schema_error(
+            tools_document, "search_models", {param: UNSAFE_INT}) is not None
+    assert _static_schema_error(
+        tools_document, "search_models", {"limit": 1}) is None
+    assert _static_schema_error(
+        tools_document, "search_models", {"limit": 200}) is None
+    assert _static_schema_error(
+        tools_document, "search_models", {"limit": 0}) is not None
+    assert _static_schema_error(
+        tools_document, "search_models", {"limit": 201}) is not None
+
+
+def test_static_optional_null_versus_omission(tools_document):
+    for param in ("query", "provider", "min_context_length",
+                  "input_modalities", "supported_parameters"):
+        assert _static_schema_error(
+            tools_document, "search_models", {param: None}) is None
+    assert _static_schema_error(tools_document, "search_models", {}) is None
+    for param in ("limit", "offset"):
+        assert _static_schema_error(
+            tools_document, "search_models", {param: None}) is not None
+
+
+def test_static_capability_array_items(tools_document):
+    assert _static_schema_error(
+        tools_document, "search_models",
+        {"input_modalities": [], "supported_parameters": []}) is None
+    assert _static_schema_error(
+        tools_document, "search_models",
+        {"input_modalities": ["TEXT", "text", " text "]}) is None
+    for bad in ([None], ["text", None], ["text", 5], [""], "text",
+                {"input": "text"}):
+        assert _static_schema_error(
+            tools_document, "search_models",
+            {"input_modalities": bad}) is not None, bad
+
+
+def test_static_model_id_blank_and_nonblank_edges(tools_document):
+    for bad in ("", " \t\n", "\u000b\u000c\r", " "):
+        assert _static_schema_error(
+            tools_document, "get_model", {"model_id": bad}) is not None, bad
+    for good in ("\u00a0", " vendor/shared ", "x", "vendor/model:free",
+                 "\u0661", "\u00b2"):
+        assert _static_schema_error(
+            tools_document, "get_model", {"model_id": good}) is None, good
+    # `model_id` is required: absence is a static failure.
+    assert _static_schema_error(tools_document, "get_model", {}) is not None
+
+
+def test_static_unknown_keys_fail_on_all_five_tools(tools_document):
+    valid = {
+        "list_free_models": {"provider": None},
+        "get_model": {"model_id": "vendor/shared"},
+        "list_endpoints": {"provider": None},
+        "watchdog_status": {},
+        "search_models": {},
+    }
+    for tool, args in valid.items():
+        assert _static_schema_error(tools_document, tool, args) is None
+        polluted = dict(args)
+        polluted["bogus"] = 1
+        assert _static_schema_error(
+            tools_document, tool, polluted) is not None, tool
+
+
+def test_static_evaluator_is_read_only(tools_document):
+    tools_before = copy.deepcopy(tools_document)
+    args = {"min_context_length": None, "input_modalities": [], "query": " x ",
+            "limit": 1.0}
+    args_before = copy.deepcopy(args)
+    assert _static_schema_error(tools_document, "search_models", args) is None
+    # Nothing was materialized, coerced or trimmed: `limit` stays the float
+    # `1.0`, the omitted keys stay omitted, and the schemas are untouched.
+    assert args == args_before, "the evaluator must not mutate the arguments"
+    assert tools_document == tools_before, \
+        "the evaluator must not mutate the schemas"
+    assert isinstance(args["limit"], float)
+
+
+# -- schema mutation sensitivity (positive control + grouped mutants) --
+
+
+def test_tool_definition_schema_mutations_are_discriminated(tools_document):
+    _assert_tool_definitions(copy.deepcopy(tools_document))  # positive control
+
+    def edited(mutate):
+        tools = copy.deepcopy(tools_document)
+        mutate(tools)
+        return tools
+
+    def tool(tools, name):
+        return next(t for t in tools if t["name"] == name)
+
+    def set_default(tools):
+        tool(tools, "search_models")["inputSchema"]["properties"][
+            "limit"]["default"] = 51
+    with pytest.raises(AssertionError, match="limit: default must be 50"):
+        _assert_tool_definitions(edited(set_default))
+
+    def weaken_additional(tools):
+        tool(tools, "list_free_models")["inputSchema"][
+            "additionalProperties"] = True
+    with pytest.raises(AssertionError,
+                       match="additionalProperties must be false"):
+        _assert_tool_definitions(edited(weaken_additional))
+
+    def require_optional(tools):
+        tool(tools, "list_endpoints")["inputSchema"]["required"] = ["provider"]
+    with pytest.raises(AssertionError, match="required must be exactly"):
+        _assert_tool_definitions(edited(require_optional))
+
+    def nullable_limit(tools):
+        tool(tools, "search_models")["inputSchema"]["properties"][
+            "limit"]["type"] = ["integer", "null"]
+    with pytest.raises(AssertionError,
+                       match="limit: type must be the non-null integer"):
+        _assert_tool_definitions(edited(nullable_limit))
+
+    def drop_bound(tools):
+        del tool(tools, "search_models")["inputSchema"]["properties"][
+            "limit"]["maximum"]
+    with pytest.raises(AssertionError, match="limit: maximum must be 200"):
+        _assert_tool_definitions(edited(drop_bound))
+
+    def weaken_items(tools):
+        tool(tools, "search_models")["inputSchema"]["properties"][
+            "input_modalities"]["items"] = {"type": "string"}
+    with pytest.raises(AssertionError,
+                       match="items must be nonempty strings"):
+        _assert_tool_definitions(edited(weaken_items))
+
+    def weaken_pattern(tools):
+        tool(tools, "get_model")["inputSchema"]["properties"][
+            "model_id"]["pattern"] = ".*"
+    with pytest.raises(AssertionError, match="nonblank pattern"):
+        _assert_tool_definitions(edited(weaken_pattern))
+
+    def add_enum(tools):
+        tool(tools, "list_free_models")["inputSchema"]["properties"][
+            "provider"]["enum"] = ["synthetic-a"]
+    with pytest.raises(AssertionError, match="undeclared schema keyword"):
+        _assert_tool_definitions(edited(add_enum))
+
+    def overrun_budget(tools):
+        tool(tools, "watchdog_status")["description"] = \
+            "x" * (TOOL_DESCRIPTION_MAX + 1)
+    with pytest.raises(AssertionError, match="description exceeds the"):
+        _assert_tool_definitions(edited(overrun_budget))
+
+
+def test_tool_definition_text_budget_exact_limit_positive_control(
+        tools_document):
+    tools = copy.deepcopy(tools_document)
+    status = next(t for t in tools if t["name"] == "watchdog_status")
+    status["description"] = "d" * TOOL_DESCRIPTION_MAX
+    for sub in next(t for t in tools if t["name"] == "search_models")[
+            "inputSchema"]["properties"].values():
+        sub["description"] = "p" * PARAMETER_DESCRIPTION_MAX
+    # Exactly at every budget still passes...
+    _assert_tool_definitions(tools)
+    # ...and one character over the tool-description budget fails.
+    status["description"] = "d" * (TOOL_DESCRIPTION_MAX + 1)
+    with pytest.raises(AssertionError, match="description exceeds the"):
+        _assert_tool_definitions(tools)
+
+
+# -- README subsection pins --
+
+TOOL_DEFS_SECTION = "Shared tool definitions (frozen resource)"
+
+
+def _tool_defs_section_text():
+    """The README body of the shared-definitions subsection ONLY (from its
+    `###` heading to the next `###`/`##` heading), so pins here can never be
+    satisfied by tokens from an adjacent section."""
+    text = README.read_text(encoding="utf-8")
+    heading = f"### {TOOL_DEFS_SECTION}"
+    assert heading in text, (
+        "README is missing the shared tool-definitions subsection")
+    body = text[text.index(heading):]
+    ends = [i for i in (body.find("\n### ", len(heading)),
+                        body.find("\n## ", len(heading))) if i != -1]
+    return body[:min(ends)] if ends else body
+
+
+def test_readme_shared_definitions_subsection_is_itself_scoped():
+    text = " ".join(_tool_defs_section_text().split())
+    # Adjacent-section tokens must NOT satisfy these pins.
+    assert "fail export" not in text
+    assert "Success envelope" not in text
+    assert "Total ordering rule (frozen)" not in text
+    assert "Invalid tool arguments." not in text
+
+
+def test_readme_freezes_shared_tool_definition_rules():
+    text = " ".join(_tool_defs_section_text().split())
+    for phrase in (
+            "`watchdog_catalog/tools.json` is the transport-independent, "
+            "data-only shared definition",
+            "bare JSON array of exactly five objects",
+            "each with exactly `name`, `description` and `inputSchema`",
+            "**not** an `input_schema` argument to any SDK `add_tool` call",
+            "No per-tool private input",
+            "`additionalProperties` **false**",
+            "Unknown schema keywords are never silently ignored",
+            "no stale provider enum is embedded in an installed package",
+            "The schemas are **static** while provider membership stays "
+            "**dynamic**",
+            "`limit` defaults to `50` and `offset` to `0`",
+            "never `null`",
+    ):
+        assert phrase in text, \
+            f"shared-definitions subsection missing rule: {phrase}"
+
+
+def test_readme_separates_static_budgets_and_bulk_guidance():
+    text = " ".join(_tool_defs_section_text().split())
+    for phrase in (
+            "zero fractional part",
+            "**separate** from the strict snapshot integer lexeme rule",
+            "inclusive local quality gates, **not** protocol hard limits",
+            "**500** characters per tool description",
+            "**150** per parameter description",
+            "**30** per tool or parameter name",
+            "**bulk** exports",
+            "explicit small `limit` **1-5** followed by `get_model`",
+            "never imply a hard universal output cap or truncation",
+            "**published catalogue health** only",
+            "No runtime, package, SDK or browser integration is claimed here.",
+    ):
+        assert phrase in text, \
+            f"shared-definitions subsection missing rule: {phrase}"
