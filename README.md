@@ -288,9 +288,29 @@ validated local snapshot; the `snapshot_id` hash binds that **local sanitized
 public projection**, not the raw metadata dictionaries or any filesystem
 diagnostic, so it can differ from the strictly published feed for the same tick,
 and a structurally invalid raw source can prevent strict publication while this
-local compatibility view still answers. Only `list_free_models` delegates to
-the pure query here; the other local tools keep their own behaviour until their
-own units.
+local compatibility view still answers. Both `list_free_models` and `get_model`
+delegate to the pure query here; `list_endpoints` and `watchdog_status` keep
+their own behaviour until their own units.
+
+**Local `get_model` compatibility (literal membership, restored raw metadata).**
+The root-script `get_model` delegates exact membership, the separate
+marker-insensitive endpoint lookup, ordering and counts to that same pure query
+module while keeping the local interface. Every result keeps the absence caveat,
+and `exact_matches`/`exact_gateways` stay strictly literal — case-sensitive,
+untrimmed and never grouped. `endpoints` use the legacy `gateway` name and each
+carries the **ORIGINAL raw metadata dictionary** for exactly the selected
+`(gateway, raw id)` pair (unknown upstream fields included; `{}` when the roster
+carries none or the hierarchy is malformed), plus the core `stale` flag. The
+required `model_id` must contain at least one character outside the six ASCII
+blanks (`U+0009`..`U+000D` and `U+0020`): empty and ASCII-blank-only queries fail
+with the flat local `model_id must be a non-empty string` **before** any state
+read, while NBSP, EM SPACE and other non-ASCII whitespace stay literal query
+characters — a successful no-match, or a real match when that exact id is
+tracked. Surrounding padding is never trimmed. Additive core provenance
+(`snapshot_id`, strict `tick_epoch`, `provider_staleness`, `warnings` and all
+four count definitions) is carried through, and `snapshot_id` binds the same
+local sanitized public projection described above — never the restored raw
+metadata dictionaries or a filesystem diagnostic.
 
 ### Structural validation of published snapshots (frozen rules)
 

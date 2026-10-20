@@ -369,62 +369,77 @@ ABSENCE_CAVEAT = (
 def get_model(model_id, root=None) -> dict:
     """Which gateways track this exact id right now — exact only, caveated.
 
-    Additive change: also returns ``endpoints`` — one entry per (gateway,
-    raw id) in the roster whose free-marker-stripped name equals the
-    stripped query. This makes ``get_model("foo")`` and
-    ``get_model("foo:free")`` return the same wiring list (marker-insensitive
-    lookup). ``exact_matches`` stays STRICTLY exact — the honest raw answer,
-    never grouped.
+    Local compatibility wrapper: the captured registry and the roster read ONCE
+    through state.py are adapted to the validated public snapshot, and the
+    exact membership, the separate marker-insensitive endpoint lookup, their
+    order and the counts are delegated to the pure ``watchdog_catalog.query``
+    core. Only the OUTPUT is adapted back -- each selected endpoint carries the
+    legacy ``gateway`` key and its ORIGINAL raw metadata dictionary restored
+    from the same in-memory roster, while the core provenance
+    (``snapshot_id``, ``tick_epoch``, ``provider_staleness``, ``counts``,
+    ``warnings``) passes through.
+
+    ``model_id`` must be a string containing at least one character outside
+    the frozen six ASCII blanks (space, tab, LF, CR, VT, FF); NBSP and other
+    non-ASCII whitespace stay LITERAL query characters. Empty or
+    ASCII-blank-only queries are rejected before any state read, and the
+    identifier is never trimmed.
+
+    ``exact_matches`` stays STRICTLY exact — the honest raw answer, never
+    grouped — while ``endpoints`` is the separate marker-insensitive wiring
+    lookup. Each endpoint keeps the core ``stale`` flag and the gateway's raw
+    metadata object ({} when the roster carries none or the hierarchy is
+    malformed).
     """
     r = Path(root).resolve() if root is not None else REPO
     base: dict = {"tool": "get_model", "state_root": str(r)}
-    if not isinstance(model_id, str) or not model_id.strip():
-        return _error(base, "model_id must be a non-empty string")
+
+    # Capture the resolved registry ONCE. A bad registry root outranks every
+    # argument and state error, so broken local wiring is never masked by a
+    # bad query.
     try:
-        roster = _load_roster_checked(r, base)
+        registry = _capture_registry(base)
     except _StateError as exc:
         return exc.payload
 
-    providers_map = roster["providers"]
-    exact = {gw: model_id in providers_map.get(gw, []) for gw in PROVIDERS}
+    # The frozen six ASCII blanks: never Python's default Unicode-whitespace
+    # strip, which would wrongly reject a literal NBSP (or EM SPACE) query.
+    if not isinstance(model_id, str) or not model_id.strip(" \t\n\r\v\f"):
+        return _error(base, "model_id must be a non-empty string")
 
-    # Marker-insensitive wiring lookup: strip the query, then collect every
-    # (gateway, raw id) in the roster whose stripped name matches. Order:
-    # PROVIDERS display order, then raw id by _natural_key.
-    needle = strip_free_marker(model_id)
+    try:
+        roster = _load_roster_checked(r, base)
+        snapshot = _local_snapshot(roster, registry, base)
+    except _StateError as exc:
+        return exc.payload
+
+    # Delegate membership, the separate marker lookup, order and counts to the
+    # pure core ONCE. The core's argument validation stays a defensive
+    # backstop: the local checks above already rejected every value it can
+    # reject, so this only fires on a wrapper-level inconsistency.
+    result = _query.get_model(snapshot, {"model_id": model_id})
+    if not result.get("ok"):
+        return _error(base, "model_id must be a non-empty string")
+
+    # Fresh outer mapping: neither the validated snapshot nor the returned core
+    # result is mutated by the local adaptation below.
+    out = {**base, **result}
+    out["warnings"] = list(snapshot["warnings"])
+    # Adapt ONLY each endpoint the core selected, in its returned order: rename
+    # ``provider`` to the legacy ``gateway``, preserve every other core field
+    # (including ``stale``), and restore the ORIGINAL raw metadata object for
+    # that exact (gateway, raw id) pair from the one retained roster.
     endpoints = []
-    for gw in PROVIDERS:
-        for raw_id in _clean_ids(providers_map.get(gw, [])):
-            if strip_free_marker(raw_id) == needle:
-                wiring = GATEWAY_WIRING.get(gw, {})
-                endpoints.append({
-                    "gateway": gw,
-                    "model_id": raw_id,
-                    "chat_completions_url": wiring.get("chat_completions_url"),
-                    "api_type": wiring.get("api_type"),
-                    "metadata": _model_metadata(roster, gw, [raw_id]).get(raw_id, {}),
-                })
-    # Deduplicate while preserving order (a gateway carries a raw id once),
-    # then sort by (PROVIDERS index, _natural_key(model_id)).
-    seen = set()
-    unique = []
-    for ep in endpoints:
-        key = (ep["gateway"], ep["model_id"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(ep)
-    gw_index = {gw: i for i, gw in enumerate(PROVIDERS)}
-    unique.sort(key=lambda ep: (gw_index[ep["gateway"]], _natural_key(ep["model_id"])))
-
-    return {
-        **base,
-        "ok": True,
-        "query": model_id,
-        "exact_matches": exact,
-        "exact_gateways": [gw for gw in PROVIDERS if exact[gw]],
-        "endpoints": unique,
-        "caveats": [ABSENCE_CAVEAT],
-    }
+    for endpoint in result["endpoints"]:
+        provider = endpoint["provider"]
+        raw_id = endpoint["model_id"]
+        local = {("gateway" if key == "provider" else key): value
+                 for key, value in endpoint.items()}
+        metadata = _model_metadata(roster, provider, [raw_id])
+        local["metadata"] = metadata.get(raw_id, {})
+        endpoints.append(local)
+    out["endpoints"] = endpoints
+    return out
 
 
 # ---------- tool: list_endpoints ----------
