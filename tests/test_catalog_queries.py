@@ -4945,9 +4945,9 @@ def test_search_models_argument_boundary_matches_literal_rows_and_rules(
     (both bools, numeric strings, fractions, huge native ints, NaN/Inf, unsafe
     boundaries), integral-float acceptance with strict-int pagination echo,
     array member validation versus []/padded/cased/duplicate/unmatched tokens,
-    exact provider case/padding/zero-ID/empty-registry rules, signature and
-    unknown-key precedence in BOTH insertion orders, fail-before-selection and
-    fresh non-reflecting errors."""
+    exact provider case/padding/zero-ID/empty-registry rules, all six adjacent
+    signature links and unknown-key precedence in BOTH insertion orders,
+    fail-before-selection and fresh non-reflecting errors."""
     from watchdog_catalog.query import search_models
 
     doc = _decode_doc(SEARCH_ARGUMENT_DOC)
@@ -5132,6 +5132,14 @@ def test_search_models_argument_boundary_matches_literal_rows_and_rules(
          INVALID_ARGUMENTS, "input_modalities"),
         ({"offset": -1, "limit": 0}, INVALID_ARGUMENTS, "limit"),
         ({"limit": 0, "offset": -1}, INVALID_ARGUMENTS, "limit"),
+        ({"min_context_length": -1, "input_modalities": "x"},
+         INVALID_ARGUMENTS, "min_context_length"),
+        ({"input_modalities": "x", "min_context_length": -1},
+         INVALID_ARGUMENTS, "min_context_length"),
+        ({"supported_parameters": "x", "limit": 0}, INVALID_ARGUMENTS,
+         "supported_parameters"),
+        ({"limit": 0, "supported_parameters": "x"}, INVALID_ARGUMENTS,
+         "supported_parameters"),
         ({"bogus": 1, "provider": "synthetic-a"}, INVALID_ARGUMENTS, None),
         ({"provider": "synthetic-a", "bogus": 1}, INVALID_ARGUMENTS, None),
     )
@@ -5476,6 +5484,8 @@ def test_search_models_pagination_counts_and_projection_controls():
     assert row["metadata"] is not cased
     assert row["metadata"]["architecture"] is not cased["architecture"]
     assert row["metadata"]["pricing"] is not cased["pricing"]
+    assert row["metadata"]["supported_parameters"] is not \
+        cased["supported_parameters"]
 
     unknown_row = search_models(
         norm, {"query": "unknown", "limit": 1})["endpoints"][0]
@@ -5497,6 +5507,7 @@ def test_search_models_pagination_counts_and_projection_controls():
     iso["endpoints"][0]["metadata"]["architecture"]["input_modalities"].append(
         "injected")
     iso["endpoints"][0]["metadata"]["pricing"]["prompt"] = "9"
+    iso["endpoints"][0]["metadata"]["supported_parameters"].append("injected")
     iso["counts"]["gateways"] = 99
     iso["caveats"].clear()
     iso["endpoints"].clear()
