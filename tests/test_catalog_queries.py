@@ -3640,3 +3640,243 @@ def test_search_text_provider_pairs_boundary_controls():
         [("Alpha", "shared-id"), ("alpha", "shared-id")]
     assert query == "shared-id"
     assert snapshot == before
+
+
+# -- inclusive per-pair minimum-context stage: unknown is never zero --
+
+def test_search_min_context_pairs_boundary_controls():
+    """The internal inclusive minimum-context stage composes with the accepted
+    text/provider selection: the four frozen active-min-context `search_models`
+    goldens reproduce exactly as literal endpoint identities, and a synthetic
+    fully-validated registry pins None-threshold freedom, zero-vs-unknown
+    distinction, the inclusive boundary, per-pair isolation (no raw-id borrowing
+    across providers, no selection expansion), unpaginated completeness and
+    mutation isolation."""
+    from watchdog_catalog.query import _search_min_context_pairs
+    from watchdog_catalog.query import _search_text_provider_pairs
+
+    # -- the four frozen active-min-context goldens: compose the accepted
+    # text/provider stage then this context stage over the REAL validated
+    # fixtures and compare to the literal golden identity arrays.
+    min_context_goldens = (
+        ("search_metadata_reasoning_min_context_inclusive",
+         "metadata-edge-cases.json",
+         {"query": "reasoning", "min_context_length": 65536}),
+        ("search_metadata_reasoning_min_context_zero",
+         "metadata-edge-cases.json",
+         {"query": "reasoning", "min_context_length": 0}),
+        ("search_capability_min_context_zero_known_only",
+         "capability-unknown.json",
+         {"min_context_length": 0}),
+        ("search_shared_min_context_a_only",
+         "lookup.json",
+         {"query": "shared", "min_context_length": 65536}),
+    )
+    assert len(min_context_goldens) == 4, len(min_context_goldens)
+    assert len({cid for cid, _, _ in min_context_goldens}) == 4
+    doc = _decode_doc(SEARCH_SELECTION_CASES_DOC)
+    search_cases = {case["id"]: case for case in doc["cases"]
+                    if case["tool"] == "search_models"}
+    for cid, fixture, args in min_context_goldens:
+        case = search_cases[cid]
+        assert case["args"] == args, cid
+        assert case.get("fixture", doc["fixture"]) == fixture, cid
+        expect = case["expect"]
+        # No other active filter and no page slicing: the whole match set fits
+        # the default page, so the eligible set is exactly the golden rows.
+        assert expect["limit"] == 50, cid
+        assert expect["offset"] == 0, cid
+        assert expect["next_offset"] is None, cid
+        assert expect["total_matches"] == len(expect["endpoints"]), cid
+        assert expect["filters"] == {
+            "provider": None,
+            "min_context_length": args["min_context_length"],
+            "input_modalities": None,
+            "supported_parameters": None,
+        }, cid
+        snapshot = _validated_snapshot(fixture)
+        before = copy.deepcopy(snapshot)
+        query = args.get("query")
+        provider = args.get("provider")
+        text_pairs = _search_text_provider_pairs(
+            snapshot, query=query, provider=provider)
+        composed = _search_min_context_pairs(
+            snapshot, text_pairs, min_context_length=args["min_context_length"])
+        expected = [(row["provider"], row["model_id"])
+                    for row in expect["endpoints"]]
+        assert composed == expected, cid
+        assert type(composed) is list, cid
+        # A pure filter: it can only narrow the accepted text/provider
+        # selection, never widen it or borrow a sibling pair's context.
+        assert set(composed) <= set(text_pairs), cid
+        assert len(composed) <= len(text_pairs), cid
+        assert snapshot == before, cid
+
+    # -- synthetic controls over a resealed, structurally valid registry.
+    def model(raw_id, context_length):
+        return _search_model(raw_id, "Context " + raw_id, None,
+                              context_length=context_length)
+
+    max_safe = _catalog.MAX_SAFE_INT
+    gate_models = {
+        "model-null": model("model-null", None),
+        "model-zero": model("model-zero", 0),
+        "model-one": model("model-one", 1),
+        "model-low": model("model-low", 65535),
+        "model-high": model("model-high", 65536),
+        "model-higher": model("model-higher", 65537),
+        "model-max": model("model-max", max_safe),
+        "model-shared": model("model-shared", 65536),
+    }
+    other_models = {"model-shared": model("model-shared", 32768)}
+    bulk_models = {"bulk-%02d" % index: model("bulk-%02d" % index, 7)
+                   for index in range(60)}
+    providers = {
+        "gate": _search_provider(
+            gate_models, "Gate", "https://gate.example/v1/chat/completions"),
+        "other": _search_provider(
+            other_models, "Other", "https://other.example/v1/chat/completions"),
+        "bulk": _search_provider(
+            bulk_models, "Bulk", "https://bulk.example/v1/chat/completions"),
+        "zero-provd": _search_provider(
+            {}, "Zero", "https://zero.example/v1/chat/completions"),
+    }
+    snapshot = _search_snapshot(["gate", "other", "bulk", "zero-provd"],
+                                providers)
+    before = copy.deepcopy(snapshot)
+
+    # (supplied pairs, threshold, expected ordered pairs) compact rows.
+    context_rows = (
+        # None threshold is NO constraint: unknown and known contexts both stay.
+        ([("gate", "model-null"), ("gate", "model-zero"),
+          ("gate", "model-one")], None,
+         [("gate", "model-null"), ("gate", "model-zero"),
+          ("gate", "model-one")]),
+        # Zero threshold IS active: it retains a known zero, rejects null.
+        ([("gate", "model-null"), ("gate", "model-zero")], 0,
+         [("gate", "model-zero")]),
+        # Inclusive boundary: exact passes, one below fails, one above passes.
+        ([("gate", "model-low"), ("gate", "model-high"),
+          ("gate", "model-higher")], 65536,
+         [("gate", "model-high"), ("gate", "model-higher")]),
+        # Safe maximum boundary passes; a smaller context never reaches it.
+        ([("gate", "model-max"), ("gate", "model-higher")], max_safe,
+         [("gate", "model-max")]),
+        # No matches at all for a threshold above every supplied context.
+        ([("gate", "model-one"), ("gate", "model-zero")], max_safe, []),
+    )
+    for pairs, threshold, expected in context_rows:
+        result = _search_min_context_pairs(
+            snapshot, pairs, min_context_length=threshold)
+        assert result == expected, (pairs, threshold)
+        assert type(result) is list, (pairs, threshold)
+
+    # A shared raw id is TWO pairs: provider A passes, provider B fails, and
+    # the candidate set never borrows A's high context for B's pair.
+    shared_text = _search_text_provider_pairs(snapshot, query="shared")
+    assert shared_text == [("gate", "model-shared"), ("other", "model-shared")]
+    assert _search_min_context_pairs(
+        snapshot, shared_text, min_context_length=65536) == \
+        [("gate", "model-shared")]
+    assert _search_min_context_pairs(
+        snapshot, [("other", "model-shared"), ("gate", "model-higher")],
+        min_context_length=65536) == [("gate", "model-higher")]
+
+    # A supplied strict subset is never expanded, even when excluded snapshot
+    # models hold enough context; empty input stays empty.
+    assert _search_min_context_pairs(
+        snapshot, [("gate", "model-null"), ("gate", "model-zero")],
+        min_context_length=max_safe) == []
+    assert _search_min_context_pairs(snapshot, []) == []
+    assert _search_min_context_pairs(snapshot, [], min_context_length=0) == []
+
+    # Exact input order is preserved: never sorted, never deduplicated.
+    unordered = [("gate", "model-higher"), ("gate", "model-zero"),
+                 ("gate", "model-low")]
+    assert _search_min_context_pairs(
+        snapshot, unordered, min_context_length=0) == unordered
+
+    # A zero-ID provider selects nothing, and an empty registry stays empty.
+    assert _search_text_provider_pairs(snapshot, provider="zero-provd") == []
+    assert _search_min_context_pairs(
+        snapshot, _search_text_provider_pairs(snapshot, provider="zero-provd"),
+        min_context_length=0) == []
+    solo = _search_snapshot(
+        ["solo"], {"solo": _search_provider(
+            {}, "Solo", "https://solo.example/v1/chat/completions")})
+    assert _search_min_context_pairs(solo, []) == []
+    assert _search_min_context_pairs(solo, [], min_context_length=0) == []
+
+    # More than the public default page (50) of eligible pairs stays complete.
+    bulk_pairs = _search_text_provider_pairs(snapshot, provider="bulk")
+    assert len(bulk_pairs) == 60
+    assert _search_min_context_pairs(
+        snapshot, bulk_pairs, min_context_length=7) == bulk_pairs
+
+    # A fresh, non-aliasing result list: mutating it (or a returned pair) can
+    # never corrupt the snapshot, the input sequence or another call.
+    result = _search_min_context_pairs(
+        snapshot, [("gate", "model-null"), ("gate", "model-zero")],
+        min_context_length=0)
+    result.clear()
+    assert snapshot == before
+    again = _search_min_context_pairs(
+        snapshot, [("gate", "model-null"), ("gate", "model-zero")],
+        min_context_length=0)
+    again.append(("gate", "injected"))
+    again[0] = ("gate", "model-null")
+    assert _search_min_context_pairs(
+        snapshot, [("gate", "model-null"), ("gate", "model-zero")],
+        min_context_length=0) == [("gate", "model-zero")]
+    assert unordered == [("gate", "model-higher"), ("gate", "model-zero"),
+                         ("gate", "model-low")]
+    assert snapshot == before
+
+    # -- strict unknown handling by composition: hostile upstream contexts are
+    # projected through the accepted projector into a resealed snapshot, so the
+    # query stage never sees an invalid snapshot.
+    raw_context_rows = (
+        ("absent", {"name": "Absent"}, None),
+        ("null", {"name": "Null", "context_length": None}, None),
+        ("numeric-string", {"name": "String", "context_length": "65536"}, None),
+        ("bool", {"name": "Bool", "context_length": True}, None),
+        ("negative", {"name": "Negative", "context_length": -1}, None),
+        ("float-one", {"name": "FloatOne", "context_length": 1.0}, None),
+        ("float-fractional", {"name": "FloatHalf", "context_length": 2.5}, None),
+        ("non-finite", {"name": "Infinity", "context_length": float("inf")}, None),
+        ("unsafe", {"name": "Unsafe", "context_length": max_safe + 1}, None),
+        ("known-zero", {"name": "KnownZero", "context_length": 0}, 0),
+        ("known-positive", {"name": "KnownPositive",
+                            "context_length": 4096}, 4096),
+        ("known-max", {"name": "KnownMax", "context_length": max_safe}, max_safe),
+    )
+    projected_models = {}
+    for raw_id, raw, expected_context in raw_context_rows:
+        projected, warnings = _catalog.project_model(raw_id, raw)
+        assert projected["context_length"] == expected_context, raw_id
+        assert type(projected["context_length"]) is type(expected_context), raw_id
+        # A degraded or missing context never drops the endpoint: the model
+        # keeps its complete projected shape, and the warning list is fresh.
+        assert set(projected) == {"id", "name", "description", "context_length",
+                                  "architecture", "supported_parameters",
+                                  "pricing"}, raw_id
+        assert type(warnings) is list, raw_id
+        projected_models[raw_id] = projected
+    raw_snapshot = _search_snapshot(
+        ["raw"], {"raw": _search_provider(
+            projected_models, "Raw",
+            "https://raw.example/v1/chat/completions")})
+    raw_pairs = _search_text_provider_pairs(raw_snapshot)
+    assert len(raw_pairs) == len(raw_context_rows)
+    assert _search_min_context_pairs(raw_snapshot, raw_pairs,
+                                     min_context_length=0) == \
+        [("raw", "known-max"), ("raw", "known-positive"), ("raw", "known-zero")]
+    assert _search_min_context_pairs(raw_snapshot, raw_pairs,
+                                     min_context_length=1) == \
+        [("raw", "known-max"), ("raw", "known-positive")]
+    assert _search_min_context_pairs(raw_snapshot, raw_pairs,
+                                     min_context_length=max_safe) == \
+        [("raw", "known-max")]
+    assert _search_min_context_pairs(raw_snapshot, raw_pairs,
+                                     min_context_length=None) == raw_pairs
+    assert snapshot == before

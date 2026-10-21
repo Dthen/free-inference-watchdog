@@ -571,6 +571,52 @@ def watchdog_status(snapshot, arguments, *, now):
     }
 
 
+# -- pure inclusive minimum-context stage: per-pair known context --
+
+
+def _search_min_context_pairs(snapshot, pairs, *, min_context_length=None):
+    """The INTERNAL inclusive minimum-context stage of ``search_models``.
+
+    Preconditions: ``snapshot`` is an already-VALIDATED public snapshot and
+    ``pairs`` is an ordered sequence of immutable ``(provider_key, raw_model_id)``
+    tuples identifying tracked pairs of that snapshot -- it is the ALREADY
+    selected candidate set (typically from :func:`_search_text_provider_pairs`),
+    never re-derived here. ``min_context_length`` is ``None`` or an
+    already-validated/normalized non-negative SAFE native int. The public decoded
+    argument is validated and normalized by the later transport-level search
+    unit before this stage is invoked; this stage never validates its argument,
+    parses a numeric string, coerces a bool, or invents a temporary error.
+
+    Returns a NEW list of only those supplied pairs whose OWN projected model
+    ``context_length`` is not ``None`` and is ``>=`` the threshold -- an
+    INCLUSIVE comparison on each pair's own metadata. A pair's context is never
+    borrowed from a sibling provider sharing its raw id, inferred from a name or
+    description, defaulted to zero, or merged across providers: endpoint identity
+    is exactly ``(provider, raw model_id)``.
+
+    ``min_context_length`` ``None`` applies NO constraint and returns a fresh
+    list with every supplied pair unchanged; ``0`` is an ACTIVE threshold that
+    retains a known zero and rejects an unknown (``null``) context. There is no
+    truthiness test of the threshold or of the context, no ``or 0`` fallback, no
+    sort, no deduplication, no roster/config read and no pagination: the incoming
+    pair order is preserved exactly, the supplied selection is never expanded,
+    and more than the default page's worth of eligible pairs stay complete.
+
+    The snapshot and the input pair sequence are never mutated, and only
+    immutable identity tuples are returned, so a caller mutating the result can
+    never corrupt the snapshot, the input sequence or another call.
+    """
+    if min_context_length is None:
+        return list(pairs)
+    providers = snapshot["providers"]
+    kept = []
+    for provider_key, raw_id in pairs:
+        context = providers[provider_key]["models"][raw_id]["context_length"]
+        if context is not None and context >= min_context_length:
+            kept.append((provider_key, raw_id))
+    return kept
+
+
 # -- pure metadata-search candidate selection: literal text + exact provider --
 
 
