@@ -41,7 +41,9 @@ HTTP boundary:
   are cross-checked here;
 * ``timeout_s`` bounds the blocking connection/read socket operations. This is
   honestly a stdlib socket-operation timeout, not an end-to-end or DNS
-  deadline, and it is the only clock this module reads.
+  deadline, and it is the only clock the synchronous HTTP primitives read; the
+  asynchronous owner described below takes explicit application clocks of its
+  own.
 
 Both boundaries share one acceptance path: accepted bytes are decoded as strict
 UTF-8 (no BOM stripping, newline rewriting, replacement or ignored bytes) and
@@ -181,7 +183,6 @@ transport wiring remain later units and are deliberately absent.
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import datetime
 import email.utils
@@ -1706,6 +1707,7 @@ class AsyncCatalogSource:
         own truth is untouched), the flight is still cleared, and the next call
         remains due because no deadline was published.
         """
+        import asyncio
         try:
             result = await asyncio.to_thread(self._refresh_in_worker, moment)
             completed = _monotonic_reading(self._monotonic_clock)
@@ -1731,6 +1733,7 @@ class AsyncCatalogSource:
         never reach another waiter, retained memory, the disk entry or a later
         view.
         """
+        import asyncio
         return copy.deepcopy(await asyncio.shield(flight))
 
     async def aget(self):
@@ -1742,6 +1745,7 @@ class AsyncCatalogSource:
         surviving warnings and the real observation age of the caller's captured
         wall epoch. There is no automatic retry, timer or force-refresh.
         """
+        import asyncio
         loop = asyncio.get_running_loop()
         if self._loop is None:
             self._loop = loop

@@ -72,7 +72,9 @@ after a successful attempt COMPLETED, 30 seconds after a failed one. Two
 further unparametrized groups cover coalescing, off-loop dispatch, cancellation
 and single-loop ownership with deeply detached results; then both scheduling
 windows, wall-clock jumps, async URL/file failures and the clock/configuration
-gates. CLI, SDK and transport wiring remain later units. Nothing in this module
+gates. The coalescing group additionally re-runs the source import and
+construction boundary in a genuinely fresh interpreter to prove neither reads a
+clock. CLI, SDK and transport wiring remain later units. Nothing in this module
 writes outside pytest's own scratch directory.
 """
 
@@ -3788,6 +3790,139 @@ def test_catalog_async_source_coalesces_off_loop_and_survives_cancellation(
 
     assert asyncio.run(fresh_loop())["ok"] is True
     assert loopback.hits.get("/held.json") == held_before + 1
+
+    # -- (j) a FRESH process reads NO clock at import or construction ---------
+    # The pytest host has already imported asyncio -- and therefore logging --
+    # so an in-process check cannot observe the transitive clock read a bare
+    # source import performs. This guard re-runs the boundary in a genuinely
+    # fresh interpreter that arms all eight named ``time`` APIs with recording
+    # stand-ins BEFORE importing the source, then asserts zero clock reads at
+    # the import AND the construction boundary with asyncio/logging deferred.
+    clock_probe = r'''
+import json
+import os
+import sys
+
+CLOCKS = ("time", "time_ns", "monotonic", "monotonic_ns",
+          "perf_counter", "perf_counter_ns", "process_time",
+          "process_time_ns")
+
+import time as _time
+
+_records = []
+_originals = {name: getattr(_time, name) for name in CLOCKS}
+
+
+def _recorder(name):
+    real = _originals[name]
+
+    def record(*args, **kwargs):
+        frame = sys._getframe(1)
+        _records.append([name, frame.f_code.co_filename, frame.f_lineno])
+        return real(*args, **kwargs)
+
+    return record
+
+
+report = {
+    "preloaded": sorted(
+        name for name in ("asyncio", "logging") if name in sys.modules),
+    "source_file": None,
+    "positive_control": [],
+    "import_calls": [],
+    "import_modules": [],
+    "construct_calls": [],
+    "construct_modules": [],
+    "cache_created": None,
+    "query_imported": None,
+    "thread_delta": None,
+    "socket_events": 0,
+    "open_events": 0,
+}
+
+for _name in CLOCKS:
+    setattr(_time, _name, _recorder(_name))
+
+# Positive control: the recording stand-ins must catch deliberate reads.
+_time.time()
+_time.monotonic()
+report["positive_control"] = list(_records)
+del _records[:]
+
+import watchdog_catalog.source as source
+report["source_file"] = source.__file__
+report["import_calls"] = list(_records)
+report["import_modules"] = sorted(
+    name for name in ("asyncio", "logging") if name in sys.modules)
+del _records[:]
+
+
+def _audit(event, args):
+    if event.startswith("socket."):
+        report["socket_events"] += 1
+    elif event == "open":
+        report["open_events"] += 1
+
+
+sys.addaudithook(_audit)
+
+import threading as _threading
+
+cache_dir = os.path.join(os.getcwd(), "unused-cache")
+before_threads = _threading.active_count()
+source.AsyncCatalogSource(
+    "url", "https://example.invalid/catalog.json", cache_dir=cache_dir)
+report["construct_calls"] = list(_records)
+report["construct_modules"] = sorted(
+    name for name in ("asyncio", "logging") if name in sys.modules)
+report["cache_created"] = os.path.exists(cache_dir)
+report["query_imported"] = "watchdog_catalog.query" in sys.modules
+report["thread_delta"] = _threading.active_count() - before_threads
+
+for _name in CLOCKS:
+    setattr(_time, _name, _originals[_name])
+
+sys.stdout.write(json.dumps(report))
+'''
+    guard_cwd = tmp_path / "fresh-clock-cwd"
+    guard_cwd.mkdir()
+    guard_home = tmp_path / "fresh-clock-home"
+    guard_home.mkdir()
+    guard_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(guard_home),
+        "PYTHONPATH": str(REPO),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    guard = subprocess.run(
+        [sys.executable, "-B", "-c", clock_probe],
+        cwd=str(guard_cwd), env=guard_env, capture_output=True, text=True,
+        timeout=120)
+    assert guard.returncode == 0, guard.stderr
+    assert guard.stderr == "", guard.stderr
+    clock_report = json.loads(guard.stdout)
+    # The probe ran in a fresh interpreter with neither module preloaded, so
+    # nothing it imports can be masked by an earlier initialization.
+    assert clock_report["preloaded"] == []
+    # It imported THIS tree, not an installed copy of the package.
+    assert Path(clock_report["source_file"]).resolve() == (
+        REPO / "watchdog_catalog" / "source.py").resolve()
+    # Positive control: the recording stand-ins caught deliberate reads, so a
+    # zero-call result below is a real absence of reads, not a broken recorder.
+    assert len(clock_report["positive_control"]) == 2
+    # Importing the source reads no clock and leaves asyncio/logging deferred.
+    assert clock_report["import_calls"] == []
+    assert clock_report["import_modules"] == []
+    # Construction with DEFAULT clocks reads no clock either, imports no query
+    # and creates no cache directory, thread, task, loop or socket.
+    assert clock_report["construct_calls"] == []
+    assert clock_report["construct_modules"] == []
+    assert clock_report["cache_created"] is False
+    assert not (guard_cwd / "unused-cache").exists()
+    assert clock_report["query_imported"] is False
+    assert clock_report["thread_delta"] == 0
+    assert clock_report["socket_events"] == 0
+    assert clock_report["open_events"] == 0
 
 
 def test_catalog_async_source_schedules_success_and_failure_windows(
