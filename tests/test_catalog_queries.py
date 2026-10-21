@@ -3880,3 +3880,358 @@ def test_search_min_context_pairs_boundary_controls():
     assert _search_min_context_pairs(raw_snapshot, raw_pairs,
                                      min_context_length=None) == raw_pairs
     assert snapshot == before
+
+
+# ---------- internal metadata search: input-modality AND stage (3c) ----------
+#
+# `watchdog_catalog.query._search_input_modality_pairs(snapshot, pairs, *,
+# input_modalities=None)` is the INTERNAL, UNPAGINATED input-modality stage
+# that later `search_models` units compose AFTER the accepted text/provider and
+# minimum-context stages. Preconditions are an already-VALIDATED snapshot, an
+# ordered sequence of immutable tracked `(provider_key, raw_model_id)` tuples
+# and an already-validated `None`/list-of-nonempty-strings request: public
+# argument validation belongs to a later unit, so this stage deliberately has no
+# temporary argument envelope and no public tool.
+#
+# The three eligible frozen goldens are the INDEPENDENTLY authored `cases.json`
+# rows whose arguments are confined to query/provider/min_context_length/
+# input_modalities; the synthetic rows below are literal, hand-derived controls.
+
+
+MODALITY_GOLDEN_IDS = (
+    "search_capability_positive_modality_yields_none",
+    "search_shared_modalities_and_b_only",
+    "search_shared_context_and_image_neither",
+)
+
+
+def test_search_input_modality_pairs_and_and_isolation_controls():
+    """The internal input-modality AND stage composes with the accepted
+    text/provider and minimum-context stages: the three frozen eligible
+    `search_models` goldens reproduce exactly as literal endpoint identities,
+    and a synthetic fully-validated registry pins None/[] freedom, the AND over
+    every requested token, ASCII-only folding on both sides, whitespace and
+    non-ASCII case-pair preservation, input-vs-output separation, no inference
+    from name/description/raw id/provider key/pricing/supported_parameters, no
+    cross-provider borrowing, no scope expansion, unpaginated completeness and
+    mutation isolation."""
+    from watchdog_catalog.query import _search_input_modality_pairs
+    from watchdog_catalog.query import _search_min_context_pairs
+    from watchdog_catalog.query import _search_text_provider_pairs
+
+    doc = _decode_doc(SEARCH_SELECTION_CASES_DOC)
+    search_cases = {case["id"]: case for case in doc["cases"]
+                    if case["tool"] == "search_models"}
+
+    # (a) The three frozen eligible goldens: compose text/provider -> context ->
+    #     modality over the REAL validated fixtures and compare the literal
+    #     golden identity arrays, pinning args/filter scope and the default page.
+    modality_goldens = (
+        (MODALITY_GOLDEN_IDS[0], "capability-unknown.json",
+         {"input_modalities": ["text"]}, []),
+        (MODALITY_GOLDEN_IDS[1], "lookup.json",
+         {"query": "shared", "input_modalities": ["text", "IMAGE"]},
+         [("synthetic-b", "vendor/shared")]),
+        (MODALITY_GOLDEN_IDS[2], "lookup.json",
+         {"query": "shared", "min_context_length": 65536,
+          "input_modalities": ["image"]}, []),
+    )
+    assert len({cid for cid, _, _, _ in modality_goldens}) == 3
+    for cid, fixture, args, expected in modality_goldens:
+        case = search_cases[cid]
+        assert case["args"] == args, cid
+        assert set(args) <= {"query", "provider", "min_context_length",
+                             "input_modalities"}, cid
+        assert case.get("fixture", doc["fixture"]) == fixture, cid
+        expect = case["expect"]
+        assert set(expect["filters"]) == {
+            "provider", "min_context_length", "input_modalities",
+            "supported_parameters"}, cid
+        assert expect["filters"]["input_modalities"] == \
+            args["input_modalities"], cid
+        assert expect["filters"]["min_context_length"] == \
+            args.get("min_context_length"), cid
+        assert expect["filters"]["supported_parameters"] is None, cid
+        assert expect["limit"] == 50, cid
+        assert expect["offset"] == 0, cid
+        assert expect["next_offset"] is None, cid
+        assert expect["total_matches"] == len(expect["endpoints"]), cid
+        snapshot = _validated_snapshot(fixture)
+        before = copy.deepcopy(snapshot)
+        text_pairs = _search_text_provider_pairs(
+            snapshot, query=args.get("query"), provider=args.get("provider"))
+        context_pairs = _search_min_context_pairs(
+            snapshot, text_pairs,
+            min_context_length=args.get("min_context_length"))
+        composed = _search_input_modality_pairs(
+            snapshot, context_pairs, input_modalities=args["input_modalities"])
+        assert composed == expected, cid
+        assert type(composed) is list, cid
+        # A pure filter: it can only narrow the accepted composition, never
+        # widen it or borrow a sibling pair's capability.
+        assert set(composed) <= set(context_pairs), cid
+        assert len(composed) <= len(context_pairs), cid
+        assert snapshot == before, cid
+
+    # (b) Synthetic controls over a resealed, structurally valid registry.
+    synth_models = {
+        "both": _search_model("both", "Both Modalities",
+                              input_modalities=["text", "image"]),
+        "text-only": _search_model("text-only", "Text Only",
+                                   input_modalities=["text"]),
+        "empty-known": _search_model("empty-known", "Empty Known",
+                                     input_modalities=[]),
+        "unknown-array": _search_model("unknown-array", "Unknown Array",
+                                       input_modalities=None),
+        "cased-dupes": _search_model(
+            "cased-dupes", "Cased Dupes",
+            input_modalities=["TEXT", "Image", "text", "image"]),
+        "padded": _search_model("padded", "Padded", input_modalities=[" text "]),
+        "unicode-upper": _search_model("unicode-upper", "Unicode Upper",
+                                       input_modalities=["\u00c9"]),
+        "output-image": _search_model(
+            "output-image", "Output Image", input_modalities=["text"],
+            output_modalities=["image"]),
+        "name-image": _search_model(
+            "name-image", "Image Name", "image prose",
+            input_modalities=["text"]),
+        "param-image": _search_model(
+            "param-image", "Param Image", input_modalities=["text"],
+            supported_parameters=["image_size"]),
+        "price-image": _search_model(
+            "price-image", "Price Image", input_modalities=["text"],
+            pricing={"prompt": "0", "completion": "0"}),
+        "shared-id": _search_model("shared-id", "Shared A",
+                                   input_modalities=["text", "image"]),
+    }
+    other_models = {
+        "shared-id": _search_model("shared-id", "Shared B",
+                                   input_modalities=["text"]),
+    }
+    bulk_models = {"bulk-%02d" % index: _search_model(
+                       "bulk-%02d" % index, "Bulk %02d" % index,
+                       input_modalities=["text"])
+                   for index in range(60)}
+    synth_snapshot = _search_snapshot(
+        ["gate", "other", "bulk", "zero-provd"],
+        {"gate": _search_provider(
+             synth_models, "Gate", "https://gate.example/v1/chat/completions"),
+         "other": _search_provider(
+             other_models, "Other",
+             "https://other.example/v1/chat/completions"),
+         "bulk": _search_provider(
+             bulk_models, "Bulk", "https://bulk.example/v1/chat/completions"),
+         "zero-provd": _search_provider(
+             {}, "Zero", "https://zero.example/v1/chat/completions")})
+    before = copy.deepcopy(synth_snapshot)
+
+    modality_rows = (
+        # None and [] apply NO constraint: every supplied pair is retained,
+        # including unknown (null) and known-empty ([]) input arrays.
+        ([("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")],
+         None,
+         [("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")]),
+        ([("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")],
+         [],
+         [("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")]),
+        # A nonempty request rejects BOTH an unknown array and a known-empty one.
+        ([("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")],
+         ["text"],
+         [("gate", "both")]),
+        # Single and multi-token AND: every requested token on the SAME pair.
+        ([("gate", "both"), ("gate", "text-only")], ["text"],
+         [("gate", "both"), ("gate", "text-only")]),
+        ([("gate", "both"), ("gate", "text-only")], ["text", "image"],
+         [("gate", "both")]),
+        ([("gate", "both"), ("gate", "text-only")], ["image", "text"],
+         [("gate", "both")]),
+        # Duplicates are idempotent, never a multiplicity constraint.
+        ([("gate", "both")], ["text", "text", "TEXT"],
+         [("gate", "both")]),
+        # ASCII-insensitive on BOTH sides; first-occurrence duplicates harmless.
+        ([("gate", "cased-dupes")], ["image", "TEXT"],
+         [("gate", "cased-dupes")]),
+        # Whitespace preserved: a padded token matches only an identically
+        # padded reported token.
+        ([("gate", "padded")], ["text"], []),
+        ([("gate", "padded")], [" text "], [("gate", "padded")]),
+        ([("gate", "padded")], [" text"], []),
+        ([("gate", "padded")], ["text "], []),
+        # A non-ASCII case pair stays distinct (never Unicode-folded).
+        ([("gate", "unicode-upper")], ["\u00e9"], []),
+        ([("gate", "unicode-upper")], ["\u00c9"], [("gate", "unicode-upper")]),
+        # Output modalities are not substitutes for input modalities.
+        ([("gate", "output-image")], ["image"], []),
+        ([("gate", "output-image")], ["text"], [("gate", "output-image")]),
+        # No capability is inferred from name, description, raw id, provider
+        # key, pricing or supported_parameters.
+        ([("gate", "name-image")], ["image"], []),
+        ([("gate", "param-image")], ["image"], []),
+        ([("gate", "price-image")], ["image"], []),
+        ([("gate", "text-only")], ["text"], [("gate", "text-only")]),
+        # A supplied strict subset is never expanded, even when excluded
+        # snapshot models satisfy the filter; empty input stays empty.
+        ([("gate", "both")], ["text"], [("gate", "both")]),
+        ([], ["text"], []),
+        # Exact incoming order is preserved: never sorted, never deduplicated.
+        ([("gate", "text-only"), ("gate", "both"), ("gate", "cased-dupes")],
+         ["text"],
+         [("gate", "text-only"), ("gate", "both"), ("gate", "cased-dupes")]),
+        # A shared raw id with disjoint per-provider capabilities: no union,
+        # no borrowing, and the incoming order is still preserved.
+        ([("gate", "shared-id"), ("other", "shared-id")], ["image"],
+         [("gate", "shared-id")]),
+        ([("gate", "shared-id"), ("other", "shared-id")], ["text"],
+         [("gate", "shared-id"), ("other", "shared-id")]),
+        ([("other", "shared-id"), ("gate", "shared-id")], ["image"],
+         [("gate", "shared-id")]),
+    )
+    for pairs, request, expected in modality_rows:
+        result = _search_input_modality_pairs(
+            synth_snapshot, pairs, input_modalities=request)
+        assert result == expected, (pairs, request)
+        assert type(result) is list, (pairs, request)
+        assert all(type(pair) is tuple and len(pair) == 2
+                   for pair in result), (pairs, request)
+
+    # (c) Composition with context: high-context text-only A and low-context
+    #     image-capable B yield NEITHER for context+image, even though each
+    #     predicate alone matches somewhere.
+    ctx_models = {
+        "high-text": _search_model("high-text", "High Text",
+                                   context_length=65536,
+                                   input_modalities=["text"]),
+        "low-image": _search_model("low-image", "Low Image",
+                                   context_length=32768,
+                                   input_modalities=["text", "image"]),
+    }
+    ctx_snapshot = _search_snapshot(
+        ["ctx"], {"ctx": _search_provider(
+            ctx_models, "Ctx", "https://ctx.example/v1/chat/completions")})
+    assert _search_input_modality_pairs(
+        ctx_snapshot,
+        _search_min_context_pairs(
+            ctx_snapshot, _search_text_provider_pairs(ctx_snapshot),
+            min_context_length=65536),
+        input_modalities=["image"]) == []
+    assert _search_input_modality_pairs(
+        ctx_snapshot, _search_text_provider_pairs(ctx_snapshot),
+        input_modalities=["image"]) == [("ctx", "low-image")]
+    assert _search_min_context_pairs(
+        ctx_snapshot, _search_text_provider_pairs(ctx_snapshot),
+        min_context_length=65536) == [("ctx", "high-text")]
+
+    # (d) A fresh, non-aliasing result on BOTH branches: mutating it (or a
+    #     returned pair) can never corrupt the snapshot, the input sequence, the
+    #     request list or a later call.
+    supplied = [("gate", "both"), ("gate", "text-only")]
+    for request, expected in (
+            (None, supplied), ([], supplied),
+            (["text"], [("gate", "both"), ("gate", "text-only")]),
+            (["image"], [("gate", "both")])):
+        result = _search_input_modality_pairs(
+            synth_snapshot, supplied, input_modalities=request)
+        assert result is not supplied, request
+        assert result == expected, request
+        result.clear()
+        result.append(("gate", "injected"))
+        assert _search_input_modality_pairs(
+            synth_snapshot, supplied, input_modalities=request) == expected, \
+            request
+        assert supplied == [("gate", "both"), ("gate", "text-only")], request
+    request = ["TEXT", "IMAGE"]
+    request_before = list(request)
+    assert _search_input_modality_pairs(
+        synth_snapshot, [("gate", "both")], input_modalities=request) == \
+        [("gate", "both")]
+    assert request == request_before
+
+    # (e) A zero-ID provider selects nothing and an empty registry stays empty.
+    assert _search_input_modality_pairs(
+        synth_snapshot, [], input_modalities=["text"]) == []
+    assert _search_input_modality_pairs(
+        synth_snapshot, [], input_modalities=None) == []
+    empty_snapshot = _search_snapshot([], {})
+    assert _search_input_modality_pairs(empty_snapshot, []) == []
+    assert _search_input_modality_pairs(
+        empty_snapshot, [], input_modalities=[]) == []
+    assert _search_input_modality_pairs(
+        empty_snapshot, [], input_modalities=["text"]) == []
+
+    # More than the public default page (50) of eligible pairs stays complete.
+    bulk_pairs = _search_text_provider_pairs(synth_snapshot, provider="bulk")
+    assert len(bulk_pairs) == 60
+    assert _search_input_modality_pairs(
+        synth_snapshot, bulk_pairs, input_modalities=["text"]) == bulk_pairs
+
+    # (f) Malformed upstream input arrays project to null WHOLE through the real
+    #     accepted projector; the query stage then rejects them, never salvaging
+    #     a valid member. Valid []/casing/duplicates/padded tokens survive in the
+    #     projected metadata, which the filter matches literally.
+    raw_rows = (
+        ("absent", {"name": "Absent"}, None),
+        ("null", {"name": "Null",
+                  "architecture": {"input_modalities": None}}, None),
+        ("bare-string", {"name": "Bare",
+                         "architecture": {"input_modalities": "text"}}, None),
+        ("object", {"name": "Object",
+                    "architecture": {"input_modalities": {"a": 1}}}, None),
+        ("mixed", {"name": "Mixed",
+                   "architecture": {"input_modalities": ["text", 5]}}, None),
+        ("null-member", {"name": "NullMember",
+                         "architecture": {"input_modalities": [None]}}, None),
+        ("empty-string-member",
+         {"name": "EmptyMember",
+          "architecture": {"input_modalities": [""]}}, None),
+        ("valid-empty", {"name": "ValidEmpty",
+                         "architecture": {"input_modalities": []}}, []),
+        ("valid-cased",
+         {"name": "ValidCased",
+          "architecture": {"input_modalities": ["TEXT", "Image", "text"]}},
+         ["TEXT", "Image", "text"]),
+        ("valid-padded",
+         {"name": "ValidPadded",
+          "architecture": {"input_modalities": [" text "]}}, [" text "]),
+    )
+    projected_models = {}
+    for raw_id, raw, expected_input in raw_rows:
+        projected, warnings = _catalog.project_model(raw_id, raw)
+        assert projected["architecture"]["input_modalities"] == \
+            expected_input, raw_id
+        assert set(projected) == {"id", "name", "description", "context_length",
+                                  "architecture", "supported_parameters",
+                                  "pricing"}, raw_id
+        assert type(warnings) is list, raw_id
+        projected_models[raw_id] = projected
+    raw_snapshot = _search_snapshot(
+        ["raw"], {"raw": _search_provider(
+            projected_models, "Raw",
+            "https://raw.example/v1/chat/completions")})
+    raw_pairs = _search_text_provider_pairs(raw_snapshot)
+    assert len(raw_pairs) == len(raw_rows)
+    # Unknown arrays are not a wildcard: a nonempty request rejects them, and
+    # a valid known-empty array satisfies no nonempty request.
+    assert _search_input_modality_pairs(
+        raw_snapshot, raw_pairs, input_modalities=["text"]) == \
+        [("raw", "valid-cased")]
+    assert _search_input_modality_pairs(
+        raw_snapshot, raw_pairs, input_modalities=["image"]) == \
+        [("raw", "valid-cased")]
+    assert _search_input_modality_pairs(
+        raw_snapshot, [("raw", "valid-empty")],
+        input_modalities=["text"]) == []
+    # Omission/[] retains every pair, including the unknown ones.
+    assert _search_input_modality_pairs(raw_snapshot, raw_pairs) == raw_pairs
+    assert _search_input_modality_pairs(
+        raw_snapshot, raw_pairs, input_modalities=[]) == raw_pairs
+    # Padded and cased projected metadata matches literally.
+    assert _search_input_modality_pairs(
+        raw_snapshot, [("raw", "valid-padded")],
+        input_modalities=[" text "]) == [("raw", "valid-padded")]
+    assert _search_input_modality_pairs(
+        raw_snapshot, [("raw", "valid-padded")],
+        input_modalities=["text"]) == []
+    assert _search_input_modality_pairs(
+        raw_snapshot, [("raw", "valid-cased")],
+        input_modalities=["IMAGE"]) == [("raw", "valid-cased")]
+    assert synth_snapshot == before
