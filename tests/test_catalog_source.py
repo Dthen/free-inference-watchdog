@@ -43,6 +43,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -1162,3 +1163,744 @@ def test_catalog_url_source_failures_stay_stable_and_non_reflective(
     assert sorted(entry.name for entry in tmp_path.iterdir()) == [
         "empty-home", "neutral-cwd"]
     monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# Unit 5c: source-scoped validated disk cache
+# ---------------------------------------------------------------------------
+#
+# The two behavioural groups below cover ONE validated cache record per source:
+# real scratch-directory round trips, source-scoped digest filenames, platform
+# default roots (lexical only) and every miss/corruption/persistence fault.
+# Nothing here touches a real user cache directory, a provider, the network or
+# a clock, and nothing is deleted or repaired by the cache itself.
+
+CACHE_VERSION = 1
+CACHE_ENTRY_FIELDS = frozenset({"cache_version", "source", "fetched_at",
+                                "etag", "last_modified", "snapshot"})
+CACHE_KIND_TYPE_ERROR = "DiskCache() requires a cache kind string"
+CACHE_KIND_VALUE_ERROR = 'DiskCache() requires kind "url" or "file"'
+CACHE_LOCATION_ERROR = "DiskCache() requires a non-empty file source path"
+CACHE_DIR_ERROR = "DiskCache() requires a non-empty cache directory path"
+FETCHED_AT_ERROR = (
+    "DiskCache.store() requires a finite non-negative fetch time")
+VALIDATOR_ERROR = (
+    "DiskCache.store() requires etag and last_modified to be HTTP header "
+    "values or None")
+
+
+def _identity(kind, location):
+    return {"kind": kind, "location": location}
+
+
+def _entry_name(kind, location):
+    """The expected entry filename: SHA-256 of the canonical identity."""
+    return hashlib.sha256(
+        catalog.canonical_bytes(_identity(kind, location))).hexdigest() + \
+        ".json"
+
+
+def _cache_document(snapshot, *, identity, fetched_at=1700000000, etag=None,
+                    last_modified=None, version=CACHE_VERSION):
+    return {
+        "cache_version": version,
+        "source": dict(identity),
+        "fetched_at": fetched_at,
+        "etag": etag,
+        "last_modified": last_modified,
+        "snapshot": snapshot,
+    }
+
+
+def _scratch_snapshot(name="basic.json"):
+    return json.loads((FIXTURE_DIR / name).read_text("utf-8"))
+
+
+def _temp_leftovers(directory):
+    return sorted(entry.name for entry in directory.iterdir()
+                  if entry.name.endswith(".tmp"))
+
+
+def _empty_snapshot():
+    """A legitimately EMPTY catalogue, resealed by the test's own helper."""
+    document = _scratch_snapshot()
+    document["provider_order"] = []
+    document["providers"] = {}
+    return _reseal(document)
+
+
+def test_catalog_disk_cache_round_trips_are_source_scoped(tmp_path):
+    assert source._MAX_CACHE_BYTES == 4 * source.MAX_SOURCE_BYTES
+
+    root = tmp_path / "cache-root"
+    url = "https://example.test/catalog.json"
+    identity = _identity("url", url)
+    cache = source.DiskCache("url", url, cache_dir=root)
+
+    # -- (a) construction is INERT and the entry path is source-scoped -------
+    assert isinstance(cache.path, Path)
+    assert cache.path.is_absolute()
+    assert cache.path == root / _entry_name("url", url)
+    assert cache.path.name == _entry_name("url", url)
+    assert len(cache.path.name) == 64 + len(".json")
+    for raw in (url, "example.test", "catalog", "https"):
+        assert raw not in cache.path.name
+    assert not root.exists()
+    assert cache.load() is None
+
+    # -- (b) one record: exact envelope, canonical bytes, full hash ----------
+    basic = _scratch_snapshot()
+    before = json.loads(json.dumps(basic))
+    etag = 'W/"a1b2c3"'
+    modified = "Wed, 21 Oct 2026 10:00:00 GMT"
+    assert cache.store(basic, fetched_at=1700000000, etag=etag,
+                       last_modified=modified) is True
+    assert basic == before          # the caller's snapshot is never mutated
+
+    expected = _cache_document(basic, identity=identity, fetched_at=1700000000,
+                               etag=etag, last_modified=modified)
+    assert cache.path.read_bytes() == catalog.canonical_bytes(expected)
+
+    entry = cache.load()
+    assert set(entry) == CACHE_ENTRY_FIELDS
+    assert entry == expected
+    assert entry["cache_version"] == CACHE_VERSION
+    assert type(entry["cache_version"]) is int
+    assert entry["source"] == identity
+    assert entry["etag"] == etag and entry["last_modified"] == modified
+    assert type(entry["fetched_at"]) is int
+    assert entry["snapshot"] == basic
+    assert catalog.snapshot_hash(entry["snapshot"]) == basic["snapshot_id"]
+
+    # -- (c) every load is a FRESH decode: caller mutation cannot poison -----
+    pristine = json.loads(json.dumps(entry))
+    again = cache.load()
+    assert again == pristine and again is not entry
+    assert again["snapshot"] is not entry["snapshot"]
+    assert again["snapshot"]["providers"] is not entry["snapshot"]["providers"]
+    again["snapshot"]["providers"].clear()
+    again["snapshot"]["provider_order"].append("injected")
+    again["source"]["location"] = "mutated"
+    entry["fetched_at"] = -1
+    assert cache.load() == pristine
+
+    # -- (d) typed metadata and a legitimately EMPTY snapshot stay a HIT -----
+    empty = _empty_snapshot()
+    assert cache.store(empty, fetched_at=1700000000.5) is True
+    empty_entry = cache.load()
+    assert empty_entry["snapshot"]["provider_order"] == []
+    assert empty_entry["snapshot"]["providers"] == {}
+    assert empty_entry["snapshot"]["snapshot_id"] == empty["snapshot_id"] == \
+        catalog.snapshot_hash(empty_entry["snapshot"])
+    assert empty_entry["fetched_at"] == 1700000000.5
+    assert type(empty_entry["fetched_at"]) is float
+    assert empty_entry["etag"] is None
+    assert empty_entry["last_modified"] is None
+    # a validator string round trips LITERALLY, never trimmed or requoted
+    literal_etag = '  W/"padded"  '
+    assert cache.store(basic, fetched_at=0, etag=literal_etag) is True
+    assert cache.load()["etag"] == literal_etag
+
+    # -- (e) fetch time is distinct from the observation time, no clock ------
+    ordered = _scratch_snapshot("ordering.json")
+    observed = ordered["tick_epoch"]
+    assert isinstance(observed, int)
+    future = source.DiskCache("url", "https://example.test/future.json",
+                              cache_dir=root)
+
+    def no_clock(*args, **kwargs):
+        raise AssertionError("the disk cache must never read a clock")
+
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(time, "time", no_clock)
+        scope.setattr(time, "time_ns", no_clock)
+        assert future.store(ordered, fetched_at=catalog.MAX_SAFE_INT) is True
+        future_entry = future.load()
+    assert future_entry["fetched_at"] == catalog.MAX_SAFE_INT
+    assert future_entry["snapshot"]["tick_epoch"] == observed
+    assert future_entry["snapshot"]["tick_epoch"] != future_entry["fetched_at"]
+    assert future_entry["snapshot"] == ordered
+
+    # -- (f) URL and FILE modes never share data, even in one root ----------
+    shared = tmp_path / "shared-root"
+    url_cache = source.DiskCache("url", url, cache_dir=shared)
+    file_cache = source.DiskCache("file", url, cache_dir=shared)
+    assert url_cache.location == url                 # URL text stays literal
+    assert file_cache.location == os.path.abspath(url)
+    assert file_cache.location != url_cache.location
+    assert file_cache.path != url_cache.path
+    assert file_cache.path.name == _entry_name("file", file_cache.location)
+    assert url_cache.store(basic, fetched_at=1) is True
+    assert file_cache.load() is None                  # wrong mode: a miss
+    assert url_cache.load()["snapshot"] == basic
+    assert file_cache.store(basic, fetched_at=2) is True
+    assert file_cache.load()["fetched_at"] == 2
+    assert url_cache.load()["fetched_at"] == 1
+
+    # a distinct selection of the same mode is a distinct entry
+    other = source.DiskCache("url", "https://example.test/other.json",
+                             cache_dir=shared)
+    assert other.path != url_cache.path
+    assert other.load() is None
+
+    # a foreign-source record copied into the CORRECT filename still misses:
+    # the filename scopes the lookup, the embedded identity decides the hit.
+    victim = source.DiskCache("url", "https://example.test/victim.json",
+                              cache_dir=tmp_path / "foreign")
+    impostor = source.DiskCache("url", "https://example.test/impostor.json",
+                                cache_dir=tmp_path / "foreign-src")
+    assert impostor.store(basic, fetched_at=5) is True
+    victim.path.parent.mkdir(parents=True, exist_ok=True)
+    victim.path.write_bytes(impostor.path.read_bytes())
+    assert victim.load() is None
+    assert victim.path.read_bytes() == impostor.path.read_bytes()
+
+    # -- (g) file identities freeze the LEXICAL absolute path ----------------
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    with pytest.MonkeyPatch.context() as scope:
+        scope.chdir(left)
+        from_left = source.DiskCache("file", "catalog.json",
+                                     cache_dir=tmp_path / "identity-root")
+        tilde = source.DiskCache("file", "~/catalog.json",
+                                 cache_dir=tmp_path / "identity-root")
+        expanded = source.DiskCache("file", "$HOME/catalog.json",
+                                    cache_dir=tmp_path / "identity-root")
+    with pytest.MonkeyPatch.context() as scope:
+        scope.chdir(right)
+        from_right = source.DiskCache("file", "catalog.json",
+                                      cache_dir=tmp_path / "identity-root")
+    assert from_left.location == os.path.abspath(
+        os.path.join(str(left), "catalog.json"))
+    assert from_right.location == os.path.abspath(
+        os.path.join(str(right), "catalog.json"))
+    assert from_left.path != from_right.path
+    assert from_left.path.name == _entry_name("file", from_left.location)
+    # no tilde/environment expansion and no cwd after the freeze
+    assert tilde.location.endswith("~/catalog.json")
+    assert not tilde.location.startswith(os.path.expanduser("~"))
+    assert expanded.location.endswith("$HOME/catalog.json")
+    # lexical only: a symlinked location is NOT resolved to its target
+    link = tmp_path / "link-catalog.json"
+    real = tmp_path / "real-catalog.json"
+    real.write_bytes(b"{}")
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        link = None
+    if link is not None:
+        linked = source.DiskCache("file", link, cache_dir=tmp_path / "links")
+        assert linked.location == os.path.abspath(str(link))
+        assert linked.location != os.path.realpath(str(link))
+
+    # -- (h) a relative cache_dir is anchored at construction ----------------
+    with pytest.MonkeyPatch.context() as scope:
+        scope.chdir(left)
+        relative = source.DiskCache("url", url, cache_dir="relative-cache")
+        anchored = relative.path
+        assert anchored.is_absolute()
+        assert anchored.parent == left / "relative-cache"
+    with pytest.MonkeyPatch.context() as scope:
+        scope.chdir(right)
+        assert relative.path == anchored
+        assert relative.store(basic, fetched_at=3) is True
+    assert (left / "relative-cache" / anchored.name).is_file()
+    assert not (right / "relative-cache").exists()
+
+    # -- (i) the platform default roots, purely lexically --------------------
+    defaults = (
+        ("linux", {"HOME": "/home/tester"},
+         "/home/tester/.cache/watchdog-catalog"),
+        ("linux", {"XDG_CACHE_HOME": "/var/cache/tester",
+                   "HOME": "/home/tester"},
+         "/var/cache/tester/watchdog-catalog"),
+        ("linux", {"XDG_CACHE_HOME": "/var/cache/tester"},
+         "/var/cache/tester/watchdog-catalog"),
+        ("linux", {"XDG_CACHE_HOME": "relative/cache", "HOME": "/home/tester"},
+         "/home/tester/.cache/watchdog-catalog"),
+        ("darwin", {"HOME": "/Users/tester"},
+         "/Users/tester/Library/Caches/watchdog-catalog"),
+        ("win32", {"LOCALAPPDATA": "C:/Users/tester/AppData/Local"},
+         "C:/Users/tester/AppData/Local/watchdog-catalog"),
+        ("win32", {"LOCALAPPDATA": "relative",
+                   "USERPROFILE": "C:/Users/tester"},
+         "C:/Users/tester/AppData/Local/watchdog-catalog"),
+        ("win32", {"USERPROFILE": "C:/Users/tester"},
+         "C:/Users/tester/AppData/Local/watchdog-catalog"),
+    )
+    for platform, environ, expected_root in defaults:
+        found = source._default_cache_root(platform=platform,
+                                          environ=environ)
+        assert found == Path(expected_root), (platform, environ)
+
+    unusable = (
+        {}, {"HOME": ""}, {"HOME": "relative/home"}, {"HOME": None},
+        {"XDG_CACHE_HOME": "", "HOME": ""},
+        {"XDG_CACHE_HOME": "relative", "HOME": "relative/home"},
+        {"LOCALAPPDATA": ""}, {"USERPROFILE": ""},
+        {"LOCALAPPDATA": "relative", "USERPROFILE": "relative"},
+        {"HOME": "/home/tester\x00"},
+    )
+    for platform in ("linux", "darwin", "win32"):
+        for environ in unusable:
+            assert source._default_cache_root(
+                platform=platform, environ=environ) is None, (platform,
+                                                              environ)
+    # no cwd/root/system-temp fallback is ever invented
+    with pytest.MonkeyPatch.context() as scope:
+        neutral = tmp_path / "neutral"
+        neutral.mkdir()
+        scope.chdir(neutral)
+        assert source._default_cache_root(
+            platform="linux", environ={}) is None
+        assert source._default_cache_root(
+            platform="linux", environ={"HOME": ""}) is None
+        assert list(neutral.iterdir()) == []
+    # the runtime default platform is the live one
+    if sys.platform == "darwin":
+        assert source._default_cache_root(
+            environ={"HOME": "/Users/tester"}) == \
+            Path("/Users/tester/Library/Caches/watchdog-catalog")
+    elif sys.platform == "win32":
+        assert source._default_cache_root(
+            environ={"LOCALAPPDATA": "C:/tester"}) == \
+            Path("C:/tester/watchdog-catalog")
+    else:
+        assert source._default_cache_root(
+            environ={"HOME": "/home/tester"}) == \
+            Path("/home/tester/.cache/watchdog-catalog")
+
+    # -- (j) a live default root round trips INSIDE scratch ------------------
+    home = tmp_path / "home"
+    home.mkdir()
+    with pytest.MonkeyPatch.context() as scope:
+        scope.chdir(neutral)
+        scope.setenv("HOME", str(home))
+        scope.delenv("XDG_CACHE_HOME", raising=False)
+        default_cache = source.DiskCache("url", url + "?default")
+        assert default_cache.path is not None
+        assert default_cache.path.is_absolute()
+        assert default_cache.path.parent == \
+            home / ".cache" / "watchdog-catalog"
+        assert not (home / ".cache").exists()
+        assert default_cache.store(basic, fetched_at=4) is True
+        assert default_cache.load()["snapshot"] == basic
+        assert list(neutral.iterdir()) == []
+        # an explicit root always wins over the platform default
+        explicit = source.DiskCache("url", url + "?default",
+                                    cache_dir=tmp_path / "explicit")
+        assert explicit.path.parent == tmp_path / "explicit"
+        assert explicit.path != default_cache.path
+    assert sorted(entry.name for entry in (home / ".cache").iterdir()) == [
+        "watchdog-catalog"]
+    assert list(neutral.iterdir()) == []
+
+
+def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
+    url = "https://example.test/catalog.json"
+    identity = _identity("url", url)
+    basic = _scratch_snapshot()
+    empty = _empty_snapshot()
+    root = tmp_path / "cache-root"
+    cache = source.DiskCache("url", url, cache_dir=root)
+
+    # -- (a) invalid configuration fails BEFORE any file/temp/replace step ---
+    hits = []
+
+    def forbidden(step):
+        def _fail(*args, **kwargs):
+            hits.append(step)
+            raise AssertionError(
+                "invalid configuration must not reach the filesystem")
+        return _fail
+
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source.os, "makedirs", forbidden("makedirs"))
+        scope.setattr(source.tempfile, "mkstemp", forbidden("mkstemp"))
+        scope.setattr(source.os, "fdopen", forbidden("fdopen"))
+        scope.setattr(source.os, "replace", forbidden("replace"))
+        scope.setattr(source, "open", forbidden("open"), raising=False)
+        for bad_kind in (None, 3, True, 3.5, b"url", bytearray(b"file"),
+                         object(), ["url"]):
+            with pytest.raises(TypeError) as excinfo:
+                source.DiskCache(bad_kind, url)
+            assert type(excinfo.value) is TypeError
+            assert str(excinfo.value) == CACHE_KIND_TYPE_ERROR
+            assert excinfo.value.__cause__ is None
+        for bad_kind in ("", "URL", "url ", "file ", "disk", "https"):
+            with pytest.raises(ValueError) as excinfo:
+                source.DiskCache(bad_kind, url)
+            assert type(excinfo.value) is ValueError
+            assert str(excinfo.value) == CACHE_KIND_VALUE_ERROR
+
+        for bad_location in ("",):
+            with pytest.raises(ValueError) as excinfo:
+                source.DiskCache("file", bad_location)
+            assert str(excinfo.value) == CACHE_LOCATION_ERROR
+        for bad_location in (None, 3, True, b"/tmp/catalog.json", object()):
+            with pytest.raises(TypeError) as excinfo:
+                source.DiskCache("file", bad_location)
+            assert str(excinfo.value) == PATH_TYPE_ERROR
+        with pytest.raises(ValueError) as excinfo:
+            source.DiskCache("url", "")
+        assert str(excinfo.value) == URL_VALUE_ERROR
+        with pytest.raises(TypeError) as excinfo:
+            source.DiskCache("url", b"https://example.test/x")
+        assert str(excinfo.value) == URL_TYPE_ERROR
+
+        for bad_dir in ("",):
+            with pytest.raises(ValueError) as excinfo:
+                source.DiskCache("url", url, cache_dir=bad_dir)
+            assert str(excinfo.value) == CACHE_DIR_ERROR
+        for bad_dir in (3, True, b"/tmp/cache", object()):
+            with pytest.raises(TypeError) as excinfo:
+                source.DiskCache("url", url, cache_dir=bad_dir)
+            assert str(excinfo.value) == PATH_TYPE_ERROR
+
+        inert = source.DiskCache("url", "https://example.test/inert.json",
+                                 cache_dir=root)
+        for bad_time in (None, True, False, -1, -0.5, "1700", [1],
+                         float("nan"), float("inf"), float("-inf"),
+                         catalog.MAX_SAFE_INT + 1, 1e300):
+            with pytest.raises(ValueError) as excinfo:
+                inert.store(basic, fetched_at=bad_time)
+            assert type(excinfo.value) is ValueError
+            assert str(excinfo.value) == FETCHED_AT_ERROR
+            assert "example.test" not in str(excinfo.value)
+
+        for bad_validator in (3, 1.5, True, b'W/"x"', [1], "",
+                              "a" * 1025, "bad\rvalue", "bad\nvalue",
+                              "bad\x00value", "bad\x7fvalue",
+                              "bad\x9bvalue", "bad\u0100value",
+                              "bad\r\nvalue"):
+            with pytest.raises(ValueError) as excinfo:
+                inert.store(basic, fetched_at=1, etag=bad_validator)
+            assert str(excinfo.value) == VALIDATOR_ERROR
+            with pytest.raises(ValueError) as excinfo:
+                inert.store(basic, fetched_at=1,
+                            last_modified=bad_validator)
+            assert str(excinfo.value) == VALIDATOR_ERROR
+
+        # a bad snapshot keeps its accepted core error
+        tampered = json.loads(json.dumps(basic))
+        tampered["snapshot_id"] = "0" * 64
+        future = json.loads(json.dumps(basic))
+        future["schema_version"] = 2
+        for bad_snapshot in (None, {}, [], "text", 3, tampered, future):
+            with pytest.raises(catalog.CatalogError) as excinfo:
+                inert.store(bad_snapshot, fetched_at=1)
+            assert not isinstance(excinfo.value, source.SourceError)
+            assert excinfo.value.code in (
+                catalog.INVALID_SNAPSHOT, catalog.UNSUPPORTED_SCHEMA_VERSION)
+        # nothing above touched mkdir/temp/wrapper-open/replace or an entry
+        assert hits == []
+        assert not (root / _entry_name("url",
+                                       "https://example.test/inert.json")
+                    ).exists()
+
+    # the accepted validator edges: 1024 printable characters, Latin-1 text
+    assert inert.store(basic, fetched_at=1, etag="a" * 1024,
+                       last_modified="Caf\u00e9 \u00ff") is True
+    assert inert.load()["etag"] == "a" * 1024
+    assert inert.load()["last_modified"] == "Caf\u00e9 \u00ff"
+
+    # -- (b) no safe default root: None path, misses, strict False -----------
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "_default_cache_root", lambda: None)
+        rootless = source.DiskCache("url", url + "?rootless")
+        assert rootless.path is None
+        assert rootless.load() is None
+        assert rootless.store(basic, fetched_at=1) is False
+    if os.name == "posix":
+        with pytest.MonkeyPatch.context() as scope:
+            scope.setenv("HOME", "")
+            scope.delenv("XDG_CACHE_HOME", raising=False)
+            assert source._default_cache_root() is None
+            empty_home = source.DiskCache("url", url + "?empty-home")
+            assert empty_home.path is None
+            assert empty_home.store(basic, fetched_at=1) is False
+            assert empty_home.load() is None
+
+    # an unusable root (a regular FILE where the directory must be) is a
+    # strict False/None, never an exception and never a cwd write
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("file", encoding="utf-8")
+    blocked = source.DiskCache("url", url + "?blocked",
+                               cache_dir=blocker / "below")
+    assert blocked.path is not None
+    assert blocked.store(basic, fetched_at=8) is False
+    assert blocked.load() is None
+    assert blocker.read_text(encoding="utf-8") == "file"
+
+    # -- (c) a MISS is never a healthy empty catalogue, and never deleted ----
+    assert cache.store(basic, fetched_at=1700000000) is True
+    good_bytes = cache.path.read_bytes()
+    base_text = good_bytes.decode("utf-8")
+    truncated = good_bytes[:-24]
+    duplicate = ('{"cache_version": 1, ' + base_text[1:]).encode("utf-8")
+    non_finite = base_text.replace(
+        '"fetched_at":1700000000', '"fetched_at":1e999').encode("utf-8")
+    bad_version = catalog.canonical_bytes(_cache_document(
+        basic, identity=identity, version=2))
+    float_version = catalog.canonical_bytes(_cache_document(
+        basic, identity=identity, version=1.0))
+    bool_version = catalog.canonical_bytes(_cache_document(
+        basic, identity=identity, version=True))
+    text_version = catalog.canonical_bytes(_cache_document(
+        basic, identity=identity, version="1"))
+    missing_key = _cache_document(basic, identity=identity)
+    del missing_key["etag"]
+    extra_key = _cache_document(basic, identity=identity)
+    extra_key["observation_epoch"] = 1
+    wrong_source = _cache_document(
+        basic, identity=_identity("url", "https://example.test/impostor.json"))
+    wrong_mode = _cache_document(
+        basic, identity=_identity("file", os.path.abspath(url)))
+    sparse_source = _cache_document(basic, identity={"kind": "url"})
+    extra_identity = _cache_document(
+        basic, identity={"kind": "url", "location": url, "etag": "x"})
+    negative_time = _cache_document(basic, identity=identity, fetched_at=-1)
+    text_time = _cache_document(basic, identity=identity, fetched_at="1")
+    bad_etag = _cache_document(basic, identity=identity, etag="a\r\nb")
+    newer_schema = _scratch_snapshot()
+    newer_schema["schema_version"] = 2
+    bad_hash = json.loads(json.dumps(basic))
+    bad_hash["snapshot_id"] = "0" * 64
+
+    corrupt = {
+        "empty": b"",
+        "whitespace": b"   \n\t",
+        "truncated": truncated,
+        "duplicate-keys": duplicate,
+        "non-finite": non_finite,
+        "bom": b"\xef\xbb\xbf" + good_bytes,
+        "invalid-utf8": b'{"cache_version": 1, "source": {"kind": "url", '
+                        b'"location": "\xff\xfe"}}',
+        "not-an-object": b"[]",
+        "null-root": b"null",
+        "cache-version-2": bad_version,
+        "cache-version-float": float_version,
+        "cache-version-bool": bool_version,
+        "cache-version-text": text_version,
+        "missing-key": catalog.canonical_bytes(missing_key),
+        "extra-key": catalog.canonical_bytes(extra_key),
+        "wrong-source": catalog.canonical_bytes(wrong_source),
+        "wrong-mode": catalog.canonical_bytes(wrong_mode),
+        "sparse-source": catalog.canonical_bytes(sparse_source),
+        "extra-identity": catalog.canonical_bytes(extra_identity),
+        "negative-fetch-time": catalog.canonical_bytes(negative_time),
+        "text-fetch-time": catalog.canonical_bytes(text_time),
+        "bad-etag": catalog.canonical_bytes(bad_etag),
+        "unsupported-schema": catalog.canonical_bytes(
+            _cache_document(newer_schema, identity=identity)),
+        "invalid-snapshot-hash": catalog.canonical_bytes(
+            _cache_document(bad_hash, identity=identity)),
+        "snapshot-not-object": catalog.canonical_bytes(
+            _cache_document(None, identity=identity)),
+    }
+    for label, payload in corrupt.items():
+        assert payload != good_bytes, label
+        cache.path.write_bytes(payload)
+        assert cache.load() is None, label
+        # never deleted, repaired or rewritten
+        assert cache.path.read_bytes() == payload, label
+
+    # -- (d) an unreadable entry is the same quiet MISS ----------------------
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "open",
+                      lambda *a, **k: (_ for _ in ()).throw(
+                          OSError(13, "Permission denied")), raising=False)
+        assert cache.load() is None
+
+        class _ReadFault:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+            def read(self, size):
+                assert size == source._MAX_CACHE_BYTES + 1
+                raise OSError(5, "I/O error")
+        scope.setattr(source, "open", lambda *a, **k: _ReadFault(),
+                      raising=False)
+        assert cache.load() is None
+    cache.path.unlink()
+    assert cache.load() is None          # absent entry
+
+    # -- (e) the ENTRY byte bound is real, on the reader and the writer ------
+    bound = source._MAX_CACHE_BYTES
+    assert bound == 4 * source.MAX_SOURCE_BYTES
+    at_bound = good_bytes + b" " * (bound - len(good_bytes))
+    assert len(at_bound) == bound
+    cache.path.write_bytes(at_bound)
+    assert cache.load()["snapshot"] == basic      # exactly at the bound
+    cache.path.write_bytes(at_bound + b" ")
+    assert cache.load() is None                   # one byte past the bound
+    cache.path.write_bytes(b"x" * (bound + 1))
+    assert cache.load() is None
+    cache.path.unlink()
+
+    # -- (f) injected persistence faults: last-good survives, no leaks ------
+    class _FaultHandle:
+        """The real staged handle with ONE named step failing."""
+
+        def __init__(self, handle, step, error):
+            self.handle = handle
+            self._step = step
+            self._error = error
+            self.closed = 0
+
+        def write(self, data):
+            if self._step == "write":
+                raise self._error
+            return self.handle.write(data)
+
+        def flush(self):
+            if self._step == "flush":
+                raise self._error
+            return self.handle.flush()
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def close(self):
+            self.closed += 1
+            self.handle.close()
+            if self._step == "close":
+                raise self._error
+
+    def install(scope, step, error):
+        seen = {"fds": [], "handles": []}
+
+        def raising(raised):
+            def _fail(*args, **kwargs):
+                raise raised
+            return _fail
+
+        if step == "makedirs":
+            scope.setattr(source.os, "makedirs", raising(error))
+        elif step == "mkstemp":
+            scope.setattr(source.tempfile, "mkstemp", raising(error))
+        elif step == "fdopen":
+            def fdopen(fd, *args, **kwargs):
+                seen["fds"].append(fd)
+                raise error
+            scope.setattr(source.os, "fdopen", fdopen)
+        elif step in ("write", "flush", "close"):
+            real_fdopen = os.fdopen
+
+            def fdopen(fd, *args, **kwargs):
+                wrapper = _FaultHandle(
+                    real_fdopen(fd, *args, **kwargs), step, error)
+                seen["handles"].append(wrapper)
+                return wrapper
+            scope.setattr(source.os, "fdopen", fdopen)
+        elif step == "fsync":
+            scope.setattr(source.os, "fsync", raising(error))
+        else:
+            scope.setattr(source.os, "replace", raising(error))
+        return seen
+
+    error = OSError(28, "No space left on device")
+    for step in ("makedirs", "mkstemp", "fdopen", "write", "flush", "fsync",
+                 "close", "replace"):
+        fault_root = tmp_path / ("fault-" + step)
+        target = source.DiskCache("url", url, cache_dir=fault_root)
+        unrelated = fault_root / "unrelated.txt"
+
+        # (i) no previous entry at all
+        with pytest.MonkeyPatch.context() as scope:
+            seen = install(scope, step, error)
+            assert target.store(basic, fetched_at=5) is False
+            if step == "fdopen":
+                assert seen["fds"]
+                for descriptor in seen["fds"]:
+                    with pytest.raises(OSError):
+                        os.fstat(descriptor)     # our own fd was closed
+            for wrapper in seen["handles"]:
+                assert wrapper.closed >= 1
+                assert wrapper.handle.closed
+        assert not target.path.exists()
+        if fault_root.exists():
+            assert _temp_leftovers(fault_root) == []
+
+        # (ii) a pre-existing last-good entry and an unrelated neighbour
+        fault_root.mkdir(parents=True, exist_ok=True)
+        unrelated.write_text("keep me", encoding="utf-8")
+        assert target.store(basic, fetched_at=5) is True
+        good = target.path.read_bytes()
+        with pytest.MonkeyPatch.context() as scope:
+            install(scope, step, error)
+            assert target.store(empty, fetched_at=6) is False
+        assert target.path.read_bytes() == good       # last-good untouched
+        assert target.load()["snapshot"] == basic
+        assert unrelated.read_text(encoding="utf-8") == "keep me"
+        assert _temp_leftovers(fault_root) == []
+        assert sorted(entry.name for entry in fault_root.iterdir()) == [
+            target.path.name, "unrelated.txt"]
+
+    # a failed store never reports success for an entry the reader rejects
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "_MAX_CACHE_BYTES", 1)
+        assert target.store(empty, fetched_at=7) is False
+    assert target.path.read_bytes() == good
+
+    # -- (g) two concurrent writers: distinct temps, ONE whole record --------
+    concurrent_root = tmp_path / "concurrent"
+    writers = tuple(source.DiskCache("url", url, cache_dir=concurrent_root)
+                    for _ in range(2))
+    staged = []
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        staged.append(name)
+        return descriptor, name
+
+    results = {}
+    barrier = threading.Barrier(2, timeout=10)
+
+    def writer(label, snapshot, base_time):
+        barrier.wait()
+        results[label] = [writers[0].store(snapshot, fetched_at=base_time + i,
+                                           etag="%s-%d" % (label, i))
+                          for i in range(8)]
+
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source.tempfile, "mkstemp", recording_mkstemp)
+        threads = (
+            threading.Thread(target=writer, args=("alpha", basic, 1000),
+                             daemon=True),
+            threading.Thread(target=writer, args=("beta", empty, 2000),
+                             daemon=True),
+        )
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(20)
+            assert not thread.is_alive()
+    assert results == {"alpha": [True] * 8, "beta": [True] * 8}
+    assert len(staged) == 16
+    assert len(set(staged)) == len(staged)             # unique temp names
+    assert {Path(name).parent for name in staged} == {concurrent_root}
+    assert not any(name.endswith(".json") for name in staged)
+
+    final = writers[1].load()
+    assert final is not None
+    assert set(final) == CACHE_ENTRY_FIELDS
+    if final["snapshot"] == basic:
+        assert final["snapshot"]["snapshot_id"] == basic["snapshot_id"]
+        assert 1000 <= final["fetched_at"] <= 1007
+        assert final["etag"].startswith("alpha-")
+    else:
+        assert final["snapshot"]["snapshot_id"] == empty["snapshot_id"]
+        assert 2000 <= final["fetched_at"] <= 2007
+        assert final["etag"].startswith("beta-")
+    assert catalog.snapshot_hash(final["snapshot"]) == \
+        final["snapshot"]["snapshot_id"]
+    assert _temp_leftovers(concurrent_root) == []
+    assert sorted(entry.name for entry in concurrent_root.iterdir()) == [
+        writers[0].path.name]

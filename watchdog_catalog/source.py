@@ -61,23 +61,53 @@ Configuration TYPE errors are programming errors (:class:`TypeError` /
 source fault is the fixed, non-reflective :class:`SourceError` with code
 ``source_unavailable``. No failure ever yields an invented empty catalogue.
 
+Disk cache:
+
+* :class:`DiskCache` persists ONE validated record per source under a
+  source-scoped filename -- the SHA-256 of the canonical ``{kind, location}``
+  identity -- so distinct selections, and the URL and file modes, can never
+  share data accidentally and a raw location never reaches a filename;
+* the record is the version-1 envelope ``cache_version``, ``source``,
+  ``fetched_at``, ``etag``, ``last_modified`` and ``snapshot``. A load
+  re-verifies that envelope, the embedded source identity and the FULL accepted
+  snapshot (schema and body hash), so an unreadable, oversized, corrupt,
+  wrong-source, wrong-version or unsupported-schema record is a MISS -- never a
+  healthy empty catalogue -- and a legitimately empty snapshot stays a hit;
+* writes are atomic: one securely created unique temp in the SAME directory as
+  the final entry, written/flushed/fsynced/closed, then ``os.replace``d over
+  it. A cache fault (including an unavailable or unwritable root) is a strict
+  ``False`` from :meth:`DiskCache.store`, never a catalogue success or
+  failure: optional persistence cannot invalidate a freshly validated snapshot;
+* the root is an explicit ``cache_dir`` or the platform default from
+  :func:`_default_cache_root` (XDG/HOME on Unix, ``Library/Caches`` on macOS,
+  ``LOCALAPPDATA``/``USERPROFILE`` on Windows). No safe root means the disk
+  cache is simply unavailable -- cwd, the filesystem root, the system temp
+  directory and the project checkout are never invented as fallbacks.
+
 Importing this module performs no file, environment, clock or network access.
-Calling :func:`load_catalog_file` reads only the named file; calling
-:func:`load_catalog_url` performs only its one GET. Neither writes, consults or
+Calling :func:`load_catalog_file` reads only the named file and calling
+:func:`load_catalog_url` performs only its one GET; neither consults, writes or
 creates a cache, falls back to another source, retries or reads a clock beyond
-the socket timeout. Cache, conditional GET, fallback/freshness wrappers, source
-metadata envelopes, observation/fetch stamping, CLI wiring, async dispatch and
+the socket timeout. :class:`DiskCache` reads and writes only its own entry and
+never fetches, retries, infers freshness, reseals a snapshot or reads a clock.
+Conditional GET, last-good/warning/freshness envelopes, async dispatch and
 coalesced refresh belong to later units and are deliberately absent.
 """
 
 from __future__ import annotations
 
+import hashlib
 import http.client
+import ntpath
 import os
+import posixpath
 import ssl
+import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from . import catalog as _catalog
 
@@ -424,3 +454,411 @@ def load_catalog_url(url=DEFAULT_CATALOG_URL, *, timeout_s=DEFAULT_TIMEOUT_S,
     except UnicodeDecodeError:
         raise _catalog.CatalogError(_catalog.INVALID_JSON) from None
     return _catalog.load_snapshot(text)
+
+
+# ---------------------------------------------------------------------------
+# Source-scoped validated disk cache (unit 5c)
+# ---------------------------------------------------------------------------
+#
+# One cache ENTRY per selected source. The entry is the version-1 envelope
+# `cache_version, source, fetched_at, etag, last_modified, snapshot`; the
+# snapshot is the complete accepted document, never a projection, and a load
+# re-verifies the envelope, the embedded identity and the FULL accepted
+# snapshot. Everything here is optional persistence: a cache fault is a MISS or
+# a strict `False` from `store`, never a catalogue result.
+
+#: Inclusive byte bound for one serialized cache ENTRY. Deliberately wider than
+#: one direct source document, because an entry carries its snapshot plus
+#: envelope metadata and canonical encoding overhead. This is an internal
+#: reader/writer bound, not a new CLI knob.
+_MAX_CACHE_BYTES = 4 * MAX_SOURCE_BYTES
+
+#: The one cache document version this module writes and accepts.
+_CACHE_VERSION = 1
+_CACHE_KINDS = ("url", "file")
+_CACHE_APP_DIR = "watchdog-catalog"
+_CACHE_SUFFIX = ".json"
+_CACHE_TEMP_PREFIX = ".watchdog-catalog-"
+_CACHE_TEMP_SUFFIX = ".tmp"
+
+#: Documented inclusive character bound for a stored ``ETag``/``Last-Modified``
+#: validator. Real validators are tens of characters; the bound keeps one
+#: record's metadata from being an unbounded string.
+_MAX_VALIDATOR_CHARS = 1024
+
+_ENTRY_FIELDS = frozenset({"cache_version", "source", "fetched_at", "etag",
+                           "last_modified", "snapshot"})
+_IDENTITY_FIELDS = frozenset({"kind", "location"})
+
+_CACHE_KIND_TYPE_ERROR = "DiskCache() requires a cache kind string"
+_CACHE_KIND_VALUE_ERROR = 'DiskCache() requires kind "url" or "file"'
+_CACHE_LOCATION_ERROR = "DiskCache() requires a non-empty file source path"
+_CACHE_DIR_ERROR = "DiskCache() requires a non-empty cache directory path"
+_FETCHED_AT_ERROR = (
+    "DiskCache.store() requires a finite non-negative fetch time")
+_VALIDATOR_ERROR = (
+    "DiskCache.store() requires etag and last_modified to be HTTP header "
+    "values or None")
+
+
+def _is_strict_int(value):
+    """A native JSON integer: a ``bool`` is never an integer here."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _valid_fetch_time(value):
+    """Whether ``value`` is a caller-supplied fetch time.
+
+    A finite, non-negative native ``int``/``float`` inside
+    :data:`~watchdog_catalog.catalog.MAX_SAFE_INT`, with ``bool`` excluded. A
+    FUTURE value is accepted exactly as given: this predicate never compares
+    the value against a clock, so "fetched in the future" stays the caller's
+    statement rather than a cache-layer repair.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return 0 <= value <= _catalog.MAX_SAFE_INT
+    if isinstance(value, float):
+        # NaN fails both comparisons; +/-infinity fails the upper bound.
+        return 0 <= value <= _catalog.MAX_SAFE_INT
+    return False
+
+
+def _valid_header_validator(value):
+    """Whether ``value`` is storable as an ``ETag``/``Last-Modified`` value.
+
+    ``None`` (unknown) and a string of 1..:data:`_MAX_VALIDATOR_CHARS`
+    characters are accepted; the string is preserved LITERALLY (no trim, case
+    fold, quoting or unquoting). Every character must be printable ASCII
+    (``U+0020``..``U+007E``) or printable Latin-1 (``U+00A0``..``U+00FF``),
+    which rejects CR, LF, every C0/C1 control, DEL and anything an HTTP header
+    field value could not carry.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    if not value or len(value) > _MAX_VALIDATOR_CHARS:
+        return False
+    for character in value:
+        code = ord(character)
+        if not (0x20 <= code <= 0x7E or 0xA0 <= code <= 0xFF):
+            return False
+    return True
+
+
+def _absolute_default(value, *, windows):
+    """One absolute default base, or ``None`` when it is unusable.
+
+    Missing, empty, NUL-bearing and RELATIVE values are ignored rather than
+    anchored to the current directory, so no default ever writes into cwd. A
+    foreign-platform base is checked purely LEXICALLY (``ntpath`` for Windows,
+    ``posixpath`` elsewhere); nothing is opened, statted or resolved.
+    """
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    if windows:
+        drive, _ = ntpath.splitdrive(value)
+        # A drive-relative "C:foo" or a bare rooted "\foo" is not absolute.
+        if not drive or not ntpath.isabs(value):
+            return None
+        return value
+    if not posixpath.isabs(value):
+        return None
+    return value
+
+
+def _default_cache_root(*, platform=None, environ=None):
+    """The platform default cache root, or ``None`` when none is safe.
+
+    Pure: it reads the supplied ``platform``/``environ`` (the live
+    ``sys.platform``/``os.environ`` by default) only when CALLED, and never
+    creates, stats, reads or resolves a file. The app directory is
+    :data:`_CACHE_APP_DIR`, placed under
+
+    * Unix: an absolute non-empty ``XDG_CACHE_HOME``, else an absolute
+      non-empty ``HOME`` with ``/.cache``;
+    * macOS: ``HOME/Library/Caches``;
+    * Windows: an absolute ``LOCALAPPDATA``, else
+      ``USERPROFILE/AppData/Local``.
+
+    A missing, empty, relative or otherwise unusable base yields ``None`` --
+    disk caching is simply unavailable. cwd, the filesystem root, the system
+    temp directory and the project checkout are NEVER invented as fallbacks,
+    because a silent cwd write is exactly the accident this default must not
+    cause.
+    """
+    system = sys.platform if platform is None else platform
+    values = os.environ if environ is None else environ
+    if not isinstance(system, str) or values is None:
+        return None
+    if system == "darwin":
+        home = _absolute_default(values.get("HOME"), windows=False)
+        if home is None:
+            return None
+        return Path(posixpath.join(home, "Library", "Caches", _CACHE_APP_DIR))
+    if system == "win32":
+        local = _absolute_default(values.get("LOCALAPPDATA"), windows=True)
+        if local is not None:
+            return Path(posixpath.join(local, _CACHE_APP_DIR))
+        profile = _absolute_default(values.get("USERPROFILE"), windows=True)
+        if profile is None:
+            return None
+        return Path(posixpath.join(profile, "AppData", "Local",
+                                   _CACHE_APP_DIR))
+    # Every other platform is treated as Unix (the XDG base-directory rule).
+    xdg = _absolute_default(values.get("XDG_CACHE_HOME"), windows=False)
+    if xdg is not None:
+        return Path(posixpath.join(xdg, _CACHE_APP_DIR))
+    home = _absolute_default(values.get("HOME"), windows=False)
+    if home is None:
+        return None
+    return Path(posixpath.join(home, ".cache", _CACHE_APP_DIR))
+
+
+class DiskCache:
+    """One source-scoped, validated, atomically replaced disk-cache entry.
+
+    ``kind`` is exactly ``"url"`` or ``"file"``. A URL ``location`` is accepted
+    under the SAME literal policy as :func:`_selected_url` (no trimming,
+    repair, scheme upgrade or substitution) and its text stays literal. A file
+    ``location`` is a non-empty path string/PathLike whose LEXICAL absolute
+    path is frozen at construction -- no tilde or environment expansion and no
+    symlink resolution -- so a later ``chdir`` cannot redirect the entry.
+    :func:`load_catalog_file`'s literal selected-path behaviour is untouched:
+    this normalization exists only to scope a cache entry.
+
+    The source identity is exactly ``{"kind": ..., "location": ...}`` and the
+    entry filename is the SHA-256 of its accepted canonical bytes plus
+    ``.json``. Raw locations therefore never appear in a filename, and distinct
+    selections -- including the URL and file modes -- cannot share data
+    accidentally. ``cache_dir`` is an explicit non-empty root (a relative
+    override is anchored absolutely here); without one
+    :func:`_default_cache_root` supplies the platform root. ``path`` is the
+    absolute native entry path, or ``None`` when no safe root exists.
+
+    Construction performs NO source/cache read, network access, environment
+    mutation or directory creation. :meth:`load` is a strict read returning a
+    freshly decoded validated entry or ``None``; :meth:`store` is the only
+    writer. This class never fetches, falls back, retries, reseals a snapshot,
+    infers freshness or reads a clock, and a cache fault is never an empty
+    catalogue.
+    """
+
+    def __init__(self, kind, location, *, cache_dir=None):
+        if not isinstance(kind, str):
+            raise TypeError(_CACHE_KIND_TYPE_ERROR)
+        if kind not in _CACHE_KINDS:
+            raise ValueError(_CACHE_KIND_VALUE_ERROR)
+        if kind == "url":
+            selected = _selected_url(location)
+        else:
+            selected = _selected_path(location)
+            if not selected:
+                raise ValueError(_CACHE_LOCATION_ERROR)
+            # Lexical absolute freeze: no expansion, no realpath.
+            selected = os.path.abspath(selected)
+        if cache_dir is None:
+            root = _default_cache_root()
+        else:
+            override = _selected_path(cache_dir)
+            if not override:
+                raise ValueError(_CACHE_DIR_ERROR)
+            root = os.path.abspath(override)
+        self.kind = kind
+        self.location = selected
+        self._identity = {"kind": kind, "location": selected}
+        if root is None:
+            self.path = None
+        else:
+            digest = hashlib.sha256(
+                _catalog.canonical_bytes(self._identity)).hexdigest()
+            self.path = Path(root) / (digest + _CACHE_SUFFIX)
+
+    # -- read -------------------------------------------------------------
+
+    def load(self):
+        """The validated cache entry, or ``None`` for a MISS.
+
+        The entry is read with a real ``_MAX_CACHE_BYTES + 1`` byte cap and
+        decoded by the accepted :func:`watchdog_catalog.catalog.load_json`
+        (strict UTF-8, duplicate-key/number/depth/BOM truth) and
+        :func:`watchdog_catalog.catalog.validate_snapshot` (full schema and
+        body-hash truth). The cache version, the embedded source identity and
+        the fetch metadata are re-verified on EVERY load, so a wrong-source,
+        wrong-version, unsupported-schema, corrupt, truncated or oversized
+        record is a miss even when its filename is correct.
+
+        A miss is never an empty catalogue: an absent, unreadable or invalid
+        entry is not evidence of zero providers. Nothing on disk is deleted,
+        repaired or rewritten, and a legitimately EMPTY validated snapshot is a
+        HIT. Every returned container is freshly decoded, so caller mutation
+        cannot poison a later load.
+        """
+        path = self.path
+        if path is None:
+            return None
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read(_MAX_CACHE_BYTES + 1)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(raw, bytes) or len(raw) > _MAX_CACHE_BYTES:
+            return None
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        try:
+            entry = _catalog.load_json(text)
+        except _catalog.CatalogError:
+            return None
+        if not self._valid_entry(entry):
+            return None
+        return entry
+
+    def _valid_entry(self, entry):
+        """Whether one decoded document is a valid record for THIS source."""
+        if not isinstance(entry, dict) or set(entry) != _ENTRY_FIELDS:
+            return False
+        version = entry["cache_version"]
+        if not _is_strict_int(version) or version != _CACHE_VERSION:
+            return False
+        identity = entry["source"]
+        if not isinstance(identity, dict) or \
+                set(identity) != _IDENTITY_FIELDS:
+            return False
+        # A record copied into the RIGHT filename is still a miss when it says
+        # it belongs to another source: the filename is not the identity.
+        if identity != self._identity:
+            return False
+        if not _valid_fetch_time(entry["fetched_at"]):
+            return False
+        if not _valid_header_validator(entry["etag"]):
+            return False
+        if not _valid_header_validator(entry["last_modified"]):
+            return False
+        try:
+            _catalog.validate_snapshot(entry["snapshot"])
+        except _catalog.CatalogError:
+            return False
+        return True
+
+    # -- write ------------------------------------------------------------
+
+    def store(self, snapshot, *, fetched_at, etag=None, last_modified=None):
+        """Validate and atomically persist ONE cache entry for this source.
+
+        ``snapshot`` must be a complete accepted snapshot and is never mutated,
+        resealed, repaired or merged: it is detached by encoding the whole
+        entry to stable bytes BEFORE any directory, temp or final write.
+        ``fetched_at`` is the caller's fetch time and is preserved exactly
+        (including a future value); ``etag``/``last_modified`` are optional
+        literal validators.
+
+        Returns a strict ``bool``: ``True`` only for a completed atomic
+        replacement, ``False`` whenever the cache is unavailable or unwritable,
+        the record would exceed :data:`_MAX_CACHE_BYTES`, or a normal cache I/O
+        step (mkdir/temp/write/flush/fsync/close/replace) failed. ``False`` is
+        optional-persistence failure only -- it never invalidates an otherwise
+        valid freshly fetched snapshot, and the caller owns every
+        warning/fallback decision.
+
+        An invalid snapshot raises its accepted core
+        :class:`~watchdog_catalog.catalog.CatalogError`; invalid ``fetched_at``
+        or validator metadata raises one fixed non-reflective ``ValueError``.
+        Both fail before any filesystem access.
+        """
+        validated = _catalog.validate_snapshot(snapshot)
+        if not _valid_fetch_time(fetched_at):
+            raise ValueError(_FETCHED_AT_ERROR)
+        if not _valid_header_validator(etag) or \
+                not _valid_header_validator(last_modified):
+            raise ValueError(_VALIDATOR_ERROR)
+        entry = {
+            "cache_version": _CACHE_VERSION,
+            "source": dict(self._identity),
+            "fetched_at": fetched_at,
+            "etag": etag,
+            "last_modified": last_modified,
+            "snapshot": validated,
+        }
+        payload = _catalog.canonical_bytes(entry)
+        if len(payload) > _MAX_CACHE_BYTES:
+            # The writer never reports success for an entry its own reader
+            # would refuse.
+            return False
+        path = self.path
+        if path is None:
+            return False
+        return self._replace(path, payload)
+
+    @staticmethod
+    def _replace(path, payload):
+        """Stage ``payload`` beside ``path`` and atomically replace ``path``.
+
+        The temp entry is securely created with a unique name in the SAME
+        directory as the final entry -- never a fixed name and never the global
+        temp directory -- then written, flushed, fsynced and closed before
+        ``os.replace`` publishes it, so every visible entry is one whole valid
+        record with matching metadata. Ownership of the descriptor and the temp
+        path starts at creation: a wrapper-open/write/flush/fsync/close/replace
+        fault closes what THIS invocation opened, removes only THIS
+        invocation's temp, leaves the last-good final untouched and returns
+        ``False``.
+
+        No rollback deletion of the final, no directory removal, no locking and
+        no power-loss/directory-fsync durability claim: the last COMPLETED
+        concurrent valid replacement wins.
+        """
+        directory = path.parent
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError:
+            return False
+        descriptor = None
+        handle = None
+        temp_path = None
+        try:
+            try:
+                descriptor, temp_path = tempfile.mkstemp(
+                    dir=str(directory), prefix=_CACHE_TEMP_PREFIX,
+                    suffix=_CACHE_TEMP_SUFFIX)
+            except OSError:
+                return False
+            try:
+                handle = os.fdopen(descriptor, "wb")
+            except (OSError, ValueError):
+                return False
+            descriptor = None            # the handle owns the descriptor now
+            try:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                handle.close()
+                handle = None
+            except (OSError, ValueError):
+                return False
+            try:
+                os.replace(temp_path, path)
+            except OSError:
+                return False
+            temp_path = None             # published: nothing left to clean
+            return True
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:  # noqa: BLE001 - never masks the result
+                    pass
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if temp_path is not None:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
