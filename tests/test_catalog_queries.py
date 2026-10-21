@@ -4779,3 +4779,729 @@ def test_search_supported_parameter_pairs_and_cross_provider_controls():
                    input_modalities=["image"],
                    supported_parameters=["temperature"]) == [("keep", borrow_id)]
     assert borrow_snapshot == borrow_before
+
+
+# ---------- public metadata search: pipeline, pagination, counts (3e) ----------
+#
+# `watchdog_catalog.query.search_models(snapshot, arguments)` is the PUBLIC pure
+# assembled search: it validates the WHOLE decoded argument object against the
+# frozen tool contract, composes the four accepted internal stages in order,
+# then counts, slices and projects the page. The literal success corpus is the
+# INDEPENDENTLY authored `cases.json` `search_models` rows; the argument corpus
+# is the frozen `argument-cases.json` table plus compact programmatic rows. No
+# expectation below is derived from this implementation.
+
+SEARCH_GOLDEN_DOC = FIXTURE_DIR / "cases.json"
+SEARCH_ARGUMENT_DOC = FIXTURE_DIR / "argument-cases.json"
+
+SEARCH_PAYLOAD_FIELDS = frozenset({
+    "ok", "query", "filters", "limit", "offset", "snapshot_id", "tick_epoch",
+    "provider_staleness", "endpoints", "total_matches", "returned_count",
+    "next_offset", "counts", "caveats",
+})
+SEARCH_FILTER_ECHO_FIELDS = frozenset({
+    "provider", "min_context_length", "input_modalities",
+    "supported_parameters",
+})
+SEARCH_ROW_FIELDS = frozenset({
+    "provider", "model_id", "chat_completions_url", "api_type", "stale",
+    "name", "description", "context_length", "input_modalities",
+    "output_modalities", "supported_parameters", "unknown_fields", "metadata",
+})
+SEARCH_PAGE_COUNT_FIELDS = frozenset({
+    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
+})
+# The frozen absence caveat literal, pinned independently of the module.
+SEARCH_ABSENCE_CAVEAT = (
+    "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a "
+    "missing exact id does NOT prove the model is unavailable there."
+)
+
+
+def _assert_search_strict_types(result, cid):
+    """Exact payload/row field sets plus strict scalar types. Deep equality
+    alone cannot distinguish ``1.0``/``True`` from a strict integer count."""
+    assert type(result) is dict, cid
+    assert set(result) == SEARCH_PAYLOAD_FIELDS, cid
+    assert type(result["ok"]) is bool and result["ok"] is True, cid
+    assert type(result["filters"]) is dict, cid
+    assert set(result["filters"]) == SEARCH_FILTER_ECHO_FIELDS, cid
+    assert type(result["provider_staleness"]) is dict, cid
+    assert type(result["endpoints"]) is list, cid
+    assert type(result["caveats"]) is list, cid
+    assert type(result["counts"]) is dict, cid
+    assert set(result["counts"]) == SEARCH_PAGE_COUNT_FIELDS, cid
+    for name in ("limit", "offset", "total_matches", "returned_count"):
+        assert type(result[name]) is int, (cid, name, type(result[name]))
+        assert result[name] >= 0, (cid, name)
+    if result["next_offset"] is not None:
+        assert type(result["next_offset"]) is int, cid
+        assert result["next_offset"] >= 0, cid
+    for name, value in result["counts"].items():
+        assert type(value) is int, (cid, name, type(value))
+        assert value >= 0, (cid, name)
+    for name, value in result["provider_staleness"].items():
+        assert type(name) is str and type(value) is bool, (cid, name)
+    for row in result["endpoints"]:
+        assert type(row) is dict and set(row) == SEARCH_ROW_FIELDS, cid
+        assert type(row["stale"]) is bool, cid
+        assert type(row["provider"]) is str, cid
+        assert type(row["model_id"]) is str, cid
+        assert row["context_length"] is None or \
+            type(row["context_length"]) is int, cid
+        assert type(row["metadata"]) is dict, cid
+        assert row["metadata"]["context_length"] is None or \
+            type(row["metadata"]["context_length"]) is int, cid
+        assert type(row["unknown_fields"]) is list, cid
+        for name in ("input_modalities", "output_modalities",
+                     "supported_parameters", "unknown_fields"):
+            assert row[name] is None or type(row[name]) is list, (cid, name)
+    assert all(type(caveat) is str for caveat in result["caveats"]), cid
+
+
+def test_search_models_success_goldens_match_every_literal_case():
+    """All 29 frozen `search_models` goldens reproduce EXACTLY -- the whole
+    runtime payload compared to the stored independent `expect` (never a
+    runtime-derived or truncated projection), with exact field sets, strict
+    scalar types, raw filter echoes, fixture overrides honored through the real
+    `catalog.load_snapshot`, and unchanged inputs."""
+    from watchdog_catalog.query import search_models
+
+    doc = _decode_doc(SEARCH_GOLDEN_DOC)
+    cases = [case for case in doc["cases"] if case["tool"] == "search_models"]
+    assert len(cases) == 29, len(cases)
+    assert len({case["id"] for case in cases}) == 29
+
+    for case in cases:
+        cid = case["id"]
+        fixture = case.get("fixture", doc["fixture"])
+        snapshot = _validated_snapshot(fixture)
+        snapshot_before = copy.deepcopy(snapshot)
+        args = copy.deepcopy(case["args"])
+        args_before = copy.deepcopy(args)
+        expect = case["expect"]
+
+        result = search_models(snapshot, args)
+
+        # The ENTIRE payload equals the independent stored fixture payload.
+        assert result == expect, cid
+        _assert_search_strict_types(result, cid)
+        _assert_search_strict_types(expect, cid)
+
+        # Raw query echo, never trimmed or normalized, omission -> null.
+        assert result["query"] == args.get("query"), cid
+        # Raw filter echoes: casing/order/duplicates/[] versus null preserved,
+        # and a supplied array is COPIED rather than aliased.
+        for name in ("provider", "min_context_length", "input_modalities",
+                     "supported_parameters"):
+            assert result["filters"][name] == args.get(name), (cid, name)
+            if isinstance(args.get(name), list):
+                assert result["filters"][name] is not args[name], (cid, name)
+        # The caveat literal is the accepted frozen tuple, freshly listed.
+        assert result["caveats"] == [SEARCH_ABSENCE_CAVEAT], cid
+        # Pagination echo is the effective strict int, never the raw float.
+        assert result["limit"] == args.get("limit", 50), cid
+        assert result["offset"] == args.get("offset", 0), cid
+        # Provenance mirrors the consumed snapshot.
+        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
+        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
+        # Each row's metadata is THAT pair's complete projected model, a deep
+        # copy distinct from the snapshot object, with raw casing preserved.
+        for row in result["endpoints"]:
+            pair_model = snapshot["providers"][row["provider"]]["models"][
+                row["model_id"]]
+            assert row["metadata"] == pair_model, cid
+            assert row["metadata"] is not pair_model, cid
+            assert row["metadata"]["architecture"] is not \
+                pair_model["architecture"], cid
+
+        # Fresh, non-aliasing payload and untouched inputs.
+        assert result is not expect, cid
+        assert args == args_before, cid
+        assert snapshot == snapshot_before, cid
+        assert result["provider_staleness"] is not \
+            expect["provider_staleness"], cid
+        again = search_models(snapshot, copy.deepcopy(args))
+        assert again == expect, cid
+        again["caveats"].clear()
+        assert search_models(snapshot, copy.deepcopy(args)) == expect, cid
+
+
+# ---------- public metadata search: the whole argument boundary (3e) ----------
+#
+# The frozen `argument-cases.json` table is the independent acceptance
+# specification for `search_models`: 31 invalid rows carry the COMPLETE literal
+# envelope and 13 valid controls record acceptance only. The compact rows below
+# add every parameter's wrong-type, numeric-safety, array-shape and precedence
+# edge without re-authoring the table.
+
+SEARCH_MIN_CONTEXT_FIELD = "min_context_length"
+
+
+def test_search_models_argument_boundary_matches_literal_rows_and_rules(
+        monkeypatch):
+    """The 31 frozen invalid rows and 13 valid controls reproduce literally,
+    and compact rows pin non-object rejection, every parameter's wrong types
+    (both bools, numeric strings, fractions, huge native ints, NaN/Inf, unsafe
+    boundaries), integral-float acceptance with strict-int pagination echo,
+    array member validation versus []/padded/cased/duplicate/unmatched tokens,
+    exact provider case/padding/zero-ID/empty-registry rules, signature and
+    unknown-key precedence in BOTH insertion orders, fail-before-selection and
+    fresh non-reflecting errors."""
+    from watchdog_catalog.query import search_models
+
+    doc = _decode_doc(SEARCH_ARGUMENT_DOC)
+    invalid = [row for row in doc["invalid_cases"]
+               if row["tool"] == "search_models"]
+    valid = [row for row in doc["valid_controls"]
+             if row["tool"] == "search_models"]
+    assert len(invalid) == 31, len(invalid)
+    assert len(valid) == 13, len(valid)
+    assert len({row["id"] for row in invalid + valid}) == 44
+
+    # -- frozen literal corpus: complete envelope, unchanged args, no leakage.
+    for row in invalid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        snapshot_before = copy.deepcopy(snapshot)
+        args = copy.deepcopy(row["args"])
+        before = copy.deepcopy(args)
+        result = search_models(snapshot, args)
+        assert result == row["expect"], cid
+        assert set(result) == {"ok", "error"}, cid
+        assert result["ok"] is False, cid
+        assert set(result["error"]) == {"code", "message", "parameter"}, cid
+        assert args == before, cid
+        assert snapshot == snapshot_before, cid
+        for hostile in ("tool", "state_root", "source", "path", "cache",
+                        "snapshot_id", "tick_epoch", "provider_staleness",
+                        "counts", "partial", "warnings"):
+            assert hostile not in result and hostile not in result["error"], \
+                (cid, hostile)
+
+    for row in valid:
+        cid = row["id"]
+        snapshot = _validated_snapshot(row["fixture"])
+        args = copy.deepcopy(row["args"])
+        before = copy.deepcopy(args)
+        result = search_models(snapshot, args)
+        assert result["ok"] is True, cid
+        _assert_search_strict_types(result, cid)
+        assert args == before, cid
+
+    lookup = _validated_snapshot("lookup.json")
+    lookup_before = copy.deepcopy(lookup)
+
+    # -- non-object argument objects: invalid_arguments with parameter null.
+    for args in (None, [], 5, "x", False, 1.0, (), b"{}", set()):
+        _assert_argument_envelope(search_models(lookup, args),
+                                  INVALID_ARGUMENTS, None, repr(args))
+
+    # -- every parameter's wrong non-null type / numeric edge.
+    for field, value in (
+            ("query", True), ("query", False), ("query", 0), ("query", 1.0),
+            ("query", []), ("query", {}), ("query", ()), ("query", b"x"),
+            ("provider", True), ("provider", False), ("provider", 0),
+            ("provider", 1.5), ("provider", []), ("provider", {}),
+            ("min_context_length", True), ("min_context_length", False),
+            ("min_context_length", "65536"), ("min_context_length", " 1 "),
+            ("min_context_length", 1.5), ("min_context_length", -1),
+            ("min_context_length", -1.5),
+            ("min_context_length", _catalog.MAX_SAFE_INT + 1),
+            ("min_context_length", 10 ** 400),
+            ("min_context_length", float("nan")),
+            ("min_context_length", float("inf")),
+            ("min_context_length", float("-inf")),
+            ("min_context_length", []), ("min_context_length", {}),
+            ("input_modalities", "text"), ("input_modalities", ("text",)),
+            ("input_modalities", {"text"}), ("input_modalities", {"text": 1}),
+            ("input_modalities", [None]), ("input_modalities", [5]),
+            ("input_modalities", [True]), ("input_modalities", [""]),
+            ("input_modalities", ["text", 5]),
+            ("input_modalities", ["text", ""]),
+            ("input_modalities", ["text", None]),
+            ("input_modalities", [["text"]]),
+            ("supported_parameters", "temperature"),
+            ("supported_parameters", ("temperature",)),
+            ("supported_parameters", {"temperature"}),
+            ("supported_parameters", {"temperature": 1}),
+            ("supported_parameters", [None]),
+            ("supported_parameters", [5]),
+            ("supported_parameters", [False]),
+            ("supported_parameters", [""]),
+            ("supported_parameters", ["temperature", 5]),
+            ("supported_parameters", ["temperature", ""]),
+            ("supported_parameters", ["temperature", None]),
+            ("limit", True), ("limit", False), ("limit", None),
+            ("limit", 0), ("limit", -1), ("limit", 201), ("limit", 200.5),
+            ("limit", 1e308), ("limit", "50"), ("limit", []), ("limit", {}),
+            ("limit", _catalog.MAX_SAFE_INT),
+            ("limit", _catalog.MAX_SAFE_INT + 1), ("limit", 10 ** 400),
+            ("limit", float("nan")), ("limit", float("inf")),
+            ("limit", float("-inf")),
+            ("offset", True), ("offset", False), ("offset", None),
+            ("offset", -1), ("offset", 0.5), ("offset", "0"), ("offset", []),
+            ("offset", {}), ("offset", _catalog.MAX_SAFE_INT + 1),
+            ("offset", 10 ** 400), ("offset", float("nan")),
+            ("offset", float("inf")), ("offset", float("-inf"))):
+        _assert_argument_envelope(search_models(lookup, {field: value}),
+                                  INVALID_ARGUMENTS, field,
+                                  (field, repr(value)))
+
+    # -- accepted values, including safe boundaries and integral floats.
+    for args in ({}, {"query": None}, {"query": ""}, {"query": "   "},
+                 {"query": "[ab].*"}, {"query": "(\u00c9CHO)"},
+                 {"query": "\u00e9cho"}, {"query": "a" * 400},
+                 {"provider": None}, {"provider": "synthetic-a"},
+                 {"provider": "synthetic-c"},
+                 {"min_context_length": None},
+                 {"min_context_length": 0},
+                 {"min_context_length": _catalog.MAX_SAFE_INT},
+                 {"min_context_length": 1.0},
+                 {"input_modalities": []}, {"input_modalities": [" "]},
+                 {"input_modalities": [" text "]},
+                 {"input_modalities": ["TEXT", "text", "IMAGE"]},
+                 {"input_modalities": ["no-such-modality"]},
+                 {"input_modalities": ["\u00c9"]},
+                 {"supported_parameters": []},
+                 {"supported_parameters": [" Temperature ", "TEMPERATURE"]},
+                 {"supported_parameters": ["no-such-parameter"]},
+                 {"limit": 1}, {"limit": 200}, {"limit": 1.0},
+                 {"offset": 0}, {"offset": 0.0},
+                 {"offset": _catalog.MAX_SAFE_INT}):
+        result = search_models(lookup, dict(args))
+        assert result["ok"] is True, args
+        _assert_search_strict_types(result, repr(args))
+
+    # Integral floats are the same JSON integer value but the page echo is a
+    # strict int; the raw min-context filter echo stays the supplied float.
+    float_result = search_models(
+        lookup, {SEARCH_MIN_CONTEXT_FIELD: 1.0, "limit": 1.0, "offset": 1.0})
+    int_result = search_models(
+        lookup, {SEARCH_MIN_CONTEXT_FIELD: 1, "limit": 1, "offset": 1})
+    assert type(float_result["limit"]) is int and float_result["limit"] == 1
+    assert type(float_result["offset"]) is int and float_result["offset"] == 1
+    assert type(float_result["filters"][SEARCH_MIN_CONTEXT_FIELD]) is float
+    assert float_result["filters"][SEARCH_MIN_CONTEXT_FIELD] == 1.0
+    assert float_result["endpoints"] == int_result["endpoints"]
+    assert float_result["total_matches"] == int_result["total_matches"]
+    assert float_result["next_offset"] == int_result["next_offset"]
+    assert type(float_result["total_matches"]) is int
+
+    # -- provider membership: never trimmed, case-folded or repaired.
+    for bad in ("", " synthetic-a ", "synthetic-a ", " synthetic-a",
+                "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"):
+        _assert_argument_envelope(search_models(lookup, {"provider": bad}),
+                                  UNKNOWN_PROVIDER, "provider", bad)
+    # A registered zero-ID provider is VALID; an empty registry accepts {} and
+    # rejects every named provider.
+    zero_id = search_models(lookup, {"provider": "synthetic-c"})
+    assert zero_id["ok"] is True
+    assert zero_id["endpoints"] == [] and zero_id["total_matches"] == 0
+    assert zero_id["provider_staleness"] == {"synthetic-c": False}
+    empty_registry = _search_snapshot([], {})
+    for args in ({}, {"provider": None}, {"query": "anything"}):
+        result = search_models(empty_registry, dict(args))
+        assert result["ok"] is True and result["endpoints"] == [], args
+        assert result["total_matches"] == 0, args
+        assert result["provider_staleness"] == {}, args
+        assert result["next_offset"] is None, args
+    _assert_argument_envelope(
+        search_models(empty_registry, {"provider": "synthetic-a"}),
+        UNKNOWN_PROVIDER, "provider", "empty registry")
+
+    # -- frozen signature precedence, pinned with REVERSED insertion order.
+    precedence_rows = (
+        ({"bogus": 1, "query": []}, INVALID_ARGUMENTS, None),
+        ({"query": [], "bogus": 1}, INVALID_ARGUMENTS, None),
+        ({"query": [], "provider": "synthetic-z"}, INVALID_ARGUMENTS, "query"),
+        ({"provider": "synthetic-z", "query": []}, INVALID_ARGUMENTS, "query"),
+        ({"min_context_length": -1, "provider": "synthetic-z"},
+         UNKNOWN_PROVIDER, "provider"),
+        ({"provider": "synthetic-z", "min_context_length": -1},
+         UNKNOWN_PROVIDER, "provider"),
+        ({"query": 5, "min_context_length": -1}, INVALID_ARGUMENTS, "query"),
+        ({"min_context_length": -1, "query": 5}, INVALID_ARGUMENTS, "query"),
+        ({"limit": 0, "input_modalities": "x"}, INVALID_ARGUMENTS,
+         "input_modalities"),
+        ({"input_modalities": "x", "limit": 0}, INVALID_ARGUMENTS,
+         "input_modalities"),
+        ({"supported_parameters": "x", "input_modalities": "x"},
+         INVALID_ARGUMENTS, "input_modalities"),
+        ({"input_modalities": "x", "supported_parameters": "x"},
+         INVALID_ARGUMENTS, "input_modalities"),
+        ({"offset": -1, "limit": 0}, INVALID_ARGUMENTS, "limit"),
+        ({"limit": 0, "offset": -1}, INVALID_ARGUMENTS, "limit"),
+        ({"bogus": 1, "provider": "synthetic-a"}, INVALID_ARGUMENTS, None),
+        ({"provider": "synthetic-a", "bogus": 1}, INVALID_ARGUMENTS, None),
+    )
+    for args, code, parameter in precedence_rows:
+        _assert_argument_envelope(search_models(lookup, dict(args)),
+                                  code, parameter, args)
+
+    # -- validation runs BEFORE any selection stage.
+    import watchdog_catalog.query as query_module
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("selection stage ran before validation")
+
+    for name in ("_search_text_provider_pairs", "_search_min_context_pairs",
+                 "_search_input_modality_pairs",
+                 "_search_supported_parameter_pairs"):
+        monkeypatch.setattr(query_module, name, _boom)
+    for args, code, parameter in (
+            ({"limit": 0}, INVALID_ARGUMENTS, "limit"),
+            ({"provider": "synthetic-z"}, UNKNOWN_PROVIDER, "provider"),
+            ({"query": []}, INVALID_ARGUMENTS, "query")):
+        _assert_argument_envelope(search_models(lookup, dict(args)),
+                                  code, parameter, args)
+    monkeypatch.undo()
+    assert search_models(lookup, {"limit": 1})["ok"] is True
+
+    # -- errors are fresh and non-reflecting on every call.
+    first = search_models(lookup, {"limit": 0})
+    first["error"]["parameter"] = "injected"
+    first["error"]["code"] = "injected"
+    first["ok"] = True
+    second = search_models(lookup, {"limit": 0})
+    assert second == _argument_envelope(INVALID_ARGUMENTS, "limit")
+    assert second is not first
+    assert lookup == lookup_before
+
+
+# ---------- public metadata search: composition, pagination, isolation (3e) ---
+#
+# The public function's own page/count/projection behavior over synthetic,
+# resealed, fully-validated registries: default and maximum pages, a population
+# larger than any page, filter-before-slice, provider-crossing and exact-end
+# pages, page-scoped counts with shared ids and marker variants, zero-ID and
+# empty-registry success, staleness scope, cross-provider conflict rejection
+# with same-pair positive controls, normalization versus raw metadata, and deep
+# mutation isolation.
+
+
+def _bulk_search_snapshot():
+    """215 tracked pairs over three providers; provider ORDER differs from the
+    providers-map insertion order and from alphabetic order."""
+    omega = {}
+    for index in range(120):
+        raw_id = "om-%03d" % index
+        omega[raw_id] = _search_model(
+            raw_id, "Omega row %03d" % index,
+            "Bulk population row for the omega gateway.",
+            context_length=65536 if index >= 115 else 8192,
+            input_modalities=["text"], output_modalities=["text"],
+            supported_parameters=["temperature"])
+    alpha = {}
+    for index in range(95):
+        raw_id = "al-%03d" % index
+        alpha[raw_id] = _search_model(
+            raw_id, "Alpha row %03d" % index,
+            "Bulk population row for the alpha gateway.",
+            context_length=8192, input_modalities=["text"],
+            output_modalities=["text"], supported_parameters=["temperature"])
+    providers = {
+        "zero": _search_provider(
+            {}, "Zero", "https://zero.example/v1/chat/completions"),
+        "alpha": _search_provider(
+            alpha, "Alpha", "https://alpha.example/v1/chat/completions"),
+        "omega": _search_provider(
+            omega, "Omega", "https://omega.example/v1/chat/completions"),
+    }
+    return _search_snapshot(["omega", "alpha", "zero"], providers)
+
+
+def test_search_models_pagination_counts_and_projection_controls():
+    """Pages and counts describe the sorted-then-sliced match set: default 50,
+    maximum 200, a 215-pair population with no hidden cap, provider-crossing
+    and exact/beyond-end offsets, the inclusive MAX_SAFE offset, a filter that
+    genuinely moves the window, page-only counts with shared ids and marker
+    variants, zero-ID and empty-registry success, staleness scope, cross-
+    provider conflicts with same-pair positives, normalization versus raw
+    metadata and deep mutation isolation."""
+    from watchdog_catalog.query import search_models
+
+    snapshot = _bulk_search_snapshot()
+    before = copy.deepcopy(snapshot)
+    assert snapshot["provider_order"] != list(snapshot["providers"])
+    assert snapshot["provider_order"] != sorted(snapshot["provider_order"])
+    omega_ids = ["om-%03d" % index for index in range(120)]
+    alpha_ids = ["al-%03d" % index for index in range(95)]
+
+    # Default page: 50 rows, provider order then natural raw-ID order.
+    default = search_models(snapshot, {})
+    assert default["limit"] == 50 and default["offset"] == 0
+    assert default["total_matches"] == 215
+    assert default["returned_count"] == 50 and default["next_offset"] == 50
+    assert [(row["provider"], row["model_id"])
+            for row in default["endpoints"]] == \
+        [("omega", raw_id) for raw_id in omega_ids[:50]]
+    assert default["provider_staleness"] == {
+        "omega": False, "alpha": False, "zero": False}
+
+    # Maximum page and an over-200 population: no hidden stage cap or
+    # truncation, and the page crosses the provider boundary exactly.
+    max_page = search_models(snapshot, {"limit": 200})
+    assert max_page["returned_count"] == 200
+    assert max_page["next_offset"] == 200
+    assert max_page["endpoints"][119]["model_id"] == "om-119"
+    assert max_page["endpoints"][120]["provider"] == "alpha"
+    assert max_page["endpoints"][120]["model_id"] == "al-000"
+    tail = search_models(snapshot, {"limit": 200, "offset": 200})
+    assert tail["returned_count"] == 15 and tail["next_offset"] is None
+    assert [row["model_id"] for row in tail["endpoints"]] == alpha_ids[80:]
+    assert tail["total_matches"] == 215
+
+    # A page crossing the provider boundary mid-request.
+    cross = search_models(snapshot, {"limit": 2, "offset": 119})
+    assert [(row["provider"], row["model_id"])
+            for row in cross["endpoints"]] == \
+        [("omega", "om-119"), ("alpha", "al-000")]
+    assert cross["next_offset"] == 121
+    assert cross["counts"] == {"gateways": 2, "endpoints": 2,
+                               "distinct_raw_ids": 2,
+                               "marker_group_labels": 2}
+
+    # Exact end, one-past end, far beyond end and the MAX_SAFE offset.
+    exact_end = search_models(snapshot, {"limit": 2, "offset": 213})
+    assert exact_end["returned_count"] == 2
+    assert exact_end["next_offset"] is None
+    continuing = search_models(snapshot, {"limit": 2, "offset": 211})
+    assert continuing["returned_count"] == 2
+    assert continuing["next_offset"] == 213
+    at_end = search_models(snapshot, {"limit": 2, "offset": 215})
+    assert at_end["returned_count"] == 0 and at_end["next_offset"] is None
+    assert at_end["total_matches"] == 215
+    far = search_models(snapshot, {"limit": 2, "offset": 999999})
+    assert far["returned_count"] == 0 and far["next_offset"] is None
+    assert far["counts"] == {"gateways": 0, "endpoints": 0,
+                             "distinct_raw_ids": 0, "marker_group_labels": 0}
+    assert far["provider_staleness"] == {
+        "omega": False, "alpha": False, "zero": False}
+    huge_offset = search_models(
+        snapshot, {"limit": 2, "offset": _catalog.MAX_SAFE_INT})
+    assert huge_offset["offset"] == _catalog.MAX_SAFE_INT
+    assert huge_offset["returned_count"] == 0
+    assert huge_offset["next_offset"] is None
+
+    # Filter BEFORE slice: the unfiltered first page holds no qualifying row,
+    # and the filtered page starts at the LATER matching window.
+    assert [row["model_id"] for row in default["endpoints"][:3]] == \
+        omega_ids[:3]
+    filtered = search_models(snapshot, {"min_context_length": 65536,
+                                       "limit": 3})
+    assert [row["model_id"] for row in filtered["endpoints"]] == \
+        ["om-115", "om-116", "om-117"]
+    assert filtered["total_matches"] == 5
+    assert filtered["next_offset"] == 3
+    assert filtered["counts"] == {"gateways": 1, "endpoints": 3,
+                                  "distinct_raw_ids": 3,
+                                  "marker_group_labels": 3}
+
+    # Page-only counts with shared literal raw IDs across providers and marker
+    # variants: endpoint, distinct-raw-ID and marker-label cardinalities differ.
+    def marker_model(raw_id):
+        return _search_model(raw_id, "Marker " + raw_id,
+                             input_modalities=["text"],
+                             supported_parameters=["temperature"])
+
+    marker_id = "acme/chat:free"
+    marker_snapshot = _search_snapshot(
+        ["p1", "p2", "p3"],
+        {"p1": _search_provider(
+             {marker_id: marker_model(marker_id),
+              "acme/other": marker_model("acme/other")},
+             "P1", "https://p1.example/v1/chat/completions", stale=True),
+         "p2": _search_provider(
+             {"acme/chat_free": marker_model("acme/chat_free")},
+             "P2", "https://p2.example/v1/chat/completions"),
+         "p3": _search_provider(
+             {marker_id: marker_model(marker_id)},
+             "P3", "https://p3.example/v1/chat/completions", stale=True)})
+    marker_before = copy.deepcopy(marker_snapshot)
+    marker_page = search_models(marker_snapshot, {"query": "acme"})
+    assert [(row["provider"], row["model_id"])
+            for row in marker_page["endpoints"]] == \
+        [("p1", marker_id), ("p1", "acme/other"),
+         ("p2", "acme/chat_free"), ("p3", marker_id)]
+    assert marker_page["total_matches"] == 4
+    assert marker_page["counts"] == {"gateways": 3, "endpoints": 4,
+                                     "distinct_raw_ids": 3,
+                                     "marker_group_labels": 2}
+    assert marker_page["provider_staleness"] == {
+        "p1": True, "p2": False, "p3": True}
+    # A single-provider page keeps its own pair metadata and stale flag.
+    p3_page = search_models(marker_snapshot, {"provider": "p3"})
+    assert [(row["provider"], row["model_id"])
+            for row in p3_page["endpoints"]] == [("p3", marker_id)]
+    assert p3_page["endpoints"][0]["stale"] is True
+    assert p3_page["endpoints"][0]["chat_completions_url"] == \
+        "https://p3.example/v1/chat/completions"
+    assert p3_page["counts"] == {"gateways": 1, "endpoints": 1,
+                                 "distinct_raw_ids": 1,
+                                 "marker_group_labels": 1}
+    assert marker_snapshot == marker_before
+
+    # Zero-ID provider success keeps its own staleness scope; a true
+    # zero-provider registry succeeds with empty scope and zero counts.
+    zero_stale = _search_snapshot(
+        ["zero"], {"zero": _search_provider(
+            {}, "Zero", "https://zero.example/v1/chat/completions",
+            stale=True)})
+    zero_page = search_models(zero_stale, {})
+    assert zero_page["endpoints"] == [] and zero_page["total_matches"] == 0
+    assert zero_page["provider_staleness"] == {"zero": True}
+    empty_registry = _search_snapshot([], {})
+    empty_page = search_models(empty_registry, {})
+    assert empty_page["ok"] is True
+    assert empty_page["provider_staleness"] == {}
+    assert empty_page["counts"] == {"gateways": 0, "endpoints": 0,
+                                    "distinct_raw_ids": 0,
+                                    "marker_group_labels": 0}
+
+    # Natural/display order from the accepted selection controls: provider
+    # order (zeta before Alpha/alpha/bulk) then natural raw-ID order.
+    boundary = _boundary_snapshot()
+    zeta_page = search_models(boundary, {"provider": "zeta", "limit": 200})
+    assert [(row["provider"], row["model_id"])
+            for row in zeta_page["endpoints"]] == SEARCH_ZETA_ORDER
+    assert zeta_page["total_matches"] == len(SEARCH_ZETA_ORDER)
+    assert boundary["provider_order"] != list(boundary["providers"])
+    empty_selected = search_models(boundary, {"provider": "empty"})
+    assert empty_selected["ok"] is True
+    assert empty_selected["provider_staleness"] == {"empty": False}
+    assert empty_selected["endpoints"] == []
+    assert empty_selected["counts"] == {"gateways": 0, "endpoints": 0,
+                                        "distinct_raw_ids": 0,
+                                        "marker_group_labels": 0}
+
+    # -- cross-provider conflicts through the PUBLIC function, with same-pair
+    # positive controls (no union by raw id, no borrowed capability).
+    conflict_id = "vendor/conflict"
+    conflict = _search_snapshot(
+        ["gw-a", "gw-b"],
+        {"gw-a": _search_provider(
+             {conflict_id: _search_model(
+                 conflict_id, "Conflict A", context_length=65536,
+                 input_modalities=["text"], output_modalities=["text"],
+                 supported_parameters=["temperature"])},
+             "Gate A", "https://gw-a.example/v1/chat/completions"),
+         "gw-b": _search_provider(
+             {conflict_id: _search_model(
+                 conflict_id, "Conflict B", context_length=8192,
+                 input_modalities=["text", "image"],
+                 output_modalities=["text"],
+                 supported_parameters=["temperature"])},
+             "Gate B", "https://gw-b.example/v1/chat/completions")})
+    conflict_before = copy.deepcopy(conflict)
+    neither = search_models(conflict, {"min_context_length": 65536,
+                                      "input_modalities": ["image"]})
+    assert neither["endpoints"] == [] and neither["total_matches"] == 0
+    assert neither["next_offset"] is None
+    assert neither["provider_staleness"] == {"gw-a": False, "gw-b": False}
+    high_text = search_models(
+        conflict, {"min_context_length": 65536, "input_modalities": ["text"],
+                   "supported_parameters": ["temperature"]})
+    assert [(row["provider"], row["model_id"])
+            for row in high_text["endpoints"]] == [("gw-a", conflict_id)]
+    low_image = search_models(
+        conflict, {"min_context_length": 8192, "input_modalities": ["IMAGE"],
+                   "supported_parameters": ["TEMPERATURE"]})
+    assert [(row["provider"], row["model_id"])
+            for row in low_image["endpoints"]] == [("gw-b", conflict_id)]
+
+    split_id = "vendor/split"
+    split = _search_snapshot(
+        ["gw-a", "gw-b"],
+        {"gw-a": _search_provider(
+             {split_id: _search_model(
+                 split_id, "Split A", context_length=65536,
+                 input_modalities=["text"],
+                 supported_parameters=["temperature"])},
+             "Gate A", "https://gw-a.example/v1/chat/completions"),
+         "gw-b": _search_provider(
+             {split_id: _search_model(
+                 split_id, "Split B", context_length=65536,
+                 input_modalities=["text"],
+                 supported_parameters=["max_tokens"])},
+             "Gate B", "https://gw-b.example/v1/chat/completions")})
+    split_before = copy.deepcopy(split)
+    borrowed = search_models(
+        split, {"supported_parameters": ["temperature", "max_tokens"]})
+    assert borrowed["endpoints"] == [] and borrowed["total_matches"] == 0
+    assert [(row["provider"], row["model_id"]) for row in search_models(
+        split, {"supported_parameters": ["temperature"]})["endpoints"]] == \
+        [("gw-a", split_id)]
+    assert [(row["provider"], row["model_id"]) for row in search_models(
+        split, {"supported_parameters": ["max_tokens"]})["endpoints"]] == \
+        [("gw-b", split_id)]
+    assert conflict == conflict_before and split == split_before
+
+    # -- normalization versus raw metadata, raw filter echoes and deep
+    # isolation of every mutable returned category.
+    cased = _search_model(
+        "cased", "Cased Row", "Prose for the cased row.", context_length=100,
+        input_modalities=["TEXT", "Image", "text"], output_modalities=[],
+        supported_parameters=["Temperature", "TEMPERATURE"],
+        pricing={"prompt": "0.5", "completion": 0})
+    unknown = _search_model("unknown", "Unknown Row")
+    norm = _search_snapshot(
+        ["norm"], {"norm": _search_provider(
+            {"cased": cased, "unknown": unknown}, "Norm",
+            "https://norm.example/v1/chat/completions")})
+    norm_before = copy.deepcopy(norm)
+
+    iso_args = {"input_modalities": ["TEXT", "text"],
+                "supported_parameters": ["temperature"]}
+    iso = search_models(norm, iso_args)
+    assert iso["filters"] == {"provider": None, "min_context_length": None,
+                              "input_modalities": ["TEXT", "text"],
+                              "supported_parameters": ["temperature"]}
+    assert iso["filters"]["input_modalities"] is not iso_args["input_modalities"]
+    assert iso["filters"]["supported_parameters"] is not \
+        iso_args["supported_parameters"]
+    assert [(row["provider"], row["model_id"])
+            for row in iso["endpoints"]] == [("norm", "cased")]
+    row = iso["endpoints"][0]
+    assert row["input_modalities"] == ["text", "image"]
+    assert row["output_modalities"] == []
+    assert row["supported_parameters"] == ["temperature"]
+    assert row["unknown_fields"] == []
+    assert row["metadata"]["architecture"]["input_modalities"] == \
+        ["TEXT", "Image", "text"]
+    assert row["metadata"]["supported_parameters"] == \
+        ["Temperature", "TEMPERATURE"]
+    assert row["metadata"]["pricing"] == {"prompt": "0.5", "completion": 0}
+    assert type(row["metadata"]["pricing"]["completion"]) is int
+    assert row["metadata"] is not cased
+    assert row["metadata"]["architecture"] is not cased["architecture"]
+    assert row["metadata"]["pricing"] is not cased["pricing"]
+
+    unknown_row = search_models(
+        norm, {"query": "unknown", "limit": 1})["endpoints"][0]
+    assert unknown_row["context_length"] is None
+    assert unknown_row["input_modalities"] is None
+    assert unknown_row["output_modalities"] is None
+    assert unknown_row["supported_parameters"] is None
+    assert unknown_row["unknown_fields"] == [
+        "context_length", "input_modalities", "output_modalities",
+        "supported_parameters"]
+    assert unknown_row["metadata"] == unknown
+
+    saved = copy.deepcopy(iso)
+    iso["filters"]["input_modalities"].append("injected")
+    iso["filters"]["supported_parameters"].clear()
+    iso["provider_staleness"]["norm"] = True
+    iso["endpoints"][0]["input_modalities"].append("injected")
+    iso["endpoints"][0]["unknown_fields"].append("injected")
+    iso["endpoints"][0]["metadata"]["architecture"]["input_modalities"].append(
+        "injected")
+    iso["endpoints"][0]["metadata"]["pricing"]["prompt"] = "9"
+    iso["counts"]["gateways"] = 99
+    iso["caveats"].clear()
+    iso["endpoints"].clear()
+    assert search_models(norm, iso_args) == saved
+    assert iso_args == {"input_modalities": ["TEXT", "text"],
+                        "supported_parameters": ["temperature"]}
+    assert norm == norm_before
+    assert snapshot == before

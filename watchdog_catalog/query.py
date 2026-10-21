@@ -8,9 +8,11 @@ than carrying a second copy.
 """
 
 import copy
+import math
 import re
 
-from watchdog_catalog.catalog import _ascii_lower, normalize_capabilities
+from watchdog_catalog.catalog import (MAX_SAFE_INT, _ascii_lower,
+                                      normalize_capabilities)
 
 # Regexes for strip_free_marker: match "free" only at a segment boundary
 # (preceded by a separator for suffix, followed by one for prefix). The
@@ -796,3 +798,243 @@ def _search_supported_parameter_pairs(snapshot, pairs, *,
                                          for token in requested):
             kept.append((provider_key, raw_id))
     return kept
+
+
+# -- pure public metadata search: validated arguments + sorted/page projection --
+
+
+#: The frozen public `search_models` argument signature, in validation order.
+#: Validation walks THIS tuple after the whole-object and unknown-key checks,
+#: so precedence is independent of the caller's dict insertion order.
+_SEARCH_SIGNATURE = ("query", "provider", "min_context_length",
+                     "input_modalities", "supported_parameters", "limit",
+                     "offset")
+
+#: The frozen pagination defaults and inclusive maximum.
+_SEARCH_DEFAULT_LIMIT = 50
+_SEARCH_DEFAULT_OFFSET = 0
+_SEARCH_MAX_LIMIT = 200
+
+
+def _search_safe_integer(value):
+    """The PUBLIC tool-argument integer normalization: a strict non-negative
+    safe int, else ``None``.
+
+    A JSON ``integer`` argument is a finite numeric value with zero fractional
+    part in ``0..MAX_SAFE_INT`` -- so the numeric ``1.0`` IS the integer ``1``
+    and normalizes to a native ``int``. A ``bool`` is rejected BEFORE the int
+    branch (``True`` is never ``1``), and a numeric string, a fraction, a
+    non-finite float and an unsafe/huge native integer are rejected too. Huge
+    native ints are range-checked directly, and non-finite floats are rejected
+    BEFORE any ``int()`` conversion, so neither can overflow or crash.
+
+    This is the TOOL-INPUT boundary rule only; it never relaxes the strict-int
+    snapshot/context projection, which stays a separate strict check.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        integer = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        integer = int(value)
+    else:
+        return None
+    if 0 <= integer <= MAX_SAFE_INT:
+        return integer
+    return None
+
+
+def _search_nonempty_string_list(value):
+    """The PUBLIC capability-array rule: a LIST whose EVERY member is a
+    nonempty string. ``[]`` is accepted; a bare string, tuple, object or any
+    non-string/empty-string member rejects the WHOLE parameter -- never a
+    partial salvage. Casing, padding and duplicates stay literal."""
+    return (isinstance(value, list)
+            and all(isinstance(item, str) and item for item in value))
+
+
+def search_models(snapshot, arguments):
+    """The pure core of the frozen ``search_models`` tool.
+
+    ``snapshot`` is an already-VALIDATED public snapshot object -- the
+    ``load_snapshot`` / source / adapter boundary owns raw, structural and hash
+    validation, so this function performs NO validation, NO hash recompute, NO
+    I/O and NO clock/environment/auth read. ``arguments`` is the whole DECODED
+    argument object (a JSON object), passed explicitly rather than splatted as
+    keyword arguments.
+
+    Argument validation is deterministic and in the frozen order: the argument
+    must be a JSON object; then ANY unknown key is rejected (``parameter``
+    ``None``); then the frozen signature order -- ``query``, ``provider``,
+    ``min_context_length``, ``input_modalities``, ``supported_parameters``,
+    ``limit``, ``offset`` -- stopping at the FIRST error regardless of the
+    input dict's insertion order. ``query`` is omitted/``null`` or any string
+    (kept literally, never trimmed); ``provider`` is omitted/``null`` or one
+    exact ``provider_order`` key (a non-string is ``invalid_arguments``, an
+    absent string -- including empty, padded or wrong-case -- is
+    ``unknown_provider``, and a registered zero-ID provider is valid);
+    ``min_context_length`` is omitted/``null`` or a safe integer numeric;
+    the two capability arrays are omitted/``null`` or lists of nonempty
+    strings; ``limit`` is omitted (50) or an integer 1..200 (explicit ``null``
+    is invalid); ``offset`` is omitted (0) or a safe integer (explicit ``null``
+    is invalid). A numeric ``1.0`` is accepted as the integer value while a
+    bool, numeric string, fraction, unsafe integer or non-finite number is
+    rejected as ``invalid_arguments`` with its own parameter name; the raw
+    supplied value is still echoed in ``filters``.
+
+    Only after EVERY argument validates does it compose the accepted stages in
+    order -- :func:`_search_text_provider_pairs`,
+    :func:`_search_min_context_pairs`, :func:`_search_input_modality_pairs`,
+    :func:`_search_supported_parameter_pairs` -- so each capability is tested
+    on its own ``(provider, raw model_id)`` pair and active filters combine
+    with AND. ``total_matches`` is counted AFTER all filters and BEFORE the
+    single ``offset:offset + limit`` slice; pagination is never an earlier
+    filter, never a per-provider operation and never capped by a stage.
+
+    The success payload carries exactly ``ok``, ``query``, ``filters``,
+    ``limit``, ``offset``, ``snapshot_id``, ``tick_epoch``,
+    ``provider_staleness``, ``endpoints``, ``total_matches``,
+    ``returned_count``, ``next_offset``, ``counts`` and ``caveats``. ``query``
+    and every ``filters`` member echo the RAW supplied value (arrays copied,
+    order/case/duplicates preserved, ``[]`` distinct from ``null``), while
+    ``limit``/``offset`` echo the effective strict int. ``provider_staleness``
+    covers every ``provider_order`` key when ``provider`` is omitted, else
+    exactly the selected provider -- retained on empty, exhausted and
+    beyond-end pages. ``endpoints`` is the returned page: pair-specific wiring
+    and display values, the raw id unchanged, the five normalized capability
+    fields from :func:`normalize_capabilities` (ASCII-only folding,
+    first-occurrence dedup, frozen unknown-field order, known ``[]`` distinct
+    from unknown ``null``) and ``metadata`` as a deep copy of that pair's
+    complete projected public model with its original casing/order/duplicates
+    and pricing types. ``next_offset`` is ``offset + returned_count`` only when
+    that is LESS than ``total_matches``, else ``None``. ``counts`` is PAGE
+    scoped (exactly ``gateways``, ``endpoints``, ``distinct_raw_ids`` and
+    ``marker_group_labels``) and all-zero on an empty page even when matches
+    exist; marker labels are the frozen :func:`strip_free_marker` labels, never
+    verified model identities. ``caveats`` freshly carries
+    :data:`_ABSENCE_CAVEAT`.
+
+    Every returned container, array, row, filter echo and metadata object
+    (with its nested architecture/parameter/pricing containers) is freshly
+    allocated, so a caller mutating a result can never corrupt the snapshot,
+    the argument object or another call. The inputs are never mutated.
+    """
+    if not isinstance(arguments, dict):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+    if any(key not in _SEARCH_SIGNATURE for key in arguments):
+        return _argument_error(_INVALID_ARGUMENTS, None)
+
+    query = arguments.get("query")
+    if query is not None and not isinstance(query, str):
+        return _argument_error(_INVALID_ARGUMENTS, "query")
+
+    provider = arguments.get("provider")
+    if provider is not None and not isinstance(provider, str):
+        return _argument_error(_INVALID_ARGUMENTS, "provider")
+    order = snapshot["provider_order"]
+    providers = snapshot["providers"]
+    if provider is not None and provider not in order:
+        return _argument_error(_UNKNOWN_PROVIDER, "provider")
+
+    raw_min_context = arguments.get("min_context_length")
+    min_context_length = None
+    if raw_min_context is not None:
+        min_context_length = _search_safe_integer(raw_min_context)
+        if min_context_length is None:
+            return _argument_error(_INVALID_ARGUMENTS, "min_context_length")
+
+    requested_arrays = {}
+    for name in ("input_modalities", "supported_parameters"):
+        value = arguments.get(name)
+        if value is not None and not _search_nonempty_string_list(value):
+            return _argument_error(_INVALID_ARGUMENTS, name)
+        requested_arrays[name] = value
+
+    limit = _SEARCH_DEFAULT_LIMIT
+    if "limit" in arguments:
+        limit = _search_safe_integer(arguments["limit"])
+        if limit is None or not 1 <= limit <= _SEARCH_MAX_LIMIT:
+            return _argument_error(_INVALID_ARGUMENTS, "limit")
+
+    offset = _SEARCH_DEFAULT_OFFSET
+    if "offset" in arguments:
+        offset = _search_safe_integer(arguments["offset"])
+        if offset is None:
+            return _argument_error(_INVALID_ARGUMENTS, "offset")
+
+    matches = _search_text_provider_pairs(
+        snapshot, query=query, provider=provider)
+    matches = _search_min_context_pairs(
+        snapshot, matches, min_context_length=min_context_length)
+    matches = _search_input_modality_pairs(
+        snapshot, matches,
+        input_modalities=requested_arrays["input_modalities"])
+    matches = _search_supported_parameter_pairs(
+        snapshot, matches,
+        supported_parameters=requested_arrays["supported_parameters"])
+
+    total_matches = len(matches)
+    page = matches[offset:offset + limit]
+
+    endpoints = []
+    for provider_key, raw_id in page:
+        entry = providers[provider_key]
+        model = entry["models"][raw_id]
+        normalized = normalize_capabilities(model)
+        endpoints.append({
+            "provider": provider_key,
+            "model_id": raw_id,
+            "chat_completions_url": entry["chat_completions_url"],
+            "api_type": entry["api_type"],
+            "stale": entry["stale"],
+            "name": model["name"],
+            "description": model["description"],
+            "context_length": normalized["context_length"],
+            "input_modalities": normalized["input_modalities"],
+            "output_modalities": normalized["output_modalities"],
+            "supported_parameters": normalized["supported_parameters"],
+            "unknown_fields": normalized["unknown_fields"],
+            "metadata": copy.deepcopy(model),
+        })
+
+    returned_count = len(endpoints)
+    next_offset = offset + returned_count
+    if next_offset >= total_matches:
+        next_offset = None
+
+    selected = [provider] if provider is not None else list(order)
+
+    def echo(name):
+        value = requested_arrays[name]
+        return list(value) if value is not None else None
+
+    return {
+        "ok": True,
+        "query": query,
+        "filters": {
+            "provider": provider,
+            "min_context_length": raw_min_context,
+            "input_modalities": echo("input_modalities"),
+            "supported_parameters": echo("supported_parameters"),
+        },
+        "limit": limit,
+        "offset": offset,
+        "snapshot_id": snapshot["snapshot_id"],
+        "tick_epoch": snapshot["tick_epoch"],
+        "provider_staleness": {key: providers[key]["stale"]
+                               for key in selected},
+        "endpoints": endpoints,
+        "total_matches": total_matches,
+        "returned_count": returned_count,
+        "next_offset": next_offset,
+        "counts": {
+            "gateways": len({row["provider"] for row in endpoints}),
+            "endpoints": returned_count,
+            "distinct_raw_ids": len({row["model_id"] for row in endpoints}),
+            "marker_group_labels": len({strip_free_marker(row["model_id"])
+                                        for row in endpoints}),
+        },
+        "caveats": [_ABSENCE_CAVEAT],
+    }
