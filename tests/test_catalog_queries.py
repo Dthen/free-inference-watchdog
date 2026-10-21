@@ -3290,3 +3290,349 @@ def test_watchdog_status_outputs_are_fresh_and_isolated_and_clock_invariant():
     second_error = watchdog_status(lookup, {"now": 0}, now=0)
     assert second_error == _argument_envelope(INVALID_ARGUMENTS, None)
     assert second_error is not first_error
+
+# ---------- internal metadata search: text/provider candidate pairs (3a) ------
+#
+# `watchdog_catalog.query._search_text_provider_pairs(snapshot, *, query=None,
+# provider=None)` is the INTERNAL, UNPAGINATED candidate-selection stage that
+# later `search_models` units compose. Preconditions are an already-VALIDATED
+# snapshot and already-validated query/provider values: public argument
+# validation -- including `unknown_provider` -- belongs to a later unit, so this
+# stage deliberately has no temporary argument envelope and no public tool.
+#
+# Expected pairs below are taken from the INDEPENDENTLY authored `cases.json`
+# goldens (never from another implementation, serializer or runtime query) and
+# from literal, hand-derived synthetic sequences.
+
+SEARCH_SELECTION_CASES_DOC = FIXTURE_DIR / "cases.json"
+
+# The exact frozen goldens whose arguments are confined to query/provider and
+# whose complete match set fits the default page. A paginated or
+# capability-filtered case must never become a selection oracle here.
+SEARCH_SELECTION_CASE_IDS = frozenset({
+    "search_metadata_reasoning_text_only",
+    "search_capability_defaults_both_models",
+    "search_provider_b_shared_stale_scope",
+    "search_provider_c_empty_stale_scope",
+    "search_text_unicode_upper_echo_first",
+    "search_text_unicode_lower_echo_second",
+    "search_text_literal_brackets_not_regex",
+    "search_text_metadata_array_not_searched",
+    "search_text_raw_id_unknown_flags",
+    "search_text_padded_query_not_trimmed",
+})
+
+
+def _selection_eligible(case):
+    """A search golden usable as a candidate-selection oracle: only
+    query/provider arguments and a whole match set inside the default page."""
+    expect = case["expect"]
+    return (set(case["args"]) <= {"query", "provider"}
+            and expect["limit"] == 50
+            and expect["offset"] == 0
+            and expect["next_offset"] is None
+            and expect["total_matches"] == len(expect["endpoints"]))
+
+
+def test_search_text_provider_pairs_match_eligible_goldens():
+    """The ten eligible frozen `search_models` goldens reproduce EXACTLY as
+    ordered endpoint identities, with the case set itself pinned so a future
+    paginated golden cannot silently widen this oracle."""
+    from watchdog_catalog.query import _search_text_provider_pairs
+
+    doc = _decode_doc(SEARCH_SELECTION_CASES_DOC)
+    search_cases = [case for case in doc["cases"]
+                    if case["tool"] == "search_models"]
+    eligible = [case for case in search_cases if _selection_eligible(case)]
+    assert len(search_cases) == 29, len(search_cases)
+    assert len(eligible) == 10, len(eligible)
+    assert {case["id"] for case in eligible} == SEARCH_SELECTION_CASE_IDS
+
+    for case in eligible:
+        cid = case["id"]
+        fixture = case.get("fixture", doc["fixture"])
+        snapshot = _validated_snapshot(fixture)
+        before = copy.deepcopy(snapshot)
+        query = case["args"].get("query")
+        provider = case["args"].get("provider")
+        expected = [(row["provider"], row["model_id"])
+                    for row in case["expect"]["endpoints"]]
+        result = _search_text_provider_pairs(
+            snapshot, query=query, provider=provider)
+        assert result == expected, cid
+        assert type(result) is list, cid
+        assert all(type(pair) is tuple and len(pair) == 2 for pair in result), cid
+        # Every selected identity is a REAL tracked pair of the source
+        # snapshot, and the selection never borrows another provider's row.
+        for provider_key, raw_id in result:
+            assert provider_key in snapshot["provider_order"], cid
+            assert raw_id in snapshot["providers"][provider_key]["model_ids"], \
+                (cid, provider_key, raw_id)
+        assert snapshot == before, cid
+        # A NEW list on every call: mutating one result can never corrupt the
+        # snapshot, an earlier result or a later call.
+        result.clear()
+        assert snapshot == before, cid
+        assert _search_text_provider_pairs(
+            snapshot, query=query, provider=provider) == expected, cid
+        assert snapshot == before, cid
+
+
+# -- synthetic boundary controls (structurally valid, independently pinned) ---
+
+# Provider order is deliberately NON-alphabetic and differs from the provider
+# map's insertion order, so the pinned pair sequences prove `provider_order`
+# precedence rather than any incidental dict/alphabetic order.
+SEARCH_ZETA_ORDER = [
+    ("zeta", "m-1"),
+    ("zeta", "m-1a"),
+    ("zeta", "m-2"),
+    ("zeta", "m-9"),
+    ("zeta", "m-01"),
+    ("zeta", "m-10"),
+    ("zeta", "m-" + "0" * 29 + "1"),
+    ("zeta", "m-\u00b2"),
+    ("zeta", "m-\u0661"),
+]
+SEARCH_ALPHA_ORDER = [
+    ("Alpha", "ascii-case"),
+    ("Alpha", "caps-only"),
+    ("Alpha", "fusion-left"),
+    ("Alpha", "idtoken-model"),
+    ("Alpha", "literal-regex"),
+    ("Alpha", "name-target"),
+    ("Alpha", "shared-id"),
+    ("Alpha", "unicode-upper"),
+    ("Alpha", "vendor/tool:free"),
+]
+SEARCH_ALPHA_LOWER_ORDER = [
+    ("alpha", "shared-id"),
+    ("alpha", "unicode-lower"),
+    ("alpha", "vendor/tool"),
+]
+SEARCH_BULK_PAIRS = [("bulk", "bulk-%02d" % index) for index in range(55)]
+SEARCH_ALL_PAIRS = (SEARCH_ZETA_ORDER + SEARCH_ALPHA_ORDER
+                    + SEARCH_ALPHA_LOWER_ORDER + SEARCH_BULK_PAIRS)
+
+# Compact (query, provider, expected ordered pairs) boundary rows.
+SEARCH_BOUNDARY_ROWS = (
+    # Omitted/empty query applies NO text constraint; whitespace is literal.
+    (None, None, SEARCH_ALL_PAIRS),
+    ("", None, SEARCH_ALL_PAIRS),
+    ("   ", None, []),
+    ("   ", "zeta", []),
+    # Per-pair text only: a shared raw ID never borrows a sibling's name or
+    # description, and provider scope ANDs with the text predicate.
+    ("borrow", None, [("Alpha", "shared-id")]),
+    ("borrow", "Alpha", [("Alpha", "shared-id")]),
+    ("borrow", "alpha", []),
+    ("other label", None, [("alpha", "shared-id")]),
+    ("shared-id", None, [("Alpha", "shared-id"), ("alpha", "shared-id")]),
+    # Each individual text field matches on its own: raw ID, name, description.
+    ("idtoken", None, [("Alpha", "idtoken-model")]),
+    ("nametoken", None, [("Alpha", "name-target")]),
+    ("descword", None, [("Alpha", "idtoken-model")]),
+    # Substring across a field boundary does not match (name "Alpha" plus
+    # description "Beta prose body." is never joined).
+    ("Alpha Beta", None, []),
+    # ASCII-only fold: ASCII letters fold, non-ASCII case pairs stay literal.
+    ("mixed name", None, [("Alpha", "ascii-case")]),
+    ("MIXED NAME", None, [("Alpha", "ascii-case")]),
+    ("\u00c9CHO", None, [("Alpha", "unicode-upper")]),
+    ("\u00e9cho", None, [("alpha", "unicode-lower")]),
+    ("\u00e9cho", "Alpha", []),
+    # Literal regex-looking and invalid-regex queries; literal parentheses.
+    ("[ab].*", None, [("Alpha", "literal-regex")]),
+    ("(", None, [("Alpha", "literal-regex")]),
+    # Never trimmed, never marker-normalized.
+    ("Caps Only", None, [("Alpha", "caps-only")]),
+    ("Caps Only ", None, []),
+    ("vendor/tool", None, [("Alpha", "vendor/tool:free"),
+                           ("alpha", "vendor/tool")]),
+    ("vendor/tool", "alpha", [("alpha", "vendor/tool")]),
+    ("vendor/tool:free", None, [("Alpha", "vendor/tool:free")]),
+    # Capability arrays, pricing, URL, provider key and object key names are
+    # never searched.
+    ("ImageToken", None, []),
+    ("ParamToken", None, []),
+    ("urltoken", None, []),
+    ("apitoken", None, []),
+    ("0.123", None, []),
+    ("https", None, []),
+    ("zeta", None, []),
+    ("pricing", None, []),
+    ("context_length", None, []),
+    ("architecture", None, []),
+    ("supported_parameters", None, []),
+    ("display_name", None, []),
+    # Exact provider scoping, including differently-cased VALID keys and a
+    # registered zero-ID provider.
+    (None, "zeta", SEARCH_ZETA_ORDER),
+    (None, "Alpha", SEARCH_ALPHA_ORDER),
+    (None, "alpha", SEARCH_ALPHA_LOWER_ORDER),
+    (None, "empty", []),
+    ("bulk", None, SEARCH_BULK_PAIRS),
+)
+
+
+def _search_model(raw_id, name, description=None, *, context_length=None,
+                  input_modalities=None, output_modalities=None,
+                  supported_parameters=None, pricing=None):
+    """One complete projected public model object (the accepted model shape)."""
+    return {
+        "id": raw_id,
+        "name": name,
+        "description": description,
+        "context_length": context_length,
+        "architecture": {"input_modalities": input_modalities,
+                         "output_modalities": output_modalities},
+        "supported_parameters": supported_parameters,
+        "pricing": pricing,
+    }
+
+
+def _search_provider(models, display_name, url, *, api_type="openai",
+                     stale=False):
+    """One provider entry with its raw-ID array in the required literal order."""
+    ids = sorted(models)
+    return {
+        "display_name": display_name,
+        "chat_completions_url": url,
+        "api_type": api_type,
+        "model_ids": ids,
+        "models": {raw_id: models[raw_id] for raw_id in ids},
+        "stale": stale,
+    }
+
+
+def _search_snapshot(provider_order, providers):
+    """A resealed synthetic snapshot that the REAL validator accepts."""
+    snapshot = {
+        "schema_version": 1,
+        "snapshot_id": "0" * 64,
+        "tick_epoch": 1759200000,
+        "cadence_s": 3600,
+        "provider_order": list(provider_order),
+        "providers": providers,
+        "warnings": [],
+    }
+    _reseal(snapshot)
+    assert _catalog.validate_snapshot(snapshot) is snapshot
+    return snapshot
+
+
+def _boundary_snapshot():
+    zeta = {}
+    for raw_id, name in (
+            ("m-1", "Order A"), ("m-01", "Order B"), ("m-1a", "Order C"),
+            ("m-2", "Order D"), ("m-9", "Order E"), ("m-10", "Order F"),
+            ("m-" + "0" * 29 + "1", "Order G"), ("m-\u00b2", "Order H"),
+            ("m-\u0661", "Order I")):
+        zeta[raw_id] = _search_model(raw_id, name)
+    alpha_upper = {
+        "ascii-case": _search_model("ascii-case", "MiXeD Name"),
+        "caps-only": _search_model(
+            "caps-only", "Caps Only", "plain synthetic prose",
+            context_length=7, input_modalities=["ImageToken"],
+            output_modalities=["OutToken"],
+            supported_parameters=["ParamToken"],
+            pricing={"prompt": "0.123", "completion": 0}),
+        "fusion-left": _search_model(
+            "fusion-left", "Alpha", "Beta prose body."),
+        "idtoken-model": _search_model(
+            "idtoken-model", "Alpha Display One", "descword one."),
+        "literal-regex": _search_model(
+            "literal-regex", "paren (test)", "literal [ab].* marker"),
+        "name-target": _search_model(
+            "name-target", "NameToken Display", "Alpha prose two."),
+        "shared-id": _search_model("shared-id", "Borrow Target"),
+        "unicode-upper": _search_model("unicode-upper", "\u00c9CHO"),
+        "vendor/tool:free": _search_model(
+            "vendor/tool:free", "Tool Free Display"),
+    }
+    alpha_lower = {
+        "shared-id": _search_model(
+            "shared-id", "Other Label", "Sibling prose."),
+        "unicode-lower": _search_model("unicode-lower", "\u00e9cho"),
+        "vendor/tool": _search_model("vendor/tool", "Tool Sibling"),
+    }
+    bulk = {"bulk-%02d" % index: _search_model(
+                "bulk-%02d" % index, "Bulk row %02d" % index,
+                "Bulk synthetic row.")
+            for index in range(55)}
+    # Insertion order here is deliberately unrelated to provider_order.
+    providers = {
+        "empty": _search_provider(
+            {}, "Empty Gateway", "https://empty.example/v1/chat/completions"),
+        "bulk": _search_provider(
+            bulk, "Bulk Gateway", "https://bulk.example/v1/chat/completions"),
+        "alpha": _search_provider(
+            alpha_lower, "Lower Alpha",
+            "https://alpha.example/v1/chat/completions"),
+        "zeta": _search_provider(
+            zeta, "Zeta Order", "https://zeta.example/v1/chat/completions"),
+        "Alpha": _search_provider(
+            alpha_upper, "Upper Alpha",
+            "https://urltoken.example/v1/chat/completions",
+            api_type="apitoken"),
+    }
+    return _search_snapshot(
+        ["zeta", "Alpha", "alpha", "bulk", "empty"], providers)
+
+
+def test_search_text_provider_pairs_boundary_controls():
+    """Literal ASCII-only text + exact provider scope over a synthetic, fully
+    validated registry: pinned endpoint order, field isolation, no inference,
+    no trimming, no marker repair, no cross-provider borrowing and no silent
+    page cap."""
+    from watchdog_catalog.query import _search_text_provider_pairs
+
+    snapshot = _boundary_snapshot()
+    # The pin is meaningful: neither provider-map insertion order nor literal
+    # raw-ID order coincides with the frozen endpoint order.
+    assert snapshot["provider_order"] != list(snapshot["providers"])
+    assert snapshot["provider_order"] != sorted(snapshot["provider_order"])
+    assert sorted(snapshot["providers"]["zeta"]["model_ids"]) != \
+        [pair[1] for pair in SEARCH_ZETA_ORDER]
+
+    before = copy.deepcopy(snapshot)
+    for query, provider, expected in SEARCH_BOUNDARY_ROWS:
+        result = _search_text_provider_pairs(
+            snapshot, query=query, provider=provider)
+        assert result == expected, (query, provider)
+        assert type(result) is list, (query, provider)
+        assert all(type(pair) is tuple and len(pair) == 2
+                   for pair in result), (query, provider)
+    assert snapshot == before
+
+    # More than the public default page (50) is returned WHOLE: the internal
+    # stage neither slices nor truncates.
+    bulk = _search_text_provider_pairs(snapshot, query="bulk")
+    assert len(bulk) == 55
+    assert bulk[0] == ("bulk", "bulk-00")
+    assert bulk[-1] == ("bulk", "bulk-54")
+
+    # A legitimate empty registry and a zero-ID single provider both select
+    # nothing, including for an omitted/empty query.
+    solo = _search_snapshot(
+        ["solo"],
+        {"solo": _search_provider(
+            {}, "Solo", "https://solo.example/v1/chat/completions")})
+    assert _search_text_provider_pairs(solo) == []
+    assert _search_text_provider_pairs(solo, query="") == []
+    assert _search_text_provider_pairs(snapshot, provider="empty") == []
+
+    # A returned list is a fresh, non-aliasing snapshot: mutating it (or one of
+    # its rows) cannot corrupt the snapshot or a later call, and the input query
+    # string is untouched.
+    query = "shared-id"
+    first = _search_text_provider_pairs(snapshot, query=query)
+    assert first == [("Alpha", "shared-id"), ("alpha", "shared-id")]
+    first.clear()
+    mutated = _search_text_provider_pairs(snapshot, query=query)
+    mutated.append(("Alpha", "injected"))
+    mutated[0] = ("alpha", "vendor/tool")
+    assert _search_text_provider_pairs(snapshot, query=query) == \
+        [("Alpha", "shared-id"), ("alpha", "shared-id")]
+    assert query == "shared-id"
+    assert snapshot == before

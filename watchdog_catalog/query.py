@@ -10,6 +10,8 @@ than carrying a second copy.
 import copy
 import re
 
+from watchdog_catalog.catalog import _ascii_lower
+
 # Regexes for strip_free_marker: match "free" only at a segment boundary
 # (preceded by a separator for suffix, followed by one for prefix). The
 # separator set is [-:_], matching how gateways tag free ids in practice.
@@ -567,3 +569,59 @@ def watchdog_status(snapshot, arguments, *, now):
         "site_publish_age_s": None,
         "warnings": warnings,
     }
+
+
+# -- pure metadata-search candidate selection: literal text + exact provider --
+
+
+def _search_text_provider_pairs(snapshot, *, query=None, provider=None):
+    """The INTERNAL candidate-selection stage of ``search_models``.
+
+    Preconditions: ``snapshot`` is an already-VALIDATED public snapshot, and
+    ``query``/``provider`` are ALREADY validated -- ``query`` is ``None`` or a
+    string and ``provider`` is ``None`` or one exact ``provider_order`` key.
+    The public argument envelope (including ``unknown_provider``) belongs to the
+    transport-level search unit; this stage never validates, repairs or reports
+    on its arguments, and never reads a clock, the filesystem or the network.
+
+    Returns a NEW list of immutable ``(provider_key, raw_model_id)`` tuples in
+    the frozen endpoint order: ``provider_order`` precedence, then the accepted
+    :func:`natural_key` raw-ID order within each provider. The result is
+    UNPAGINATED and carries no page cap, so a later sort-then-slice stage sees
+    the complete match set; a raw ID shared by two providers stays TWO distinct
+    pairs, and a selected zero-ID provider yields no pairs.
+
+    ``provider`` scopes to exactly that one key when supplied, else every
+    ``provider_order`` key. ``query`` is a LITERAL, UNTRIMMED substring
+    compared separately against that pair's raw ID, name and non-``None``
+    description after the shared ASCII-only fold (A-Z to a-z; every other code
+    point -- including a non-ASCII uppercase letter -- stays literal). There is
+    no regular expression, fuzzy alias, marker stripping, JSON/metadata
+    serialization or capability/price/branding inference: capability arrays,
+    pricing, wiring URLs, provider keys and object key names are never
+    searched. ``None`` or ``""`` applies no text constraint; a whitespace-only
+    query is a literal constraint. A pair with no matching text field --
+    including one whose only candidate field is a ``null`` description -- is
+    excluded, and one pair's fields are never borrowed from a sibling provider.
+
+    The inputs are never mutated and no snapshot metadata is aliased: only the
+    two identity strings are returned, so a later row projection works from
+    those identities rather than from a cross-provider metadata union.
+    """
+    order = snapshot["provider_order"]
+    providers = snapshot["providers"]
+    selected = [provider] if provider is not None else list(order)
+    needle = _ascii_lower(query) if query else None
+    pairs = []
+    for provider_key in selected:
+        entry = providers[provider_key]
+        models = entry["models"]
+        for raw_id in sorted(entry["model_ids"], key=natural_key):
+            if needle is not None:
+                model = models[raw_id]
+                fields = (raw_id, model["name"], model["description"])
+                if not any(field is not None and needle in _ascii_lower(field)
+                           for field in fields):
+                    continue
+            pairs.append((provider_key, raw_id))
+    return pairs
