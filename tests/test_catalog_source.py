@@ -1,6 +1,6 @@
 """Runtime tests for the validated local-FILE and bounded HTTP sources.
 
-This module exercises only the small read-only source boundary:
+This module exercises only the small source/cache boundary:
 
     watchdog_catalog.source.MAX_SOURCE_BYTES
     watchdog_catalog.source.DEFAULT_CATALOG_URL
@@ -10,6 +10,8 @@ This module exercises only the small read-only source boundary:
     watchdog_catalog.source.load_catalog_url    (unit 5b)
     watchdog_catalog.source.DiskCache           (unit 5c)
     watchdog_catalog.source.fetch_catalog_url   (unit 5d)
+    watchdog_catalog.source.CatalogSource       (unit 5e)
+    watchdog_catalog.source.with_source         (unit 5e)
 
 `load_catalog_file` is one explicit, byte-bounded binary read of an
 operator-selected path whose bytes are decoded as strict UTF-8 and then handed
@@ -38,9 +40,27 @@ and it accepts a 304 only when it sent such a header. Two further
 unparametrized groups cover that primitive: the accepted 200/304/changed-200
 flow, validator capture and rejection, candidate detachment and DiskCache
 compatibility; then every invalid candidate, unsolicited or contradictory 304,
-unread 304 body, framing fault and fallback-free failure. Fallback/warning/
-freshness envelopes, CLI wiring and async refresh coalescing belong to later
-units and are NOT implemented, imported or exercised here. Nothing in this
+unread 304 body, framing fault and fallback-free failure.
+
+``CatalogSource`` and ``with_source`` (unit 5e) are implemented and exercised
+here too. ``CatalogSource`` is the synchronous acquisition/state layer over
+those accepted primitives: ONE selected url/file source, at most one validated
+last-good entry in memory (bootstrapped ONCE from its source-scoped
+``DiskCache``) and exactly ONE explicit refresh attempt per call. A successful
+refresh carries ``ok``/``snapshot``/``source``; a failed one returns the
+retained last-good body, validators and its ORIGINAL retrieval time with
+``refresh_failed``/``cache_fallback`` warnings, or the frozen ``SourceError``
+envelope when nothing valid was ever captured -- never an invented empty
+success. Retrieval time (``fetched_at``/``fetch_age_s``/``not_modified``) is
+kept separate from observation freshness, which is derived only from the
+snapshot's own ``tick_epoch``/``cadence_s``. ``current`` is a memory-only view
+and ``with_source`` attaches that provenance to a pure query payload without
+querying or mutating it. Two further unparametrized groups cover the
+200/304/changed-body/fallback/freshness flow with detached views, warning
+propagation and source isolation; then every failure, corrupt-record, invalid
+clock/configuration and zero-I/O path. Scheduling, coalesced refresh,
+retries/backoff and async dispatch belong to later units, as does any CLI
+wiring -- none is implemented, imported or exercised here. Nothing in this
 module writes outside pytest's own scratch directory.
 """
 
