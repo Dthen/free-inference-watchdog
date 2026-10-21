@@ -21,6 +21,15 @@ The two captured inputs are described as a boundary, not a config loader:
   is the raw per-gateway model metadata; ``roster['tick_epoch']`` and
   ``roster['stale_providers']`` carry the observation time and staleness.
 
+:func:`capture_registry` is the pure public-record side of that boundary. Given
+the ALREADY-RESOLVED active ``providers`` map (insertion/display order, one
+config per active key) and the matching ``wiring`` map, it emits one fresh
+four-field record per active key -- reading only the selected config's ``name``
+and the selected wiring's ``chat_completions_url``/``api_type``. Every other
+config/wiring member is never inspected or traversed, wiring-only keys are
+ignored, and its only output is the explicit record list :func:`build_snapshot`
+consumes. It performs no I/O and no config-loader/SDK import.
+
 Structural faults (a non-``dict`` record, a bad or duplicate resolved key, a
 non-string or empty wiring member, a malformed roster provider map, a malformed
 ID list, an invalid cadence) fail with the accepted frozen
@@ -43,7 +52,7 @@ from __future__ import annotations
 
 from watchdog_catalog import catalog
 
-__all__ = ["build_snapshot"]
+__all__ = ["build_snapshot", "capture_registry"]
 
 #: The frozen warning vocabulary, in its deduplicated publication ORDER. The
 #: accepted validator re-enforces exactly this order on the sealed snapshot.
@@ -55,6 +64,11 @@ _REGISTRY_ROOT_MESSAGE = (
     "build_snapshot() requires a registry list or tuple of provider records")
 _ROSTER_ROOT_MESSAGE = (
     "build_snapshot() requires a captured roster mapping")
+#: ``capture_registry`` root gates: same fixed, non-reflective discipline.
+_PROVIDERS_ROOT_MESSAGE = (
+    "capture_registry() requires a resolved providers mapping")
+_WIRING_ROOT_MESSAGE = (
+    "capture_registry() requires a resolved gateway wiring mapping")
 
 
 def _is_strict_int(value):
@@ -228,3 +242,58 @@ def build_snapshot(registry, roster, *, cadence_s):
     # hand the SAME object to the accepted structural self-check.
     snapshot["snapshot_id"] = catalog.snapshot_hash(snapshot)
     return catalog.validate_snapshot(snapshot)
+
+
+def capture_registry(providers, wiring):
+    """Project the already-RESOLVED active registry to four-field public records.
+
+    ``providers`` is the active key -> resolved config mapping in
+    INSERTION/display order (the config loader has already excluded disabled
+    providers and resolved keys); ``wiring`` is the matching key -> resolved
+    wiring mapping. Membership of ``providers`` IS the registry: one new record
+    per key in that exact order, and wiring-only keys are ignored. Only the
+    selected config's ``name`` and the selected wiring's
+    ``chat_completions_url``/``api_type`` are read -- every other member
+    (credentials, auth, local paths, probe/private objects, ``enabled`` flags)
+    is never inspected, traversed or copied, and no key/URL is re-derived.
+
+    Returns a NEW list of NEW dicts carrying EXACTLY ``key``, ``name``,
+    ``chat_completions_url`` and ``api_type``, ready for
+    :func:`build_snapshot`. Required-slot validation is delegated to the
+    accepted :func:`_read_record` (nonempty string key/URL/api_type; a
+    missing/empty/non-string ``name`` falls back to the literal key) and a
+    missing or malformed selected config/wiring entry is the frozen structural
+    :class:`catalog.CatalogError` (``invalid_snapshot``), never a silent skip.
+    URL SYNTAX is left to the accepted final snapshot validator.
+
+    Only the two ROOT argument types are programming errors: a non-``dict``
+    raises a fixed, non-reflective ``TypeError`` before any content is read.
+    Neither input is mutated, and the helper performs no I/O, clock,
+    environment, network or config-loader/SDK import.
+    """
+    if not isinstance(providers, dict):
+        raise TypeError(_PROVIDERS_ROOT_MESSAGE)
+    if not isinstance(wiring, dict):
+        raise TypeError(_WIRING_ROOT_MESSAGE)
+    records = []
+    for key in providers:
+        config = providers.get(key)
+        wiring_entry = wiring.get(key)
+        if not isinstance(config, dict) or not isinstance(wiring_entry, dict):
+            # Direct raise (not `_fail`) so a static checker narrows both maps.
+            raise catalog.CatalogError(catalog.INVALID_SNAPSHOT)
+        # Reuse the ONE accepted record-shape validator/fallback, then form the
+        # fresh public record from its returned values only.
+        record_key, display_name, url, api_type = _read_record({
+            "key": key,
+            "name": config.get("name"),
+            "chat_completions_url": wiring_entry.get("chat_completions_url"),
+            "api_type": wiring_entry.get("api_type"),
+        })
+        records.append({
+            "key": record_key,
+            "name": display_name,
+            "chat_completions_url": url,
+            "api_type": api_type,
+        })
+    return records

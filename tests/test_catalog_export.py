@@ -6,7 +6,7 @@ module -- ``catalog_export.build_snapshot`` -- plus the accepted
 LAZILY inside each test so that a missing module or symbol is a focused RED
 (one failing assertion per group) rather than an unrelated collection error.
 
-Four coherent groups, edges expressed as row loops rather than one test per
+Five coherent groups, edges expressed as row loops rather than one test per
 row:
 
 * G1 -- reverse capture: a captured active registry plus one captured roster
@@ -28,6 +28,14 @@ row:
 * G4 -- closed projection (no secret/private field ever serialized), retained
   public text, freshness/isolation of every mutable container, and a REAL
   fresh-process import-purity audit of the producer module.
+* G5 -- active-registry public capture (unit 4a): the pure
+  ``capture_registry`` projection of the already-resolved provider/wiring maps
+  into four-field records in insertion/display order, its root-``TypeError``
+  versus selected-record-``CatalogError`` boundary, ignored-extra
+  non-traversal, and one end-to-end capture -> REAL ``build_snapshot`` ->
+  JSON -> accepted-validator round trip with synthetic secret sentinels.
+  HTML rendering, CLI wiring and publication remain OUT of this group's
+  boundary.
 
 Every expected value below is an independent literal restatement of the frozen
 contract or of an existing fixture; no expected snapshot is generated from the
@@ -717,3 +725,278 @@ def test_closed_projection_freshness_and_producer_import_purity(tmp_path):
 
     # Real fresh-process import-purity audit of the producer module.
     _assert_producer_import_purity(tmp_path)
+
+
+# =============== G5: active-registry public capture (unit 4a) ===============
+
+def test_active_registry_public_capture_and_secret_sentinels():
+    from catalog_export import build_snapshot, capture_registry
+    from watchdog_catalog import catalog
+
+    class _Poison:
+        """An IGNORED extra that explodes on whole-object operations."""
+
+        def __str__(self):
+            raise AssertionError("ignored extra was stringified")
+
+        def __iter__(self):
+            raise AssertionError("ignored extra was iterated")
+
+        def __deepcopy__(self, memo):
+            raise AssertionError("ignored extra was deep-copied")
+
+    fields = {"key", "name", "chat_completions_url", "api_type"}
+    token, auth, base, path, probe = (
+        "SENTINEL-4A-TOKEN", "SENTINEL-4A-AUTH", "SENTINEL-4A-BASE",
+        "SENTINEL-4A-PATH", "SENTINEL-4A-PROBE")
+    pending, unknown = "SENTINEL-4A-PENDING", "SENTINEL-4A-UPSTREAM"
+    sentinels = (token, auth, base, path, probe, pending, unknown,
+                 "SENTINEL-4A-STEM", "SENTINEL-4A-ROSTER")
+
+    zeta_url = "https://zeta.example/v1/chat/completions"
+    alpha_url = "https://alpha.example/v1/chat/completions"
+    padded_url = "https://padded.example/v1/chat/completions"
+    zero_url = "https://zero-id.example/v1/chat/completions"
+    off_url = "https://off.example/v1/chat/completions"
+    good_wire = {"chat_completions_url": "https://k.example/v1/chat/completions",
+                 "api_type": "openai_compatible"}
+
+    # (a) Exact public projection and INSERTION/display order. Provider order
+    # is deliberately neither alphabetical nor the wiring-map order; wiring
+    # carries an extra key BEFORE the first provider key, and an `enabled=False`
+    # EXTRA inside the already-active map must not become a second filter.
+    wiring = {
+        "wiring-only": {"chat_completions_url": "https://wiring-only.example/v1/chat/completions",
+                        "api_type": "openai_compatible"},
+        " pad ": {"chat_completions_url": padded_url,
+                  "api_type": "openai_compatible"},
+        "zeta": {"chat_completions_url": zeta_url,
+                 "api_type": "openai_compatible", "upstream_unknown": unknown,
+                 "pending_alert": pending},
+        "off-extra": {"chat_completions_url": off_url,
+                      "api_type": "openai_compatible"},
+        "zero-id": {"chat_completions_url": zero_url,
+                    "api_type": "openai_compatible"},
+        "Alpha": {"chat_completions_url": alpha_url,
+                  "api_type": "openai_compatible"},
+    }
+    providers = {
+        "zeta": {"name": "Zeta ✓", "_token": token, "auth": {"token": auth},
+                 "base_url": base, "private_path": path, "probe": probe,
+                 "pending_alert": pending, "upstream_unknown": unknown,
+                 "_stem": "SENTINEL-4A-STEM", "enabled": True},
+        "Alpha": {"name": "  Alpha  ", "_token": token, "enabled": True},
+        " pad ": {"name": "", "enabled": True},          # empty -> literal key
+        "zero-id": {"name": 17, "enabled": True},        # non-string -> literal key
+        "off-extra": {"name": "Off", "enabled": False},  # active: extra wins never
+    }
+    expected = [
+        {"key": "zeta", "name": "Zeta ✓", "chat_completions_url": zeta_url,
+         "api_type": "openai_compatible"},
+        {"key": "Alpha", "name": "  Alpha  ", "chat_completions_url": alpha_url,
+         "api_type": "openai_compatible"},
+        {"key": " pad ", "name": " pad ", "chat_completions_url": padded_url,
+         "api_type": "openai_compatible"},
+        {"key": "zero-id", "name": "zero-id", "chat_completions_url": zero_url,
+         "api_type": "openai_compatible"},
+        {"key": "off-extra", "name": "Off", "chat_completions_url": off_url,
+         "api_type": "openai_compatible"},
+    ]
+    captured = capture_registry(providers, wiring)
+    assert captured == expected
+    assert [record["key"] for record in captured] == [
+        "zeta", "Alpha", " pad ", "zero-id", "off-extra"]
+    for record in captured:
+        assert set(record) == fields
+        assert not any(secret in json.dumps(record, ensure_ascii=False)
+                       for secret in sentinels)
+    assert "wiring-only" not in [record["key"] for record in captured]
+
+    # Fresh list of fresh dicts on every call; inputs unchanged.
+    second = capture_registry(providers, wiring)
+    assert second == captured and second is not captured
+    assert all(left is not right for left, right in zip(second, captured))
+    second[0]["name"] = "MUTATED"
+    second.append({"key": "MUTATED"})
+    assert captured[0]["name"] == "Zeta ✓" and len(captured) == 5
+    assert providers["zeta"]["name"] == "Zeta ✓"
+
+    # A legitimately EMPTY active registry is valid even with a populated
+    # wiring map; bad roots never degrade to that empty registry.
+    assert capture_registry({}, wiring) == []
+    assert capture_registry({}, {}) is not capture_registry({}, {})
+
+    # (b) Root type gates are programming errors with fixed, non-reflective
+    # messages, checked BEFORE any content -- so a poisonous leaf cannot leak.
+    for bad in ([], (), "", None, 0, 3.5, {"k": 1}.keys(), ("k",)):
+        with pytest.raises(TypeError) as excinfo:
+            capture_registry(bad, {})
+        assert str(excinfo.value) == (
+            "capture_registry() requires a resolved providers mapping")
+    for bad in ([], (), "", None, 0, 3.5, {"k": 1}.values(), ("k",)):
+        with pytest.raises(TypeError) as excinfo:
+            capture_registry({}, bad)
+        assert str(excinfo.value) == (
+            "capture_registry() requires a resolved gateway wiring mapping")
+    with pytest.raises(TypeError):
+        capture_registry({"k": _Poison()}, None)
+
+    # Selected-record faults are the frozen structural failure, never a skip.
+    bad_cases = [
+        ({"k": "not-a-dict"}, {"k": dict(good_wire)}),        # config not a dict
+        ({"k": {"name": "K"}}, {}),                           # wiring missing
+        ({"k": {"name": "K"}}, {"k": "not-a-dict"}),          # wiring not a dict
+        ({"k": {"name": "K"}}, {"k": {}}),                    # url missing
+        ({"k": {"name": "K"}},
+         {"k": {"chat_completions_url": "", "api_type": "openai_compatible"}}),
+        ({"k": {"name": "K"}},
+         {"k": {"chat_completions_url": 3, "api_type": "openai_compatible"}}),
+        ({"k": {"name": "K"}},
+         {"k": {"chat_completions_url": good_wire["chat_completions_url"],
+                "api_type": ""}}),
+        ({"k": {"name": "K"}},
+         {"k": {"chat_completions_url": good_wire["chat_completions_url"],
+                "api_type": None}}),
+        ({3: {"name": "Three"}}, {3: dict(good_wire)}),       # bad key type
+        ({"": {"name": "Empty"}}, {"": dict(good_wire)}),     # empty key
+        ({None: {"name": "None"}}, {None: dict(good_wire)}),
+    ]
+    for bad_providers, bad_wiring in bad_cases:
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            capture_registry(bad_providers, bad_wiring)
+        assert excinfo.value.code == INVALID_SNAPSHOT
+        assert excinfo.value.message == INVALID_SNAPSHOT_MESSAGE
+
+    hostile = "<script>alert('x')</script>"
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        capture_registry({hostile: "not-a-dict"}, {hostile: dict(good_wire)})
+    assert hostile not in str(excinfo.value)
+
+    # A malformed selected leaf anywhere fails the WHOLE capture: no partial
+    # list is returned and no healthy sibling is salvaged.
+    with pytest.raises(catalog.CatalogError):
+        capture_registry({"ok": {"name": "OK"}, "bad": "not-a-dict"},
+                         {"ok": dict(good_wire), "bad": dict(good_wire)})
+
+    # URL SYNTAX stays with the accepted final validator: capture keeps the
+    # nonempty string verbatim, and the REAL builder then rejects it.
+    bad_url = "ftp://k.example/v1/chat/completions"
+    captured_bad = capture_registry(
+        {"k": {"name": "K"}},
+        {"k": {"chat_completions_url": bad_url, "api_type": "openai_compatible"}})
+    assert captured_bad[0]["chat_completions_url"] == bad_url
+    with pytest.raises(catalog.CatalogError):
+        build_snapshot(captured_bad, {"providers": {}}, cadence_s=1)
+
+    # (c) Ignored extras are never traversed: poison in every private slot and
+    # in an unrelated wiring-only entry neither raises nor leaks. `enabled` is
+    # an ignored EXTRA, not a second provider filter.
+    poison = _Poison()
+    poison_capture = capture_registry(
+        {"p": {"name": "P", "_token": poison, "auth": poison,
+               "base_url": poison, "private_path": poison, "probe": poison,
+               "pending_alert": poison, "upstream_unknown": poison,
+               "enabled": False}},
+        {"p": {"chat_completions_url": good_wire["chat_completions_url"],
+               "api_type": "openai_compatible", "_token": poison,
+               "auth": poison, "upstream_unknown": poison},
+         "wiring-only": {"chat_completions_url": poison, "api_type": poison}})
+    assert poison_capture == [{
+        "key": "p", "name": "P",
+        "chat_completions_url": good_wire["chat_completions_url"],
+        "api_type": "openai_compatible"}]
+
+    # (d) Integration: ONE capture -> the REAL builder -> JSON -> the accepted
+    # validator. Public values round-trip; synthetic private sentinels never
+    # reach the serialized snapshot.
+    roster = {
+        "tick_epoch": 0,
+        "providers": {
+            "zeta": ["m2", "m1", "m2"],
+            "Alpha": ["shared"],
+            " pad ": [],
+            "zero-id": [],
+            "off-extra": ["shared"],
+            "roster-only": ["m"],
+        },
+        "provider_models": {
+            "zeta": {
+                "m1": {"name": "Model ✓ one", "description": "  spaced  ",
+                       "context_length": 4096,
+                       "architecture": {"input_modalities": ["TEXT"],
+                                        "output_modalities": ["text"]},
+                       "supported_parameters": ["Temperature"],
+                       "pricing": {"prompt": "0", "completion": 0},
+                       "unknown_field": unknown},
+                "m2": {"name": "M2"},
+            },
+            "Alpha": {"shared": {"name": "Alpha shared", "context_length": 8}},
+            "off-extra": {"shared": {"name": "Off shared", "context_length": 16}},
+            "roster-only": {"m": {"name": unknown}},
+        },
+        "stale_providers": ["Alpha"],
+        "pending_alerts": [{"_token": pending}],
+        "transients": {"private": auth},
+        "ratelimits": {"headers": base},
+        "warnings": [unknown],
+    }
+    providers_before = copy.deepcopy(providers)
+    wiring_before = copy.deepcopy(wiring)
+    roster_before = copy.deepcopy(roster)
+
+    captured = capture_registry(providers, wiring)
+    assert all(set(record) == fields for record in captured)
+    snapshot = build_snapshot(captured, roster, cadence_s=3600)
+
+    text = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
+    for secret in sentinels:
+        assert secret not in text, secret
+    assert "roster-only" not in snapshot["providers"]
+    assert "wiring-only" not in snapshot["providers"]
+    assert snapshot["provider_order"] == [
+        "zeta", "Alpha", " pad ", "zero-id", "off-extra"]
+
+    # Public values survive verbatim, not over-redacted.
+    zeta = snapshot["providers"]["zeta"]
+    assert zeta["display_name"] == "Zeta ✓"
+    assert zeta["chat_completions_url"] == zeta_url
+    assert zeta["api_type"] == "openai_compatible"
+    assert zeta["model_ids"] == ["m1", "m2"]       # unsorted/duplicate normalised
+    model = zeta["models"]["m1"]
+    assert model["name"] == "Model ✓ one"
+    assert model["description"] == "  spaced  "
+    assert model["context_length"] == 4096
+    assert model["architecture"]["input_modalities"] == ["TEXT"]
+    assert model["supported_parameters"] == ["Temperature"]
+    assert model["pricing"] == {"prompt": "0", "completion": 0}
+    assert set(model["pricing"]) == PUBLIC_PRICING_FIELDS
+    assert snapshot["providers"][" pad "]["display_name"] == " pad "
+    assert snapshot["providers"]["zero-id"]["model_ids"] == []
+    assert snapshot["providers"]["off-extra"]["display_name"] == "Off"
+    assert snapshot["providers"]["Alpha"]["stale"] is True
+
+    # Per-provider shared-ID metadata is NEVER flattened across providers.
+    alpha_shared = snapshot["providers"]["Alpha"]["models"]["shared"]
+    off_shared = snapshot["providers"]["off-extra"]["models"]["shared"]
+    assert alpha_shared["name"] == "Alpha shared"
+    assert alpha_shared["context_length"] == 8
+    assert off_shared["name"] == "Off shared"
+    assert off_shared["context_length"] == 16
+    assert alpha_shared is not off_shared
+
+    # JSON round trip then the REAL accepted validator on the loaded object.
+    loaded = json.loads(text)
+    assert loaded == snapshot
+    assert catalog.validate_snapshot(loaded) is loaded
+    assert loaded["providers"]["zeta"]["models"]["m1"]["name"] == "Model ✓ one"
+
+    # Inputs are unchanged by capture + build; captured records never alias
+    # the snapshot or a later capture.
+    assert _same_inputs(providers, providers_before)
+    assert _same_inputs(wiring, wiring_before)
+    assert _same_inputs(roster, roster_before)
+    captured[0]["name"] = "LATE"
+    assert snapshot["providers"]["zeta"]["display_name"] == "Zeta ✓"
+    again = capture_registry(providers, wiring)
+    assert again[0] is not captured[0]
+    assert again[0]["name"] == "Zeta ✓"
