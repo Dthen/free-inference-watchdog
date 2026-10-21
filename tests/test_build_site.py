@@ -1496,3 +1496,466 @@ def test_dead_raw_count_key_removed(tmp_path):
     gone from both code and docstring."""
     src = BUILDER.read_text(encoding="utf-8")
     assert "raw_count" not in src
+
+
+# ---------- Unit 4c: snapshot-authoritative public matrix rendering ----------
+#
+# The public route renders an already-VALIDATED snapshot through the SAME
+# template the legacy adapter uses. Two synthetic-only groups pin it:
+#   1. snapshot authority: provider order, per-provider wiring and per-pair
+#      projected metadata come from the snapshot, never module globals; the
+#      staged data-script slot stays EMPTY (no roster island, no premature
+#      catalogue/tool island).
+#   2. one shared template: public HTML equals the legacy render_page output
+#      minus ONLY its roster-data island, and a capture -> build -> render
+#      round trip leaks none of the excluded operational fields.
+# No production roster, provider config, site artifact or network is touched.
+
+PUBLIC_RENDER_LOGO = "ZmFrZWxvZ28="
+
+# Authoritative display order DIFFERS from the poisoned global order below and
+# from the reversed insertion order used for the snapshot's providers map.
+PUBLIC_PROVIDER_ORDER = ["synthetic-beta", "synthetic-alpha", "synthetic-empty"]
+PUBLIC_LONG_RUN = "acme/token-" + "0" * 59 + "1:free"
+PUBLIC_TOKEN_IDS = [
+    "acme/token-2:free",
+    "acme/token-02:free",
+    "acme/token-10-free",
+    PUBLIC_LONG_RUN,
+    "acme/token-\u0662:free",  # Arabic-Indic digit two: TEXT token, not a digit run
+]
+
+
+def _public_snapshot(providers, provider_models):
+    """Build a REAL validated snapshot through the accepted capture/build path."""
+    from catalog_export import build_snapshot, capture_registry
+
+    providers = {key: list(ids) for key, ids in providers.items()}
+    wiring = {
+        key: {
+            "chat_completions_url": (
+                f"https://{key}.synthetic.example/v1/chat/completions"),
+            "api_type": "openai-synthetic",
+        }
+        for key in providers
+    }
+    configs = {key: {"name": key} for key in providers}
+    roster = {
+        "tick_epoch": 1787721434,
+        "providers": providers,
+        "provider_models": provider_models,
+        "stale_providers": [],
+    }
+    return build_snapshot(capture_registry(configs, wiring), roster,
+                          cadence_s=3600)
+
+
+def _resnapshot_with_map_order(snapshot, map_order):
+    """Reseal a deep copy whose providers MAP insertion order differs from
+    provider_order -- valid, because only set equality is constrained."""
+    import copy
+
+    from watchdog_catalog import catalog
+
+    body = copy.deepcopy(snapshot)
+    body.pop("snapshot_id")
+    body["providers"] = {key: body["providers"][key] for key in map_order}
+    body["snapshot_id"] = catalog.snapshot_hash(body)
+    return catalog.validate_snapshot(body)
+
+
+def _public_wires(html):
+    """Every (gateway, raw id, url, api type) wiring row, in document order."""
+    wires = []
+    for tr in re.findall(r'<tr class="expand">.*?</tr>', html, re.S):
+        wires.append((
+            re.search(r'<span class="wire-gw">([^<]*)</span>', tr).group(1),
+            re.search(r'<span class="wire-id">([^<]*)</span>', tr).group(1),
+            re.search(r'<span class="wire-url">([^<]*)</span>', tr).group(1),
+            re.search(r'<span class="wire-api">([^<]*)</span>', tr).group(1),
+        ))
+    return wires
+
+
+def _thead_columns(html):
+    head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
+    return [c.strip() for c in re.findall(r"<th>(?:<a[^>]*>)?([^<(]*)", head)]
+
+
+def test_public_snapshot_renderer_is_snapshot_authoritative():
+    """Public matrix derives order/wiring/metadata from the snapshot only.
+
+    Builds two actual validated synthetic snapshots (populated + true empty),
+    poisons the module globals and the legacy adapter with matching keys but
+    WRONG values, and pins literal output: header order, every raw endpoint
+    identity + wiring, portable natural order (ASCII/leading-zero/long-run/
+    non-ASCII digit controls), per-gateway footer counts, endpoint totals and
+    the `#` distinct-gateway count. Also pins the STAGED boundary: the public
+    data-script slot is empty, so no script island exists yet.
+    """
+    import copy
+
+    import build_site
+
+    beta_models = {
+        "acme/token-2:free": {
+            "name": "acme/token", "context_length": 262144,
+            "architecture": {"input_modalities": ["text"]}},
+        "acme/token-02:free": {
+            "name": "acme/token", "context_length": 262144,
+            "architecture": {"input_modalities": ["text"]}},
+        "acme/token-10-free": {
+            "name": "acme/token", "context_length": 262144,
+            "architecture": {"input_modalities": ["text"]}},
+        PUBLIC_LONG_RUN: {
+            # Known context 0 must still render a tooltip, never "unknown".
+            "name": "acme/token", "context_length": 0,
+            "architecture": {"input_modalities": ["text"]}},
+        "acme/token-\u0662:free": {
+            # Known EMPTY modalities must not crash the tooltip builder.
+            "name": "acme/token", "context_length": 262144,
+            "architecture": {"input_modalities": []}},
+        # No metadata entry at all -> projected name falls back to the raw id.
+    }
+    alpha_models = {
+        "acme/token-2:free": {
+            "name": "acme/token", "context_length": 262144,
+            "architecture": {"input_modalities": ["text"]}},
+        "acme/alpha-only-free": {
+            "name": "acme/alpha-only", "context_length": 131072,
+            "architecture": {"input_modalities": ["text", "image"]}},
+    }
+    snapshot = _public_snapshot(
+        {
+            "synthetic-beta": PUBLIC_TOKEN_IDS + ["acme/only-beta-free"],
+            "synthetic-alpha": ["acme/token-2:free", "acme/alpha-only-free"],
+            "synthetic-empty": [],
+        },
+        {"synthetic-beta": beta_models, "synthetic-alpha": alpha_models},
+    )
+    assert snapshot["provider_order"] == PUBLIC_PROVIDER_ORDER
+    # Same snapshot, providers MAP inserted in a different order: rendering
+    # must follow provider_order, not dict insertion order.
+    snapshot = _resnapshot_with_map_order(
+        snapshot, ["synthetic-empty", "synthetic-alpha", "synthetic-beta"])
+
+    header_meta = {
+        "synthetic-beta": {
+            "signup_url": "https://beta.synthetic.example/signup",
+            "limits_note": 'beta "note" & <angle>',
+        },
+        # Non-https must degrade to a plain <th> (scheme guard).
+        "synthetic-alpha": {
+            "signup_url": "javascript:alert(1)", "limits_note": "ignored"},
+    }
+
+    saved_order = build_site.DISPLAY_ORDER
+    saved_wiring = build_site.GATEWAY_WIRING
+    saved_meta = build_site.build_provider_header_meta
+    saved_render_page = build_site.render_page
+    saved_load_configs = build_site.config_loader.load_configs
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("public renderer consulted legacy configuration")
+
+    def _thead(html):
+        return html.split("<thead>", 1)[1].split("</thead>", 1)[0]
+
+    try:
+        # Matching keys, WRONG order / URLs / api types: a wrong source must
+        # produce a meaningful literal mismatch, never a KeyError.
+        build_site.DISPLAY_ORDER = [
+            "synthetic-alpha", "synthetic-empty", "synthetic-beta"]
+        build_site.GATEWAY_WIRING = {
+            key: {
+                "chat_completions_url":
+                    f"https://poisoned.example/WRONG-{key}",
+                "api_type": "WRONG-api-type",
+            }
+            for key in PUBLIC_PROVIDER_ORDER
+        }
+        build_site.build_provider_header_meta = _forbidden
+        build_site.render_page = _forbidden
+        build_site.config_loader.load_configs = _forbidden
+
+        snapshot_before = copy.deepcopy(snapshot)
+        header_before = copy.deepcopy(header_meta)
+
+        html = build_site.render_catalog_page(
+            snapshot, PUBLIC_RENDER_LOGO, header_meta)
+        assert html == build_site.render_catalog_page(
+            snapshot, PUBLIC_RENDER_LOGO, header_meta), "output must be deterministic"
+        assert snapshot == snapshot_before, "snapshot was mutated by rendering"
+        assert header_meta == header_before, "header map was mutated by rendering"
+
+        # --- snapshot-authoritative column order / headers -----------------
+        assert _thead_columns(html) == [
+            "model", "#", "synthetic-beta", "synthetic-alpha"], _thead(html)
+        head = _thead(html)
+        assert ('<th><a href="https://beta.synthetic.example/signup" '
+                'target="_blank" rel="noopener" title="beta &quot;note&quot; '
+                '&amp; &lt;angle&gt;">synthetic-beta</a></th>') in head
+        assert "<th>synthetic-alpha</th>" in head
+        # Scheme guard: a javascript: signup_url is never linked or emitted.
+        assert "javascript:" not in html
+        # Zero-ID provider is hidden: no column, no chip inflation.
+        assert "synthetic-empty" not in html
+
+        # --- chips, footer totals, distinct-gateway '#' --------------------
+        chips = html.split('<div class="chips">', 1)[1].split("</div>", 1)[0]
+        assert "<b>3</b> unique models" in chips, chips   # alpha-only + only-beta + token
+        assert "<b>8</b> endpoints" in chips, chips       # 6 beta + 2 alpha wirings
+        assert "<b>2</b> gateways" in chips, chips        # empty provider hidden
+        assert _tfoot_numbers(html) == [6, 2]
+
+        assert _row_count(html) == 3
+        names = []
+        for tbody in re.findall(r"<tbody>(.*?)</tbody>", html, re.S):
+            names.extend(re.findall(_NAME_ROW_RE, tbody))
+        assert names == ["acme/alpha-only", "acme/only-beta-free", "acme/token"]
+
+        expected_hashes = {
+            "acme/alpha-only": "1",
+            "acme/only-beta-free": "1",
+            "acme/token": "2",
+        }
+        for name, want in expected_hashes.items():
+            row = _row_for(html, name)
+            m = re.search(r'<th[^>]*>[\s\S]*?</th>\s*<td class="n">(\d+)</td>',
+                          row)
+            assert m and m.group(1) == want, (name, row)
+
+        # --- every exact raw endpoint identity + per-provider wiring --------
+        expected_wires = [
+            ("synthetic-beta", raw_id,
+             "https://synthetic-beta.synthetic.example/v1/chat/completions",
+             "openai-synthetic")
+            for raw_id in PUBLIC_TOKEN_IDS + ["acme/only-beta-free"]
+        ] + [
+            ("synthetic-alpha", "acme/token-2:free",
+             "https://synthetic-alpha.synthetic.example/v1/chat/completions",
+             "openai-synthetic"),
+            ("synthetic-alpha", "acme/alpha-only-free",
+             "https://synthetic-alpha.synthetic.example/v1/chat/completions",
+             "openai-synthetic"),
+        ]
+        wires = _public_wires(html)
+        assert len(wires) == 8, wires
+        assert sorted(wires) == sorted(expected_wires)
+        assert "poisoned.example" not in html
+        assert "WRONG-api-type" not in html
+
+        # --- portable natural order inside the shared group ----------------
+        token_body = next(
+            body for body in re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
+            if re.search(_NAME_ROW_RE, body).group(1) == "acme/token")
+        assert re.findall(r'<span class="wire-id">([^<]*)</span>',
+                          token_body) == PUBLIC_TOKEN_IDS + [
+                              "acme/token-2:free"]  # alpha variant last
+
+        # --- tooltip metadata: known 0 rendered, unknown stays absent ------
+        assert "Context length: 0 (synthetic-beta)" in html, "known 0 dropped"
+        assert "Input modalities: text" in html
+        only_beta_row = _row_for(html, "acme/only-beta-free")
+        assert "Context length" not in only_beta_row
+        assert "Input modalities" not in only_beta_row
+
+        # --- preserved presentation: CSS-only expansion, colspan, logo -----
+        assert "type:checkbox" not in html  # no stray inline JS/type confusion
+        assert 'type="checkbox"' in html
+        assert '<label for="row-0">' in html
+        assert 'colspan="4"' in html                    # 2 + 2 active gateways
+        assert "tbody tr:has(input.row-expand:checked) ~ tr.expand" in html
+        assert "--nord0:#2e3440" in html
+        assert ('src="data:image/png;base64,' + PUBLIC_RENDER_LOGO + '"') in html
+        assert 'href="https://github.com/Dthen/free-inference-watchdog"' in html
+        assert 'href="https://ko-fi.com/dthen"' in html
+
+        # --- STAGED boundary: no script island on the public route ---------
+        assert "<script" not in html, "public route must not embed any script yet"
+        assert 'id="roster-data"' not in html
+
+        # --- default headers are plain and I/O-free ------------------------
+        default_html = build_site.render_catalog_page(
+            snapshot, PUBLIC_RENDER_LOGO)
+        assert "<a " not in _thead(default_html)
+        assert _thead_columns(default_html) == [
+            "model", "#", "synthetic-beta", "synthetic-alpha"]
+
+        # --- true empty registry stays a valid, distinguishable page -------
+        empty_html = build_site.render_catalog_page(
+            _public_snapshot({}, {}), PUBLIC_RENDER_LOGO)
+        assert _thead_columns(empty_html) == ["model", "#"]
+        assert 'class="name-row"' not in empty_html
+        empty_chips = empty_html.split('<div class="chips">', 1)[1].split(
+            "</div>", 1)[0]
+        assert "<b>0</b> unique models" in empty_chips
+        assert "<b>0</b> endpoints" in empty_chips
+        assert "<b>0</b> gateways" in empty_chips
+        assert "<script" not in empty_html
+    finally:
+        build_site.DISPLAY_ORDER = saved_order
+        build_site.GATEWAY_WIRING = saved_wiring
+        build_site.build_provider_header_meta = saved_meta
+        build_site.render_page = saved_render_page
+        build_site.config_loader.load_configs = saved_load_configs
+
+
+def test_shared_template_parity_and_public_html_is_secret_safe():
+    """One template: public HTML == legacy HTML minus ONLY the roster island.
+
+    Also drives real capture -> build_snapshot -> render_catalog_page with
+    genuine token/auth/local-path/pending/upstream-unknown sentinels in
+    EXCLUDED fields, asserting none reach the HTML while retained public
+    name/context/modality/wiring strings do, hostile visible/attribute text
+    stays escaped, and no input is mutated.
+    """
+    import copy
+    from html.parser import HTMLParser
+
+    import build_site
+    from catalog_export import build_snapshot, capture_registry
+    from config_loader import GATEWAY_WIRING
+
+    # ---- (a) legacy parity through the shared template -------------------
+    order = ["nous", "tokenrouter", "kilo", "openrouter"]
+    legacy_roster = copy.deepcopy(EXPAND_ROSTER)
+    parity_header_meta = {"nous": {
+        "signup_url": "https://nous.synthetic.example/signup",
+        "limits_note": 'nous "note" & <synthetic>'}}
+    parity_records = capture_registry(
+        {key: {"name": key} for key in order},
+        {key: {"chat_completions_url":
+               GATEWAY_WIRING[key]["chat_completions_url"],
+               "api_type": GATEWAY_WIRING[key]["api_type"]}
+         for key in order},
+    )
+    parity_snapshot = build_snapshot(
+        parity_records,
+        {
+            "tick_epoch": 1787721434,
+            "providers": {key: list(legacy_roster["providers"][key])
+                          for key in order},
+            "provider_models": copy.deepcopy(legacy_roster["provider_models"]),
+            "stale_providers": [],
+        },
+        cadence_s=3600,
+    )
+    legacy_html = build_site.render_page(
+        legacy_roster, PUBLIC_RENDER_LOGO, parity_header_meta)
+    public_html = build_site.render_catalog_page(
+        parity_snapshot, PUBLIC_RENDER_LOGO, parity_header_meta)
+    assert re.findall(r'<script\b[^>]*>', legacy_html) == [
+        '<script type="application/json" id="roster-data">']
+    assert "<script" not in public_html
+    stripped_legacy = re.sub(
+        r'<script type="application/json" id="roster-data">.*?</script>', "",
+        legacy_html, count=1, flags=re.S)
+    assert stripped_legacy == public_html, (
+        "public route must reuse the ONE legacy template byte-for-byte")
+
+    # ---- (b) secret-safe public HTML from real capture/build -------------
+    token_sentinel = "sk-live-SENTINEL-TOKEN-9f3a"
+    auth_sentinel = "Bearer SENTINEL-AUTH-77c1"
+    path_sentinel = "/home/operator/.secrets/SENTINEL-PATH"
+    pending_sentinel = "SENTINEL-PENDING-ALERT"
+    unknown_sentinel = "SENTINEL-UPSTREAM-UNKNOWN"
+
+    configs = {"send-gw": {
+        "name": 'Send <Gateway> "quoted"',
+        "_token": token_sentinel,
+        "auth": auth_sentinel,
+        "base_url": path_sentinel,
+        "pending_alerts": [pending_sentinel],
+        "upstream_unknown": unknown_sentinel,
+    }}
+    wiring = {"send-gw": {
+        "chat_completions_url":
+            "https://send.synthetic.example/v1/chat/completions",
+        "api_type": "openai-synthetic",
+    }}
+    roster = {
+        "tick_epoch": 1787721434,
+        "providers": {"send-gw": ["vendor-a/secret-safe-free"]},
+        "provider_models": {"send-gw": {"vendor-a/secret-safe-free": {
+            "name": 'Vendor <A> "Safe"',
+            "context_length": 65536,
+            "architecture": {"input_modalities": ["text", "image"]},
+            "auth": auth_sentinel,
+            "upstream_unknown": unknown_sentinel,
+        }}},
+        "stale_providers": [],
+        "_token": token_sentinel,
+        "local_path": path_sentinel,
+        "pending_alerts": [pending_sentinel],
+        "upstream_unknown": unknown_sentinel,
+        "auth": auth_sentinel,
+    }
+    header_meta = {"send-gw": {
+        "signup_url":
+            'https://send.synthetic.example/signup?x="><script>alert(2)</script>',
+        "limits_note": 'note "quoted" & <angle>',
+    }}
+    snapshot_before = copy.deepcopy(
+        build_snapshot(capture_registry(configs, wiring),
+                       copy.deepcopy(roster), cadence_s=1800))
+    configs_before = copy.deepcopy(configs)
+    wiring_before = copy.deepcopy(wiring)
+    roster_before = copy.deepcopy(roster)
+    header_before = copy.deepcopy(header_meta)
+
+    snapshot = build_snapshot(capture_registry(configs, wiring), roster,
+                              cadence_s=1800)
+    assert snapshot == snapshot_before
+    safe_html = build_site.render_catalog_page(
+        snapshot, PUBLIC_RENDER_LOGO, header_meta)
+
+    assert snapshot == snapshot_before, "snapshot mutated by rendering"
+    assert configs == configs_before and wiring == wiring_before
+    assert roster == roster_before, "operational roster input mutated"
+    assert header_meta == header_before
+
+    for sentinel in (token_sentinel, auth_sentinel, path_sentinel,
+                     pending_sentinel, unknown_sentinel):
+        assert sentinel not in safe_html, f"excluded field leaked: {sentinel}"
+    assert "SENTINEL" not in safe_html
+
+    # Intended public values DO survive, escaped where they are hostile text.
+    assert "Vendor &lt;A&gt; &quot;Safe&quot;" in safe_html
+    assert "vendor-a/secret-safe-free" in safe_html
+    assert "Context length: 65536" in safe_html
+    assert "Input modalities: text, image" in safe_html
+    assert "https://send.synthetic.example/v1/chat/completions" in safe_html
+    assert "openai-synthetic" in safe_html
+    # Visible copy stays escaped; the hostile header metadata is escaped too.
+    assert "<script>alert(2)</script>" not in safe_html
+    assert 'href="https://send.synthetic.example/signup?x=&quot;&gt;&lt;script&gt;alert(2)&lt;/script&gt;"' in safe_html
+    assert 'title="note &quot;quoted&quot; &amp; &lt;angle&gt;"' in safe_html
+
+    # ---- (c) stdlib structural sanity check (not a browser layout proof) --
+    class _TagAudit(HTMLParser):
+        _VOID = frozenset({"meta", "img", "input", "link", "br", "hr"})
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.stack = []
+            self.bad = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag not in self._VOID:
+                self.stack.append(tag)
+
+        def handle_endtag(self, tag):
+            if tag in self.stack:
+                while self.stack and self.stack[-1] != tag:
+                    self.bad.append(("unclosed", self.stack.pop()))
+                if self.stack:
+                    self.stack.pop()
+            else:
+                self.bad.append(("stray", tag))
+
+    audit = _TagAudit()
+    audit.feed(safe_html)
+    audit.close()
+    assert audit.bad == [], f"unbalanced markup: {audit.bad}"
+    assert audit.stack == [], f"unclosed elements: {audit.stack}"

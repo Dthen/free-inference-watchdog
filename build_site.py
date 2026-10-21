@@ -44,7 +44,6 @@ import argparse
 import base64
 import json
 import os
-import re
 import sys
 import threading
 from html import escape
@@ -72,12 +71,12 @@ SITE_REL = Path("site/index.html")
 LOGO_REL = Path("assets/logo.png")
 MAX_LOGO_BYTES = 40 * 1024  # refuse to embed a bloated logo
 
-# The free-marker stripper now lives in the pure, side-effect-free
-# watchdog_catalog.query module (stdlib-only, no config/state/SDK import). This
-# name re-exports that exact function object during the compatibility
-# transition, so existing importers and this page builder never drift from a
-# second copy.
-from watchdog_catalog.query import strip_free_marker  # noqa: E402
+# The free-marker stripper and the portable natural raw-ID key now live in the
+# pure, side-effect-free watchdog_catalog.query module (stdlib-only, no
+# config/state/SDK import). These names re-export those exact function objects
+# during the compatibility transition, so existing importers, the legacy
+# adapter and the public renderer never drift from a second copy.
+from watchdog_catalog.query import natural_key, strip_free_marker  # noqa: E402
 
 
 def load_roster(root):
@@ -146,9 +145,16 @@ def load_logo_b64(root):
 
 
 def _natural_key(s):
-    """Numeric-segment-aware ordering so 'x-2.10' sorts after 'x-2.2'."""
-    return [int(p) if p.isdigit() else p.lower()
-            for p in re.split(r"(\d+)", s)]
+    """Thin private delegate to the accepted portable natural raw-ID key.
+
+    Kept as a name (rather than inlining the import at every call site) so the
+    module's private call surface is unchanged; the ordering RULE itself lives
+    only in ``watchdog_catalog.query.natural_key`` -- ASCII digit runs by run
+    length then digits, every other piece case-sensitively by code point, so a
+    very long digit run, mixed case, leading zeroes and non-ASCII digit
+    lookalikes can never raise the old heterogeneous int/str comparison error.
+    """
+    return natural_key(s)
 
 
 def build_provider_header_meta():
@@ -182,7 +188,7 @@ def build_provider_header_meta():
         return {}
 
 
-def build_groups(providers, provider_models):
+def build_groups(providers, provider_models, *, provider_order=None):
     """Group raw ids by their display `name` field, deterministically.
 
     Returns (group_names, groups, endpoints) where:
@@ -191,7 +197,7 @@ def build_groups(providers, provider_models):
       - groups: dict[group_name] -> {
             "gateways": set[str],                  # every gw carrying ANY variant
             "variants": list[(gateway, raw_id)],   # per-(gw,raw) wiring rows, in
-                                                   # DISPLAY_ORDER then natural key
+                                                   # provider order then natural key
           }
       - endpoints: number of distinct (gateway, raw_id) wiring pairs, i.e.
         sum(len(slot["variants"]) for slot in groups.values()). An id
@@ -203,7 +209,14 @@ def build_groups(providers, provider_models):
     Grouping key: the `name` field from each gateway's provider_models entry.
     Fallback: if a model id has no entry in provider_models (e.g. gateway
     fetch failed), use the raw id as the group name (don't crash).
+
+    provider_order: optional keyword-only provider precedence. None (the legacy
+    two-positional-argument shape) means the module DISPLAY_ORDER; an explicit
+    list -- including an EMPTY one -- is used verbatim, never truthiness-fallen
+    back to the global. Every internal provider loop and the variant sort use
+    this order, so a caller can render from its own explicit provider view.
     """
+    order = DISPLAY_ORDER if provider_order is None else list(provider_order)
     raw_ids = sorted({mid for models in providers.values() for mid in models})
     groups: dict = {}
     # Build the per-(gw, raw_id) variant map deterministically: one slot
@@ -213,7 +226,7 @@ def build_groups(providers, provider_models):
     for mid in raw_ids:
         # Find the group name by looking up the `name` field in provider_models
         group_name = mid  # fallback: raw id
-        for gw in DISPLAY_ORDER:
+        for gw in order:
             if mid in providers.get(gw, []):
                 model_info = provider_models.get(gw, {}).get(mid, {})
                 name = model_info.get("name")
@@ -221,13 +234,13 @@ def build_groups(providers, provider_models):
                     group_name = name
                     break  # first gateway with a name wins (stable)
         slot = groups.setdefault(group_name, {"gateways": set(), "variants": []})
-        for gw in DISPLAY_ORDER:
+        for gw in order:
             if mid in providers.get(gw, []):
                 slot["gateways"].add(gw)
                 slot["variants"].append((gw, mid))
     for slot in groups.values():
         slot["variants"].sort(
-            key=lambda pair: (DISPLAY_ORDER.index(pair[0]),
+            key=lambda pair: (order.index(pair[0]),
                               _natural_key(pair[1]))
         )
     group_names = sorted(groups.keys())
@@ -250,13 +263,28 @@ def build_counts(providers):
     return ids, counts
 
 
-def render_page(roster, logo_b64, header_meta=None):
-    """Render the full HTML document as one string (byte-deterministic).
+def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
+                   logo_b64, header_meta, data_script):
+    """Render the ONE shared matrix HTML document from explicit resolved views.
 
-    header_meta: gateway key -> {'signup_url', 'limits_note'} (see
-    build_provider_header_meta). None (default) = derive from the repo's
-    providers/*.json once per render; config load failure degrades to plain
-    headers, never a crash.
+    This private engine owns the single copy of the template, the alphabetical
+    display-name grouping, the per-(gateway, raw id) expansion rows, the counts
+    and the Nord styling. It performs NO roster/registry read, NO logo or header
+    config load and NO I/O: every input is handed in by a thin adapter.
+
+    gateways: explicit provider-ID view -- gateway key -> tracked raw ids. Only
+        keys present here can get a column; an EMPTY list is already filtered
+        out by the adapter (zero-model columns stay hidden).
+    models_by_gateway: per-provider model view -- gateway key -> raw id ->
+        mapping read for `name`, `context_length` and
+        `architecture.input_modalities`. A missing pair stays unknown.
+    provider_order: authoritative provider precedence for columns, group-name
+        selection and variant ordering. An explicit EMPTY list is honoured.
+    wiring: gateway key -> {'chat_completions_url', 'api_type'}.
+    header_meta: explicit trusted gateway -> {'signup_url', 'limits_note'} map;
+        never derived here.
+    data_script: the complete data-script slot markup. The legacy adapter
+        passes its roster-data island; the staged public route passes "".
 
     Rows are GROUPED by stripped name: a model that ships as
     `vendor/x:free` on gateway A and `vendor/x-free` on gateway B renders
@@ -264,31 +292,23 @@ def render_page(roster, logo_b64, header_meta=None):
     gateways reached (so a gateway carrying both variants counts once).
     The <tfoot> per-gateway totals stay RAW per-gateway counts — that is
     the honest "ids tracked per gateway" number and must not change
-    meaning just because the matrix collapsed. The embedded
-    <script id="roster-data"> JSON island keeps the RAW roster verbatim
-    (MCP and any other consumer read raw ids, not groups).
-
-    Providers with zero free models are hidden from the matrix — they
-    clutter the view with an empty column and inflate the gateway chip.
+    meaning just because the matrix collapsed.
     """
-    providers = roster["providers"]
-    # Hide providers with zero free models — they clutter the matrix with
-    # an empty column and inflate the "gateways" chip for no reason.
-    providers = {gw: ids for gw, ids in providers.items() if ids}
-    # Active gateways in display order: only providers with models.
-    active_gateways = [gw for gw in DISPLAY_ORDER if gw in providers]
-    provider_models = roster.get("provider_models", {})
-    group_names, groups, endpoints = build_groups(providers, provider_models)
+    # Active gateways in the caller's provider order: only providers with models.
+    active_gateways = [gw for gw in provider_order if gw in gateways]
+    group_names, groups, endpoints = build_groups(
+        gateways, models_by_gateway, provider_order=provider_order)
 
     def _wire_cell(gw, raw_id):
         """Return the inner-HTML for one (gateway, raw_id) wiring row.
 
-        Imports from GATEWAY_WIRING: the URL column carries the gateway's
-        chat_completions_url, so the reader gets the exact endpoint.
+        Reads the caller's wiring view: the URL and api type come from THAT
+        provider entry, so the reader gets the exact endpoint.
         """
-        w = GATEWAY_WIRING[gw]
-        # config_loader.build_gateway_wiring() always emits chat_completions_url
-        # and api_type for every provider -- the subscripts are safe.
+        w = wiring[gw]
+        # Both wiring sources (the legacy config_loader map and a validated
+        # public provider entry) always carry chat_completions_url and
+        # api_type for an ACTIVE gateway -- the subscripts are safe.
         url_text = w["chat_completions_url"]
         # All visible strings: escaped, monospaced, copy-pasteable.
         return (
@@ -312,7 +332,7 @@ def render_page(roster, logo_b64, header_meta=None):
         ctx_by_val = {}  # {value: set of providers}
         mod_by_val = {}  # {tuple_of_modalities: set of providers}
         for gw, mid in group["variants"]:
-            model_info = provider_models.get(gw, {}).get(mid, {})
+            model_info = models_by_gateway.get(gw, {}).get(mid, {})
             cl = model_info.get("context_length")
             arch = model_info.get("architecture", {})
             im = arch.get("input_modalities")
@@ -380,9 +400,6 @@ def render_page(roster, logo_b64, header_meta=None):
         )
         return name_row + expand_rows
 
-    if header_meta is None:
-        header_meta = build_provider_header_meta()
-
     def _head_cell(gw):
         """Gateway column head: '<gateway>' always visible; wrapped in a
         signup anchor when providers/*.json carries an https:// signup_url,
@@ -409,7 +426,7 @@ def render_page(roster, logo_b64, header_meta=None):
     # tracked per gateway" number and must not change meaning because
     # the matrix collapsed to one row per group above.
     foot_cells = "".join(
-        '<td class="n">%d</td>' % len(providers.get(gw, [])) for gw in active_gateways
+        '<td class="n">%d</td>' % len(gateways.get(gw, [])) for gw in active_gateways
     )
     chips = (
         f'<span class="chip"><b>{len(group_names)}</b> unique models</span>'
@@ -417,13 +434,8 @@ def render_page(roster, logo_b64, header_meta=None):
         f'<span class="chip"><b>{len(active_gateways)}</b> gateways</span>'
     )
     meta = "updated hourly"
-    # sort_keys keeps the embedded JSON byte-stable across builds; the
-    # JSON island stays the RAW roster so MCP and other consumers that
-    # read raw ids are unaffected by the matrix grouping.
-    roster_json = json.dumps(roster, sort_keys=True).replace("</", "<\\/")
-    roster_script = (
-        f'<script type="application/json" id="roster-data">{roster_json}</script>'
-    )
+    # The data-script slot is supplied fully formed by the adapter: the legacy
+    # one carries its roster-data island, the staged public route carries "".
     body_rows = "".join(
         f"<tbody>{row_html(name, i)}</tbody>"
         for i, name in enumerate(group_names)
@@ -500,7 +512,7 @@ def render_page(roster, logo_b64, header_meta=None):
     <h1>Free Inference Watchdog</h1>
     <div class="meta">{meta}</div>
     <div class="chips">{chips}</div>
-    {roster_script}
+    {data_script}
   </div>
 </header>
 <table>
@@ -511,6 +523,103 @@ def render_page(roster, logo_b64, header_meta=None):
 </table>
 <footer class="note"><div class="footer-links"><a href="https://github.com/Dthen/free-inference-watchdog" target="_blank" rel="noopener">GitHub</a><a href="https://ko-fi.com/dthen" target="_blank" rel="noopener">Ko-fi</a></div></footer>
 </div></body></html>"""
+
+
+def render_page(roster, logo_b64, header_meta=None):
+    """Render the full HTML document as one string (byte-deterministic).
+
+    Legacy adapter: keeps its existing signature, roster-data island bytes and
+    default header derivation EXACTLY. Providers with zero free models are
+    hidden from the matrix — they clutter the view with an empty column and
+    inflate the gateway chip.
+
+    header_meta: gateway key -> {'signup_url', 'limits_note'} (see
+    build_provider_header_meta). None (default) = derive from the repo's
+    providers/*.json once per render; config load failure degrades to plain
+    headers, never a crash. Wiring and display order are this module's
+    legacy GATEWAY_WIRING / DISPLAY_ORDER views.
+    """
+    providers = roster["providers"]
+    # Hide providers with zero free models — they clutter the matrix with
+    # an empty column and inflate the "gateways" chip for no reason.
+    providers = {gw: ids for gw, ids in providers.items() if ids}
+    if header_meta is None:
+        header_meta = build_provider_header_meta()
+    # sort_keys keeps the embedded JSON byte-stable across builds; the
+    # JSON island stays the RAW roster so MCP and other consumers that
+    # read raw ids are unaffected by the matrix grouping.
+    roster_json = json.dumps(roster, sort_keys=True).replace("</", "<\\/")
+    return _render_matrix(
+        gateways=providers,
+        models_by_gateway=roster.get("provider_models", {}),
+        provider_order=DISPLAY_ORDER,
+        wiring=GATEWAY_WIRING,
+        logo_b64=logo_b64,
+        header_meta=header_meta,
+        data_script=(
+            f'<script type="application/json" id="roster-data">'
+            f"{roster_json}</script>"),
+    )
+
+
+def render_catalog_page(snapshot, logo_b64, header_meta=None):
+    """Render the matrix HTML from an already-VALIDATED public snapshot.
+
+    ``snapshot`` is a CALLER PRECONDITION: validation (and the eventual
+    build-before-render/write sequencing) belongs to the publishing unit, so
+    this function performs none itself. In-memory only — no roster/registry
+    read or capture, no logo/header/config load, no clock and no I/O. The
+    module's import-time producer configuration stays outside this function's
+    purity claim.
+
+    Every rendered fact is derived from the snapshot, never from a module
+    global or another provider's data:
+
+    * column order comes from ``snapshot["provider_order"]`` (an explicit empty
+      list is honoured, never replaced by DISPLAY_ORDER);
+    * tracked ids/models come from each public provider entry's ``model_ids`` /
+      ``models``;
+    * the wiring URL and api type come from THAT provider entry;
+    * tooltip context/modalities come from the selected pair's projected model
+      (unknown/null stays silent; a known 0 or known [] renders safely).
+
+    ``header_meta`` is an explicit trusted gateway -> {'signup_url',
+    'limits_note'} map. None means an EMPTY map on this route — deliberately
+    NOT a config read, so default headers are plain. The HTTPS-only scheme
+    guard and attribute escaping are shared template behaviour.
+
+    The data-script slot is deliberately EMPTY in this unit: the roster-data
+    island belongs to the legacy adapter, and catalogue/tool embedding with
+    script-context escaping is a later boundary. An empty slot is staging, not
+    a production claim.
+    """
+    provider_order = list(snapshot["provider_order"])
+    providers = snapshot["providers"]
+    # Explicit provider-ID / per-provider-model / wiring views. Zero-ID
+    # providers are dropped here so they get no hidden-but-present column.
+    gateways = {}
+    models_by_gateway = {}
+    wiring = {}
+    for key in provider_order:
+        entry = providers[key]
+        model_ids = entry["model_ids"]
+        if not model_ids:
+            continue
+        gateways[key] = list(model_ids)
+        models_by_gateway[key] = entry["models"]
+        wiring[key] = {
+            "chat_completions_url": entry["chat_completions_url"],
+            "api_type": entry["api_type"],
+        }
+    return _render_matrix(
+        gateways=gateways,
+        models_by_gateway=models_by_gateway,
+        provider_order=provider_order,
+        wiring=wiring,
+        logo_b64=logo_b64,
+        header_meta={} if header_meta is None else header_meta,
+        data_script="",
+    )
 
 
 def main(argv=None):
