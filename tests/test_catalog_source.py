@@ -9,6 +9,7 @@ This module exercises only the small read-only source boundary:
     watchdog_catalog.source.load_catalog_file   (unit 5a)
     watchdog_catalog.source.load_catalog_url    (unit 5b)
     watchdog_catalog.source.DiskCache           (unit 5c)
+    watchdog_catalog.source.fetch_catalog_url   (unit 5d)
 
 `load_catalog_file` is one explicit, byte-bounded binary read of an
 operator-selected path whose bytes are decoded as strict UTF-8 and then handed
@@ -29,10 +30,18 @@ a network-free double) and every non-200 / malformed / timed-out / disconnected
 ephemeral port; no test resolves a public host, and the production default URL
 is only exercised through a request/response double.
 
-``DiskCache`` (unit 5c) is implemented and exercised here. Conditional GET,
-fallback/freshness wrappers, CLI wiring and async refresh coalescing belong to
-later units and are NOT implemented, imported or exercised here. Nothing in
-this module writes outside pytest's own scratch directory.
+``DiskCache`` (unit 5c) is implemented and exercised here. ``fetch_catalog_url``
+(unit 5d) is ONE synchronous conditional revalidation of ONE literal URL: it
+may send a single ``If-None-Match`` (preferred) or ``If-Modified-Since`` header
+derived only from a detached, fully re-validated same-source candidate entry,
+and it accepts a 304 only when it sent such a header. Two further
+unparametrized groups cover that primitive: the accepted 200/304/changed-200
+flow, validator capture and rejection, candidate detachment and DiskCache
+compatibility; then every invalid candidate, unsolicited or contradictory 304,
+unread 304 body, framing fault and fallback-free failure. Fallback/warning/
+freshness envelopes, CLI wiring and async refresh coalescing belong to later
+units and are NOT implemented, imported or exercised here. Nothing in this
+module writes outside pytest's own scratch directory.
 """
 
 import hashlib
@@ -2022,3 +2031,591 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
     assert _temp_leftovers(cleanup_root) == []
     assert sorted(entry.name for entry in cleanup_root.iterdir()) == [
         cleanup_cache.path.name]
+
+
+# ---------------------------------------------------------------------------
+# Unit 5d: conditional GET and 304/cache validity
+# ---------------------------------------------------------------------------
+#
+# `fetch_catalog_url` is ONE synchronous conditional GET of ONE literal URL. A
+# caller-supplied candidate is untrusted DATA: it is detached and fully
+# re-validated (version, source identity, fetch metadata, complete schema and
+# body hash) BEFORE the request, so only a same-source, complete, valid
+# snapshot can authorize a 304 or contribute a conditional header. Nothing here
+# persists, repairs, falls back or reads a clock; the retained observation
+# keeps its own snapshot_id, tick_epoch and provider metadata.
+
+REVALIDATION_KEYS = frozenset({"snapshot", "etag", "last_modified",
+                               "not_modified"})
+#: Fields that belong to later units (fallback/warning/freshness envelopes and
+#: the on-disk cache document), never to this internal transport result.
+DEFERRED_FIELDS = ("ok", "error", "source", "fetched_at", "age", "age_s",
+                   "stale", "warnings", "warning", "cache_version")
+
+
+def _script(server, *responses):
+    """Serve one scripted ``(status, body, headers, length, chunked)`` row per
+    request through the fixture server's existing responder hook."""
+    queue = list(responses)
+
+    def respond(handler):
+        _write_response(handler, *queue.pop(0))
+
+    server._responder = respond
+    return queue
+
+
+def _opener_double(scope, response=None, error=None):
+    """Point the private-opener seam at one scripted double, recording calls."""
+    opened = []
+
+    def open_with(self, fullurl, data=None, timeout=None):
+        opened.append((fullurl, data, timeout))
+        if error is not None:
+            raise error
+        return response
+
+    scope.setattr(urllib.request.OpenerDirector, "open", open_with)
+    return opened
+
+
+def _no_conditional(request):
+    sent = _sent_headers(request)
+    assert "if-none-match" not in sent
+    assert "if-modified-since" not in sent
+
+
+def _only_conditional(request, header, value):
+    sent = _sent_headers(request)
+    assert sent[header] == value
+    for name in ("if-none-match", "if-modified-since"):
+        if name != header:
+            assert name not in sent
+
+
+def test_catalog_revalidation_conditional_get_and_304_reuse(loopback,
+                                                            tmp_path):
+    basic_raw = (FIXTURE_DIR / "basic.json").read_bytes()
+    basic = json.loads(basic_raw.decode("utf-8"))
+    url = loopback.url("/catalog.json")
+    identity = _identity("url", url)
+    stamp = "Wed, 21 Oct 2026 10:00:00 GMT"
+    newer = "Thu, 22 Oct 2026 10:00:00 GMT"
+    entry = _cache_document(basic, identity=identity, fetched_at=1700000000,
+                            etag='W/"v1"', last_modified=stamp)
+
+    # -- (a) no candidate: ONE unconditional GET, this response's validators --
+    _script(loopback, (200, basic_raw,
+                       [("ETag", 'W/"v1"'), ("Last-Modified", stamp)],
+                       True, False))
+    first = source.fetch_catalog_url(url)
+    assert set(first) == REVALIDATION_KEYS
+    assert first["not_modified"] is False
+    assert first["snapshot"] == basic
+    assert first["snapshot"]["snapshot_id"] == basic["snapshot_id"] == \
+        catalog.snapshot_hash(first["snapshot"])
+    assert (first["etag"], first["last_modified"]) == ('W/"v1"', stamp)
+    assert len(loopback.requests) == 1
+    assert loopback.requests[0]["method"] == "GET"
+    assert loopback.requests[0]["path"] == "/catalog.json"
+    sent = _sent_headers(loopback.requests[0])
+    assert sent["accept"] == ACCEPT_HEADER
+    assert sent["accept-encoding"] == ENCODING_HEADER
+    for name in ("if-none-match", "if-modified-since", "authorization",
+                 "cookie", "proxy-authorization"):
+        assert name not in sent
+
+    # -- (b) a valid same-source candidate sends EXACTLY its ETag; the 304
+    # reuses the detached snapshot with every observation field untouched ----
+    loopback.requests.clear()
+    _script(loopback, (304, b"", [("ETag", 'W/"v1"')], False, False))
+    before = json.loads(json.dumps(entry["snapshot"]))
+    reused = source.fetch_catalog_url(url, cached_entry=entry)
+    assert set(reused) == REVALIDATION_KEYS
+    assert reused["not_modified"] is True
+    assert (reused["etag"], reused["last_modified"]) == ('W/"v1"', stamp)
+    assert reused["snapshot"] == before
+    assert reused["snapshot"] is not entry["snapshot"]
+    assert reused["snapshot"]["snapshot_id"] == basic["snapshot_id"]
+    assert reused["snapshot"]["tick_epoch"] == basic["tick_epoch"]
+    assert reused["snapshot"]["provider_order"] == basic["provider_order"]
+    assert reused["snapshot"]["warnings"] == basic["warnings"]
+    assert list(reused["snapshot"]["providers"]) == list(basic["providers"])
+    assert entry["snapshot"] == before      # the caller's entry is never edited
+    assert len(loopback.requests) == 1
+    _only_conditional(loopback.requests[0], "if-none-match", 'W/"v1"')
+
+    # -- (c) one validator is selected: ETag preferred, else Last-Modified ----
+    validator_rows = (
+        ("etag-preferred", 'W/"v1"', stamp, "if-none-match", 'W/"v1"'),
+        ("date-fallback", None, stamp, "if-modified-since", stamp),
+        ("unusable-etag-falls-back", "*", stamp, "if-modified-since", stamp),
+        ("quoted-empty-etag", '""', None, "if-none-match", '""'),
+    )
+    for label, etag, modified, header, value in validator_rows:
+        loopback.requests.clear()
+        _script(loopback, (304, b"", [], False, False))
+        candidate = _cache_document(basic, identity=identity, fetched_at=5,
+                                    etag=etag, last_modified=modified)
+        kept = source.fetch_catalog_url(url, cached_entry=candidate)
+        assert kept["not_modified"] is True, label
+        assert kept["snapshot"] == basic, label
+        assert (kept["etag"], kept["last_modified"]) == (etag, modified), label
+        assert len(loopback.requests) == 1, label
+        _only_conditional(loopback.requests[0], header, value)
+
+    # a weak response tag and the candidate's strong spelling are the SAME
+    # opaque tag for GET, and the candidate's metadata is preserved on 304.
+    loopback.requests.clear()
+    _script(loopback, (304, b"", [("ETag", '"v1"')], False, False))
+    strong = source.fetch_catalog_url(url, cached_entry=entry)
+    assert strong["not_modified"] is True
+    assert strong["etag"] == 'W/"v1"'
+    assert strong["last_modified"] == stamp
+    assert strong["snapshot"] == basic
+
+    # -- (d) a legitimately EMPTY cached snapshot stays usable; a future
+    # fetch time is candidate DATA (never repaired, never clock-compared) -----
+    empty = _empty_snapshot()
+    loopback.requests.clear()
+    _script(loopback, (304, b"", [], False, False))
+    empty_entry = _cache_document(empty, identity=identity,
+                                  fetched_at=catalog.MAX_SAFE_INT,
+                                  etag='"e1"')
+    empty_reuse = source.fetch_catalog_url(url, cached_entry=empty_entry)
+    assert empty_reuse["not_modified"] is True
+    assert empty_reuse["snapshot"]["provider_order"] == []
+    assert empty_reuse["snapshot"]["providers"] == {}
+    assert empty_reuse["snapshot"]["snapshot_id"] == empty["snapshot_id"]
+    assert set(empty_reuse) == REVALIDATION_KEYS
+    for absent in DEFERRED_FIELDS:
+        assert absent not in empty_reuse
+
+    # -- (e) a changed 200 is the NEW body: its missing validators clear the
+    # old body's metadata rather than inheriting it ---------------------------
+    changed = json.loads(basic_raw.decode("utf-8"))
+    changed["tick_epoch"] += 60
+    _reseal(changed)
+    changed_raw = json.dumps(changed, indent=2).encode("utf-8")
+    loopback.requests.clear()
+    _script(loopback, (200, changed_raw, [], True, False))
+    refreshed = source.fetch_catalog_url(url, cached_entry=entry)
+    assert refreshed["not_modified"] is False
+    assert (refreshed["etag"], refreshed["last_modified"]) == (None, None)
+    assert refreshed["snapshot"]["snapshot_id"] == changed["snapshot_id"]
+    assert refreshed["snapshot"]["snapshot_id"] != basic["snapshot_id"]
+    assert refreshed["snapshot"]["tick_epoch"] == changed["tick_epoch"]
+    assert len(loopback.requests) == 1
+    _only_conditional(loopback.requests[0], "if-none-match", 'W/"v1"')
+
+    # -- (f) optional response validators are captured literally or dropped
+    # WITHOUT discarding an accepted body -------------------------------------
+    header_rows = (
+        ("etag-strong", [("ETag", '"abc"')], ('"abc"', None)),
+        ("etag-weak", [("ETag", 'W/"abc"')], ('W/"abc"', None)),
+        ("etag-quoted-empty", [("ETag", '""')], ('""', None)),
+        ("etag-header-empty", [("ETag", "")], (None, None)),
+        ("etag-wildcard", [("ETag", "*")], (None, None)),
+        ("etag-list", [("ETag", '"a", "b"')], (None, None)),
+        ("etag-unquoted", [("ETag", "abc")], (None, None)),
+        ("etag-unbalanced", [("ETag", '"abc')], (None, None)),
+        ("etag-interior-quote", [("ETag", '"a"b"')], (None, None)),
+        ("etag-interior-space", [("ETag", '"a b"')], (None, None)),
+        ("etag-control", [("ETag", '"a\tb"')], (None, None)),
+        ("etag-over-bound", [("ETag", '"' + "a" * 1024 + '"')], (None, None)),
+        ("etag-duplicate", [("ETag", '"a"'), ("ETag", '"a"')], (None, None)),
+        ("etag-obs-text", [("ETag", '"caf\xe9"')], ('"caf\xe9"', None)),
+        ("date-valid", [("Last-Modified", stamp)], (None, stamp)),
+        ("date-rfc850",
+         [("Last-Modified", "Wednesday, 21-Oct-26 10:00:00 GMT")],
+         (None, "Wednesday, 21-Oct-26 10:00:00 GMT")),
+        ("date-asctime", [("Last-Modified", "Wed Oct 21 10:00:00 2026")],
+         (None, "Wed Oct 21 10:00:00 2026")),
+        ("date-list", [("Last-Modified", stamp + ", " + newer)], (None, None)),
+        ("date-no-zone",
+         [("Last-Modified", "Wed, 21 Oct 2026 10:00:00")], (None, None)),
+        ("date-non-utc",
+         [("Last-Modified", "Wed, 21 Oct 2026 10:00:00 PST")], (None, None)),
+        ("date-trailing", [("Last-Modified", stamp + " extra")], (None, None)),
+        ("date-impossible",
+         [("Last-Modified", "Wed, 32 Oct 2026 10:00:00 GMT")], (None, None)),
+        ("date-garbage", [("Last-Modified", "yesterday")], (None, None)),
+        ("date-empty", [("Last-Modified", "")], (None, None)),
+        ("date-over-bound", [("Last-Modified", stamp + " GMT" * 300)],
+         (None, None)),
+        ("date-duplicate",
+         [("Last-Modified", stamp), ("Last-Modified", stamp)], (None, None)),
+        ("both", [("ETag", '"abc"'), ("Last-Modified", stamp)],
+         ('"abc"', stamp)),
+    )
+    with pytest.MonkeyPatch.context() as scope:
+        for label, headers, expected in header_rows:
+            response = _FakeResponse(basic_raw, status=200, headers=headers)
+            _opener_double(scope, response=response)
+            captured = source.fetch_catalog_url(url)
+            assert (captured["etag"], captured["last_modified"]) == expected, \
+                label
+            assert captured["not_modified"] is False, label
+            assert captured["snapshot"]["snapshot_id"] == \
+                basic["snapshot_id"], label
+            assert response.closed == 1, label
+            assert response.reads, label
+
+    # -- (g) neither candidate validator is usable: unconditional GET, and a
+    # 304 is then a failure rather than an empty success ----------------------
+    loopback.requests.clear()
+    _script(loopback, (200, basic_raw, [("ETag", '"fresh"')], True, False))
+    bare = _cache_document(basic, identity=identity, etag="*",
+                           last_modified="yesterday")
+    unconditional = source.fetch_catalog_url(url, cached_entry=bare)
+    assert unconditional["not_modified"] is False
+    assert unconditional["etag"] == '"fresh"'
+    assert unconditional["last_modified"] is None
+    _no_conditional(loopback.requests[0])
+
+    # -- (h) mutating the caller's candidate inside the opener cannot poison
+    # the retained 304 body; mutating a result cannot poison a later call -----
+    victim = _cache_document(json.loads(json.dumps(basic)), identity=identity,
+                             fetched_at=7, etag='W/"v1"',
+                             last_modified=stamp)
+    expected_body = json.loads(json.dumps(victim["snapshot"]))
+
+    with pytest.MonkeyPatch.context() as scope:
+        def hostile(self, fullurl, data=None, timeout=None):
+            target = victim["snapshot"]
+            target["provider_order"] = []
+            target["providers"] = {}
+            target["snapshot_id"] = "0" * 64
+            victim["etag"] = '"mutated"'
+            return _FakeResponse(b"", status=304,
+                                 headers=[("ETag", 'W/"v1"')])
+
+        scope.setattr(urllib.request.OpenerDirector, "open", hostile)
+        owned = source.fetch_catalog_url(url, cached_entry=victim)
+    assert owned["not_modified"] is True
+    assert owned["snapshot"] == expected_body
+    assert owned["snapshot"]["snapshot_id"] == basic["snapshot_id"]
+    assert owned["snapshot"] is not victim["snapshot"]
+    assert (owned["etag"], owned["last_modified"]) == ('W/"v1"', stamp)
+
+    owned["snapshot"]["providers"] = {}
+    owned["snapshot"]["snapshot_id"] = "f" * 64
+    owned["etag"] = "mutated"
+    loopback.requests.clear()
+    _script(loopback, (304, b"", [], False, False))
+    replay = source.fetch_catalog_url(
+        url, cached_entry=json.loads(json.dumps(entry)))
+    assert replay["snapshot"] == basic
+    assert replay["etag"] == 'W/"v1"'
+    _only_conditional(loopback.requests[0], "if-none-match", 'W/"v1"')
+
+    # -- (i) the returned snapshot and the DiskCache record are compatible:
+    # one stored result loads back as an accepted candidate, and the fetch
+    # itself never reads or writes the cache ---------------------------------
+    root = tmp_path / "cache-root"
+    cache = source.DiskCache("url", url, cache_dir=root)
+    assert list(tmp_path.iterdir()) == []
+    assert cache.store(first["snapshot"], fetched_at=1700000000,
+                       etag=first["etag"],
+                       last_modified=first["last_modified"]) is True
+    stored_bytes = cache.path.read_bytes()
+    loaded = cache.load()
+    assert loaded == _cache_document(first["snapshot"], identity=identity,
+                                     fetched_at=1700000000,
+                                     etag=first["etag"],
+                                     last_modified=first["last_modified"])
+    loopback.requests.clear()
+    _script(loopback, (304, b"", [], False, False))
+    from_disk = source.fetch_catalog_url(url, cached_entry=loaded)
+    assert from_disk["not_modified"] is True
+    assert from_disk["snapshot"] == basic
+    assert (from_disk["etag"], from_disk["last_modified"]) == ('W/"v1"', stamp)
+    _only_conditional(loopback.requests[0], "if-none-match", 'W/"v1"')
+    assert cache.path.read_bytes() == stored_bytes
+    assert _temp_leftovers(root) == []
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["cache-root"]
+
+
+def test_catalog_revalidation_invalid_304_and_stale_candidates_fail_closed(
+        loopback, tmp_path):
+    basic_raw = (FIXTURE_DIR / "basic.json").read_bytes()
+    basic = json.loads(basic_raw.decode("utf-8"))
+    url = loopback.url("/catalog.json")
+    identity = _identity("url", url)
+    stamp = "Wed, 21 Oct 2026 10:00:00 GMT"
+    valid = _cache_document(basic, identity=identity, etag='W/"v1"',
+                            last_modified=stamp)
+    pristine = json.loads(json.dumps(valid))
+    tampered = json.loads(json.dumps(basic))
+    tampered["snapshot_id"] = "0" * 64
+    future_schema = json.loads(json.dumps(basic))
+    future_schema["schema_version"] = 2
+
+    # -- (a) an unsolicited 304 with no candidate is one fixed failure --------
+    loopback.requests.clear()
+    _script(loopback, (304, b"", [], False, False))
+    _fixed_source_error(lambda: source.fetch_catalog_url(url),
+                        ("127.0.0.1", "catalog.json", "304", "Not Modified"))
+    assert len(loopback.requests) == 1
+    _no_conditional(loopback.requests[0])
+
+    # -- (b) every invalid candidate is a MISS: NO conditional header, a 200
+    # still recovers, and a 304 stays one fixed failure in ONE GET ------------
+    def candidate(snapshot=basic, identity_value=None, **overrides):
+        document = _cache_document(
+            snapshot,
+            identity=identity if identity_value is None else identity_value,
+            etag='W/"v1"', last_modified=stamp)
+        document.update(overrides)
+        return document
+
+    def without_pairs(pairs, field):
+        document = dict(pairs)
+        del document[field]
+        return document
+
+    bad_entries = (
+        ("no-candidate", None),
+        ("json-list", [basic]),
+        ("scalar", 17),
+        ("empty-dict", {}),
+        ("foreign-source", candidate(identity_value=_identity(
+            "url", url + "?mirror=none"))),
+        ("file-mode", candidate(identity_value=_identity(
+            "file", "/tmp/some/catalog.json"))),
+        ("extra-identity", candidate(identity_value={
+            "kind": "url", "location": url, "extra": 1})),
+        ("wrong-version", candidate(cache_version=2)),
+        ("string-version", candidate(cache_version="1")),
+        ("bool-version", candidate(cache_version=True)),
+        ("missing-field", without_pairs(candidate(), "last_modified")),
+        ("extra-field", candidate(extra="field")),
+        ("negative-fetch-time", candidate(fetched_at=-1)),
+        ("bool-fetch-time", candidate(fetched_at=True)),
+        ("nan-fetch-time", candidate(fetched_at=float("nan"))),
+        ("int-etag", candidate(etag=12345)),
+        ("control-etag", candidate(etag='"a\tb"')),
+        ("bad-hash", candidate(snapshot=tampered)),
+        ("future-schema", candidate(snapshot=future_schema)),
+    )
+    for label, bad in bad_entries:
+        loopback.requests.clear()
+        _script(loopback, (200, basic_raw, [], True, False))
+        recovered = source.fetch_catalog_url(url, cached_entry=bad)
+        assert recovered["not_modified"] is False, label
+        assert recovered["snapshot"] == basic, label
+        assert len(loopback.requests) == 1, label
+        _no_conditional(loopback.requests[0])
+
+        loopback.requests.clear()
+        _script(loopback, (304, b"", [], False, False))
+        _fixed_source_error(
+            lambda value=bad: source.fetch_catalog_url(
+                url, cached_entry=value), ())
+        assert len(loopback.requests) == 1, label
+        _no_conditional(loopback.requests[0])
+
+    # A fully VALID candidate whose optional validators are merely UNUSABLE is
+    # still a hit for the body, but contributes no conditional header -- so its
+    # 304 can authorize nothing either.
+    unusable_values = _cache_document(
+        basic, identity=identity, etag="*",
+        last_modified="Wed, 21 Oct 2026 10:00:00 PST")
+    loopback.requests.clear()
+    _script(loopback, (200, basic_raw, [], True, False))
+    accepted = source.fetch_catalog_url(url, cached_entry=unusable_values)
+    assert accepted["not_modified"] is False
+    assert accepted["snapshot"] == basic
+    _no_conditional(loopback.requests[0])
+    loopback.requests.clear()
+    _script(loopback, (304, b"", [], False, False))
+    _fixed_source_error(
+        lambda: source.fetch_catalog_url(url, cached_entry=unusable_values), ())
+    _no_conditional(loopback.requests[0])
+
+    # -- (c) an oversized candidate is a miss; exactly at the accepted bound
+    # it is still usable (the bound is narrowed for the probe, never widened) -
+    sized = candidate()
+    size = len(catalog.canonical_bytes(sized))
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "_MAX_CACHE_BYTES", size - 1)
+        loopback.requests.clear()
+        _script(loopback, (200, basic_raw, [], True, False))
+        assert source.fetch_catalog_url(
+            url, cached_entry=sized)["not_modified"] is False
+        _no_conditional(loopback.requests[0])
+        loopback.requests.clear()
+        _script(loopback, (304, b"", [], False, False))
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=sized), ())
+        _no_conditional(loopback.requests[0])
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "_MAX_CACHE_BYTES", size)
+        loopback.requests.clear()
+        _script(loopback, (304, b"", [], False, False))
+        assert source.fetch_catalog_url(
+            url, cached_entry=sized)["not_modified"] is True
+        _only_conditional(loopback.requests[0], "if-none-match", 'W/"v1"')
+
+    # -- (d) a 304 body is NEVER read, decoded or parsed, and its hypothetical
+    # Content-Length never reaches the 200 framing gate ----------------------
+    with pytest.MonkeyPatch.context() as scope:
+        poison = _FakeResponse(
+            b"", status=304,
+            headers=[("ETag", 'W/"v1"'),
+                     ("Content-Length", str(source.MAX_SOURCE_BYTES + 4096))],
+            read_error=AssertionError("a 304 body must never be read"))
+        _opener_double(scope, response=poison)
+        reused = source.fetch_catalog_url(url, cached_entry=valid,
+                                          max_bytes=len(basic_raw))
+        assert reused["not_modified"] is True
+        assert reused["snapshot"] == basic
+        assert (reused["etag"], reused["last_modified"]) == ('W/"v1"', stamp)
+        assert poison.reads == []
+        assert poison.closed == 1
+
+    class _PoisonBody(io.BytesIO):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.read_calls = 0
+
+        def _poison(self, *args, **kwargs):
+            self.read_calls += 1
+            raise AssertionError("a 304 body must never be read")
+
+        read = _poison
+        readline = _poison
+
+    class _TrackingHTTPError(_HTTPError):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            super().close()
+
+    with pytest.MonkeyPatch.context() as scope:
+        body = _PoisonBody(b'{"schema_version": 1}')
+        not_modified = _TrackingHTTPError(
+            url, 304, "Not Modified",
+            _headers_message([("ETag", 'W/"v1"'),
+                              ("Content-Length",
+                               str(source.MAX_SOURCE_BYTES))]),
+            body)
+        _opener_double(scope, error=not_modified)
+        reused = source.fetch_catalog_url(url, cached_entry=valid,
+                                          max_bytes=8)
+        assert reused["not_modified"] is True
+        assert reused["snapshot"] == basic
+        assert body.read_calls == 0
+        assert not_modified.close_calls == 1
+
+    # -- (e) a contradictory response tag fails closed; an unusable one is
+    # ignored; a failed 304 close is a source failure -------------------------
+    with pytest.MonkeyPatch.context() as scope:
+        conflict = _FakeResponse(b"", status=304,
+                                 headers=[("ETag", '"other"')])
+        _opener_double(scope, response=conflict)
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=valid),
+            ('"other"', "v1"))
+        assert conflict.reads == []
+        assert conflict.closed == 1
+
+    with pytest.MonkeyPatch.context() as scope:
+        unusable = _FakeResponse(b"", status=304, headers=[("ETag", "*")])
+        _opener_double(scope, response=unusable)
+        assert source.fetch_catalog_url(
+            url, cached_entry=valid)["not_modified"] is True
+        assert unusable.closed == 1
+
+    with pytest.MonkeyPatch.context() as scope:
+        broken = _FakeResponse(b"", status=304,
+                               close_error=OSError(5, "close failed s3cr3t"))
+        _opener_double(scope, response=broken)
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=valid),
+            ("s3cr3t", "close"))
+        assert broken.reads == []
+        assert broken.closed == 1
+
+    # -- (f) an invalid 200 body keeps its accepted core error even with a
+    # valid last-good entry: this function never falls back ------------------
+    invalid_bodies = (
+        ("malformed", b'{"schema_version": 1, "snapshot_id": ',
+         catalog.INVALID_JSON, "Invalid catalogue JSON."),
+        ("tampered", json.dumps(tampered).encode("utf-8"),
+         catalog.INVALID_SNAPSHOT, "Invalid catalogue snapshot."),
+        ("future-schema", json.dumps(future_schema).encode("utf-8"),
+         catalog.UNSUPPORTED_SCHEMA_VERSION,
+         "Unsupported catalogue schema version."),
+    )
+    for label, body, code, message in invalid_bodies:
+        loopback.requests.clear()
+        _script(loopback, (200, body, [], True, False))
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            source.fetch_catalog_url(url, cached_entry=valid)
+        error = excinfo.value
+        assert not isinstance(error, source.SourceError)
+        assert (error.code, error.message, str(error)) == (
+            code, message, message), label
+        assert "127.0.0.1" not in str(error)
+        assert len(loopback.requests) == 1, label
+        _only_conditional(loopback.requests[0], "if-none-match", 'W/"v1"')
+        assert valid == pristine
+
+    # -- (g) transport and framing failures stay fixed and non-reflective ----
+    loopback.requests.clear()
+    _script(loopback, (500, b"", [], False, False))
+    _fixed_source_error(
+        lambda: source.fetch_catalog_url(url, cached_entry=valid),
+        ("127.0.0.1", "500", "Internal", "Unavailable"))
+    assert len(loopback.requests) == 1
+    assert valid == pristine
+
+    loopback.requests.clear()
+    _script(loopback, (200, basic_raw + b" ", [], False, False))
+    _fixed_source_error(
+        lambda: source.fetch_catalog_url(url, cached_entry=valid,
+                                         max_bytes=len(basic_raw)),
+        ("127.0.0.1",))
+    assert len(loopback.requests) == 1
+    assert valid == pristine
+
+    with pytest.MonkeyPatch.context() as scope:
+        broken = _FakeResponse(b"", read_error=OSError(104,
+                                                       "Connection reset"))
+        _opener_double(scope, response=broken)
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=valid),
+            ("reset", "peer"))
+        assert broken.closed == 1
+        assert valid == pristine
+
+    # -- (h) configuration reuse: fixed exceptions, before any network -------
+    with pytest.MonkeyPatch.context() as scope:
+        opened = _opener_double(scope, response=_FakeResponse(b""))
+        with pytest.raises(TypeError) as excinfo:
+            source.fetch_catalog_url(None, cached_entry=valid)
+        assert type(excinfo.value) is TypeError
+        assert str(excinfo.value) == URL_TYPE_ERROR
+        for bad in ("", "//example.test/x", "ftp://example.test/x"):
+            with pytest.raises(ValueError) as excinfo:
+                source.fetch_catalog_url(bad, cached_entry=valid)
+            assert str(excinfo.value) == URL_VALUE_ERROR
+        for bad_timeout in (0, -1, True, float("nan"), "10"):
+            with pytest.raises(ValueError) as excinfo:
+                source.fetch_catalog_url(url, cached_entry=valid,
+                                         timeout_s=bad_timeout)
+            assert str(excinfo.value) == TIMEOUT_ERROR
+        for bad_limit in (0, -1, True, 1.0, None):
+            with pytest.raises(ValueError) as excinfo:
+                source.fetch_catalog_url(url, cached_entry=valid,
+                                         max_bytes=bad_limit)
+            assert str(excinfo.value) == HTTP_BYTE_LIMIT_ERROR
+        assert opened == []
+
+    # nothing above persisted anything, and the candidate is still pristine
+    assert valid == pristine
+    assert sorted(item.name for item in tmp_path.iterdir()) == []

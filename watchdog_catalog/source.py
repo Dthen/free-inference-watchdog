@@ -48,6 +48,25 @@ UTF-8 (no BOM stripping, newline rewriting, replacement or ignored bytes) and
 handed EXACTLY ONCE to :func:`watchdog_catalog.catalog.load_snapshot`, whose
 return value is forwarded unmodified.
 
+Conditional revalidation is a SEPARATE entry point,
+:func:`fetch_catalog_url`. It is one synchronous ``GET`` that may carry exactly
+ONE conditional header -- ``If-None-Match`` when the caller's candidate has a
+usable entity-tag, otherwise ``If-Modified-Since`` when it has a usable HTTP
+date -- derived ONLY from a candidate that was detached and fully re-validated
+(version, source identity, fetch metadata, complete snapshot schema and body
+hash) BEFORE the request. A candidate that is absent, foreign, a file-mode
+record, a wrong version, malformed, oversized or hash-invalid is a MISS: no
+conditional header is sent from it and no 304 can be authorized by it. A 304
+has no representation, so its body is never read, decoded or parsed and its
+``Content-Length`` describes a hypothetical 200 payload that never enters the
+200 framing gate; the detached candidate snapshot is reused with its
+``snapshot_id``, ``tick_epoch``, providers, metadata and warnings unchanged.
+Response validators are captured literally only when they are one syntactically
+usable value (one RFC entity-tag; one parseable HTTP date with an explicit
+UTC/GMT interpretation); an absent, empty, duplicate or unusable optional
+validator becomes ``None`` without discarding a valid body. This is the
+documented conditional-GET subset, not a general-purpose HTTP cache.
+
 The accepted validator owns JSON/schema/hash truth: malformed JSON, an invalid
 snapshot, an invalid hash and an unsupported schema version keep their frozen
 :class:`~watchdog_catalog.catalog.CatalogError` code and message (an invalid
@@ -86,21 +105,27 @@ Disk cache:
 
 Importing this module performs no file, environment, clock or network access.
 Calling :func:`load_catalog_file` reads only the named file and calling
-:func:`load_catalog_url` performs only its one GET; neither consults, writes or
-creates a cache, falls back to another source, retries or reads a clock beyond
-the socket timeout. :class:`DiskCache` reads and writes only its own entry and
-never fetches, retries, infers freshness, reseals a snapshot or reads a clock.
-Conditional GET, last-good/warning/freshness envelopes, async dispatch and
-coalesced refresh belong to later units and are deliberately absent.
+:func:`load_catalog_url` performs only its one unconditional GET; neither
+consults, writes or creates a cache, falls back to another source, retries or
+reads a clock beyond the socket timeout. :func:`fetch_catalog_url` performs at
+most one GET of its selected URL and neither reads nor writes a cache file.
+:class:`DiskCache` reads and writes only its own entry and never fetches,
+retries, infers freshness, reseals a snapshot or reads a clock. Last-good
+fallback, cache/freshness warnings, async dispatch and coalesced refresh belong
+to later units and are deliberately absent: this primitive reports a 304
+honestly instead of deciding what a caller should do with it.
 """
 
 from __future__ import annotations
 
+import datetime
+import email.utils
 import hashlib
 import http.client
 import ntpath
 import os
 import posixpath
+import re
 import ssl
 import sys
 import tempfile
@@ -387,35 +412,37 @@ def _close_quietly(resource):
         pass
 
 
-def load_catalog_url(url=DEFAULT_CATALOG_URL, *, timeout_s=DEFAULT_TIMEOUT_S,
-                     max_bytes=MAX_SOURCE_BYTES):
-    """One bounded, credential-free ``GET`` of ONE explicitly selected URL.
+def _response_status(response):
+    """The scripted/real status of one owned response, or ``None``."""
+    if hasattr(response, "getcode"):
+        return response.getcode()
+    return getattr(response, "status", None)
 
-    ``url`` is consumed literally and must be an absolute ``http``/``https``
-    URL with a host. ``timeout_s`` bounds blocking socket operations (not an
-    end-to-end deadline) and ``max_bytes`` bounds the RAW response bytes.
 
-    Returns the validated decoded snapshot -- the very object
-    :func:`watchdog_catalog.catalog.load_snapshot` produced, never a copy,
-    clone or reseal. Raises :class:`SourceError` for any non-200 status,
-    redirect, transport/read/close/timeout fault, rejected framing/encoding,
-    or oversized document; invalid URL/timeout/byte-limit CONFIGURATION is a
-    programming error (one fixed ``TypeError``/``ValueError``) raised before
-    any network access. Every other failure is the accepted core
-    :class:`~watchdog_catalog.catalog.CatalogError` propagated unchanged.
+def _request_headers(conditional=None):
+    """The fixed request headers, plus at most ONE selected conditional pair."""
+    headers = {"Accept": _ACCEPT, "Accept-Encoding": _IDENTITY}
+    if conditional is not None:
+        name, value = conditional
+        headers[name] = value
+    return headers
 
-    Synchronous by design: off-event-loop dispatch, caching, conditional GET,
-    retries and refresh coalescing belong to later units.
+
+def _open_source(selected, timeout, headers):
+    """Open ONE request through the private opener.
+
+    Returns the owned response. A ``304`` arrives as
+    :class:`urllib.error.HTTPError` (that is the real urllib path) and is
+    handed back as an owned response for the conditional caller to accept or
+    reject; every other HTTP error is closed and becomes the fixed failure, and
+    so is any connection/protocol/timeout fault.
     """
-    selected = _selected_url(url)
-    timeout = _timeout_seconds(timeout_s)
-    limit = _http_byte_limit(max_bytes)
-    request = urllib.request.Request(
-        selected, method="GET",
-        headers={"Accept": _ACCEPT, "Accept-Encoding": _IDENTITY})
+    request = urllib.request.Request(selected, method="GET", headers=headers)
     try:
-        response = _private_opener().open(request, timeout=timeout)
+        return _private_opener().open(request, timeout=timeout)
     except urllib.error.HTTPError as error:
+        if _response_status(error) == 304:
+            return error
         # HTTPError is itself a response: close it before reporting, and never
         # let its fp/URL/diagnostic text reach the caller.
         _close_quietly(error)
@@ -424,11 +451,17 @@ def load_catalog_url(url=DEFAULT_CATALOG_URL, *, timeout_s=DEFAULT_TIMEOUT_S,
         # URLError/connection/protocol/read/timeout failures are OSError or
         # HTTPException; the fixed failure reflects none of their text.
         raise SourceError() from None
+
+
+def _validated_body(response, limit):
+    """Frame, read, close and validate ONE owned non-304 response.
+
+    The raw-byte cap, the single unambiguous ``Content-Length`` and the
+    identity-only encoding gate are the accepted 200 rules; the accepted
+    validator then owns JSON/schema/hash truth. Every transport-shaped fault
+    becomes the fixed failure and every owned response is closed.
+    """
     try:
-        status = response.getcode() if hasattr(response, "getcode") else \
-            getattr(response, "status", None)
-        if status is not None and status != 200:
-            raise SourceError()
         headers = getattr(response, "headers", None)
         _check_content_encoding(headers)
         declared = _declared_length(headers, limit)
@@ -454,6 +487,41 @@ def load_catalog_url(url=DEFAULT_CATALOG_URL, *, timeout_s=DEFAULT_TIMEOUT_S,
     except UnicodeDecodeError:
         raise _catalog.CatalogError(_catalog.INVALID_JSON) from None
     return _catalog.load_snapshot(text)
+
+
+def load_catalog_url(url=DEFAULT_CATALOG_URL, *, timeout_s=DEFAULT_TIMEOUT_S,
+                     max_bytes=MAX_SOURCE_BYTES):
+    """One bounded, credential-free ``GET`` of ONE explicitly selected URL.
+
+    ``url`` is consumed literally and must be an absolute ``http``/``https``
+    URL with a host. ``timeout_s`` bounds blocking socket operations (not an
+    end-to-end deadline) and ``max_bytes`` bounds the RAW response bytes.
+
+    Returns the validated decoded snapshot -- the very object
+    :func:`watchdog_catalog.catalog.load_snapshot` produced, never a copy,
+    clone or reseal. Raises :class:`SourceError` for any non-200 status,
+    redirect, transport/read/close/timeout fault, rejected framing/encoding,
+    or oversized document; invalid URL/timeout/byte-limit CONFIGURATION is a
+    programming error (one fixed ``TypeError``/``ValueError``) raised before
+    any network access. Every other failure is the accepted core
+    :class:`~watchdog_catalog.catalog.CatalogError` propagated unchanged.
+
+    Synchronous by design and deliberately UNCONDITIONAL: off-event-loop
+    dispatch, caching and refresh coalescing belong to later units, and
+    :func:`fetch_catalog_url` is the separate revalidation entry point that may
+    send one conditional header.
+    """
+    selected = _selected_url(url)
+    timeout = _timeout_seconds(timeout_s)
+    limit = _http_byte_limit(max_bytes)
+    response = _open_source(selected, timeout, _request_headers())
+    status = _response_status(response)
+    if status is not None and status != 200:
+        # Every non-200 -- including a 304, which this loader never requests --
+        # is one fixed failure of THIS source.
+        _close_quietly(response)
+        raise SourceError() from None
+    return _validated_body(response, limit)
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +685,42 @@ def _default_cache_root(*, platform=None, environ=None):
     return Path(posixpath.join(home, ".cache", _CACHE_APP_DIR))
 
 
+def _valid_cache_entry(entry, identity):
+    """Whether one decoded document is a valid version-1 record for ``identity``.
+
+    The ONE accepted cache-entry predicate, shared by :meth:`DiskCache.load`
+    and by the conditional-GET candidate gate: exact six-key envelope, native
+    ``cache_version`` 1, the exact ``{kind, location}`` identity, a caller-shape
+    fetch time, header-value validators and the COMPLETE accepted snapshot
+    (schema and body hash). A filename, a prior load or a caller's assertion is
+    never evidence, and a legitimately empty snapshot is still valid.
+    """
+    if not isinstance(entry, dict) or set(entry) != _ENTRY_FIELDS:
+        return False
+    version = entry["cache_version"]
+    if not _is_strict_int(version) or version != _CACHE_VERSION:
+        return False
+    embedded = entry["source"]
+    if not isinstance(embedded, dict) or \
+            set(embedded) != _IDENTITY_FIELDS:
+        return False
+    # A record copied into the RIGHT filename is still a miss when it says it
+    # belongs to another source: neither the filename nor the claim suffices.
+    if embedded != identity:
+        return False
+    if not _valid_fetch_time(entry["fetched_at"]):
+        return False
+    if not _valid_header_validator(entry["etag"]):
+        return False
+    if not _valid_header_validator(entry["last_modified"]):
+        return False
+    try:
+        _catalog.validate_snapshot(entry["snapshot"])
+    except _catalog.CatalogError:
+        return False
+    return True
+
+
 class DiskCache:
     """One source-scoped, validated, atomically replaced disk-cache entry.
 
@@ -719,31 +823,12 @@ class DiskCache:
         return entry
 
     def _valid_entry(self, entry):
-        """Whether one decoded document is a valid record for THIS source."""
-        if not isinstance(entry, dict) or set(entry) != _ENTRY_FIELDS:
-            return False
-        version = entry["cache_version"]
-        if not _is_strict_int(version) or version != _CACHE_VERSION:
-            return False
-        identity = entry["source"]
-        if not isinstance(identity, dict) or \
-                set(identity) != _IDENTITY_FIELDS:
-            return False
-        # A record copied into the RIGHT filename is still a miss when it says
-        # it belongs to another source: the filename is not the identity.
-        if identity != self._identity:
-            return False
-        if not _valid_fetch_time(entry["fetched_at"]):
-            return False
-        if not _valid_header_validator(entry["etag"]):
-            return False
-        if not _valid_header_validator(entry["last_modified"]):
-            return False
-        try:
-            _catalog.validate_snapshot(entry["snapshot"])
-        except _catalog.CatalogError:
-            return False
-        return True
+        """Whether one decoded document is a valid record for THIS source.
+
+        Delegates to the one shared entry predicate, so a conditional-GET
+        candidate and a disk record can never drift apart.
+        """
+        return _valid_cache_entry(entry, self._identity)
 
     # -- write ------------------------------------------------------------
 
@@ -872,3 +957,217 @@ class DiskCache:
                     os.unlink(temp_path)
                 except (OSError, ValueError):
                     pass
+
+
+# ---------------------------------------------------------------------------
+# Conditional GET revalidation (unit 5d)
+# ---------------------------------------------------------------------------
+#
+# ONE synchronous GET that may carry ONE conditional header derived from a
+# detached, fully re-validated same-source candidate. This is the documented
+# conditional-GET subset -- not a general-purpose HTTP cache: no retries, no
+# implicit fallback, no persistence, no clock and no observation-time
+# promotion. Last-good/warning/freshness envelopes belong to a later unit.
+
+#: One RFC 9110 entity-tag: an optional literal ``W/`` prefix, then a
+#: double-quoted opaque value whose characters are ``%x21 / %x23-7E / obs-text``
+#: (so no interior DQUOTE, no space, no control). Not a wildcard, not a list and
+#: not unquoted text: none of those are "repaired" into a validator, and the
+#: empty quoted value ``""`` is a legitimate tag.
+_ETAG_SHAPE = re.compile(r'(?:W/)?"[\x21\x23-\x7E\x80-\xFF]*"\Z')
+
+_SHORT_DAY = "Mon|Tue|Wed|Thu|Fri|Sat|Sun"
+_LONG_DAY = "Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday"
+_MONTH = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
+
+#: The three HTTP-date shapes (RFC 9110 section 5.6.7), matched WHOLE. The shape
+#: gate keeps a comma-separated list or a trailing-garbage value away from the
+#: lenient email parser, and it makes the UTC/GMT interpretation explicit
+#: (asctime is GMT by definition). Nothing here consults the locale or a clock.
+_HTTP_DATE_SHAPES = tuple(re.compile(pattern) for pattern in (
+    r"(?:%s), \d{2} (?:%s) \d{4} \d{2}:\d{2}:\d{2} GMT\Z"
+    % (_SHORT_DAY, _MONTH),
+    r"(?:%s), \d{2}-(?:%s)-\d{2} \d{2}:\d{2}:\d{2} GMT\Z"
+    % (_LONG_DAY, _MONTH),
+    r"(?:%s) (?:%s) [ \d]\d \d{2}:\d{2}:\d{2} \d{4}\Z"
+    % (_SHORT_DAY, _MONTH),
+))
+
+
+def _usable_etag(value):
+    """Whether ``value`` is ONE usable RFC entity-tag, preserved literally.
+
+    The header-safety bound (:func:`_valid_header_validator`) and the entity-tag
+    SHAPE are separate gates: passing the first says nothing about the second.
+    """
+    if not isinstance(value, str) or not _valid_header_validator(value):
+        return False
+    return _ETAG_SHAPE.match(value) is not None
+
+
+def _usable_last_modified(value):
+    """Whether ``value`` is ONE parseable HTTP date with an explicit UTC/GMT
+    interpretation. The original string is preserved; nothing is reformatted."""
+    if not isinstance(value, str) or not _valid_header_validator(value):
+        return False
+    if not any(shape.match(value) for shape in _HTTP_DATE_SHAPES):
+        return False
+    try:
+        parsed = email.utils.parsedate_tz(value)
+        if parsed is None or parsed[9] != 0:
+            # No timezone, a non-zero offset or unparseable text: unusable.
+            return False
+        # Calendar truth (a 32nd day, month 13, second 60) is not accepted just
+        # because the lenient parser returned a tuple.
+        datetime.datetime(*parsed[:6])
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _opaque_tag(value):
+    """The quoted opaque part of one already-usable entity-tag.
+
+    The ``W/`` prefix is not part of the tag, so weak and strong spellings of
+    the same opaque value compare EQUAL for a GET.
+    """
+    return value[2:] if value.startswith("W/") else value
+
+
+def _detached_candidate(cached_entry, identity):
+    """A detached, fully validated candidate entry, or ``None`` for a MISS.
+
+    ``cached_entry`` is untrusted caller DATA: shape, version, source identity,
+    fetch metadata and the COMPLETE snapshot (schema and body hash) are checked
+    BEFORE any I/O, and the object retained for the rest of the call is a fresh
+    decode of its own canonical bytes, so a caller (or an opener double) mutating
+    the input afterwards cannot change the snapshot a 304 reuses. An entry that
+    would exceed the accepted cache-entry bound is a miss too. Nothing is
+    repaired, resealed or invented, and a legitimately empty snapshot stays
+    usable.
+    """
+    if not _valid_cache_entry(cached_entry, identity):
+        return None
+    try:
+        payload = _catalog.canonical_bytes(cached_entry)
+    except (TypeError, ValueError):
+        return None
+    if len(payload) > _MAX_CACHE_BYTES:
+        return None
+    try:
+        owned = _catalog.load_json(payload.decode("utf-8"))
+    except (UnicodeDecodeError, _catalog.CatalogError):
+        return None
+    if not _valid_cache_entry(owned, identity):
+        return None
+    return owned
+
+
+def _response_validator(headers, name, usable):
+    """One literal, usable response validator, or ``None``.
+
+    An absent, duplicated, empty, over-bound, control-bearing or syntactically
+    unusable OPTIONAL validator is dropped -- never repaired and never a reason
+    to discard an otherwise accepted body.
+    """
+    values = _header_values(headers, name)
+    if len(values) != 1 or not usable(values[0]):
+        return None
+    return values[0]
+
+
+def _not_modified_result(response, owned):
+    """Close one owned 304 and reuse its detached candidate observation.
+
+    A 304 has NO representation: nothing is read, decoded or parsed, and its
+    ``Content-Length`` (which may describe a hypothetical 200 payload larger
+    than any accepted body) never reaches the 200 framing gate. A response tag
+    that names a DIFFERENT opaque tag than the one sent fails closed; the
+    candidate's own validator metadata is preserved unchanged.
+    """
+    try:
+        expected = owned["etag"] if _usable_etag(owned["etag"]) else None
+        if expected is not None:
+            received = _response_validator(
+                getattr(response, "headers", None), "ETag", _usable_etag)
+            if received is not None and \
+                    _opaque_tag(received) != _opaque_tag(expected):
+                raise SourceError()
+    except SourceError:
+        _close_quietly(response)
+        raise SourceError() from None
+    except (OSError, http.client.HTTPException):
+        _close_quietly(response)
+        raise SourceError() from None
+    try:
+        response.close()
+    except Exception:  # noqa: BLE001 - a cleanup fault is a source fault
+        raise SourceError() from None
+    return {"snapshot": owned["snapshot"], "etag": owned["etag"],
+            "last_modified": owned["last_modified"], "not_modified": True}
+
+
+def fetch_catalog_url(url=DEFAULT_CATALOG_URL, *, cached_entry=None,
+                      timeout_s=DEFAULT_TIMEOUT_S,
+                      max_bytes=MAX_SOURCE_BYTES):
+    """One bounded conditional ``GET`` of ONE explicitly selected URL.
+
+    ``cached_entry`` is an OPTIONAL untrusted candidate: the version-1 cache
+    document (``cache_version``, ``source``, ``fetched_at``, ``etag``,
+    ``last_modified``, ``snapshot``) for exactly this URL. It is detached and
+    fully re-validated BEFORE the request; anything else -- ``None``, a
+    non-dict, a foreign source, a file-mode record, a wrong version, invalid
+    metadata, an unsupported schema, a bad body hash or an oversized entry -- is
+    a MISS, so no conditional header is derived from it and no 304 can be
+    authorized by it. A miss is never an empty catalogue.
+
+    Returns exactly ``snapshot``, ``etag``, ``last_modified`` and
+    ``not_modified``: a complete validated snapshot, this result's literal
+    optional validators and a strict bool that distinguishes a 304 from a new
+    200 body. This is an internal TRANSPORT result -- it carries no fetch time,
+    path, source/warning or freshness field, and it neither reads nor writes any
+    cache: the caller owns persistence and every fallback decision.
+
+    ``url`` is consumed literally and must be an absolute ``http``/``https`` URL
+    with a host; ``timeout_s`` bounds blocking socket operations and
+    ``max_bytes`` bounds the RAW 200 response bytes. Invalid configuration is one
+    fixed ``TypeError``/``ValueError`` raised before any network access. Every
+    non-200/non-304 status, redirect, transport/read/close/timeout fault,
+    rejected framing/encoding, oversized body, unrequested 304 and contradictory
+    response tag is the fixed :class:`SourceError`; an invalid 200 body keeps its
+    accepted core :class:`~watchdog_catalog.catalog.CatalogError`. There is no
+    retry, no second GET, no implicit fallback to another source and no fallback
+    to the caller's candidate.
+    """
+    selected = _selected_url(url)
+    timeout = _timeout_seconds(timeout_s)
+    limit = _http_byte_limit(max_bytes)
+    identity = {"kind": "url", "location": selected}
+    owned = _detached_candidate(cached_entry, identity)
+    conditional = None
+    if owned is not None:
+        if _usable_etag(owned["etag"]):
+            conditional = ("If-None-Match", owned["etag"])
+        elif _usable_last_modified(owned["last_modified"]):
+            conditional = ("If-Modified-Since", owned["last_modified"])
+    response = _open_source(selected, timeout, _request_headers(conditional))
+    status = _response_status(response)
+    if status == 304:
+        if conditional is None:
+            # An unsolicited 304 can authorize nothing: no second GET, no empty
+            # success, no invented snapshot.
+            _close_quietly(response)
+            raise SourceError() from None
+        return _not_modified_result(response, owned)
+    if status != 200:
+        _close_quietly(response)
+        raise SourceError() from None
+    response_headers = getattr(response, "headers", None)
+    snapshot = _validated_body(response, limit)
+    return {
+        "snapshot": snapshot,
+        "etag": _response_validator(response_headers, "ETag", _usable_etag),
+        "last_modified": _response_validator(
+            response_headers, "Last-Modified", _usable_last_modified),
+        "not_modified": False,
+    }
