@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """build_site.py — self-contained static dashboard for the Free Inference Watchdog.
 
-Reads state/roster.json and renders site/index.html: a single dark page whose
-body is a PRESENCE MATRIX — one row per UNIQUE model id across the gateway
-union, one column per gateway, a green (nord14) dot where tracked, a `#`
-column counting the gateways each model reaches, rows sorted alphabetically
-by stripped name, and a footer row of per-gateway totals. Roster keys
-OUTSIDE DISPLAY_ORDER are unknown gateways: they get NO column (their ids
-may still join the union rows). The full roster is INLINED
-as JSON in <script type="application/json" id="roster-data"> so the page is
-fully self-contained (works from file://, no external fetches).
+Reads state/roster.json ONCE and publishes ONE coherent public snapshot as TWO
+artifacts under <root>/site/: ``catalog.json`` (the credential-free external
+export) and ``index.html`` (a single dark page whose body is a PRESENCE MATRIX —
+one row per UNIQUE model id across the gateway union, one column per gateway, a
+green (nord14) dot where tracked, a `#` column counting the gateways each model
+reaches, rows sorted alphabetically by stripped name, and a footer row of
+per-gateway totals). Roster keys OUTSIDE DISPLAY_ORDER are unknown gateways:
+they get NO column (and, on the public route, no published provider entry).
+The page carries the SAME public snapshot inline as
+``<script type="application/json" id="catalog-data">`` plus the shared tool
+definitions as ``<script type="application/json" id="tool-contract">``, so it is
+fully self-contained (works from file://, no external fetches) and never
+publishes the raw private roster.
 
 Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
   - Display order is derived from config_loader.PROVIDERS (sorted by the
@@ -23,8 +27,22 @@ Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
     #d8dee9 @ opacity .72, nord8 accent (counts) #88c0d0, nord9 column
     heads #81a1c1, nord14 dots #a3be8c.
 
-Determinism: same roster.json -> byte-identical HTML. All iteration goes
-through sorted()/DISPLAY_ORDER.
+Determinism: same roster + registry -> byte-identical HTML and JSON. All
+iteration goes through sorted()/DISPLAY_ORDER.
+
+Publication contract (one observation, one snapshot, two artifacts): the CLI
+reads the roster once, captures the already-resolved registry once, builds ONE
+validated public snapshot, and serializes/renders BOTH artifacts from that SAME
+object before either final file is replaced. The prepared pair is validated
+in-memory, both payloads are staged in exclusively-created unique temp files in
+the destination directory, replacement + exact-target read-back are serialized
+under one advisory build lock (POSIX ``fcntl`` flock on ``site/.build.lock``;
+a Windows producer needs a later equivalent), and the published pair is then
+read back from the EXACT final targets and validated again. Two individual
+renames are NOT a transaction: an interruption or a second-replacement I/O
+failure can leave a mixed pair, so that is reported as an ERROR and the pair
+validator rejects it. No rollback is attempted (it could clobber another
+successful writer) and no transactional/power-loss guarantee is claimed.
 
 Logo handling (stdlib-only at build time): assets/logo.png was downscaled
 to 128x128 with PIL during task prep (~31KB, within the <=128px / ~31KB
@@ -32,10 +50,17 @@ budget), so the builder embeds it as-is as a base64 data-URI. The >40KB
 fallback (stdlib PNG chunk parse + zlib + resample) was not needed. The
 builder itself only reads bytes and refuses logos over MAX_LOGO_BYTES.
 
+The shared tool definitions come from the BUILDER's bundled
+``watchdog_catalog/tools.json`` (never from the arbitrary --root fixture
+directory), decoded once through the accepted strict JSON loader and handed to
+the renderer explicitly.
+
 Usage: python3 build_site.py [--root DIR]   (default root = repo dir)
-Exit codes: 0 ok; 2 missing/corrupt roster, a provider value that is not a
-list of model-id strings, or a missing/oversized/unreadable logo — and
-site/index.html is NEVER written on failure (never publish garbage).
+Exit codes: 0 both artifacts published; 2 for a missing/corrupt/structurally
+invalid roster, an invalid registry/snapshot, a missing/oversized/unreadable
+logo, an unusable tool resource, or a serialization/render/validation/staging/
+replacement failure — with stderr diagnostics, empty stdout and BOTH final
+files left byte-identical (or both absent).
 """
 
 from __future__ import annotations
@@ -45,9 +70,14 @@ import base64
 import json
 import os
 import sys
-import threading
+import tempfile
 from html import escape
 from pathlib import Path
+
+try:  # POSIX advisory locking for the producer's two-artifact publication.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows producer support is later work
+    fcntl = None
 
 # Probe-verified gateway wiring (single source of truth): see config_loader.py
 # GATEWAY_WIRING. We IMPORT rather than re-hardcode so a probed-URL fix
@@ -57,6 +87,18 @@ from pathlib import Path
 # render, and degrade tests monkeypatch config_loader.load_configs.
 import config_loader  # noqa: E402
 from config_loader import GATEWAY_WIRING, PROVIDERS  # noqa: E402
+
+# The accepted producer adapter: ONE captured roster + ONE captured registry ->
+# ONE validated public snapshot, its deterministic export text, and the pure
+# pair validator. Imported as module names (never inlined) so the CLI pipeline
+# is a single call each and tests can observe the one-shot acquisition.
+from catalog_export import (  # noqa: E402
+    build_snapshot,
+    capture_registry,
+    serialize_snapshot,
+    validate_artifact_pair,
+)
+from watchdog_catalog import catalog  # noqa: E402
 
 # Dthen's quality ranking, derived from config_loader.PROVIDERS (sorted by
 # `display` field in providers/*.json). Single source of truth; a display
@@ -68,8 +110,17 @@ REPO = Path(__file__).resolve().parent
 
 ROSTER_REL = Path("state/roster.json")
 SITE_REL = Path("site/index.html")
+CATALOG_REL = Path("site/catalog.json")
 LOGO_REL = Path("assets/logo.png")
+TOOLS_REL = Path("watchdog_catalog/tools.json")
+BUILD_LOCK_REL = Path("site/.build.lock")
 MAX_LOGO_BYTES = 40 * 1024  # refuse to embed a bloated logo
+
+#: The producer's explicit snapshot cadence, matching the operational tick and
+#: the existing local MCP cadence. A literal here (rather than an import of the
+#: watchdog runtime) keeps the builder free of the monitor/state layer; it
+#: changes NO operational cadence.
+BUILD_CADENCE_S = 3600
 
 # The free-marker stripper and the portable natural raw-ID key now live in the
 # pure, side-effect-free watchdog_catalog.query module (stdlib-only, no
@@ -325,7 +376,8 @@ def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
     header_meta: explicit trusted gateway -> {'signup_url', 'limits_note'} map;
         never derived here.
     data_script: the complete data-script slot markup. The legacy adapter
-        passes its roster-data island; the staged public route passes "".
+        passes its single roster-data island; the public route passes the two
+        inert public islands (catalogue + tool contract).
 
     Rows are GROUPED by stripped name: a model that ships as
     `vendor/x:free` on gateway A and `vendor/x-free` on gateway B renders
@@ -476,7 +528,7 @@ def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
     )
     meta = "updated hourly"
     # The data-script slot is supplied fully formed by the adapter: the legacy
-    # one carries its roster-data island, the staged public route carries "".
+    # one carries its roster-data island, the public route the two public ones.
     body_rows = "".join(
         f"<tbody>{row_html(name, i)}</tbody>"
         for i, name in enumerate(group_names)
@@ -672,9 +724,175 @@ def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract):
     )
 
 
+def load_tool_contract():
+    """Decode the bundled shared tool resource ONCE at the acquisition boundary.
+
+    The path is the BUILDER's own packaged/repository copy
+    (``watchdog_catalog/tools.json``), deliberately NOT ``<root>/...``: an
+    arbitrary build root must never be able to inject the browser-visible tool
+    definitions. Decoding uses the accepted strict JSON loader, so a malformed
+    document (bad lexeme, duplicate member, unsafe number, over-deep nesting)
+    exits 2 with the frozen diagnostic instead of being repaired.
+    """
+    path = REPO / TOOLS_REL
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"build_site: cannot read tool resource {path}: {exc}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        contract = catalog.load_json(raw)
+    except catalog.CatalogError as exc:
+        print(f"build_site: corrupt tool resource {path}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if not isinstance(contract, list):
+        print(f"build_site: tool resource {path} must be a bare JSON array",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return contract
+
+
+def build_public_pair(root):
+    """Acquire ONCE and prepare BOTH artifacts from ONE public snapshot.
+
+    Exactly one roster read (the existing strict :func:`load_roster`), exactly
+    one capture of the already-resolved ``PROVIDERS`` / ``GATEWAY_WIRING`` maps
+    through the accepted :func:`catalog_export.capture_registry`, exactly one
+    :func:`catalog_export.build_snapshot`, then BOTH outputs derived from that
+    SAME object: :func:`catalog_export.serialize_snapshot` for the external
+    JSON text and :func:`render_catalog_page` for the HTML (with the bundled
+    tool contract and the trusted header metadata passed explicitly).
+
+    Returns ``(snapshot, catalog_text, html_text)``. Nothing is written here:
+    the caller stages and publishes only after the prepared pair validates.
+    """
+    roster = load_roster(root)                                    # ONE read
+    records = capture_registry(PROVIDERS, GATEWAY_WIRING)         # ONE capture
+    snapshot = build_snapshot(records, roster, cadence_s=BUILD_CADENCE_S)
+    tool_contract = load_tool_contract()
+    header_meta = build_provider_header_meta()
+    logo_b64 = load_logo_b64(root)
+    catalog_text = serialize_snapshot(snapshot)
+    html_text = render_catalog_page(
+        snapshot, logo_b64, header_meta, tool_contract=tool_contract)
+    validate_artifact_pair(catalog_text, html_text)
+    return snapshot, catalog_text, html_text
+
+
+class _PairWriteError(RuntimeError):
+    """A failed two-artifact publication (message is fixed, never reflective)."""
+
+
+def _discard(path):
+    """Remove one temp path this process OWNS; ignore everything else."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _stage(site_dir, target, text):
+    """Write ``text`` to a NEW exclusively-created temp file beside ``target``.
+
+    ``tempfile.mkstemp`` gives every invocation its own path in the destination
+    directory (same filesystem, so the later rename is atomic), including
+    overlapping builds in one process/thread and separate processes. The file is
+    fully written, flushed and fsynced before it is closed.
+    """
+    fd, name = tempfile.mkstemp(
+        dir=str(site_dir), prefix=f".{target.name}.", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return Path(name)
+
+
+def _read_published(path):
+    """Exact bytes of one final target, decoded with NO newline translation."""
+    return path.read_bytes().decode("utf-8")
+
+
+def write_artifact_pair(root, catalog_text, html_text):
+    """Stage, publish and VERIFY the two public artifacts as one pair.
+
+    Sequence (the pair of renames is still NOT a transaction):
+
+    1. validate the PREPARED pair in memory (defence in depth; the CLI already
+       built both from one snapshot);
+    2. write both complete payloads to unique, exclusively-created temp files in
+       the destination directory and close them -- nothing final is touched yet;
+    3. under one advisory build lock, rename ``catalog.json`` then
+       ``index.html`` into place;
+    4. read back the EXACT final targets and validate the pair again before
+       reporting success.
+
+    Raises :class:`_PairWriteError` on any failure. Owned temps are always
+    removed; unrelated files are never touched, and no rollback is attempted
+    (it could clobber a concurrent successful writer).
+    """
+    try:
+        validate_artifact_pair(catalog_text, html_text)
+    except (catalog.CatalogError, ValueError):
+        raise _PairWriteError("prepared catalogue pair rejected") from None
+
+    site_dir = root / SITE_REL.parent
+    try:
+        site_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _PairWriteError(f"cannot create {site_dir}: {exc}") from None
+
+    staged = []
+    try:
+        for target, text in ((site_dir / CATALOG_REL.name, catalog_text),
+                             (site_dir / SITE_REL.name, html_text)):
+            staged.append((_stage(site_dir, target, text), target))
+    except OSError as exc:
+        for temp, _ in staged:
+            _discard(temp)
+        raise _PairWriteError(f"cannot stage artifacts: {exc}") from None
+
+    if fcntl is None:  # pragma: no cover - Windows producer support is later work
+        for temp, _ in staged:
+            _discard(temp)
+        raise _PairWriteError(
+            "artifact publication needs POSIX advisory locking (fcntl)")
+
+    lock_path = site_dir / BUILD_LOCK_REL.name
+    try:
+        lock_file = open(lock_path, "a+b")
+    except OSError as exc:
+        for temp, _ in staged:
+            _discard(temp)
+        raise _PairWriteError(f"cannot open build lock {lock_path}: {exc}") from None
+
+    with lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            for temp, target in staged:
+                try:
+                    os.replace(temp, target)
+                except OSError as exc:
+                    raise _PairWriteError(
+                        f"cannot publish {target.name}: {exc}") from None
+            try:
+                published_catalog = _read_published(site_dir / CATALOG_REL.name)
+                published_html = _read_published(site_dir / SITE_REL.name)
+                validate_artifact_pair(published_catalog, published_html)
+            except (OSError, ValueError, catalog.CatalogError):
+                raise _PairWriteError(
+                    "published artifacts did not validate") from None
+        finally:
+            for temp, _ in staged:
+                _discard(temp)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="Render site/index.html from state/roster.json (stdlib only)."
+        description="Publish site/index.html + site/catalog.json from "
+                    "state/roster.json (stdlib only)."
     )
     ap.add_argument(
         "--root",
@@ -683,23 +901,28 @@ def main(argv=None):
         help="project root containing state/ and receiving site/ (default: repo dir)",
     )
     args = ap.parse_args(argv)
-    roster = load_roster(args.root)
-    logo_b64 = load_logo_b64(args.root)
-    html = render_page(roster, logo_b64)
-    out = args.root / SITE_REL
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # Unique per process + thread, mirroring state.py's _atomic_write_json:
-    # a shared 'index.html.tmp' let two concurrent builders race — one
-    # builder's replace moved the other's temp away, so the loser died on
-    # FileNotFoundError (reviewer measured 17/3 failures at 20 parallel).
-    tmp = out.with_name(
-        f"{out.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(html, encoding="utf-8")
-    tmp.replace(out)  # atomic publish: never a torn or partial write
+    try:
+        snapshot, catalog_text, html_text = build_public_pair(args.root)
+    except catalog.CatalogError as exc:
+        print(f"build_site: invalid public snapshot: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    except Exception as exc:  # noqa: BLE001 - every preparation fault exits 2
+        print(f"build_site: cannot prepare public artifacts: {exc}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        write_artifact_pair(args.root, catalog_text, html_text)
+    except _PairWriteError as exc:
+        print(f"build_site: {exc}", file=sys.stderr)
+        raise SystemExit(2)
     # Progress goes to STDERR: the tick wrapper delivers non-empty STDOUT to
     # Discord home, so a successful rebuild must stay stdout-silent.
-    n_ids = len({m for models in roster["providers"].values() for m in models})
-    print(f"build_site: wrote {out} ({n_ids} unique ids)", file=sys.stderr)
+    n_ids = len({mid for entry in snapshot["providers"].values()
+                 for mid in entry["model_ids"]})
+    site_dir = args.root / SITE_REL.parent
+    print(f"build_site: wrote {site_dir / SITE_REL.name} and "
+          f"{site_dir / CATALOG_REL.name} ({n_ids} unique ids)",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":

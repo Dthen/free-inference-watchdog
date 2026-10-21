@@ -54,15 +54,26 @@ the accepted whole-value
 :func:`watchdog_catalog.catalog.canonical_bytes`, returning a native ``str``
 plus exactly one trailing LF. It is in-memory only: no file, path, CLI, roster,
 registry, clock, environment, network or SDK access, no alternate encoder, and
-no repair/reseal. Writing that text to ``site/catalog.json`` (validated
-two-artifact publication) is a LATER unit, as is HTML script-context escaping.
+no repair/reseal.
+
+:func:`validate_artifact_pair` is the reusable PAIR boundary (unit 4e): it
+accepts the external ``catalog.json`` text plus a WHOLE rendered dashboard
+document and proves both describe ONE public snapshot, returning the validated
+external snapshot. It is pure and in-memory too -- the HTML parser is stdlib
+and it never imports the page renderer, the config/state layer or an SDK -- so
+a repository publish helper or CI can reuse it without loading producer
+runtime. Writing the two files (staging, atomic replacement, lock, read-back)
+belongs to ``build_site.py``; the publish/CI caller is a later unit.
 """
 
 from __future__ import annotations
 
+from html.parser import HTMLParser
+
 from watchdog_catalog import catalog
 
-__all__ = ["build_snapshot", "capture_registry", "serialize_snapshot"]
+__all__ = ["build_snapshot", "capture_registry", "serialize_snapshot",
+           "validate_artifact_pair"]
 
 #: The frozen warning vocabulary, in its deduplicated publication ORDER. The
 #: accepted validator re-enforces exactly this order on the sealed snapshot.
@@ -340,3 +351,131 @@ def capture_registry(providers, wiring):
             "api_type": api_type,
         })
     return records
+
+
+# ---------- public artifact-pair validation (pure, in-memory) ----------
+
+#: The single inert element that carries the public catalogue in the page.
+_CATALOGUE_ISLAND_ID = "catalog-data"
+#: The RETIRED unversioned raw-state element; publishing it again is a pair
+#: mismatch (raw private state and the projected public data must not coexist).
+_LEGACY_ISLAND_ID = "roster-data"
+#: Fixed, non-reflective pair-mismatch message: it never echoes either
+#: artifact's text, a parser offset or a path.
+_PAIR_MISMATCH_MESSAGE = "Catalogue artifacts do not match."
+_PAIR_ARGUMENT_MESSAGE = (
+    "validate_artifact_pair() requires the external catalogue JSON text and "
+    "the rendered HTML text")
+
+
+class _CatalogueIslandParser(HTMLParser):
+    """Collect the inline ``catalog-data`` element(s) from the WHOLE document.
+
+    One stdlib pass, exactly as a browser's tokenizer reads the page:
+
+    * a script body is SCRIPT DATA, so an injected ``</script>`` ends the
+      element here too -- the truncated body then fails JSON acceptance
+      instead of being silently re-parsed around;
+    * a legacy ``roster-data`` element is recorded and rejected by the caller;
+    * a self-closing candidate (``<script ... />``) is recorded as such, never
+      treated as a complete element;
+    * an element left open at end of document is malformed.
+
+    It never executes, decodes as HTML or interprets the JSON body.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        #: ``[tag, attrs, [chunks], self_closing]`` per candidate element.
+        self.candidates = []
+        self.malformed = False
+        self.legacy = False
+        self._open = None
+
+    def _note(self, tag, attrs, self_closing):
+        attrs = dict(attrs)
+        identifier = attrs.get("id")
+        if identifier == _LEGACY_ISLAND_ID:
+            self.legacy = True
+            return False
+        if identifier != _CATALOGUE_ISLAND_ID:
+            return False
+        self.candidates.append([tag, attrs, [], self_closing])
+        return not self_closing
+
+    def handle_starttag(self, tag, attrs):
+        if self._open is not None:
+            # Only reachable outside CDATA mode: an unterminated element.
+            self.malformed = True
+            return
+        if self._note(tag, attrs, False):
+            self._open = self.candidates[-1]
+
+    def handle_startendtag(self, tag, attrs):
+        self._note(tag, attrs, True)
+
+    def handle_data(self, data):
+        if self._open is not None:
+            self._open[2].append(data)
+
+    def handle_endtag(self, tag):
+        if self._open is not None and tag == "script":
+            self._open = None
+
+
+def _extract_catalogue_island(html_text):
+    """The body text of the ONE inline ``catalog-data`` JSON element.
+
+    Raises the fixed non-reflective ``ValueError`` for a missing, duplicate,
+    self-closing, wrong-type, ``src``-carrying, non-script, unterminated or
+    legacy-``roster-data`` candidate. JSON acceptance is the CALLER's job, so a
+    malformed body still surfaces as the accepted ``CatalogError``.
+    """
+    parser = _CatalogueIslandParser()
+    parser.feed(html_text)
+    parser.close()
+    if parser._open is not None:
+        # The element never saw its closing tag: HTMLParser flushes the rest of
+        # the document into its body, so this must be rejected explicitly.
+        parser.malformed = True
+    if parser.legacy or parser.malformed or len(parser.candidates) != 1:
+        raise ValueError(_PAIR_MISMATCH_MESSAGE)
+    tag, attrs, chunks, self_closing = parser.candidates[0]
+    if tag != "script" or self_closing:
+        raise ValueError(_PAIR_MISMATCH_MESSAGE)
+    if attrs.get("type", "").strip().lower() != "application/json":
+        raise ValueError(_PAIR_MISMATCH_MESSAGE)
+    if "src" in attrs:
+        raise ValueError(_PAIR_MISMATCH_MESSAGE)
+    return "".join(chunks)
+
+
+def validate_artifact_pair(catalog_text, html_text):
+    """Prove one external JSON text and one HTML page describe the SAME snapshot.
+
+    ``catalog_text`` is the published ``site/catalog.json`` body and
+    ``html_text`` the WHOLE rendered dashboard document. The external text is
+    accepted through the frozen :func:`watchdog_catalog.catalog.load_snapshot`;
+    the single inline ``catalog-data`` element is extracted with stdlib
+    ``HTMLParser`` and accepted the same way. Both are then compared as
+    COMPLETE TYPED canonical values (``canonical_bytes``), so the root
+    ``snapshot_id`` and every nested value take part and ``1`` / ``1.0`` /
+    ``True`` can never be conflated, unlike plain Python equality.
+
+    On success returns the validated EXTERNAL snapshot (a fresh object parsed
+    from ``catalog_text``). A rejected catalogue value keeps its frozen
+    :class:`catalog.CatalogError` code and message; an HTML/pair mismatch --
+    including any legacy ``roster-data`` island -- raises the fixed,
+    non-reflective ``ValueError``. Nothing is repaired, resealed or dropped,
+    and neither argument is mutated.
+
+    Pure and in-memory: no file, path, config, roster, clock, environment,
+    network or SDK access, and the page renderer is never imported.
+    """
+    if not isinstance(catalog_text, str) or not isinstance(html_text, str):
+        raise TypeError(_PAIR_ARGUMENT_MESSAGE)
+    external = catalog.load_snapshot(catalog_text)
+    embedded = catalog.load_snapshot(_extract_catalogue_island(html_text))
+    if catalog.canonical_bytes(external) != catalog.canonical_bytes(embedded):
+        raise ValueError(_PAIR_MISMATCH_MESSAGE)
+    return external

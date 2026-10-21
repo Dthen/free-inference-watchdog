@@ -45,6 +45,15 @@ row:
   exclusion with hostile retained text, typed pricing distinctions and the
   delegated rejection codes. File publication, HTML escaping and the CLI stay
   OUT of this group's boundary.
+* G7 -- the reusable pure artifact-pair validator (unit 4e): external
+  ``catalog.json`` text plus a WHOLE dashboard HTML document must describe ONE
+  public catalogue. Real renders of real validated snapshots are cross-checked
+  through one stdlib ``HTMLParser`` extraction of the single inert
+  ``catalog-data`` element; missing/duplicate/self-closing/wrong-type/
+  ``src``/legacy ``roster-data``/non-script/malformed candidates and
+  independently valid but different snapshots in either direction are
+  rejected, as are malformed external or embedded JSON documents. The
+  validator is in-memory only and never imports the renderer.
 
 Every expected value below is an independent literal restatement of the frozen
 contract or of an existing fixture; no expected snapshot is generated from the
@@ -1281,3 +1290,186 @@ def test_serialize_snapshot_validated_deterministic_export():
     # changed value, and the untouched fixture still exports normally.
     assert stale_hash["providers"][first_key]["display_name"] == "Renamed"
     assert serialize_snapshot(good) == _reference_export_text(good)
+
+
+# ================= G7: pure public artifact-pair validation =================
+
+PAIR_MISMATCH_MESSAGE = "Catalogue artifacts do not match."
+_TOOLS_RESOURCE = REPO / "watchdog_catalog" / "tools.json"
+
+
+def _rendered_pair(snapshot):
+    """Serialize + render ONE validated snapshot through the ACCEPTED surfaces.
+
+    The real public renderer and the real shared tool resource are used HERE,
+    in the test only: the exporter runtime never imports ``build_site``.
+    """
+    import build_site
+    from catalog_export import serialize_snapshot
+
+    tool_contract = json.loads(_TOOLS_RESOURCE.read_text(encoding="utf-8"))
+    html = build_site.render_catalog_page(
+        snapshot, "ZmFrZWxvZ28=", tool_contract=tool_contract)
+    return serialize_snapshot(snapshot), html
+
+
+def _pricing_snapshot(prompt):
+    """A real valid snapshot whose ONLY varying value is one pricing scalar."""
+    from catalog_export import build_snapshot
+
+    roster = {
+        "tick_epoch": 0,
+        "providers": {"p": ["m"]},
+        "provider_models": {"p": {"m": {
+            "name": "M",
+            "context_length": 8,
+            "architecture": {"input_modalities": ["text"],
+                             "output_modalities": ["text"]},
+            "supported_parameters": ["temperature"],
+            "pricing": {"prompt": prompt, "completion": 0},
+        }}},
+    }
+    return build_snapshot([_record("p")], roster, cadence_s=1)
+
+
+def test_validate_artifact_pair_rejects_a_mismatched_or_malformed_pair(
+        monkeypatch):
+    """One public data contract across the external JSON and the HTML island.
+
+    Exercises the pure validator over REAL renders: exact acceptance with the
+    full typed payload and root ``snapshot_id``, both mismatch directions,
+    int/float-only mismatches, every candidate-element defect, malformed
+    external/embedded JSON, and in-memory purity (no renderer import, no file
+    or network access).
+    """
+    import re
+
+    import catalog_export
+    from catalog_export import validate_artifact_pair
+    from watchdog_catalog import catalog
+
+    assert "validate_artifact_pair" in catalog_export.__all__
+
+    base = _load_fixture("basic.json")
+    other = _load_fixture("lookup.json")
+    assert base["snapshot_id"] != other["snapshot_id"]
+    base_text, base_html = _rendered_pair(base)
+    other_text, other_html = _rendered_pair(other)
+
+    def code_of(call, *args):
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            call(*args)
+        return excinfo.value
+
+    # ---- (a) exact acceptance: complete typed payload, root id retained ----
+    before_text, before_html = base_text, base_html
+    accepted = validate_artifact_pair(base_text, base_html)
+    assert catalog.validate_snapshot(accepted) is accepted
+    assert accepted is not base, "validator must return the parsed external value"
+    assert catalog.canonical_bytes(accepted) == catalog.canonical_bytes(base)
+    assert accepted["snapshot_id"] == base["snapshot_id"]
+    assert set(accepted) == set(base)  # no key dropped or invented
+    assert base_text == before_text and base_html == before_html
+
+    # ---- (b) independently valid snapshots must never cross-match ----------
+    for catalog_text, html_text in (
+            (base_text, other_html),   # old JSON + new HTML
+            (other_text, base_html)):  # new JSON + old HTML
+        with pytest.raises(ValueError) as excinfo:
+            validate_artifact_pair(catalog_text, html_text)
+        assert type(excinfo.value) is ValueError, "a pair mismatch is not a CatalogError"
+        assert str(excinfo.value) == PAIR_MISMATCH_MESSAGE
+
+    # int 1 and float 1.0 are DIFFERENT published values: both snapshots are
+    # independently valid, so only a complete TYPED comparison rejects them.
+    int_text, int_html = _rendered_pair(_pricing_snapshot(1))
+    float_text, float_html = _rendered_pair(_pricing_snapshot(1.0))
+    assert int_text != float_text
+    assert validate_artifact_pair(int_text, int_html)["snapshot_id"]
+    assert validate_artifact_pair(float_text, float_html)["snapshot_id"]
+    for catalog_text, html_text in ((int_text, float_html), (float_text, int_html)):
+        with pytest.raises(ValueError) as excinfo:
+            validate_artifact_pair(catalog_text, html_text)
+        assert str(excinfo.value) == PAIR_MISMATCH_MESSAGE
+
+    # ---- (c) every candidate-element defect is rejected --------------------
+    island = re.search(
+        r'<script type="application/json" id="catalog-data">.*?</script>',
+        base_html, re.S)
+    assert island, "real render must carry the catalogue island"
+    element = island.group(0)
+    body = re.fullmatch(
+        r'<script type="application/json" id="catalog-data">(.*)</script>',
+        element, re.S).group(1)
+
+    def rejected(html_text):
+        with pytest.raises(ValueError) as excinfo:
+            validate_artifact_pair(base_text, html_text)
+        assert type(excinfo.value) is ValueError
+        assert str(excinfo.value) == PAIR_MISMATCH_MESSAGE
+        return excinfo.value
+
+    rejected(base_html.replace(element, "", 1))                       # missing
+    rejected(base_html.replace(element, element + element, 1))        # duplicate
+    rejected(base_html.replace(
+        element,
+        '<script type="application/json" id="catalog-data"/>', 1))    # self-closing
+    rejected(base_html.replace(
+        element, element.replace(
+            'type="application/json"', 'type="text/plain"', 1), 1))   # wrong type
+    rejected(base_html.replace(
+        element, element.replace(
+            'type="application/json"',
+            'type="application/json" src="//evil.example/x"', 1), 1))  # external src
+    rejected(base_html.replace(
+        element,
+        '<div id="catalog-data">' + body + "</div>", 1))              # non-script
+    # Unterminated element (no closing tag anywhere in the document).
+    rejected('<html><body><script type="application/json" '
+             'id="catalog-data">' + body)
+    rejected(base_html.replace(                                     # legacy island
+        element,
+        '<script type="application/json" id="roster-data">{}</script>' + element, 1))
+    rejected(base_html.replace(                                     # hostile close
+        body, body[:40] + "</script><script id=\"catalog-data\">" + body[40:], 1))
+
+    # A prematurely closed island leaves truncated JSON behind: that is the
+    # raw-JSON boundary's frozen error, not a pair-mismatch ValueError.
+    truncated = code_of(validate_artifact_pair, base_text,
+                        base_html.replace(body, body[:40] + "</script>" + body[40:], 1))
+    assert truncated.code == "invalid_json"
+    assert truncated.message == "Invalid catalogue JSON."
+
+    # ---- (d) malformed/unaccepted external or embedded JSON ----------------
+    for catalog_text, expected in (
+            (base_text[:60], "invalid_json"),
+            ('{"schema_version":1,"schema_version":1}', "invalid_json"),
+            ("{}", "invalid_snapshot"),
+            ("null", "invalid_snapshot")):
+        assert code_of(validate_artifact_pair, catalog_text, base_html).code == expected
+    assert code_of(validate_artifact_pair, base_text,
+                   base_html.replace(body, "{not json", 1)).code == "invalid_json"
+    assert code_of(validate_artifact_pair, base_text,
+                   base_html.replace(body, "{}", 1)).code == "invalid_snapshot"
+    # Non-string inputs are programming errors, never a public error code.
+    for call_args in ((None, base_html), (base_text, None), (b"{}", base_html)):
+        with pytest.raises(TypeError):
+            validate_artifact_pair(*call_args)
+
+    # ---- (e) purity: no file, config, renderer or SDK access ---------------
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("pair validation touched the filesystem")
+
+    monkeypatch.setattr("builtins.open", _forbidden)
+    accepted_again = validate_artifact_pair(base_text, base_html)
+    assert accepted_again["snapshot_id"] == base["snapshot_id"]
+    monkeypatch.undo()
+
+    probe = (
+        "import sys, catalog_export;"
+        "print(sorted(m for m in ('build_site', 'config_loader', 'mcp',"
+        " 'socket', 'requests') if m in sys.modules))")
+    proc = subprocess.run([sys.executable, "-c", probe], cwd=str(REPO),
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "[]", proc.stdout

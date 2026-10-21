@@ -5,8 +5,10 @@ gateway union, one column per gateway) rebuilt per tick from
 state/roster.json into site/index.html. Pinned here:
 
 - a known seeded id renders in the table,
-- the full roster is INLINED as JSON in <script type="application/json"
-  id="roster-data"> and extracts cleanly with json.loads,
+- the ONE public snapshot is published as TWO artifacts (site/index.html and
+  site/catalog.json); the page carries it inline as
+  <script type="application/json" id="catalog-data"> plus the shared tool
+  definitions as id="tool-contract", and both extract cleanly with json.loads,
 - output is DETERMINISTIC (same roster -> byte-identical HTML),
 - PROVIDER DISPLAY ORDER is Dthen's quality ranking [nous, tokenrouter, kilo,
   openrouter, amd, bai, nim] — openrouter BEFORE amd/bai (limits), nim last,
@@ -15,10 +17,11 @@ state/roster.json into site/index.html. Pinned here:
   site/index.html (never publish garbage),
 - HOSTILE provider values (bare string / dict / null / int instead of a
   list of model-id strings) exit 2 WITHOUT writing site/,
-- an out-of-range tick_epoch is still embedded verbatim in the
-  roster-data JSON island (raw values are an MCP contract),
-- the publish temp file is pid+thread-unique (concurrent builders must
-  not collide on a shared index.html.tmp),
+- an out-of-range/negative optional tick_epoch projects to null +
+  tick_epoch_unknown, while a valid safe integer is retained verbatim (the
+  direct local-MCP raw-value contract is unchanged and out of this boundary),
+- every publish invocation stages its OWN temp files (concurrent builders
+  must not collide on a shared artifact temp path),
 - an oversized logo under --root exits 2 without writing site/,
 - an empty providers map renders zero rows without crashing.
 
@@ -103,23 +106,32 @@ def test_builder_renders_seeded_id():
         assert "vendor-z/zero-priced-model" in html
 
 
-def test_roster_data_script_extracts_cleanly():
-    """The embedded <script type="application/json" id="roster-data"> payload
-    must round-trip through json.loads with the original providers map."""
+def test_catalog_data_script_extracts_cleanly():
+    """The public catalogue island round-trips as the versioned snapshot.
+
+    The CLI publishes ONE validated public snapshot, never raw roster state:
+    the page's single ``catalog-data`` element and the external
+    ``site/catalog.json`` carry the SAME snapshot, whose per-provider
+    ``model_ids`` keep the raw tracked ids verbatim.
+    """
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         proc = _run_builder(SEED_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        m = re.search(
-            r'<script type="application/json" id="roster-data">(.*?)</script>',
-            html, re.S,
-        )
-        assert m, "roster-data script tag missing from output"
-        data = json.loads(m.group(1))
-        assert set(data["providers"]) == {"nous", "openrouter", "tokenrouter", "kilo", "amd"}
-        assert "vendor-z/zero-priced-model" in data["providers"]["nous"]
+        islands = _script_elements(html)
+        assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
+        data = json.loads(islands[0][1])
+        assert data["schema_version"] == 1 and data["snapshot_id"]
+        assert set(data["providers"]) == {
+            "nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"}
+        assert data["providers"]["nous"]["model_ids"] == [
+            "vendor-g/model-7:free", "vendor-z/zero-priced-model"]
+        external = json.loads(
+            (tmp / "site" / "catalog.json").read_text(encoding="utf-8"))
+        assert _typed(external) == _typed(data)
+        assert 'id="roster-data"' not in html
 
 
 def test_deterministic_output():
@@ -218,19 +230,15 @@ def test_presence_matrix_structure():
 def test_no_snapshot_or_alert_wording():
     """Header copy contract: rebuild-cadence wording only —
     NO snapshot/alert/stale/outage wording anywhere in the VISIBLE page copy.
-    (The embedded roster-data JSON island is excluded: it legitimately carries
-    upstream state keys like stale_providers as data, not copy.)"""
+    (The two inert public JSON islands are excluded: the catalogue legitimately
+    carries public keys like ``snapshot_id`` and ``warnings`` as DATA.)"""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         proc = _run_builder(SEED_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        m = re.search(
-            r'<script type="application/json" id="roster-data">.*?</script>',
-            html, re.S,
-        )
-        copy = (html[: m.start()] + html[m.end():]).lower() if m else html.lower()
+        copy = _strip_public_islands(html).lower()
         for word in ("snapshot", "alert", "stale", "outage"):
             assert word not in copy, f"forbidden copy word '{word}' in page"
 
@@ -278,36 +286,105 @@ def test_valid_list_of_str_providers_still_builds(tmp_path):
     assert (tmp_path / "site" / "index.html").exists()
 
 
-# ---------- C2: out-of-range tick_epoch still embedded verbatim -------------
+# ---------- C2: out-of-range tick_epoch projects to null + warning ----------
 
-@pytest.mark.parametrize("epoch", [10**12, -5])
-def test_out_of_range_tick_epoch_still_embedded_verbatim(epoch, tmp_path):
-    """Overflow-scale/negative epochs must still build at rc=0 and the
-    embedded roster-data JSON island must carry the raw value verbatim
-    (MCP contract) — never an unhandled traceback, page still published.
-    (The header stamp no longer exists, so there is nothing to degrade.)"""
+@pytest.mark.parametrize(("epoch", "projected"), [
+    (10 ** 12, 10 ** 12),        # safe integer: retained verbatim
+    (0, 0),                       # zero is a KNOWN epoch
+    (-5, None),                   # negative: invalid optional value
+    (2 ** 53, None),              # above the JSON-safe ceiling
+])
+def test_out_of_range_tick_epoch_projects_to_null_with_warning(
+        epoch, projected, tmp_path):
+    """An invalid optional epoch degrades to null + tick_epoch_unknown.
+
+    The accepted public projection is authoritative on this route: a negative
+    or unsafe epoch cannot be a published JSON-safe non-negative integer, so
+    the snapshot carries ``tick_epoch: null`` and the frozen
+    ``tick_epoch_unknown`` warning; a valid safe integer is retained verbatim.
+    (Direct local-MCP raw-value behaviour is a different, unchanged contract.)
+    """
     _seed_logo(tmp_path)
     roster = dict(SEED_ROSTER, tick_epoch=epoch)
     proc = _run_builder(roster, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
-    m = re.search(r'id="roster-data">(\{.*?\})</script>', html)
-    assert m, "roster-data script tag missing from output"
-    assert json.loads(m.group(1))["tick_epoch"] == epoch
+    catalog = json.loads(_script_elements(html)[0][1])
+    assert catalog["tick_epoch"] == projected
+    assert ("tick_epoch_unknown" in catalog["warnings"]) is (projected is None)
+    external = json.loads(
+        (tmp_path / "site" / "catalog.json").read_text(encoding="utf-8"))
+    assert _typed(external) == _typed(catalog)
 
 
-# ---------- I1: publish tmp name is pid+thread unique (no shared .tmp) ------
+# ---------- I1: every publish invocation stages its OWN temp paths ----------
 
-def test_tmp_publish_name_is_pid_thread_unique():
-    """Pin the collision-free temp naming: index.html.<pid>.<tid>.tmp,
-    mirroring state.py's _atomic_write_json pattern (a shared
-    index.html.tmp raced 17/3 failures at 20 parallel builders)."""
-    src = BUILDER.read_text(encoding="utf-8")
-    assert re.search(
-        r'with_name\(\s*f"\{out\.name\}\.\{os\.getpid\(\)\}'
-        r'\.\{threading\.get_ident\(\)\}\.tmp"',
-        src,
-    ), "publish tmp name lost the pid+thread-unique pattern"
+def test_publish_staging_paths_are_unique_per_invocation(tmp_path, monkeypatch):
+    """Overlapping writers never share a staging path (behavioural proof).
+
+    Two barrier-synchronised writer invocations in one process, same output
+    directory: ``tempfile.mkstemp`` must be called once per artifact per
+    invocation, producing FOUR DISTINCT paths. Nothing is left behind, the
+    final pair is coherent, and no shared ``.tmp`` name can be observed —
+    replacing the old source-regex check with real concurrency behaviour.
+    """
+    import tempfile
+    import threading
+
+    import build_site
+    from catalog_export import (capture_registry, serialize_snapshot,
+                                validate_artifact_pair)
+
+    tool_contract = _pair_tool_contract()
+    registry = capture_registry(build_site.PROVIDERS, build_site.GATEWAY_WIRING)
+
+    def pair(epoch):
+        snapshot = build_site.build_snapshot(
+            registry,
+            {"tick_epoch": epoch,
+             "providers": {"nous": [f"vendor-z/staged-{epoch}-free"]}},
+            cadence_s=3600)
+        return (
+            serialize_snapshot(snapshot),
+            build_site.render_catalog_page(
+                snapshot, "ZmFrZWxvZ28=", tool_contract=tool_contract),
+        )
+
+    pairs = [pair(1), pair(2)]
+    seen = []
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        seen.append(name)
+        return fd, name
+
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+    barrier = threading.Barrier(len(pairs))
+    errors = []
+
+    def worker(catalog_text, html_text):
+        try:
+            barrier.wait(timeout=10)
+            build_site.write_artifact_pair(tmp_path, catalog_text, html_text)
+        except BaseException as exc:      # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=p) for p in pairs]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    monkeypatch.undo()
+
+    assert errors == [], errors
+    assert len(seen) == 4, seen
+    assert len(set(seen)) == 4, f"staging paths collided: {seen}"
+    assert not any(Path(name).exists() for name in seen), "owned temp left behind"
+    catalog_text = (tmp_path / "site" / "catalog.json").read_bytes().decode()
+    html_text = (tmp_path / "site" / "index.html").read_bytes().decode()
+    assert [(c, h) for c, h in pairs if c == catalog_text and h == html_text]
+    assert validate_artifact_pair(catalog_text, html_text)["snapshot_id"]
 
 
 # ---------- I2: logo resolves under --root; oversize cap reachable via CLI --
@@ -679,23 +756,24 @@ def test_tfoot_totals_stay_raw_per_gateway_counts(tmp_path):
     )
 
 
-def test_inlined_roster_data_json_stays_raw(tmp_path):
-    """Task 3: the <script id='roster-data'> JSON island must remain the
-    raw roster (MCP and any other consumer reads raw ids, not groups)."""
+def test_published_catalogue_keeps_raw_ids(tmp_path):
+    """The public snapshot keeps RAW ids — variants preserved, not collapsed.
+
+    The old raw-roster island is gone, so this pins the same guarantee on the
+    versioned public contract: each provider's ``model_ids`` is its own raw
+    list, and the page's embedded catalogue is byte-for-byte the same data.
+    """
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
-    m = re.search(
-        r'<script type="application/json" id="roster-data">(.*?)</script>',
-        html, re.S,
-    )
-    assert m, "roster-data script tag missing from output"
-    data = json.loads(m.group(1))
+    catalog = json.loads(
+        (tmp_path / "site" / "catalog.json").read_text(encoding="utf-8"))
     # Raw ids are present — variants preserved, not collapsed
-    assert "vendor-x/poolside-s-2.1-free" in data["providers"]["tokenrouter"]
-    assert "vendor-x/poolside-s-2.1:free" in data["providers"]["nous"]
-    assert "vendor-x/poolside-s-2.1-free" in data["providers"]["kilo"]
+    assert "vendor-x/poolside-s-2.1-free" in catalog["providers"]["tokenrouter"]["model_ids"]
+    assert "vendor-x/poolside-s-2.1:free" in catalog["providers"]["nous"]["model_ids"]
+    assert "vendor-x/poolside-s-2.1-free" in catalog["providers"]["kilo"]["model_ids"]
+    assert _typed(json.loads(_script_elements(html)[0][1])) == _typed(catalog)
 
 
 def test_grouped_deterministic_output(tmp_path):
@@ -1051,9 +1129,13 @@ def test_expand_html_well_formed_round_trip(tmp_path):
         assert not errors, f"html.parser reported parse errors: {errors}"
 
 
-def test_expand_no_script_beyond_roster_data(tmp_path):
-    """No <script> element except the existing roster-data JSON island.
-    The expand toggle must be CSS-only — zero JS."""
+def test_expand_no_script_beyond_public_islands(tmp_path):
+    """Exactly the TWO inert public JSON islands; the toggle stays CSS-only.
+
+    The old single raw roster island is gone: the page carries the catalogue
+    and the shared tool contract, both ``application/json`` and inert, and no
+    executable script anywhere.
+    """
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -1061,11 +1143,12 @@ def test_expand_no_script_beyond_roster_data(tmp_path):
         proc = _run_builder(EXPAND_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        scripts = re.findall(r"<script\b[^>]*>", html)
-        assert len(scripts) == 1, (
-            f"expected exactly one <script> (roster-data), found {len(scripts)}: {scripts}"
-        )
-        assert 'id="roster-data"' in scripts[0]
+        islands = _script_elements(html)
+        assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS), (
+            f"expected exactly the two public islands, found {islands}")
+        assert [attrs.get("type") for attrs, _ in islands] == [
+            "application/json", "application/json"]
+        assert 'id="roster-data"' not in html
 
 
 def test_expand_every_raw_id_in_html_collapsed(tmp_path):
@@ -2421,3 +2504,647 @@ def test_script_context_hostile_text_is_inert_and_lossless():
     assert "evil.example" not in matrix_html
     assert "src=//evil.example" not in matrix_html
     assert "SENTINEL-HOSTILE-TOKEN" not in matrix_html
+
+
+# ---------- Unit 4e: validated public artifact-pair publication -------------
+#
+# The CLI is now the producer's ONE publication route: one roster read, one
+# registry capture, ONE validated public snapshot, and BOTH site/index.html and
+# site/catalog.json written from that same object. Three synthetic-only groups
+# pin it (no production roster/state, no network, no cron/publish wrapper):
+#   1. coherent acquisition -> validated pair, deterministic, secret-safe, with
+#      the real shared tool resource, default headers/logo and no roster
+#      island; one snapshot object feeds both artifacts;
+#   2. failure retention for absent AND pre-existing last-good targets across
+#      source/registry/logo/resource/render/serialization/staging/replacement
+#      failures, including a mixed pair after a late injected failure;
+#   3. concurrent thread/process writers and the generated-file ignore rules.
+
+PAIR_TOOLS = REPO / "watchdog_catalog" / "tools.json"
+
+# Every excluded-field sentinel below is a SYNTHETIC value that must reach
+# neither public artifact; the retained public facts must survive.
+PAIR_ROSTER = {
+    "tick_epoch": 1787721434,
+    "providers": {
+        "nous": ["vendor-z/shared-free", "vendor-a/only-nous:free"],
+        "kilo": ["vendor-z/shared-free"],
+        "openrouter": [],
+        # Unknown to the registry: validated, then excluded -- never published.
+        "mystery-gateway": ["vendor-m/ghost-free"],
+    },
+    "provider_models": {
+        "nous": {
+            "vendor-z/shared-free": {
+                "name": "vendor-z/shared",
+                "context_length": 4096,
+                "architecture": {"input_modalities": ["text"]},
+                "_token": "SENTINEL-4E-MODEL-TOKEN",
+            },
+        },
+    },
+    "stale_providers": ["kilo"],
+    "_token": "SENTINEL-4E-TOKEN",
+    "auth": {"token": "SENTINEL-4E-AUTH"},
+    "local_path": "/home/operator/SENTINEL-4E-PATH",
+    "pending_alerts": ["SENTINEL-4E-PENDING"],
+    "upstream_unknown": "SENTINEL-4E-UPSTREAM",
+}
+
+PAIR_SENTINELS = (
+    "SENTINEL-4E-TOKEN", "SENTINEL-4E-AUTH", "SENTINEL-4E-PATH",
+    "SENTINEL-4E-PENDING", "SENTINEL-4E-UPSTREAM", "SENTINEL-4E-MODEL-TOKEN",
+)
+
+LAST_GOOD = {
+    "catalog.json": b'{"last_good":true}\n',
+    "index.html": b"<!doctype html><p>last-good-page</p>",
+}
+
+
+def _write_roster(root, roster):
+    state = root / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "roster.json").write_text(json.dumps(roster), encoding="utf-8")
+
+
+def _seed_last_good(root):
+    site = root / "site"
+    site.mkdir(parents=True, exist_ok=True)
+    for name, blob in LAST_GOOD.items():
+        (site / name).write_bytes(blob)
+
+
+def _targets(root):
+    site = root / "site"
+    return site / "catalog.json", site / "index.html"
+
+
+def _run_cli(root):
+    """Run the real CLI in-process; return its exit code (0 when it returns)."""
+    import build_site
+    try:
+        build_site.main(["--root", str(root)])
+    except SystemExit as exc:
+        return exc.code
+    return 0
+
+
+def _site_leftovers(root):
+    """Owned temp/lock leftovers under site/, sorted (bounded cleanup proof)."""
+    site = root / "site"
+    if not site.is_dir():
+        return []
+    return sorted(p.name for p in site.iterdir()
+                  if p.name not in {"index.html", "catalog.json", ".build.lock"})
+
+
+def _pair_tool_contract():
+    return json.loads(PAIR_TOOLS.read_text(encoding="utf-8"))
+
+
+def _expected_pair(root):
+    """Independent oracle: the accepted capture -> build -> serialize -> render."""
+    import build_site
+    from catalog_export import capture_registry, serialize_snapshot
+
+    snapshot = build_site.build_snapshot(
+        capture_registry(build_site.PROVIDERS, build_site.GATEWAY_WIRING),
+        json.loads(json.dumps(PAIR_ROSTER)), cadence_s=3600)
+    return (
+        snapshot,
+        serialize_snapshot(snapshot),
+        build_site.render_catalog_page(
+            snapshot, build_site.load_logo_b64(root),
+            build_site.build_provider_header_meta(),
+            tool_contract=_pair_tool_contract()),
+    )
+
+
+def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
+    """One roster read -> one capture -> ONE snapshot -> BOTH artifacts.
+
+    Pins the coherent public route end to end: spied single acquisition, the
+    SAME snapshot object serialized and rendered, deterministic repeated
+    builds, exact both-target read-back, the real shared tool array, default
+    provider headers/logo, no legacy roster island, zero-ID/true-empty data
+    staying distinguishable from corruption, excluded sentinels absent, and a
+    stdlib-only run with no SDK/Node/PATH dependency.
+    """
+    import copy
+    import os
+
+    import build_site
+    from catalog_export import validate_artifact_pair
+
+    _seed_logo(tmp_path)
+    _write_roster(tmp_path, PAIR_ROSTER)
+
+    calls = {"load": 0, "capture": 0, "build": 0, "serialize": [], "render": []}
+    seen = {}
+    real_load = build_site.load_roster
+    real_capture = build_site.capture_registry
+    real_build = build_site.build_snapshot
+    real_serialize = build_site.serialize_snapshot
+    real_render = build_site.render_catalog_page
+
+    def spy_load(root):
+        calls["load"] += 1
+        return real_load(root)
+
+    def spy_capture(providers, wiring):
+        calls["capture"] += 1
+        seen["providers"] = copy.deepcopy(providers)
+        seen["wiring"] = copy.deepcopy(wiring)
+        return real_capture(providers, wiring)
+
+    def spy_build(records, roster, *, cadence_s):
+        calls["build"] += 1
+        calls["cadence"] = cadence_s
+        seen["roster"] = copy.deepcopy(roster)
+        snapshot = real_build(records, roster, cadence_s=cadence_s)
+        calls["snapshot"] = snapshot
+        return snapshot
+
+    def spy_serialize(snapshot):
+        calls["serialize"].append(snapshot)
+        return real_serialize(snapshot)
+
+    def spy_render(snapshot, logo_b64, header_meta=None, *, tool_contract):
+        calls["render"].append((snapshot, tool_contract))
+        html = real_render(snapshot, logo_b64, header_meta,
+                           tool_contract=tool_contract)
+        calls["html"] = html
+        return html
+
+    for name, spy in (("load_roster", spy_load),
+                      ("capture_registry", spy_capture),
+                      ("build_snapshot", spy_build),
+                      ("serialize_snapshot", spy_serialize),
+                      ("render_catalog_page", spy_render)):
+        monkeypatch.setattr(build_site, name, spy)
+
+    providers_before = copy.deepcopy(build_site.PROVIDERS)
+    wiring_before = copy.deepcopy(build_site.GATEWAY_WIRING)
+    roster_before = copy.deepcopy(PAIR_ROSTER)
+
+    assert _run_cli(tmp_path) == 0
+    first = capsys.readouterr()
+    assert first.out == "", "a successful CLI must stay stdout-silent"
+    assert first.err.strip(), "diagnostics belong on stderr"
+
+    # --- one observation, one capture, one validated snapshot --------------
+    assert calls["load"] == 1 and calls["capture"] == 1 and calls["build"] == 1
+    assert calls["cadence"] == 3600 == build_site.BUILD_CADENCE_S
+    snapshot = calls["snapshot"]
+    assert len(calls["serialize"]) == 1 and len(calls["render"]) == 1
+    assert calls["serialize"][0] is snapshot, "JSON must come from THE snapshot"
+    assert calls["render"][0][0] is snapshot, "HTML must come from THE snapshot"
+    assert calls["render"][0][1] == _pair_tool_contract()
+    assert build_site.PROVIDERS == providers_before
+    assert build_site.GATEWAY_WIRING == wiring_before
+    assert seen["roster"] == roster_before, "operational roster must be unmutated"
+    assert seen["providers"] == providers_before
+    assert seen["wiring"] == wiring_before
+
+    catalog_path, html_path = _targets(tmp_path)
+    catalog_text = catalog_path.read_bytes().decode("utf-8")
+    html_text = html_path.read_bytes().decode("utf-8")
+    # Exact both-target read-back: the files ARE the prepared payloads.
+    assert catalog_text == real_serialize(snapshot)
+    assert html_text == calls["html"]
+    assert catalog_text.endswith("\n") and not catalog_text.endswith("\n\n")
+
+    # --- the published pair is coherent and carries the public contract ----
+    published = validate_artifact_pair(catalog_text, html_text)
+    assert published["snapshot_id"] == snapshot["snapshot_id"]
+    assert published == snapshot
+    assert published["schema_version"] == 1
+    assert published["cadence_s"] == 3600
+    assert published["tick_epoch"] == 1787721434
+    assert published["provider_order"] == list(build_site.PROVIDERS)
+    assert published["providers"]["openrouter"]["model_ids"] == []
+    assert published["providers"]["kilo"]["stale"] is True
+    assert published["providers"]["nous"]["models"]["vendor-z/shared-free"][
+        "architecture"]["input_modalities"] == ["text"]
+    # An unknown registry key is validated then EXCLUDED, never published.
+    assert "mystery-gateway" not in published["providers"]
+    assert "vendor-m/ghost-free" not in html_text
+
+    # --- no raw private state, no legacy island, two inert islands only ----
+    for sentinel in PAIR_SENTINELS:
+        assert sentinel not in catalog_text, sentinel
+        assert sentinel not in html_text, sentinel
+    islands = _script_elements(html_text)
+    assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
+    assert 'id="roster-data"' not in html_text
+    assert len(re.findall(r"<script\b", html_text)) == 2
+    matrix_html = _strip_public_islands(html_text)
+    assert "vendor-z/shared" in matrix_html
+    assert "Context length: 4096" in matrix_html
+
+    # --- default headers + logo come from the real project surface ---------
+    assert 'href="https://portal.nousresearch.com/"' in html_text
+    logo_b64 = re.search(r'src="data:image/png;base64,([A-Za-z0-9+/=]+)"',
+                         html_text).group(1)
+    assert base64.b64decode(logo_b64) == (tmp_path / "assets" / "logo.png").read_bytes()
+
+    # --- deterministic repeated builds (same root and a fresh root) --------
+    assert _run_cli(tmp_path) == 0
+    second = capsys.readouterr()
+    assert second.out == ""
+    assert catalog_path.read_bytes().decode("utf-8") == catalog_text
+    assert html_path.read_bytes().decode("utf-8") == html_text
+    twin = tmp_path / "twin"
+    _seed_logo(twin)
+    _write_roster(twin, PAIR_ROSTER)
+    assert _run_cli(twin) == 0
+    capsys.readouterr()
+    assert _targets(twin)[0].read_bytes().decode("utf-8") == catalog_text
+    assert _targets(twin)[1].read_bytes().decode("utf-8") == html_text
+    assert not [p for p in (tmp_path / "site").iterdir() if p.suffix == ".tmp"]
+
+    # --- legitimate empty data stays distinguishable from corruption -------
+    empty = tmp_path / "empty"
+    _seed_logo(empty)
+    _write_roster(empty, {"tick_epoch": 42, "providers": {}})
+    assert _run_cli(empty) == 0
+    capsys.readouterr()
+    empty_catalog, empty_html = (
+        p.read_bytes().decode("utf-8") for p in _targets(empty))
+    empty_published = validate_artifact_pair(empty_catalog, empty_html)
+    assert empty_published["provider_order"] == list(build_site.PROVIDERS)
+    assert all(entry["model_ids"] == [] and entry["models"] == {}
+               for entry in empty_published["providers"].values())
+    assert empty_published["snapshot_id"] and empty_published["tick_epoch"] == 42
+    assert "name-row" not in _strip_public_islands(empty_html)
+    assert empty_catalog != catalog_text
+
+    # --- stdlib only: no SDK import and no PATH/Node binary needed ---------
+    probe_root = tmp_path / "probe"
+    _seed_logo(probe_root)
+    _write_roster(probe_root, PAIR_ROSTER)
+    probe = (
+        "import sys, build_site;"
+        "build_site.main(['--root', sys.argv[1]]);"
+        "print(sorted(m for m in ('mcp', 'node', 'requests', 'httpx')"
+        " if m in sys.modules))")
+    proc = subprocess.run(
+        [sys.executable, "-S", "-c", probe, str(probe_root)],
+        cwd=str(REPO), capture_output=True, text=True,
+        env={"PATH": "", "HOME": str(tmp_path), "PYTHONPATH": str(REPO)})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "[]", proc.stdout
+    assert validate_artifact_pair(
+        *[p.read_bytes().decode("utf-8") for p in _targets(probe_root)])
+
+
+def test_cli_failure_retention_and_injected_write_failures(
+        tmp_path, monkeypatch, capsys):
+    """Last-good bytes survive every failure; an injected mixed pair fails.
+
+    One row loop covers source, registry, logo, resource, serialization,
+    render, validation and staging faults against BOTH absent and pre-existing
+    final files. Replacement failures are then injected first and second
+    separately; a mixed surviving pair is rejected by the pure validator and
+    an interloper-spliced target is caught by the exact-target read-back.
+    """
+    import catalog_export
+    from catalog_export import validate_artifact_pair
+    from watchdog_catalog import catalog
+
+    import build_site
+    import os
+
+    def _raise_catalog(*args, **kwargs):
+        raise catalog.CatalogError(catalog.INVALID_SNAPSHOT)
+
+    def _raise_runtime(*args, **kwargs):
+        raise RuntimeError("forced failure")
+
+    def _raise_pair(*args, **kwargs):
+        raise ValueError("Catalogue artifacts do not match.")
+
+    def _raise_os(*args, **kwargs):
+        raise OSError("forced write failure")
+
+    bad_tools = tmp_path / "bad-tools.json"
+    bad_tools.write_text("{not json", encoding="utf-8")
+    wrong_tools = tmp_path / "wrong-tools.json"
+    wrong_tools.write_text('{"name": "not-an-array"}', encoding="utf-8")
+
+    def malformed_roster(root):
+        _write_roster(root, {"tick_epoch": 1,
+                             "providers": {"nous": "vendor-z/shared-free"}})
+
+    def bad_id_roster(root):
+        _write_roster(root, {"tick_epoch": 1,
+                             "providers": {"mystery-gateway": [None]}})
+
+    def corrupt_roster(root):
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "roster.json").write_text("NOT JSON{{", encoding="utf-8")
+
+    def wrong_root_roster(root):
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "roster.json").write_text("[]", encoding="utf-8")
+
+    oversized = b"\x89PNG\r\n\x1a\n" + b"0" * (40 * 1024 + 1)
+
+    def big_logo(root):
+        _seed_logo(root, blob=oversized)
+
+    cases = [
+        ("missing-roster", lambda root, patch: (
+            root / "state" / "roster.json").unlink(missing_ok=True)),
+        ("corrupt-roster", lambda root, patch: corrupt_roster(root)),
+        ("wrong-root-roster", lambda root, patch: wrong_root_roster(root)),
+        ("malformed-provider", lambda root, patch: malformed_roster(root)),
+        ("malformed-unknown-provider-id",
+         lambda root, patch: bad_id_roster(root)),
+        ("bad-logo", lambda root, patch: big_logo(root)),
+        ("missing-tool-resource",
+         lambda root, patch: patch.setattr(
+             "build_site.TOOLS_REL", tmp_path / "absent-tools.json")),
+        ("corrupt-tool-resource",
+         lambda root, patch: patch.setattr("build_site.TOOLS_REL", bad_tools)),
+        ("wrong-type-tool-resource",
+         lambda root, patch: patch.setattr("build_site.TOOLS_REL", wrong_tools)),
+        ("invalid-registry-wiring",
+         lambda root, patch: patch.setattr("build_site.GATEWAY_WIRING", {})),
+        ("invalid-registry-config",
+         lambda root, patch: patch.setattr(
+             "build_site.PROVIDERS", {"nous": "not-a-config"})),
+        ("invalid-snapshot",
+         lambda root, patch: patch.setattr(
+             "build_site.build_snapshot", _raise_catalog)),
+        ("serialization-failure",
+         lambda root, patch: patch.setattr(
+             "build_site.serialize_snapshot", _raise_runtime)),
+        ("render-failure",
+         lambda root, patch: patch.setattr(
+             "build_site.render_catalog_page", _raise_runtime)),
+        ("pair-validation-failure",
+         lambda root, patch: patch.setattr(
+             "build_site.validate_artifact_pair", _raise_pair)),
+        ("staging-failure",
+         lambda root, patch: patch.setattr(
+             build_site.tempfile, "mkstemp", _raise_os)),
+        ("replacement-failure",
+         lambda root, patch: patch.setattr(
+             build_site.os, "replace", _raise_os)),
+    ]
+
+    for mode in ("absent", "pre-existing"):
+        for index, (label, setup) in enumerate(cases):
+            root = tmp_path / f"{mode}-{index}"
+            root.mkdir()
+            _seed_logo(root)
+            _write_roster(root, PAIR_ROSTER)
+            if mode == "pre-existing":
+                _seed_last_good(root)
+            capsys.readouterr()
+            with monkeypatch.context() as patch:
+                setup(root, patch)
+                assert _run_cli(root) == 2, (mode, label)
+            captured = capsys.readouterr()
+            assert captured.out == "", (mode, label, captured.out)
+            assert captured.err.strip(), (mode, label)
+            for name in LAST_GOOD:
+                target = root / "site" / name
+                if mode == "absent":
+                    assert not target.exists(), (mode, label, name)
+                else:
+                    assert target.read_bytes() == LAST_GOOD[name], (
+                        mode, label, name)
+            assert _site_leftovers(root) == [], (mode, label)
+
+    # ---- injected replacement failures (first, then second) ---------------
+    oracle_root = tmp_path / "oracle"
+    _seed_logo(oracle_root)
+    snapshot, new_catalog, new_html = _expected_pair(oracle_root)
+    assert validate_artifact_pair(new_catalog, new_html)["snapshot_id"] == \
+        snapshot["snapshot_id"]
+
+    def injected_root(label):
+        root = tmp_path / label
+        root.mkdir()
+        _seed_logo(root)
+        _write_roster(root, PAIR_ROSTER)
+        _seed_last_good(root)
+        return root
+
+    # First replacement fails: NEITHER target may change.
+    root = injected_root("first-replace")
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def fail_first(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("injected first replacement failure")
+        real_replace(src, dst)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(build_site.os, "replace", fail_first)
+        assert _run_cli(root) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.strip()
+    assert calls["n"] == 1
+    for name in LAST_GOOD:
+        assert (root / "site" / name).read_bytes() == LAST_GOOD[name], name
+    assert _site_leftovers(root) == []
+
+    # Second replacement fails: the surviving pair is MIXED, the CLI reports
+    # failure (never success) and the pure validator rejects the pair.
+    root = injected_root("second-replace")
+    calls = {"n": 0}
+
+    def fail_second(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("injected second replacement failure")
+        real_replace(src, dst)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(build_site.os, "replace", fail_second)
+        assert _run_cli(root) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.strip()
+    assert calls["n"] == 2
+    mixed_catalog = (root / "site" / "catalog.json").read_bytes().decode("utf-8")
+    assert mixed_catalog == new_catalog
+    assert (root / "site" / "index.html").read_bytes() == LAST_GOOD["index.html"]
+    with pytest.raises(ValueError):
+        validate_artifact_pair(mixed_catalog, LAST_GOOD["index.html"].decode("utf-8"))
+    assert _site_leftovers(root) == []
+
+    # Both replacements "succeed" but an interloper spliced a DIFFERENT valid
+    # HTML into the target: only the exact-target read-back can catch it.
+    root = injected_root("spliced-target")
+    other_catalog, other_html = _rendered_other_pair(tmp_path)
+    other_tmp = root / "site" / ".other.html.tmp"
+    other_tmp.write_bytes(other_html.encode("utf-8"))
+    real_replace = os.replace
+
+    def splice(src, dst):
+        if str(dst).endswith("index.html"):
+            real_replace(other_tmp, dst)
+        else:
+            real_replace(src, dst)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(build_site.os, "replace", splice)
+        assert _run_cli(root) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.strip()
+    spliced_catalog = (root / "site" / "catalog.json").read_bytes().decode("utf-8")
+    spliced_html = (root / "site" / "index.html").read_bytes().decode("utf-8")
+    assert spliced_catalog == new_catalog and spliced_html == other_html
+    with pytest.raises(ValueError):
+        validate_artifact_pair(spliced_catalog, spliced_html)
+    assert other_catalog != spliced_catalog
+    assert _site_leftovers(root) == []
+
+
+def _rendered_other_pair(root):
+    """A second, independently VALID pair (different snapshot id)."""
+    import build_site
+    from catalog_export import capture_registry, serialize_snapshot
+
+    root.mkdir(parents=True, exist_ok=True)
+    _seed_logo(root)
+    snapshot = build_site.build_snapshot(
+        capture_registry(build_site.PROVIDERS, build_site.GATEWAY_WIRING),
+        {"tick_epoch": 99, "providers": {"kilo": ["vendor-z/other-free"]}},
+        cadence_s=3600)
+    return (
+        serialize_snapshot(snapshot),
+        build_site.render_catalog_page(
+            snapshot, "ZmFrZWxvZ28=", tool_contract=_pair_tool_contract()),
+    )
+
+
+def test_concurrent_publication_and_generated_file_ignore_rules(
+        tmp_path, monkeypatch):
+    """Threads and processes publish whole pairs; only public artifacts track.
+
+    Distinct legitimate snapshots (distinct ids) race for one output directory
+    behind a barrier with an injected post-replace delay; the surviving pair
+    must be ONE writer's complete pair, with no owned temp leftovers and no
+    traceback. The .gitignore exceptions are then read (git check-ignore) with
+    read-only commands against the real repo.
+    """
+    import os
+    import threading
+    import time
+
+    import build_site
+    import catalog_export
+
+    tool_contract = _pair_tool_contract()
+    registry = build_site.capture_registry(
+        build_site.PROVIDERS, build_site.GATEWAY_WIRING)
+
+    def candidate(epoch):
+        snapshot = build_site.build_snapshot(
+            registry,
+            {"tick_epoch": epoch,
+             "providers": {"nous": [f"vendor-z/concurrent-{epoch}-free"]}},
+            cadence_s=3600)
+        return (
+            snapshot["snapshot_id"],
+            catalog_export.serialize_snapshot(snapshot),
+            build_site.render_catalog_page(
+                snapshot, "ZmFrZWxvZ28=", tool_contract=tool_contract),
+        )
+
+    candidates = [candidate(epoch) for epoch in (11, 22, 33, 44)]
+    assert len({snapshot_id for snapshot_id, _, _ in candidates}) == 4
+
+    def assert_one_complete_pair(root):
+        catalog_text = (root / "site" / "catalog.json").read_bytes().decode("utf-8")
+        html_text = (root / "site" / "index.html").read_bytes().decode("utf-8")
+        matches = [snapshot_id for snapshot_id, catalog, html in candidates
+                   if catalog == catalog_text and html == html_text]
+        assert len(matches) == 1, "final pair must be one writer's whole pair"
+        published = catalog_export.validate_artifact_pair(catalog_text, html_text)
+        assert published["snapshot_id"] == matches[0]
+        assert _site_leftovers(root) == []
+        return matches[0]
+
+    # ---- threads: same process, one output directory ----------------------
+    thread_root = tmp_path / "threads"
+    (thread_root / "site").mkdir(parents=True)
+    barrier = threading.Barrier(len(candidates))
+    errors = []
+    real_replace = os.replace
+
+    def slow_replace(src, dst):
+        real_replace(src, dst)
+        time.sleep(0.02)   # widen the window a non-serialized writer would lose
+
+    def worker(catalog_text, html_text):
+        try:
+            barrier.wait(timeout=10)
+            build_site.write_artifact_pair(thread_root, catalog_text, html_text)
+        except BaseException as exc:      # noqa: BLE001 - surfaced as a failure
+            errors.append(exc)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(build_site.os, "replace", slow_replace)
+        threads = [threading.Thread(target=worker, args=(catalog, html))
+                   for _, catalog, html in candidates]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+    assert errors == [], errors
+    assert_one_complete_pair(thread_root)
+
+    # ---- independent processes: one output directory ----------------------
+    process_root = tmp_path / "processes"
+    (process_root / "site").mkdir(parents=True)
+    payloads = tmp_path / "payloads"
+    payloads.mkdir()
+    script = (
+        "import sys; sys.path.insert(0, sys.argv[1]);"
+        "from pathlib import Path; import build_site;"
+        "build_site.write_artifact_pair(Path(sys.argv[2]),"
+        " Path(sys.argv[3]).read_bytes().decode('utf-8'),"
+        " Path(sys.argv[4]).read_bytes().decode('utf-8'))")
+    procs = []
+    for index, (_, catalog_text, html_text) in enumerate(candidates):
+        catalog_file = payloads / f"c{index}.json"
+        catalog_file.write_text(catalog_text, encoding="utf-8")
+        html_file = payloads / f"h{index}.html"
+        html_file.write_text(html_text, encoding="utf-8")
+        procs.append(subprocess.Popen(
+            [sys.executable, "-c", script, str(REPO), str(process_root),
+             str(catalog_file), str(html_file)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+    for proc in procs:
+        out, err = proc.communicate(timeout=90)
+        assert proc.returncode == 0, err
+        assert out == "" and "Traceback" not in err
+    assert_one_complete_pair(process_root)
+
+    # ---- generated-file ignore rules (read-only) --------------------------
+    ignore_lines = [line.strip() for line in
+                    (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()]
+    assert [line for line in ignore_lines if line.startswith("!")] == [
+        "!site/index.html", "!site/catalog.json"]
+
+    def ignored(relative):
+        proc = subprocess.run(
+            ["git", "-C", str(REPO), "check-ignore", "--no-index", "-q", relative],
+            capture_output=True, text=True)
+        assert proc.returncode in (0, 1), proc.stderr
+        return proc.returncode == 0
+
+    for public in ("site/index.html", "site/catalog.json"):
+        assert not ignored(public), public
+    for generated in ("site/.build.lock", "site/index.html.4242.99.tmp",
+                      "site/catalog.json.4242.99.tmp", "site/other-public.json",
+                      "state/roster.json"):
+        assert ignored(generated), generated
