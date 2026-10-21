@@ -4235,3 +4235,547 @@ def test_search_input_modality_pairs_and_and_isolation_controls():
         raw_snapshot, [("raw", "valid-cased")],
         input_modalities=["IMAGE"]) == [("raw", "valid-cased")]
     assert synth_snapshot == before
+
+
+# ------ internal metadata search: supported-parameter AND stage (3d) ------
+#
+# `watchdog_catalog.query._search_supported_parameter_pairs(snapshot, pairs, *,
+# supported_parameters=None)` is the INTERNAL, UNPAGINATED FINAL capability stage
+# that `search_models` composes AFTER the accepted text/provider, minimum-context
+# and input-modality stages. Preconditions are an already-VALIDATED snapshot, an
+# ordered sequence of immutable tracked `(provider_key, raw_model_id)` tuples and
+# an already-validated `None`/list-of-nonempty-strings request: public argument
+# validation belongs to unit 3e, so this stage deliberately has no temporary
+# argument envelope and no public tool.
+#
+# The five eligible frozen goldens are the INDEPENDENTLY authored `cases.json`
+# rows whose arguments are confined to query/provider/min_context_length/
+# input_modalities/supported_parameters and whose whole match set fits the
+# default page; the synthetic rows below are literal, hand-derived controls.
+
+PARAMETER_GOLDEN_IDS = (
+    "search_capability_empty_filters_no_constraint",
+    "search_capability_positive_parameter_yields_none",
+    "search_shared_params_and_a_only",
+    "search_shared_context_and_top_p_neither",
+    "search_text_case_extended_filters_normalize",
+)
+
+
+def test_search_supported_parameter_pairs_and_cross_provider_controls():
+    """The internal supported-parameter AND stage composes as the final filter
+    over the accepted text/provider, minimum-context and input-modality stages:
+    the five frozen eligible `search_models` goldens reproduce exactly as
+    literal endpoint identities, and synthetic fully-validated registries pin
+    None/[] freedom, the ALL-on-one-pair request semantics, ASCII-only folding
+    on both sides, casing/order/duplicate/whitespace preservation, isolation
+    from modality/name/description/raw-id/pricing metadata, no substring
+    inference, no selection expansion, no cross-provider borrowing or raw-ID
+    union, unpaginated completeness and mutation isolation."""
+    from watchdog_catalog.query import _search_input_modality_pairs
+    from watchdog_catalog.query import _search_min_context_pairs
+    from watchdog_catalog.query import _search_supported_parameter_pairs
+    from watchdog_catalog.query import _search_text_provider_pairs
+
+    doc = _decode_doc(SEARCH_SELECTION_CASES_DOC)
+    search_cases = {case["id"]: case for case in doc["cases"]
+                    if case["tool"] == "search_models"}
+
+    # (a) The five frozen eligible goldens: compose all four accepted stages
+    #     over the REAL validated fixtures and compare the literal golden
+    #     identity arrays, pinning args/filter scope and the default page.
+    parameter_goldens = (
+        (PARAMETER_GOLDEN_IDS[0], "capability-unknown.json",
+         {"query": "", "input_modalities": [], "supported_parameters": []},
+         [("synthetic-a", "vendor/known-empty-capabilities"),
+          ("synthetic-a", "vendor/unknown-capabilities")]),
+        (PARAMETER_GOLDEN_IDS[1], "capability-unknown.json",
+         {"supported_parameters": ["temperature"]},
+         []),
+        (PARAMETER_GOLDEN_IDS[2], "lookup.json",
+         {"query": "shared",
+          "supported_parameters": ["temperature", "MAX_TOKENS"]},
+         [("synthetic-a", "vendor/shared")]),
+        (PARAMETER_GOLDEN_IDS[3], "lookup.json",
+         {"query": "shared", "min_context_length": 65536,
+          "supported_parameters": ["top_p"]},
+         []),
+        (PARAMETER_GOLDEN_IDS[4], "search-text.json",
+         {"query": "REASONING", "min_context_length": 65536,
+          "input_modalities": ["IMAGE", "text", "IMAGE"],
+          "supported_parameters": ["TEMPERATURE"]},
+         [("synthetic-a", "vendor/literal[ab].*")]),
+    )
+    assert len(parameter_goldens) == 5
+    assert len({cid for cid, _, _, _ in parameter_goldens}) == 5
+    assert {cid for cid, _, _, _ in parameter_goldens} == \
+        set(PARAMETER_GOLDEN_IDS)
+    for cid, fixture, args, expected in parameter_goldens:
+        case = search_cases[cid]
+        assert case["args"] == args, cid
+        assert set(args) <= {"query", "provider", "min_context_length",
+                             "input_modalities", "supported_parameters"}, cid
+        # A capability-filtered row is never a candidate-selection oracle.
+        assert not _selection_eligible(case), cid
+        assert case.get("fixture", doc["fixture"]) == fixture, cid
+        expect = case["expect"]
+        assert set(expect["filters"]) == {
+            "provider", "min_context_length", "input_modalities",
+            "supported_parameters"}, cid
+        assert expect["filters"]["supported_parameters"] == \
+            args["supported_parameters"], cid
+        assert expect["filters"]["input_modalities"] == \
+            args.get("input_modalities"), cid
+        assert expect["filters"]["min_context_length"] == \
+            args.get("min_context_length"), cid
+        assert expect["filters"]["provider"] is None, cid
+        assert expect["limit"] == 50, cid
+        assert expect["offset"] == 0, cid
+        assert expect["next_offset"] is None, cid
+        assert expect["total_matches"] == len(expect["endpoints"]), cid
+        snapshot = _validated_snapshot(fixture)
+        before = copy.deepcopy(snapshot)
+        text_pairs = _search_text_provider_pairs(
+            snapshot, query=args.get("query"), provider=args.get("provider"))
+        context_pairs = _search_min_context_pairs(
+            snapshot, text_pairs,
+            min_context_length=args.get("min_context_length"))
+        modality_pairs = _search_input_modality_pairs(
+            snapshot, context_pairs,
+            input_modalities=args.get("input_modalities"))
+        composed = _search_supported_parameter_pairs(
+            snapshot, modality_pairs,
+            supported_parameters=args["supported_parameters"])
+        assert composed == expected, cid
+        assert type(composed) is list, cid
+        # A pure final filter: it can only narrow the accepted composition,
+        # never widen it, re-expand the selection or borrow a capability.
+        assert set(composed) <= set(modality_pairs), cid
+        assert len(composed) <= len(modality_pairs), cid
+        assert snapshot == before, cid
+
+    # (b) Synthetic controls over a resealed, structurally valid registry.
+    synth_models = {
+        "params-both": _search_model(
+            "params-both", "Both Params",
+            supported_parameters=["temperature", "max_tokens"]),
+        "params-single": _search_model(
+            "params-single", "Single Param",
+            supported_parameters=["temperature"]),
+        "params-cased-dupes": _search_model(
+            "params-cased-dupes", "Cased Dupes",
+            supported_parameters=["TEMPERATURE", "Temperature", "temperature"]),
+        "params-unknown": _search_model("params-unknown", "Unknown Params"),
+        "params-empty": _search_model("params-empty", "Empty Params",
+                                      supported_parameters=[]),
+        "params-padded": _search_model("params-padded", "Padded Param",
+                                       supported_parameters=[" top_p "]),
+        "params-unicode-upper": _search_model(
+            "params-unicode-upper", "Unicode Param",
+            supported_parameters=["\u00c9"]),
+        "params-substring": _search_model(
+            "params-substring", "Substring Param",
+            supported_parameters=["temperature_top_p"]),
+        # A token in another metadata slot is NEVER a supported parameter.
+        "input-token": _search_model(
+            "input-token", "Input Token",
+            input_modalities=["temperature"]),
+        "output-token": _search_model(
+            "output-token", "Output Token", input_modalities=["text"],
+            output_modalities=["image_size"]),
+        "id-token-temperature": _search_model(
+            "id-token-temperature", "Temperature Display", "top_p prose",
+            pricing={"prompt": "0", "completion": "0"}),
+        "shared-id": _search_model(
+            "shared-id", "Shared Params A", context_length=65536,
+            input_modalities=["text", "image"],
+            supported_parameters=["temperature"]),
+    }
+    other_models = {
+        "shared-id": _search_model(
+            "shared-id", "Shared Params B", context_length=32768,
+            input_modalities=["text"], supported_parameters=["top_p"]),
+    }
+    bulk_models = {"bulk-%02d" % index: _search_model(
+                       "bulk-%02d" % index, "Bulk %02d" % index,
+                       supported_parameters=["Temperature"])
+                   for index in range(60)}
+    synth_snapshot = _search_snapshot(
+        ["gate", "other", "bulk", "zero-provd"],
+        {"gate": _search_provider(
+             synth_models, "Gate", "https://gate.example/v1/chat/completions"),
+         "other": _search_provider(
+             other_models, "Other",
+             "https://other.example/v1/chat/completions"),
+         "bulk": _search_provider(
+             bulk_models, "Bulk",
+             "https://bulk.example/v1/chat/completions"),
+         "zero-provd": _search_provider(
+             {}, "Zero", "https://zero.example/v1/chat/completions")})
+    before = copy.deepcopy(synth_snapshot)
+
+    parameter_rows = (
+        # None and [] apply NO constraint: every supplied pair is retained,
+        # including unknown (null) and known-empty ([]) parameter arrays.
+        ([("gate", "params-both"), ("gate", "params-unknown"),
+          ("gate", "params-empty")], None,
+         [("gate", "params-both"), ("gate", "params-unknown"),
+          ("gate", "params-empty")]),
+        ([("gate", "params-both"), ("gate", "params-unknown"),
+          ("gate", "params-empty")], [],
+         [("gate", "params-both"), ("gate", "params-unknown"),
+          ("gate", "params-empty")]),
+        # A nonempty request rejects BOTH an unknown array and a known-empty
+        # one: neither is a wildcard, and neither satisfies a token.
+        ([("gate", "params-both"), ("gate", "params-unknown"),
+          ("gate", "params-empty")], ["temperature"],
+         [("gate", "params-both")]),
+        # Single and multi-token AND: every requested token on the SAME pair,
+        # independent of request order.
+        ([("gate", "params-both"), ("gate", "params-single")], ["temperature"],
+         [("gate", "params-both"), ("gate", "params-single")]),
+        ([("gate", "params-both"), ("gate", "params-single")],
+         ["temperature", "max_tokens"], [("gate", "params-both")]),
+        ([("gate", "params-both"), ("gate", "params-single")],
+         ["max_tokens", "temperature"], [("gate", "params-both")]),
+        # Duplicates are idempotent, never a multiplicity constraint.
+        ([("gate", "params-both")],
+         ["temperature", "temperature", "TEMPERATURE"],
+         [("gate", "params-both")]),
+        # ASCII-insensitive on BOTH sides, first-occurrence duplicates
+        # harmless, and the projected array keeps its literal raw casing.
+        ([("gate", "params-cased-dupes")], ["temperature"],
+         [("gate", "params-cased-dupes")]),
+        ([("gate", "params-cased-dupes")], ["TEMPERATURE"],
+         [("gate", "params-cased-dupes")]),
+        # Whitespace preserved: a padded token matches only an identically
+        # padded reported token.
+        ([("gate", "params-padded")], ["top_p"], []),
+        ([("gate", "params-padded")], [" top_p "], [("gate", "params-padded")]),
+        ([("gate", "params-padded")], [" top_p"], []),
+        ([("gate", "params-padded")], ["top_p "], []),
+        # A non-ASCII case pair stays distinct (never Unicode-folded).
+        ([("gate", "params-unicode-upper")], ["\u00e9"], []),
+        ([("gate", "params-unicode-upper")], ["\u00c9"],
+         [("gate", "params-unicode-upper")]),
+        # No substring matching inside a capability name.
+        ([("gate", "params-substring")], ["temperature"], []),
+        ([("gate", "params-substring")], ["top_p"], []),
+        ([("gate", "params-substring")], ["temperature_top_p"],
+         [("gate", "params-substring")]),
+        # Input/output modalities, names, descriptions, raw ids and pricing
+        # are never substitutes for supported parameters.
+        ([("gate", "input-token")], ["temperature"], []),
+        ([("gate", "output-token")], ["image_size"], []),
+        ([("gate", "id-token-temperature")], ["temperature"], []),
+        ([("gate", "id-token-temperature")], ["top_p"], []),
+        ([("gate", "id-token-temperature")], ["image_size"], []),
+        # A supplied strict subset is never expanded, even when excluded
+        # snapshot models satisfy the filter; empty input stays empty.
+        ([("gate", "params-unknown")], ["temperature"], []),
+        ([], ["temperature"], []),
+        # Exact incoming order is preserved: never sorted, never deduplicated.
+        ([("gate", "params-single"), ("gate", "params-both"),
+          ("gate", "params-cased-dupes")], ["temperature"],
+         [("gate", "params-single"), ("gate", "params-both"),
+          ("gate", "params-cased-dupes")]),
+        # A shared raw id with disjoint per-provider parameter arrays: no
+        # union, no borrowing, and the incoming order is still preserved.
+        ([("gate", "shared-id"), ("other", "shared-id")], ["temperature"],
+         [("gate", "shared-id")]),
+        ([("gate", "shared-id"), ("other", "shared-id")], ["top_p"],
+         [("other", "shared-id")]),
+        ([("gate", "shared-id"), ("other", "shared-id")],
+         ["temperature", "top_p"], []),
+        ([("other", "shared-id"), ("gate", "shared-id")], ["temperature"],
+         [("gate", "shared-id")]),
+    )
+    for pairs, request, expected in parameter_rows:
+        result = _search_supported_parameter_pairs(
+            synth_snapshot, pairs, supported_parameters=request)
+        assert result == expected, (pairs, request)
+        assert type(result) is list, (pairs, request)
+        assert all(type(pair) is tuple and len(pair) == 2
+                   for pair in result), (pairs, request)
+
+    # More than the public default page (50) of eligible pairs stays complete.
+    bulk_pairs = _search_text_provider_pairs(synth_snapshot, provider="bulk")
+    assert len(bulk_pairs) == 60
+    assert _search_supported_parameter_pairs(
+        synth_snapshot, bulk_pairs, supported_parameters=["temperature"]) == \
+        bulk_pairs
+
+    # A zero-ID provider, a true zero-provider registry and empty input all
+    # stay empty on both the inactive and the active branch.
+    assert _search_supported_parameter_pairs(
+        synth_snapshot,
+        _search_text_provider_pairs(synth_snapshot, provider="zero-provd"),
+        supported_parameters=["temperature"]) == []
+    empty_snapshot = _search_snapshot([], {})
+    for request in (None, [], ["temperature"]):
+        assert _search_supported_parameter_pairs(
+            empty_snapshot, [], supported_parameters=request) == []
+
+    # A fresh, non-aliasing result list on the inactive None/[] AND the active
+    # branches: mutating it cannot corrupt the snapshot, the input sequence,
+    # the request list or a later call.
+    supplied = [("gate", "params-both"), ("gate", "params-single"),
+                ("gate", "params-unknown")]
+    supplied_before = list(supplied)
+    for request, expected in (
+            (None, supplied),
+            ([], supplied),
+            (["temperature"], [("gate", "params-both"),
+                               ("gate", "params-single")]),
+            (["max_tokens"], [("gate", "params-both")]),
+            (["temperature", "max_tokens"], [("gate", "params-both")])):
+        result = _search_supported_parameter_pairs(
+            synth_snapshot, supplied, supported_parameters=request)
+        assert result is not supplied, request
+        assert result == expected, request
+        result.clear()
+        result.append(("gate", "injected"))
+        assert _search_supported_parameter_pairs(
+            synth_snapshot, supplied, supported_parameters=request) == \
+            expected, request
+        assert supplied == supplied_before, request
+    request = ["TEMPERATURE", "temperature"]
+    request_before = list(request)
+    assert _search_supported_parameter_pairs(
+        synth_snapshot, [("gate", "params-both")],
+        supported_parameters=request) == [("gate", "params-both")]
+    assert request == request_before
+    # Projected metadata keeps its literal raw casing, order, duplicates and
+    # padding; a known [] and an unknown null stay distinct from each other.
+    assert synth_snapshot["providers"]["gate"]["models"][
+        "params-cased-dupes"]["supported_parameters"] == \
+        ["TEMPERATURE", "Temperature", "temperature"]
+    assert synth_snapshot["providers"]["gate"]["models"][
+        "params-empty"]["supported_parameters"] == []
+    assert synth_snapshot["providers"]["gate"]["models"][
+        "params-unknown"]["supported_parameters"] is None
+    assert synth_snapshot == before
+
+    # (c) Malformed upstream parameter arrays project to null WHOLE through
+    #     the real accepted projector; the query stage then rejects them and
+    #     never salvages a valid member. Valid []/casing/duplicates/padded
+    #     tokens survive in the projected metadata and match literally.
+    raw_rows = (
+        ("absent", {"name": "Absent"}, None),
+        ("null", {"name": "Null", "supported_parameters": None}, None),
+        ("bare-string", {"name": "Bare",
+                         "supported_parameters": "temperature"}, None),
+        ("object", {"name": "Object",
+                    "supported_parameters": {"temperature": True}}, None),
+        ("mixed", {"name": "Mixed",
+                   "supported_parameters": ["temperature", 5]}, None),
+        ("number-member", {"name": "Number",
+                           "supported_parameters": ["temperature", 1.0]},
+         None),
+        ("null-member", {"name": "NullMember",
+                         "supported_parameters": ["temperature", None]}, None),
+        ("bool-member", {"name": "Bool",
+                         "supported_parameters": ["temperature", True]}, None),
+        ("empty-string-member",
+         {"name": "EmptyMember",
+          "supported_parameters": ["temperature", ""]}, None),
+        ("valid-empty", {"name": "ValidEmpty", "supported_parameters": []}, []),
+        ("valid-cased",
+         {"name": "ValidCased",
+          "supported_parameters": ["TEMPERATURE", "Temperature",
+                                   "temperature"]},
+         ["TEMPERATURE", "Temperature", "temperature"]),
+        ("valid-dupes",
+         {"name": "ValidDupes", "supported_parameters": ["top_p", "top_p"]},
+         ["top_p", "top_p"]),
+        ("valid-padded",
+         {"name": "ValidPadded", "supported_parameters": [" top_p "]},
+         [" top_p "]),
+    )
+    projected_models = {}
+    for raw_id, raw, expected_params in raw_rows:
+        projected, warnings = _catalog.project_model(raw_id, raw)
+        assert projected["supported_parameters"] == expected_params, raw_id
+        assert set(projected) == {"id", "name", "description", "context_length",
+                                  "architecture", "supported_parameters",
+                                  "pricing"}, raw_id
+        assert type(warnings) is list, raw_id
+        projected_models[raw_id] = projected
+    raw_snapshot = _search_snapshot(
+        ["raw"], {"raw": _search_provider(
+            projected_models, "Raw",
+            "https://raw.example/v1/chat/completions")})
+    assert _catalog.validate_snapshot(raw_snapshot) is raw_snapshot
+    raw_pairs = _search_text_provider_pairs(raw_snapshot)
+    assert len(raw_pairs) == len(raw_rows)
+    assert _search_supported_parameter_pairs(
+        raw_snapshot, raw_pairs, supported_parameters=["temperature"]) == \
+        [("raw", "valid-cased")]
+    assert _search_supported_parameter_pairs(
+        raw_snapshot, raw_pairs, supported_parameters=["top_p"]) == \
+        [("raw", "valid-dupes")]
+    assert _search_supported_parameter_pairs(
+        raw_snapshot, raw_pairs, supported_parameters=[" top_p "]) == \
+        [("raw", "valid-padded")]
+    # A null-projected (malformed or unknown) array is never a wildcard, and a
+    # known-empty array satisfies no nonempty request.
+    assert _search_supported_parameter_pairs(
+        raw_snapshot, [("raw", "absent")],
+        supported_parameters=["temperature"]) == []
+    assert _search_supported_parameter_pairs(
+        raw_snapshot, [("raw", "valid-empty")],
+        supported_parameters=["temperature"]) == []
+    # Omission/[] retains every pair, including the null-projected ones.
+    assert _search_supported_parameter_pairs(raw_snapshot, raw_pairs) == \
+        raw_pairs
+    assert _search_supported_parameter_pairs(
+        raw_snapshot, raw_pairs, supported_parameters=[]) == raw_pairs
+
+    # (d) Cross-provider false-positive regression: obviously synthetic
+    #     providers sharing ONE literal raw id carry intentionally conflicting
+    #     context, input modalities and parameters. Each predicate matches
+    #     somewhere on its own; the composed pipeline requires ALL on the SAME
+    #     (provider, raw_id), never a union by raw id.
+    def compose(snapshot, *, query=None, provider=None,
+                min_context_length=None, input_modalities=None,
+                supported_parameters=None):
+        pairs = _search_text_provider_pairs(
+            snapshot, query=query, provider=provider)
+        pairs = _search_min_context_pairs(
+            snapshot, pairs, min_context_length=min_context_length)
+        pairs = _search_input_modality_pairs(
+            snapshot, pairs, input_modalities=input_modalities)
+        return _search_supported_parameter_pairs(
+            snapshot, pairs, supported_parameters=supported_parameters)
+
+    # d1: gateway A has enough context but text-only input; gateway B accepts
+    # image input but has too little context. Both support the parameter.
+    cap_id = "vendor/conflict-cap"
+    cap_snapshot = _search_snapshot(
+        ["gw-a", "gw-b"],
+        {"gw-a": _search_provider(
+             {cap_id: _search_model(
+                 cap_id, "Conflict A", context_length=65536,
+                 input_modalities=["text"],
+                 supported_parameters=["temperature"])},
+             "Gate A", "https://gw-a.example/v1/chat/completions"),
+         "gw-b": _search_provider(
+             {cap_id: _search_model(
+                 cap_id, "Conflict B", context_length=8192,
+                 input_modalities=["text", "image"],
+                 supported_parameters=["temperature"])},
+             "Gate B", "https://gw-b.example/v1/chat/completions")})
+    cap_before = copy.deepcopy(cap_snapshot)
+    cap_pairs = _search_text_provider_pairs(cap_snapshot)
+    assert cap_pairs == [("gw-a", cap_id), ("gw-b", cap_id)]
+    # Each predicate alone matches somewhere.
+    assert _search_min_context_pairs(
+        cap_snapshot, cap_pairs, min_context_length=65536) == \
+        [("gw-a", cap_id)]
+    assert _search_input_modality_pairs(
+        cap_snapshot, cap_pairs, input_modalities=["image"]) == \
+        [("gw-b", cap_id)]
+    assert _search_supported_parameter_pairs(
+        cap_snapshot, cap_pairs, supported_parameters=["temperature"]) == \
+        cap_pairs
+    # Context AND image AND parameter: neither gateway has all three.
+    assert compose(cap_snapshot, min_context_length=65536,
+                   input_modalities=["image"],
+                   supported_parameters=["temperature"]) == []
+    assert compose(cap_snapshot, min_context_length=65536,
+                   input_modalities=["image"]) == []
+    # Positive same-pair controls prove the composed pipeline is not
+    # always-empty: A wins on context+text, B wins on image+small context.
+    assert compose(cap_snapshot, min_context_length=65536,
+                   input_modalities=["text"],
+                   supported_parameters=["temperature"]) == [("gw-a", cap_id)]
+    assert compose(cap_snapshot, min_context_length=8192,
+                   input_modalities=["image"],
+                   supported_parameters=["temperature"]) == [("gw-b", cap_id)]
+    assert cap_snapshot == cap_before
+
+    # d2: gateway A supports one requested parameter and gateway B another on
+    # the same raw id; requiring both yields neither (never a raw-ID union).
+    split_id = "vendor/split-param"
+    split_snapshot = _search_snapshot(
+        ["gw-a", "gw-b"],
+        {"gw-a": _search_provider(
+             {split_id: _search_model(
+                 split_id, "Split A", context_length=65536,
+                 input_modalities=["text"],
+                 supported_parameters=["temperature"])},
+             "Gate A", "https://gw-a.example/v1/chat/completions"),
+         "gw-b": _search_provider(
+             {split_id: _search_model(
+                 split_id, "Split B", context_length=65536,
+                 input_modalities=["text"],
+                 supported_parameters=["max_tokens"])},
+             "Gate B", "https://gw-b.example/v1/chat/completions")})
+    split_before = copy.deepcopy(split_snapshot)
+    split_pairs = _search_text_provider_pairs(split_snapshot)
+    assert split_pairs == [("gw-a", split_id), ("gw-b", split_id)]
+    assert _search_supported_parameter_pairs(
+        split_snapshot, split_pairs, supported_parameters=["temperature"]) == \
+        [("gw-a", split_id)]
+    assert _search_supported_parameter_pairs(
+        split_snapshot, split_pairs, supported_parameters=["max_tokens"]) == \
+        [("gw-b", split_id)]
+    assert _search_supported_parameter_pairs(
+        split_snapshot, split_pairs,
+        supported_parameters=["temperature", "max_tokens"]) == []
+    assert compose(split_snapshot, min_context_length=0,
+                   input_modalities=["text"],
+                   supported_parameters=["temperature", "max_tokens"]) == []
+    assert split_snapshot == split_before
+
+    # d3: prior text/context/modality/provider stages exclude the pair that
+    # alone holds the requested parameter; the final stage must neither
+    # re-expand the selection nor borrow that parameter for a surviving pair.
+    borrow_id = "vendor/borrow-param"
+    borrow_snapshot = _search_snapshot(
+        ["keep", "drop"],
+        {"keep": _search_provider(
+             {borrow_id: _search_model(
+                 borrow_id, "Keep Params", "borrow marker", context_length=65536,
+                 input_modalities=["text", "image"],
+                 supported_parameters=["temperature"])},
+             "Keep", "https://keep.example/v1/chat/completions"),
+         "drop": _search_provider(
+             {borrow_id: _search_model(
+                 borrow_id, "Drop Params", "borrow marker", context_length=8192,
+                 input_modalities=["text"],
+                 supported_parameters=["max_tokens"])},
+             "Drop", "https://drop.example/v1/chat/completions")})
+    borrow_before = copy.deepcopy(borrow_snapshot)
+    borrow_text = _search_text_provider_pairs(borrow_snapshot, query="borrow")
+    assert borrow_text == [("keep", borrow_id), ("drop", borrow_id)]
+    # Each prior predicate alone excludes exactly one of the two pairs.
+    context_kept = _search_min_context_pairs(
+        borrow_snapshot, borrow_text, min_context_length=65536)
+    assert context_kept == [("keep", borrow_id)]
+    assert _search_input_modality_pairs(
+        borrow_snapshot, borrow_text, input_modalities=["image"]) == \
+        [("keep", borrow_id)]
+    # The parameter alone matches only the DROP pair.
+    assert _search_supported_parameter_pairs(
+        borrow_snapshot, borrow_text, supported_parameters=["max_tokens"]) == \
+        [("drop", borrow_id)]
+    # Applied to the surviving subset it must not re-introduce DROP, and it
+    # must not borrow DROP's max_tokens for KEEP.
+    assert _search_supported_parameter_pairs(
+        borrow_snapshot, context_kept, supported_parameters=["max_tokens"]) == []
+    assert compose(borrow_snapshot, query="borrow", min_context_length=65536,
+                   supported_parameters=["max_tokens"]) == []
+    assert compose(borrow_snapshot, query="borrow", min_context_length=65536,
+                   input_modalities=["image"],
+                   supported_parameters=["max_tokens"]) == []
+    # Provider scope excludes the only pair holding max_tokens.
+    assert compose(borrow_snapshot, query="borrow", provider="keep",
+                   supported_parameters=["max_tokens"]) == []
+    assert compose(borrow_snapshot, query="borrow", provider="drop",
+                   supported_parameters=["max_tokens"]) == [("drop", borrow_id)]
+    # Positive same-pair control: KEEP's own parameter still matches KEEP.
+    assert compose(borrow_snapshot, query="borrow", min_context_length=65536,
+                   input_modalities=["image"],
+                   supported_parameters=["temperature"]) == [("keep", borrow_id)]
+    assert borrow_snapshot == borrow_before

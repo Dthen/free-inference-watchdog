@@ -732,3 +732,67 @@ def _search_input_modality_pairs(snapshot, pairs, *, input_modalities=None):
                                          for token in requested):
             kept.append((provider_key, raw_id))
     return kept
+
+
+# -- pure supported-parameter AND stage: every requested token on the same pair --
+
+
+def _search_supported_parameter_pairs(snapshot, pairs, *,
+                                      supported_parameters=None):
+    """The INTERNAL supported-parameter AND stage of ``search_models``.
+
+    Preconditions: ``snapshot`` is an already-VALIDATED public snapshot and
+    ``pairs`` is an ordered sequence of immutable ``(provider_key, raw_model_id)``
+    tuples identifying tracked pairs of that snapshot -- it is the ALREADY
+    selected candidate set (typically from
+    :func:`_search_input_modality_pairs`, itself composed after the accepted
+    text/provider and minimum-context stages), never re-derived here.
+    ``supported_parameters`` is ``None`` or an ALREADY-validated list of nonempty
+    strings. The public decoded argument is validated and normalized by the later
+    transport-level search unit before this stage is invoked; this stage never
+    validates its argument, invents a temporary error, or normalizes the request
+    or the snapshot in place.
+
+    Returns a NEW list of only those supplied pairs whose OWN projected model
+    ``supported_parameters`` is KNOWN (not ``None``) and contains EVERY
+    ASCII-folded requested token -- an AND over the requested entries on the same
+    pair, never a multiplicity constraint, so a duplicated request is
+    idempotent. Matching is ASCII-only (A-Z to a-z) on BOTH sides: the reported
+    array through the accepted :func:`catalog.normalize_capabilities` (which
+    folds and first-occurrence deduplicates while keeping a known ``[]``
+    distinct from ``None``) and the requested tokens through the shared
+    :func:`catalog._ascii_lower`. Non-ASCII code points and whitespace stay
+    literal, so a padded token matches only an identically padded reported token
+    and a non-ASCII case pair never collapses. Input and output modalities,
+    names, descriptions, raw ids, provider keys, pricing and pricing/object names
+    are never substitutes for a supported parameter, a capability name is never
+    substring-matched, and a pair's parameters are never borrowed from a sibling
+    provider sharing its raw id: endpoint identity is exactly
+    ``(provider, raw_model_id)``.
+
+    ``supported_parameters`` ``None`` or ``[]`` applies NO constraint and
+    returns a fresh list with EVERY supplied pair unchanged -- including pairs
+    whose parameter array is unknown (``null``) or known-empty (``[]``), which
+    are retained here but fail any nonempty request. There is no truthiness test
+    of the request or of the array, no wildcard for an unknown array, no sort, no
+    deduplication, no roster/config read and no pagination: the incoming pair
+    order is preserved exactly, the supplied selection is never expanded, and
+    more than the default page's worth of eligible pairs stay complete.
+
+    The snapshot, the input pair sequence and the requested list are never
+    mutated, and only immutable identity tuples are returned, so a caller
+    mutating the result can never corrupt the snapshot, the input sequence or
+    another call.
+    """
+    if not supported_parameters:
+        return list(pairs)
+    requested = [_ascii_lower(token) for token in supported_parameters]
+    providers = snapshot["providers"]
+    kept = []
+    for provider_key, raw_id in pairs:
+        model = providers[provider_key]["models"][raw_id]
+        available = normalize_capabilities(model)["supported_parameters"]
+        if available is not None and all(token in available
+                                         for token in requested):
+            kept.append((provider_key, raw_id))
+    return kept
