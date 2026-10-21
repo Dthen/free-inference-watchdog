@@ -1504,8 +1504,8 @@ def test_dead_raw_count_key_removed(tmp_path):
 # template the legacy adapter uses. Two synthetic-only groups pin it:
 #   1. snapshot authority: provider order, per-provider wiring and per-pair
 #      projected metadata come from the snapshot, never module globals; the
-#      staged data-script slot stays EMPTY (no roster island, no premature
-#      catalogue/tool island).
+#      public data-script slot carries ONLY its two inert JSON islands (no
+#      roster island) and the visible matrix is the page minus those islands.
 #   2. one shared template: public HTML equals the legacy render_page output
 #      minus ONLY its roster-data island, and a capture -> build -> render
 #      round trip leaks none of the excluded operational fields.
@@ -1582,6 +1582,96 @@ def _thead_columns(html):
     return [c.strip() for c in re.findall(r"<th>(?:<a[^>]*>)?([^<(]*)", head)]
 
 
+# ---------- Unit 4d: shared public JSON islands (catalogue + tools) --------
+#
+# The public route carries exactly TWO inline inert JSON elements, in order:
+# `catalog-data` (the complete public snapshot) then `tool-contract` (the
+# supplied shared tool array). These helpers read them back the way a browser
+# does — one real HTML script-data element each, not a regex that stops
+# silently at an injected end tag — and compare values with their TYPES
+# intact, because ordinary Python equality conflates 1/1.0/True.
+
+TOOLS_RESOURCE = REPO / "watchdog_catalog" / "tools.json"
+
+_TOOL_NAMES = (
+    "list_free_models", "get_model", "list_endpoints", "watchdog_status",
+    "search_models",
+)
+
+_ISLAND_IDS = ("catalog-data", "tool-contract")
+
+
+def _load_tool_contract():
+    """Decode the ACTUAL unchanged shared tool resource (a bare array)."""
+    return json.loads(TOOLS_RESOURCE.read_text(encoding="utf-8"))
+
+
+def _script_elements(html):
+    """All <script> elements as (attrs dict, EXACT inner text), in order."""
+    from html.parser import HTMLParser
+
+    class _Collector(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.scripts = []
+            self.open = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "script":
+                assert self.open is None, "nested/unterminated <script> element"
+                self.open = [dict(attrs), []]
+
+        def handle_data(self, data):
+            if self.open is not None:
+                self.open[1].append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "script" and self.open is not None:
+                self.scripts.append((self.open[0], "".join(self.open[1])))
+                self.open = None
+
+    collector = _Collector()
+    collector.feed(html)
+    collector.close()
+    assert collector.open is None, "unterminated <script> element"
+    return collector.scripts
+
+
+_ISLANDS_RE = (
+    r'<script type="application/json" id="catalog-data">.*?</script>'
+    r'<script type="application/json" id="tool-contract">.*?</script>'
+)
+
+
+def _strip_public_islands(html):
+    """Drop EXACTLY the two expected inert islands, asserting both exist once."""
+    for island_id in _ISLAND_IDS:
+        assert html.count(f'<script type="application/json" id="{island_id}">') == 1
+    stripped, count = re.subn(_ISLANDS_RE, "", html, count=1, flags=re.S)
+    assert count == 1, "expected the two islands adjacent, in order"
+    return stripped
+
+
+def _typed(value):
+    """A type-carrying view of one JSON value (1 / 1.0 / True stay distinct)."""
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", value)
+    if isinstance(value, str):
+        return ("str", value)
+    if value is None:
+        return ("null",)
+    if isinstance(value, list):
+        return ("list", tuple(_typed(item) for item in value))
+    if isinstance(value, dict):
+        return ("map", tuple(sorted((key, _typed(item))
+                                    for key, item in value.items())))
+    raise AssertionError("non-JSON value in island: %r" % type(value).__name__)
+
+
 def test_public_snapshot_renderer_is_snapshot_authoritative():
     """Public matrix derives order/wiring/metadata from the snapshot only.
 
@@ -1590,12 +1680,17 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
     WRONG values, and pins literal output: header order, every raw endpoint
     identity + wiring, portable natural order (ASCII/leading-zero/long-run/
     non-ASCII digit controls), per-gateway footer counts, endpoint totals and
-    the `#` distinct-gateway count. Also pins the STAGED boundary: the public
-    data-script slot is empty, so no script island exists yet.
+    the `#` distinct-gateway count. Also pins the PUBLIC ISLANDS: exactly the
+    two expected inert JSON elements (ids, type, order, complete payloads), a
+    whole-value catalogue equal to the SAME snapshot's export text and the
+    supplied tool array, and no roster island.
     """
     import copy
 
     import build_site
+    from catalog_export import serialize_snapshot
+
+    tool_contract = _load_tool_contract()
 
     beta_models = {
         "acme/token-2:free": {
@@ -1682,35 +1777,42 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
         header_before = copy.deepcopy(header_meta)
 
         html = build_site.render_catalog_page(
-            snapshot, PUBLIC_RENDER_LOGO, header_meta)
+            snapshot, PUBLIC_RENDER_LOGO, header_meta,
+            tool_contract=tool_contract)
         assert html == build_site.render_catalog_page(
-            snapshot, PUBLIC_RENDER_LOGO, header_meta), "output must be deterministic"
+            snapshot, PUBLIC_RENDER_LOGO, header_meta,
+            tool_contract=tool_contract), "output must be deterministic"
         assert snapshot == snapshot_before, "snapshot was mutated by rendering"
         assert header_meta == header_before, "header map was mutated by rendering"
 
+        # The matrix/visible-document bytes are the FULL page minus ONLY the
+        # two inert islands, so every matrix assertion below is unaffected by
+        # their payload text.
+        matrix_html = _strip_public_islands(html)
+
         # --- snapshot-authoritative column order / headers -----------------
-        assert _thead_columns(html) == [
-            "model", "#", "synthetic-beta", "synthetic-alpha"], _thead(html)
-        head = _thead(html)
+        assert _thead_columns(matrix_html) == [
+            "model", "#", "synthetic-beta", "synthetic-alpha"], _thead(matrix_html)
+        head = _thead(matrix_html)
         assert ('<th><a href="https://beta.synthetic.example/signup" '
                 'target="_blank" rel="noopener" title="beta &quot;note&quot; '
                 '&amp; &lt;angle&gt;">synthetic-beta</a></th>') in head
         assert "<th>synthetic-alpha</th>" in head
         # Scheme guard: a javascript: signup_url is never linked or emitted.
-        assert "javascript:" not in html
+        assert "javascript:" not in matrix_html
         # Zero-ID provider is hidden: no column, no chip inflation.
-        assert "synthetic-empty" not in html
+        assert "synthetic-empty" not in matrix_html
 
         # --- chips, footer totals, distinct-gateway '#' --------------------
-        chips = html.split('<div class="chips">', 1)[1].split("</div>", 1)[0]
+        chips = matrix_html.split('<div class="chips">', 1)[1].split("</div>", 1)[0]
         assert "<b>3</b> unique models" in chips, chips   # alpha-only + only-beta + token
         assert "<b>8</b> endpoints" in chips, chips       # 6 beta + 2 alpha wirings
         assert "<b>2</b> gateways" in chips, chips        # empty provider hidden
-        assert _tfoot_numbers(html) == [6, 2]
+        assert _tfoot_numbers(matrix_html) == [6, 2]
 
-        assert _row_count(html) == 3
+        assert _row_count(matrix_html) == 3
         names = []
-        for tbody in re.findall(r"<tbody>(.*?)</tbody>", html, re.S):
+        for tbody in re.findall(r"<tbody>(.*?)</tbody>", matrix_html, re.S):
             names.extend(re.findall(_NAME_ROW_RE, tbody))
         assert names == ["acme/alpha-only", "acme/only-beta-free", "acme/token"]
 
@@ -1720,7 +1822,7 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
             "acme/token": "2",
         }
         for name, want in expected_hashes.items():
-            row = _row_for(html, name)
+            row = _row_for(matrix_html, name)
             m = re.search(r'<th[^>]*>[\s\S]*?</th>\s*<td class="n">(\d+)</td>',
                           row)
             assert m and m.group(1) == want, (name, row)
@@ -1739,52 +1841,63 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
              "https://synthetic-alpha.synthetic.example/v1/chat/completions",
              "openai-synthetic"),
         ]
-        wires = _public_wires(html)
+        wires = _public_wires(matrix_html)
         assert len(wires) == 8, wires
         assert sorted(wires) == sorted(expected_wires)
-        assert "poisoned.example" not in html
-        assert "WRONG-api-type" not in html
+        assert "poisoned.example" not in matrix_html
+        assert "WRONG-api-type" not in matrix_html
 
         # --- portable natural order inside the shared group ----------------
         token_body = next(
-            body for body in re.findall(r"<tbody>(.*?)</tbody>", html, re.S)
+            body for body in re.findall(r"<tbody>(.*?)</tbody>", matrix_html, re.S)
             if re.search(_NAME_ROW_RE, body).group(1) == "acme/token")
         assert re.findall(r'<span class="wire-id">([^<]*)</span>',
                           token_body) == PUBLIC_TOKEN_IDS + [
                               "acme/token-2:free"]  # alpha variant last
 
         # --- tooltip metadata: known 0 rendered, unknown stays absent ------
-        assert "Context length: 0 (synthetic-beta)" in html, "known 0 dropped"
-        assert "Input modalities: text" in html
-        only_beta_row = _row_for(html, "acme/only-beta-free")
+        assert "Context length: 0 (synthetic-beta)" in matrix_html, "known 0 dropped"
+        assert "Input modalities: text" in matrix_html
+        only_beta_row = _row_for(matrix_html, "acme/only-beta-free")
         assert "Context length" not in only_beta_row
         assert "Input modalities" not in only_beta_row
 
         # --- preserved presentation: CSS-only expansion, colspan, logo -----
-        assert "type:checkbox" not in html  # no stray inline JS/type confusion
-        assert 'type="checkbox"' in html
-        assert '<label for="row-0">' in html
-        assert 'colspan="4"' in html                    # 2 + 2 active gateways
-        assert "tbody tr:has(input.row-expand:checked) ~ tr.expand" in html
-        assert "--nord0:#2e3440" in html
-        assert ('src="data:image/png;base64,' + PUBLIC_RENDER_LOGO + '"') in html
-        assert 'href="https://github.com/Dthen/free-inference-watchdog"' in html
-        assert 'href="https://ko-fi.com/dthen"' in html
+        assert "type:checkbox" not in matrix_html  # no stray inline JS/type confusion
+        assert 'type="checkbox"' in matrix_html
+        assert '<label for="row-0">' in matrix_html
+        assert 'colspan="4"' in matrix_html              # 2 + 2 active gateways
+        assert "tbody tr:has(input.row-expand:checked) ~ tr.expand" in matrix_html
+        assert "--nord0:#2e3440" in matrix_html
+        assert ('src="data:image/png;base64,' + PUBLIC_RENDER_LOGO + '"') in matrix_html
+        assert 'href="https://github.com/Dthen/free-inference-watchdog"' in matrix_html
+        assert 'href="https://ko-fi.com/dthen"' in matrix_html
 
-        # --- STAGED boundary: no script island on the public route ---------
-        assert "<script" not in html, "public route must not embed any script yet"
+        # --- the two inert islands: ids, type, order, complete payloads ----
+        islands = _script_elements(html)
+        assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
+        assert [attrs.get("type") for attrs, _ in islands] == [
+            "application/json", "application/json"]
+        assert all(attrs.get("src") is None for attrs, _ in islands)
         assert 'id="roster-data"' not in html
+        assert "<script" not in matrix_html
+        assert _typed(json.loads(islands[0][1])) == _typed(
+            json.loads(serialize_snapshot(snapshot)))
+        assert _typed(json.loads(islands[1][1])) == _typed(tool_contract)
 
         # --- default headers are plain and I/O-free ------------------------
         default_html = build_site.render_catalog_page(
-            snapshot, PUBLIC_RENDER_LOGO)
+            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract)
         assert "<a " not in _thead(default_html)
         assert _thead_columns(default_html) == [
             "model", "#", "synthetic-beta", "synthetic-alpha"]
+        assert [attrs.get("id") for attrs, _ in _script_elements(default_html)] \
+            == list(_ISLAND_IDS)
 
         # --- true empty registry stays a valid, distinguishable page -------
         empty_html = build_site.render_catalog_page(
-            _public_snapshot({}, {}), PUBLIC_RENDER_LOGO)
+            _public_snapshot({}, {}), PUBLIC_RENDER_LOGO,
+            tool_contract=tool_contract)
         assert _thead_columns(empty_html) == ["model", "#"]
         assert 'class="name-row"' not in empty_html
         empty_chips = empty_html.split('<div class="chips">', 1)[1].split(
@@ -1792,7 +1905,11 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
         assert "<b>0</b> unique models" in empty_chips
         assert "<b>0</b> endpoints" in empty_chips
         assert "<b>0</b> gateways" in empty_chips
-        assert "<script" not in empty_html
+        empty_matrix = _strip_public_islands(empty_html)
+        assert "<script" not in empty_matrix
+        empty_islands = _script_elements(empty_html)
+        assert [attrs.get("id") for attrs, _ in empty_islands] == list(_ISLAND_IDS)
+        assert json.loads(empty_islands[1][1]) == tool_contract
     finally:
         build_site.DISPLAY_ORDER = saved_order
         build_site.GATEWAY_WIRING = saved_wiring
@@ -1806,16 +1923,19 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
 
     Also drives real capture -> build_snapshot -> render_catalog_page with
     genuine token/auth/local-path/pending/upstream-unknown sentinels in
-    EXCLUDED fields, asserting none reach the HTML while retained public
-    name/context/modality/wiring strings do, hostile visible/attribute text
+    EXCLUDED fields, asserting none reach the HTML (islands included) or the
+    external export JSON, while retained public name/context/modality/wiring
+    strings do reach the decoded island data, hostile visible/attribute text
     stays escaped, and no input is mutated.
     """
     import copy
     from html.parser import HTMLParser
 
     import build_site
-    from catalog_export import build_snapshot, capture_registry
+    from catalog_export import build_snapshot, capture_registry, serialize_snapshot
     from config_loader import GATEWAY_WIRING
+
+    tool_contract = _load_tool_contract()
 
     # ---- (a) legacy parity through the shared template -------------------
     order = ["nous", "tokenrouter", "kilo", "openrouter"]
@@ -1844,14 +1964,16 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
     legacy_html = build_site.render_page(
         legacy_roster, PUBLIC_RENDER_LOGO, parity_header_meta)
     public_html = build_site.render_catalog_page(
-        parity_snapshot, PUBLIC_RENDER_LOGO, parity_header_meta)
+        parity_snapshot, PUBLIC_RENDER_LOGO, parity_header_meta,
+        tool_contract=tool_contract)
     assert re.findall(r'<script\b[^>]*>', legacy_html) == [
         '<script type="application/json" id="roster-data">']
-    assert "<script" not in public_html
+    assert [attrs.get("id") for attrs, _ in _script_elements(public_html)] == [
+        "catalog-data", "tool-contract"]
     stripped_legacy = re.sub(
         r'<script type="application/json" id="roster-data">.*?</script>', "",
         legacy_html, count=1, flags=re.S)
-    assert stripped_legacy == public_html, (
+    assert stripped_legacy == _strip_public_islands(public_html), (
         "public route must reuse the ONE legacy template byte-for-byte")
 
     # ---- (b) secret-safe public HTML from real capture/build -------------
@@ -1908,17 +2030,43 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
                               cadence_s=1800)
     assert snapshot == snapshot_before
     safe_html = build_site.render_catalog_page(
-        snapshot, PUBLIC_RENDER_LOGO, header_meta)
+        snapshot, PUBLIC_RENDER_LOGO, header_meta, tool_contract=tool_contract)
 
     assert snapshot == snapshot_before, "snapshot mutated by rendering"
     assert configs == configs_before and wiring == wiring_before
     assert roster == roster_before, "operational roster input mutated"
     assert header_meta == header_before
 
+    # Both inert islands are present and decode to the intended public data.
+    safe_islands = _script_elements(safe_html)
+    assert [attrs.get("id") for attrs, _ in safe_islands] == list(_ISLAND_IDS)
+    embedded_catalogue = json.loads(safe_islands[0][1])
+    embedded_tools = json.loads(safe_islands[1][1])
+    external_json = serialize_snapshot(snapshot)
+
     for sentinel in (token_sentinel, auth_sentinel, path_sentinel,
                      pending_sentinel, unknown_sentinel):
         assert sentinel not in safe_html, f"excluded field leaked: {sentinel}"
+        assert sentinel not in external_json, f"excluded field in export: {sentinel}"
     assert "SENTINEL" not in safe_html
+    assert "SENTINEL" not in external_json
+
+    # The whole embedded catalogue agrees completely with the export text,
+    # typing included — so the island is the SAME public contract, not a
+    # second, lossier projection.
+    assert _typed(embedded_catalogue) == _typed(json.loads(external_json))
+    assert embedded_catalogue["snapshot_id"] == snapshot["snapshot_id"]
+    assert _typed(embedded_tools) == _typed(tool_contract)
+    # Retained public values DO survive in the decoded data.
+    retained = embedded_catalogue["providers"]["send-gw"]["models"][
+        "vendor-a/secret-safe-free"]
+    assert retained["name"] == 'Vendor <A> "Safe"'
+    assert retained["context_length"] == 65536
+    assert retained["architecture"]["input_modalities"] == ["text", "image"]
+    assert embedded_catalogue["providers"]["send-gw"][
+        "chat_completions_url"] == (
+            "https://send.synthetic.example/v1/chat/completions")
+    assert embedded_catalogue["providers"]["send-gw"]["api_type"] == "openai-synthetic"
 
     # Intended public values DO survive, escaped where they are hostile text.
     assert "Vendor &lt;A&gt; &quot;Safe&quot;" in safe_html
@@ -1959,3 +2107,317 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
     audit.close()
     assert audit.bad == [], f"unbalanced markup: {audit.bad}"
     assert audit.stack == [], f"unclosed elements: {audit.stack}"
+# ---------- Unit 4d: lossless public islands and script-context escaping ----
+#
+# Two further synthetic-only groups pin the embedding boundary that unit 4c
+# deliberately staged out:
+#   1. the two islands carry the WHOLE public snapshot and the REAL shared tool
+#      array, losslessly and deterministically, for populated, zero-ID and
+#      true-empty registries;
+#   2. hostile retained text (closing-script in every case, comment/open-script
+#      sequences, quotes/backslashes/ampersands/angles, real U+2028/U+2029,
+#      non-ASCII/emoji, control characters) stays inert and round-trips
+#      exactly, in BOTH islands, with no injected executable markup anywhere.
+# Neither group writes a site artifact, touches the production roster or uses
+# the network; HTMLParser proves structure/extraction only, never browser
+# execution, layout or native WebMCP support.
+
+#: Hostile retained strings for the script-context group. Every entry is legal
+#: in a public v1 snapshot value, so the fixture stays a VALID snapshot.
+_SCRIPT_HOSTILE_TEXTS = (
+    "</script>",
+    "</SCRIPT>",
+    "</ScRiPt\t>",
+    "<!--",
+    "<SCRIPT >",
+    "<script>",
+    "<script src=//evil.example/x.js>",
+    "<!-- <script> </script> -->",
+    'quoted "double" & \'single\' \\backslash <angle> & amp',
+    "line\u2028sep\u2029par",
+    "\u65e5\u672c\u8a9e \U0001f415 \u00fcn\u00efcode",
+    "control:\x00\x01\x1f\x7f:end",
+    "]]><!--<script>alert(1)</script>",
+)
+
+
+def test_embedded_islands_are_whole_value_lossless_and_deterministic():
+    """Both islands carry the COMPLETE inputs, typed, for every registry shape.
+
+    Loops the accepted capture/build path over a populated, a zero-ID and a
+    true-empty registry, decodes each island with stdlib HTMLParser, and pins:
+    exactly two inert JSON elements in order; the catalogue validates and
+    equals the SAME snapshot's export text with types intact (root
+    ``snapshot_id``, warnings and provider metadata the matrix never shows);
+    the tool contract equals the real unchanged five-definition resource in
+    resource order; ASCII-only, less-than-free script bodies; deterministic
+    output and unmutated inputs.
+    """
+    import copy
+
+    import build_site
+    from catalog_export import serialize_snapshot
+    from watchdog_catalog import catalog
+
+    tool_contract = _load_tool_contract()
+    assert isinstance(tool_contract, list)
+    assert [definition["name"] for definition in tool_contract] == list(_TOOL_NAMES)
+
+    fixtures = {
+        "populated": _public_snapshot(
+            {
+                "synthetic-beta": ["acme/token-2:free", "acme/only-beta-free"],
+                "synthetic-alpha": ["acme/token-2:free"],
+                "synthetic-empty": [],
+            },
+            {
+                "synthetic-beta": {
+                    "acme/token-2:free": {
+                        "name": "acme/token", "context_length": 262144,
+                        "pricing": {"prompt": 1, "completion": 1.0}},
+                    "acme/only-beta-free": {
+                        "name": "acme/only-beta", "context_length": 8192},
+                },
+                "synthetic-alpha": {
+                    "acme/token-2:free": {
+                        "name": "acme/token", "context_length": 262144,
+                        "pricing": {"prompt": "0.0", "completion": None}},
+                },
+            },
+        ),
+        "zero-id": _public_snapshot({"synthetic-empty": []}, {}),
+        "true-empty": _public_snapshot({}, {}),
+    }
+
+    for label, snapshot in fixtures.items():
+        snapshot_before = copy.deepcopy(snapshot)
+        tools_before = copy.deepcopy(tool_contract)
+
+        html = build_site.render_catalog_page(
+            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract)
+        assert html == build_site.render_catalog_page(
+            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract), label
+        assert snapshot == snapshot_before, f"{label}: snapshot mutated"
+        assert tool_contract == tools_before, f"{label}: tool array mutated"
+
+        islands = _script_elements(html)
+        assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS), label
+        assert [attrs.get("type") for attrs, _ in islands] == [
+            "application/json", "application/json"], label
+        assert all(attrs.get("src") is None for attrs, _ in islands), label
+        catalogue_body, tools_body = islands[0][1], islands[1][1]
+
+        # Script-context-safe, complete text bodies: pure ASCII JSON with no
+        # literal angle bracket, ampersand or raw Unicode line separator.
+        for body in (catalogue_body, tools_body):
+            assert body, label
+            assert body.isascii(), label
+            for forbidden in ("<", ">", "&", "\u2028", "\u2029", "<!--"):
+                assert forbidden not in body, (label, forbidden)
+
+        # Whole-value public catalogue: accepted validator, full agreement with
+        # the SAME snapshot's export text (root id included), types intact.
+        embedded = json.loads(catalogue_body)
+        assert _typed(catalog.load_snapshot(catalogue_body)) == _typed(snapshot)
+        assert _typed(embedded) == _typed(json.loads(serialize_snapshot(snapshot)))
+        assert embedded["snapshot_id"] == snapshot["snapshot_id"], label
+        assert embedded["schema_version"] == 1
+        assert embedded["cadence_s"] == 3600
+
+        # The REAL shared tool array, complete and in resource order.
+        decoded_tools = json.loads(tools_body)
+        assert _typed(decoded_tools) == _typed(tool_contract), label
+        assert [definition["name"] for definition in decoded_tools] == list(
+            _TOOL_NAMES), label
+        assert all(
+            definition["description"]
+            and definition["inputSchema"]["type"] == "object"
+            for definition in decoded_tools), label
+
+        if label == "populated":
+            assert embedded["provider_order"] == [
+                "synthetic-beta", "synthetic-alpha", "synthetic-empty"]
+            # A zero-ID provider ships in the DATA even though it gets no
+            # column: empty legitimate data stays distinguishable from loss.
+            assert embedded["providers"]["synthetic-empty"]["model_ids"] == []
+            # int / float / numeric-string / null must not conflate.
+            beta = embedded["providers"]["synthetic-beta"]["models"][
+                "acme/token-2:free"]
+            assert beta["pricing"] == {"prompt": 1, "completion": 1.0}
+            assert type(beta["pricing"]["prompt"]) is int
+            assert type(beta["pricing"]["completion"]) is float
+            alpha = embedded["providers"]["synthetic-alpha"]["models"][
+                "acme/token-2:free"]
+            assert alpha["pricing"] == {"prompt": "0.0", "completion": None}
+            assert type(alpha["pricing"]["prompt"]) is str
+            assert embedded["providers"]["synthetic-beta"]["stale"] is False
+            assert type(embedded["tick_epoch"]) is int
+        if label == "zero-id":
+            assert embedded["providers"]["synthetic-empty"]["model_ids"] == []
+            assert embedded["providers"]["synthetic-empty"]["models"] == {}
+            assert "name-row" not in _strip_public_islands(html)
+        if label == "true-empty":
+            assert embedded["provider_order"] == []
+            assert embedded["providers"] == {}
+
+
+def test_script_context_hostile_text_is_inert_and_lossless():
+    """Hostile public text cannot escape, close or corrupt either island.
+
+    Builds one REAL validated snapshot whose retained values carry every
+    closing-script casing, comment/open-script sequences, quotes, backslashes,
+    ampersands, angles, real U+2028/U+2029, non-ASCII/emoji and control
+    characters, plus a valid-shape tool-description variant with hostile text.
+    Parses the WHOLE page: exactly the two intended inert elements, complete
+    round-tripping payloads, and no injected executable script/image/event
+    attribute or prematurely closed island. Matrix visible/attribute escaping
+    still holds and no input is mutated.
+    """
+    import copy
+    from html import escape
+    from html.parser import HTMLParser
+
+    import build_site
+    from catalog_export import build_snapshot, capture_registry
+
+    hostile_name = "</script><SCRIPT ><!-- & \"quoted\" \u2028 \u65e5\u672c \U0001f415"
+    hostile_id = "vendor/</script>id</SCRIPT>-free"
+
+    model_ids = [f"vendor/hostile-{index:02d}:free"
+                 for index in range(len(_SCRIPT_HOSTILE_TEXTS))]
+    model_meta = {
+        f"vendor/hostile-{index:02d}:free": {
+            "description": text,
+            "supported_parameters": [text],
+        }
+        for index, text in enumerate(_SCRIPT_HOSTILE_TEXTS)
+    }
+    model_ids.append(hostile_id)
+    model_meta[hostile_id] = {
+        "name": hostile_name,
+        "description": "<!-- <script> </script> -->",
+        "supported_parameters": [hostile_name],
+    }
+
+    configs = {"hostile-gw": {
+        "name": "</ScRiPt><script>alert('display')</script><!--",
+        "_token": "SENTINEL-HOSTILE-TOKEN",
+    }}
+    wiring = {"hostile-gw": {
+        "chat_completions_url": "https://hostile.synthetic.example/v1/chat/completions",
+        "api_type": "<!--api-type-->",
+    }}
+    roster = {
+        "tick_epoch": 1787721434,
+        "providers": {"hostile-gw": model_ids},
+        "provider_models": {"hostile-gw": model_meta},
+        "stale_providers": [],
+    }
+
+    tool_contract = copy.deepcopy(_load_tool_contract())
+    tool_contract[0]["description"] = "\n".join(_SCRIPT_HOSTILE_TEXTS)
+
+    snapshot_before = copy.deepcopy(
+        build_snapshot(capture_registry(configs, wiring),
+                       copy.deepcopy(roster), cadence_s=3600))
+    configs_before = copy.deepcopy(configs)
+    wiring_before = copy.deepcopy(wiring)
+    roster_before = copy.deepcopy(roster)
+    tools_before = copy.deepcopy(tool_contract)
+
+    snapshot = build_snapshot(capture_registry(configs, wiring), roster,
+                              cadence_s=3600)
+    html = build_site.render_catalog_page(
+        snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract)
+
+    assert html == build_site.render_catalog_page(
+        snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract)
+    assert snapshot == snapshot_before, "snapshot mutated by rendering"
+    assert configs == configs_before and wiring == wiring_before
+    assert roster == roster_before, "roster input mutated"
+    assert tool_contract == tools_before, "tool array mutated"
+
+    # ---- whole-page structure: two inert islands and nothing executable ---
+    class _PageAudit(HTMLParser):
+        _BANNED = frozenset({"iframe", "object", "embed", "base", "form"})
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.tags = []
+            self.scripts = []
+            self.open = None
+            self.bad = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            self.tags.append((tag, attrs))
+            if tag == "script":
+                if self.open is not None:
+                    self.bad.append(("nested-script", tag))
+                self.open = [attrs, []]
+            if tag in self._BANNED:
+                self.bad.append(("banned-element", tag))
+            for name, value in attrs.items():
+                if name.lower().startswith("on"):
+                    self.bad.append(("event-handler", name))
+                if name == "src" and not value.startswith("data:image/png;base64,"):
+                    self.bad.append(("external-src", value))
+
+        def handle_startendtag(self, tag, attrs):
+            self.handle_starttag(tag, attrs)
+
+        def handle_data(self, data):
+            if self.open is not None:
+                self.open[1].append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "script" and self.open is not None:
+                self.scripts.append((self.open[0], "".join(self.open[1])))
+                self.open = None
+
+    audit = _PageAudit()
+    audit.feed(html)
+    audit.close()
+    assert audit.open is None, "an island was left unterminated"
+    assert audit.bad == [], f"injected markup/attribute: {audit.bad}"
+    assert [attrs.get("id") for attrs, _ in audit.scripts] == list(_ISLAND_IDS)
+    assert [attrs.get("type") for attrs, _ in audit.scripts] == [
+        "application/json", "application/json"]
+    assert all(attrs.get("src") is None for attrs, _ in audit.scripts)
+    assert len([tag for tag, _ in audit.tags if tag == "img"]) == 1
+    assert len([tag for tag, _ in audit.tags if tag == "script"]) == 2
+
+    catalogue_body, tools_body = audit.scripts[0][1], audit.scripts[1][1]
+    for body in (catalogue_body, tools_body):
+        assert body.isascii()
+        for forbidden in ("<", ">", "&", "\u2028", "\u2029", "<!--", "</"):
+            assert forbidden not in body, forbidden
+
+    # ---- complete round-trip of every hostile value, both islands --------
+    embedded = json.loads(catalogue_body)
+    models = embedded["providers"]["hostile-gw"]["models"]
+    for index, text in enumerate(_SCRIPT_HOSTILE_TEXTS):
+        model = models[f"vendor/hostile-{index:02d}:free"]
+        assert model["description"] == text, (index, model["description"])
+        assert model["supported_parameters"] == [text], index
+    assert models[hostile_id]["name"] == hostile_name
+    assert models[hostile_id]["supported_parameters"] == [hostile_name]
+    assert embedded["providers"]["hostile-gw"]["display_name"] == (
+        "</ScRiPt><script>alert('display')</script><!--")
+    assert embedded["providers"]["hostile-gw"]["api_type"] == "<!--api-type-->"
+    assert "SENTINEL-HOSTILE-TOKEN" not in html
+
+    embedded_tools = json.loads(tools_body)
+    assert _typed(embedded_tools) == _typed(tool_contract)
+    assert embedded_tools[0]["description"] == tools_before[0]["description"]
+    assert "</script>" in embedded_tools[0]["description"]  # inert, retained
+
+    # ---- the visible matrix still escapes its text -----------------------
+    matrix_html = _strip_public_islands(html)
+    assert "<script" not in matrix_html
+    assert "<!--" not in matrix_html
+    assert escape(hostile_name) in matrix_html
+    assert hostile_name not in matrix_html
+    assert "evil.example" not in matrix_html
+    assert "src=//evil.example" not in matrix_html
+    assert "SENTINEL-HOSTILE-TOKEN" not in matrix_html

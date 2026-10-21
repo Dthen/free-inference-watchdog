@@ -76,6 +76,7 @@ MAX_LOGO_BYTES = 40 * 1024  # refuse to embed a bloated logo
 # config/state/SDK import). These names re-export those exact function objects
 # during the compatibility transition, so existing importers, the legacy
 # adapter and the public renderer never drift from a second copy.
+from watchdog_catalog.catalog import canonical_bytes  # noqa: E402
 from watchdog_catalog.query import natural_key, strip_free_marker  # noqa: E402
 
 
@@ -155,6 +156,46 @@ def _natural_key(s):
     lookalikes can never raise the old heterogeneous int/str comparison error.
     """
     return natural_key(s)
+
+
+def _script_json(value):
+    """Encode one JSON value as the body of an inert HTML script element.
+
+    Encoding goes through the SAME accepted
+    :func:`watchdog_catalog.catalog.canonical_bytes` used for the whole public
+    snapshot and its export text (UTF-8, code-point sorted keys, compact
+    separators, ``ensure_ascii=True``, finite values only) -- never a second
+    set of JSON encoding or hash rules. That encoder already escapes U+2028 /
+    U+2029, control characters and every non-ASCII character, so the only
+    HTML-relevant literal left is ``<``; the small pure pass below turns each
+    of those into its JSON Unicode escape (and, defensively, ``>`` and ``&``),
+    which is still JSON and still decodes to the identical value.
+
+    Consequence: the body contains no ``<!--``, no ``<script`` and no
+    ``</script`` in any letter case, so it cannot open a comment, open a
+    script element or prematurely close the element it sits in -- the three
+    sequences WHATWG's script-content restrictions key on. Decoding preserves
+    every value, array order and the integer/float/string/null/bool
+    distinction. HTML entity encoding and JavaScript-only ``\\x`` escapes are
+    deliberately NOT used: neither is JSON, and neither survives script-data
+    parsing unchanged.
+    """
+    text = canonical_bytes(value).decode("utf-8")
+    return (text
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026"))
+
+
+def _islands_script(snapshot, tool_contract):
+    """The data-script slot: exactly two inline inert JSON islands, in order."""
+    return (
+        '<script type="application/json" id="catalog-data">'
+        + _script_json(snapshot)
+        + '</script>'
+        '<script type="application/json" id="tool-contract">'
+        + _script_json(tool_contract)
+        + '</script>')
 
 
 def build_provider_header_meta():
@@ -562,7 +603,7 @@ def render_page(roster, logo_b64, header_meta=None):
     )
 
 
-def render_catalog_page(snapshot, logo_b64, header_meta=None):
+def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract):
     """Render the matrix HTML from an already-VALIDATED public snapshot.
 
     ``snapshot`` is a CALLER PRECONDITION: validation (and the eventual
@@ -571,6 +612,13 @@ def render_catalog_page(snapshot, logo_b64, header_meta=None):
     read or capture, no logo/header/config load, no clock and no I/O. The
     module's import-time producer configuration stays outside this function's
     purity claim.
+
+    ``tool_contract`` is a REQUIRED keyword-only argument: the already-decoded
+    bare shared ``watchdog_catalog/tools.json`` array, loaded by the caller.
+    This explicit input keeps call-time rendering I/O-free instead of
+    introducing an implicit file read or an import-time mutable tool cache. A
+    valid snapshot and a reviewed JSON-native tool contract are caller
+    preconditions, as the valid snapshot was in 4c.
 
     Every rendered fact is derived from the snapshot, never from a module
     global or another provider's data:
@@ -588,10 +636,12 @@ def render_catalog_page(snapshot, logo_b64, header_meta=None):
     NOT a config read, so default headers are plain. The HTTPS-only scheme
     guard and attribute escaping are shared template behaviour.
 
-    The data-script slot is deliberately EMPTY in this unit: the roster-data
-    island belongs to the legacy adapter, and catalogue/tool embedding with
-    script-context escaping is a later boundary. An empty slot is staging, not
-    a production claim.
+    The data-script slot carries exactly two inline inert JSON islands, in
+    order: ``catalog-data`` (the COMPLETE public snapshot) then
+    ``tool-contract`` (the supplied tool array), each encoded through the
+    accepted canonical encoder plus the script-context escape — so the page
+    stays self-contained with no executable script, no network fetch and no
+    ``src`` attribute, and no raw private state.
     """
     provider_order = list(snapshot["provider_order"])
     providers = snapshot["providers"]
@@ -618,7 +668,7 @@ def render_catalog_page(snapshot, logo_b64, header_meta=None):
         wiring=wiring,
         logo_b64=logo_b64,
         header_meta={} if header_meta is None else header_meta,
-        data_script="",
+        data_script=_islands_script(snapshot, tool_contract),
     )
 
 
