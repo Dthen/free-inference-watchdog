@@ -46,13 +46,23 @@ unaliased from either captured input, and neither input is ever mutated -- on
 success OR on failure. Output adaptation back to the legacy local shape (raw
 metadata restoration, one-read roster retention) is a LATER unit; this adapter
 returns the public snapshot only and never puts raw objects into it.
+
+:func:`serialize_snapshot` is the pure export-TEXT side of the same boundary
+(unit 4b): it validates the accepted snapshot through that same validator and
+then encodes the ENTIRE snapshot -- root ``snapshot_id`` included -- through
+the accepted whole-value
+:func:`watchdog_catalog.catalog.canonical_bytes`, returning a native ``str``
+plus exactly one trailing LF. It is in-memory only: no file, path, CLI, roster,
+registry, clock, environment, network or SDK access, no alternate encoder, and
+no repair/reseal. Writing that text to ``site/catalog.json`` (validated
+two-artifact publication) is a LATER unit, as is HTML script-context escaping.
 """
 
 from __future__ import annotations
 
 from watchdog_catalog import catalog
 
-__all__ = ["build_snapshot", "capture_registry"]
+__all__ = ["build_snapshot", "capture_registry", "serialize_snapshot"]
 
 #: The frozen warning vocabulary, in its deduplicated publication ORDER. The
 #: accepted validator re-enforces exactly this order on the sealed snapshot.
@@ -242,6 +252,39 @@ def build_snapshot(registry, roster, *, cadence_s):
     # hand the SAME object to the accepted structural self-check.
     snapshot["snapshot_id"] = catalog.snapshot_hash(snapshot)
     return catalog.validate_snapshot(snapshot)
+
+
+def serialize_snapshot(snapshot):
+    """Serialize ONE validated public snapshot to deterministic export text.
+
+    The accepted :func:`watchdog_catalog.catalog.validate_snapshot` runs FIRST
+    and unmodified: a malformed structure, an unsupported schema version or a
+    stale/incorrect digest raises that validator's own frozen
+    :class:`catalog.CatalogError` code and message. Nothing is repaired,
+    dropped, coerced or resealed, and no envelope, generic encoder error or
+    empty JSON success is manufactured here.
+
+    On acceptance the ENTIRE snapshot -- INCLUDING its root ``snapshot_id`` --
+    is encoded through the accepted
+    :func:`watchdog_catalog.catalog.canonical_bytes` (UTF-8, code-point sorted
+    object keys, compact separators, ``ensure_ascii=True``, finite values
+    only) and returned as a native ``str`` with EXACTLY ONE trailing LF. That
+    newline is part of the export-text contract, not part of the body digest.
+
+    Object insertion order therefore cannot change the returned text, while
+    array order and every retained public value/type (including the
+    integer-versus-float and numeric-string distinctions) are preserved. The
+    text is external JSON: HTML script-context escaping is a distinct later
+    boundary, and this helper does not claim raw JSON text is safe to paste
+    inside HTML.
+
+    Purely in-memory: no file, path, CLI, roster, registry, environment,
+    clock, network, SDK or config-loader access, and ``snapshot`` is never
+    mutated on success or on failure. The later writer consumes this returned
+    text; publication is NOT performed here.
+    """
+    return catalog.canonical_bytes(
+        catalog.validate_snapshot(snapshot)).decode("utf-8") + "\n"
 
 
 def capture_registry(providers, wiring):

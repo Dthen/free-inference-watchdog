@@ -6,7 +6,7 @@ module -- ``catalog_export.build_snapshot`` -- plus the accepted
 LAZILY inside each test so that a missing module or symbol is a focused RED
 (one failing assertion per group) rather than an unrelated collection error.
 
-Five coherent groups, edges expressed as row loops rather than one test per
+Six coherent groups, edges expressed as row loops rather than one test per
 row:
 
 * G1 -- reverse capture: a captured active registry plus one captured roster
@@ -36,6 +36,15 @@ row:
   JSON -> accepted-validator round trip with synthetic secret sentinels.
   HTML rendering, CLI wiring and publication remain OUT of this group's
   boundary.
+* G6 -- validated deterministic JSON serialization (unit 4b): the pure
+  ``serialize_snapshot`` export-text boundary over the accepted validator and
+  whole-value canonical encoder -- exact independent-reference text for every
+  existing valid fixture, one trailing LF, ASCII/ensure_ascii evidence,
+  object-insertion-order independence with preserved array order, a resealed
+  non-default ``provider_order``, capture -> build -> serialize sentinel
+  exclusion with hostile retained text, typed pricing distinctions and the
+  delegated rejection codes. File publication, HTML escaping and the CLI stay
+  OUT of this group's boundary.
 
 Every expected value below is an independent literal restatement of the frozen
 contract or of an existing fixture; no expected snapshot is generated from the
@@ -1000,3 +1009,275 @@ def test_active_registry_public_capture_and_secret_sentinels():
     again = capture_registry(providers, wiring)
     assert again[0] is not captured[0]
     assert again[0]["name"] == "Zeta ✓"
+
+
+# ========= G6: validated deterministic JSON serialization (unit 4b) =========
+
+# Every existing VALID public snapshot fixture, by explicit fixed name -- all
+# nine, not a glob over the rule tables.
+SERIALIZE_FIXTURES = (
+    "basic.json",
+    "lookup.json",
+    "provider-extension.json",
+    "ordering.json",
+    "status-short-cadence.json",
+    "capability-unknown.json",
+    "metadata-edge-cases.json",
+    "search-text.json",
+    "status-unknown-time.json",
+)
+
+
+def _reference_export_text(snapshot):
+    """The export text restated from stdlib ``json`` ONLY (independent oracle).
+
+    Sorted object keys, compact separators, ASCII escapes, finite values only,
+    the ENTIRE value including the root ``snapshot_id``, plus exactly one LF.
+    """
+    return json.dumps(snapshot, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False) + "\n"
+
+
+def _reverse_dict_order(value):
+    """Reverse OBJECT member insertion order ONLY; array order is untouched."""
+    if isinstance(value, dict):
+        return {key: _reverse_dict_order(value[key])
+                for key in reversed(list(value))}
+    if isinstance(value, list):
+        return [_reverse_dict_order(item) for item in value]
+    return value
+
+
+def test_serialize_snapshot_validated_deterministic_export():
+    from catalog_export import (build_snapshot, capture_registry,
+                                serialize_snapshot)
+    from watchdog_catalog import catalog
+
+    messages = {
+        INVALID_SNAPSHOT: INVALID_SNAPSHOT_MESSAGE,
+        "unsupported_schema_version":
+            "Unsupported catalogue schema version.",
+    }
+
+    # (a) Every existing valid fixture: exact independent-reference text that
+    # INCLUDES the root snapshot_id, one trailing LF and no other framing, an
+    # ASCII str, a real accepted-validator round trip, and no input mutation.
+    assert len(SERIALIZE_FIXTURES) == 9
+    assert len(set(SERIALIZE_FIXTURES)) == 9
+    for name in SERIALIZE_FIXTURES:
+        snapshot = _load_fixture(name)
+        assert snapshot["snapshot_id"] == _independent_snapshot_id(snapshot), name
+        before = copy.deepcopy(snapshot)
+        text = serialize_snapshot(snapshot)
+        assert type(text) is str, name
+        assert text == _reference_export_text(snapshot), name
+        assert text.endswith("\n") and not text.endswith("\n\n"), name
+        assert text.count("\n") == 1, name
+        assert not text.startswith("\ufeff"), name
+        assert text.isascii(), name
+        loaded = catalog.load_snapshot(text)
+        assert loaded == snapshot, name
+        assert loaded is not snapshot, name
+        assert loaded["snapshot_id"] == snapshot["snapshot_id"], name
+        assert snapshot == before, name
+        assert snapshot["snapshot_id"] == before["snapshot_id"], name
+
+    # (b) Determinism: repeated calls are byte-identical, and reversing OBJECT
+    # insertion order at root, provider, model and nested architecture/pricing
+    # maps cannot change the exported bytes or the id. Arrays keep their order.
+    for name in ("lookup.json", "metadata-edge-cases.json", "search-text.json"):
+        snapshot = _load_fixture(name)
+        assert len(snapshot["provider_order"]) >= 2, name
+        first = serialize_snapshot(snapshot)
+        assert serialize_snapshot(snapshot) == first, name
+        reordered = _reverse_dict_order(snapshot)
+        assert list(reordered) != list(snapshot), name
+        assert serialize_snapshot(reordered) == first, name
+        assert reordered["snapshot_id"] == snapshot["snapshot_id"], name
+        # The array order survives literally -- the serializer sorts objects
+        # only, never arrays.
+        assert catalog.load_snapshot(first)["provider_order"] == \
+            snapshot["provider_order"], name
+
+    # A deliberately reordered provider_order, independently resealed, is a
+    # genuine valid snapshot with its OWN digest and text: never silently
+    # sorted back into the default provider order by the serializer.
+    base = _load_fixture("ordering.json")
+    registry, roster = _reverse_inputs(base)
+    built = build_snapshot(registry, roster, cadence_s=base["cadence_s"])
+    assert built == base
+    reordered_snapshot = copy.deepcopy(built)
+    reversed_order = list(reversed(built["provider_order"]))
+    assert reversed_order != built["provider_order"]
+    reordered_snapshot["provider_order"] = reversed_order
+    reordered_snapshot["snapshot_id"] = _independent_snapshot_id(
+        reordered_snapshot)
+    assert reordered_snapshot["snapshot_id"] != base["snapshot_id"]
+    assert catalog.validate_snapshot(reordered_snapshot) is reordered_snapshot
+    reordered_text = serialize_snapshot(reordered_snapshot)
+    assert reordered_text == _reference_export_text(reordered_snapshot)
+    assert reordered_text != serialize_snapshot(base)
+    assert catalog.load_snapshot(reordered_text)["provider_order"] == \
+        reversed_order
+    assert built == base
+
+    # (c) ONE capture -> the REAL builder -> serialization: projected public
+    # data retained, synthetic private sentinels absent, and hostile retained
+    # text surviving JSON decoding under canonical ASCII escaping.
+    token, auth, base_url, local_path = (
+        "SENTINEL-4B-TOKEN", "SENTINEL-4B-AUTH", "SENTINEL-4B-BASE",
+        "SENTINEL-4B-PATH")
+    pending, upstream = "SENTINEL-4B-PENDING", "SENTINEL-4B-UPSTREAM"
+    hostile = ("Ünïcode 😀 \"quoted\" \\backslash\\ </SCRIPT> "
+               "\u2028 \u2029 text-looking-markup <b>x</b>")
+    providers = {"p": {"name": "Provider P", "_token": token,
+                       "auth": {"token": auth}, "base_url": base_url,
+                       "private_path": local_path,
+                       "pending_alert": pending,
+                       "upstream_unknown": upstream}}
+    wiring = {"p": {
+        "chat_completions_url": "https://p.example/v1/chat/completions",
+        "api_type": "openai_compatible"}}
+    roster = {
+        "tick_epoch": 1759200000,
+        "providers": {"p": ["known", "unknown"]},
+        "provider_models": {"p": {
+            "known": {"name": "Known", "description": hostile,
+                      "context_length": 0,
+                      "architecture": {"input_modalities": [],
+                                       "output_modalities": []},
+                      "supported_parameters": []},
+            "unknown": {"name": "Unknown", "description": None,
+                        "context_length": None,
+                        "architecture": {"input_modalities": None,
+                                         "output_modalities": None},
+                        "supported_parameters": None},
+        }},
+        "pending_alerts": [{"_token": pending}],
+    }
+    snapshot = build_snapshot(capture_registry(providers, wiring), roster,
+                              cadence_s=3600)
+    text = serialize_snapshot(snapshot)
+    for secret in (token, auth, base_url, local_path, pending, upstream):
+        assert secret not in text, secret
+    assert text == _reference_export_text(snapshot)
+    assert text.isascii()
+    # Quotes/backslashes and non-ASCII follow canonical ASCII escaping; the
+    # literal markup and line separators stay escaped, and raw JSON text is
+    # NOT claimed to be safe to paste inside HTML (a later 4d boundary).
+    assert "\\\"quoted\\\"" in text
+    assert "\\\\backslash\\\\" in text
+    assert "\\ud83d\\ude00" in text and "😀" not in text
+    assert "\\u2028" in text and "\\u2029" in text
+    assert "\u2028" not in text and "\u2029" not in text
+    loaded = catalog.load_snapshot(text)
+    model = loaded["providers"]["p"]["models"]["known"]
+    assert model["description"] == hostile
+    assert loaded["providers"]["p"]["display_name"] == "Provider P"
+    assert loaded["providers"]["p"]["chat_completions_url"] == \
+        wiring["p"]["chat_completions_url"]
+    assert loaded["snapshot_id"] == snapshot["snapshot_id"]
+    # A known empty [] stays distinguishable from unknown null.
+    assert model["architecture"] == {"input_modalities": [],
+                                     "output_modalities": []}
+    assert model["supported_parameters"] == []
+    unknown = loaded["providers"]["p"]["models"]["unknown"]
+    assert unknown["architecture"] == {"input_modalities": None,
+                                       "output_modalities": None}
+    assert unknown["supported_parameters"] is None
+
+    # (d) Typed pricing controls: integer 1 vs float 1.0 vs a numeric string
+    # are distinct ids AND distinct export text, each independently valid.
+    def pricing_snapshot(prompt, completion):
+        registry = [_record("p")]
+        entry = {"tick_epoch": 0, "providers": {"p": ["m"]},
+                 "provider_models": {"p": {"m": {
+                     "name": "M", "context_length": 8,
+                     "architecture": {"input_modalities": ["text"],
+                                      "output_modalities": ["text"]},
+                     "supported_parameters": ["temperature"],
+                     "pricing": {"prompt": prompt,
+                                 "completion": completion}}}}}
+        return build_snapshot(registry, entry, cadence_s=1)
+
+    int_snapshot = pricing_snapshot(1, 0)
+    float_snapshot = pricing_snapshot(1.0, 0.5)
+    string_snapshot = pricing_snapshot("1.0", "0")
+    for snapshot in (int_snapshot, float_snapshot, string_snapshot):
+        assert snapshot["snapshot_id"] == _independent_snapshot_id(snapshot)
+        assert catalog.validate_snapshot(snapshot) is snapshot
+        assert serialize_snapshot(snapshot) == \
+            _reference_export_text(snapshot)
+    ids = {int_snapshot["snapshot_id"], float_snapshot["snapshot_id"],
+           string_snapshot["snapshot_id"]}
+    assert len(ids) == 3
+    int_text = serialize_snapshot(int_snapshot)
+    float_text = serialize_snapshot(float_snapshot)
+    string_text = serialize_snapshot(string_snapshot)
+    assert '"prompt":1},"supported_parameters"' in int_text
+    assert '"prompt":1.0},"supported_parameters"' in float_text
+    assert '"prompt":"1.0"},"supported_parameters"' in string_text
+    int_prompt = catalog.load_snapshot(int_text)[
+        "providers"]["p"]["models"]["m"]["pricing"]["prompt"]
+    float_prompt = catalog.load_snapshot(float_text)[
+        "providers"]["p"]["models"]["m"]["pricing"]["prompt"]
+    string_prompt = catalog.load_snapshot(string_text)[
+        "providers"]["p"]["models"]["m"]["pricing"]["prompt"]
+    assert type(int_prompt) is int and int_prompt == 1
+    assert type(float_prompt) is float and float_prompt == 1.0
+    assert type(string_prompt) is str and string_prompt == "1.0"
+
+    # (e) Rejection controls delegate to the accepted validator: exact frozen
+    # code/message, no input mutation, no repaired output. The shaped native
+    # case would raise an incidental ``TypeError`` from the encoder if
+    # validation were skipped, so validator-before-encoder is observable.
+    good = _load_fixture("basic.json")
+    first_key = good["provider_order"][0]
+
+    missing = copy.deepcopy(good)
+    del missing["warnings"]
+    extra = copy.deepcopy(good)
+    extra["unexpected"] = "x"
+    version_type = copy.deepcopy(good)
+    version_type["schema_version"] = "1"
+    unsupported = copy.deepcopy(good)
+    unsupported["schema_version"] = 2
+    bad_type = copy.deepcopy(good)
+    bad_type["providers"][first_key]["stale"] = "yes"
+    bad_hash_format = copy.deepcopy(good)
+    bad_hash_format["snapshot_id"] = "A" * 64
+    stale_hash = copy.deepcopy(good)
+    stale_hash["providers"][first_key]["display_name"] = "Renamed"
+    shaped_native = copy.deepcopy(good)
+    shaped_native["tick_epoch"] = object()
+
+    rejects = [
+        (missing, INVALID_SNAPSHOT),
+        (extra, INVALID_SNAPSHOT),
+        (version_type, INVALID_SNAPSHOT),
+        (unsupported, "unsupported_schema_version"),
+        (bad_type, INVALID_SNAPSHOT),
+        (bad_hash_format, INVALID_SNAPSHOT),
+        (stale_hash, INVALID_SNAPSHOT),
+        (shaped_native, INVALID_SNAPSHOT),
+    ]
+    for case, code in rejects:
+        before = copy.deepcopy(case)
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            serialize_snapshot(case)
+        assert excinfo.value.code == code
+        assert excinfo.value.message == messages[code]
+        assert _same_inputs(case, before)
+
+    # Non-object roots keep the validator's invalid_snapshot behaviour.
+    for root in ([], (), "", 0, 3.5, True, None,
+                 [good], ("providers",)):
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            serialize_snapshot(root)
+        assert excinfo.value.code == INVALID_SNAPSHOT, root
+        assert excinfo.value.message == INVALID_SNAPSHOT_MESSAGE, root
+
+    # Nothing was repaired: the hostile-renamed snapshot still carries the
+    # changed value, and the untouched fixture still exports normally.
+    assert stale_hash["providers"][first_key]["display_name"] == "Renamed"
+    assert serialize_snapshot(good) == _reference_export_text(good)
