@@ -288,9 +288,8 @@ validated local snapshot; the `snapshot_id` hash binds that **local sanitized
 public projection**, not the raw metadata dictionaries or any filesystem
 diagnostic, so it can differ from the strictly published feed for the same tick,
 and a structurally invalid raw source can prevent strict publication while this
-local compatibility view still answers. `list_free_models`, `get_model` and
-`list_endpoints` delegate to the pure query here; `watchdog_status` keeps its
-own behaviour until its own unit.
+local compatibility view still answers. `list_free_models`, `get_model`,
+`list_endpoints` and `watchdog_status` all delegate to the pure query here.
 
 **Local `get_model` compatibility (literal membership, restored raw metadata).**
 The root-script `get_model` delegates exact membership, the separate
@@ -331,6 +330,37 @@ registry-wide totals. Additive core provenance (`snapshot_id`, strict
 snapshot-wide `warnings`) is carried through; `snapshot_id` binds the same local
 sanitized public projection described above — never the restored raw metadata
 dictionaries or a filesystem diagnostic.
+
+**Local `watchdog_status` compatibility (core catalogue health, local operator diagnostics).**
+The root-script `watchdog_status` delegates catalogue health — tick age (core
+field `last_tick_age_s`), freshness, provider staleness, per-gateway counts, the
+whole-catalogue cardinalities and the projected metadata coverage — to that same
+pure query module while keeping the local interface. Freshness is strict: a null
+or future roster `tick_epoch` yields `last_tick_age_s` null and `tick_fresh`
+false, never a negative age or a healthy clamp, and an age exactly equal to
+`cadence_s` still counts as fresh. Its legacy `now=None` parameter is a LOCAL
+test clock, not a public tool argument: `None` reads `time.time()` once, an
+explicit native int or finite non-negative float within `2**53 - 1` is used
+literally (`0` never falls back to the wall clock), and bool, non-numeric,
+NaN/Infinity, negative (including a negative fraction) or unsafe values fail
+with the flat `now must be a finite non-negative safe number` before any state
+read, while the pure core only ever receives one normalized integer clock. The
+counts are the corrected **deduplicated** ones (duplicate ids collapse, empty
+and non-string ids are dropped), so a provider's count is its distinct selected
+raw ids. Two metadata measures are deliberately kept apart: `metadata_summary`
+is the legacy **raw dictionary-presence** pair count over the selected
+`(gateway, raw id)` scope (an empty raw dict counts; a missing or non-dict value
+does not), while `metadata_coverage` reports **projected-field** knowledge and is
+not an alias. `stale_providers` (the roster's carried names, original order and
+duplicates, inactive names included), `pending_alerts` and
+`site_published`/`site_publish_age_s` remain LOCAL observations — the direct
+public core reports those three as `null` — and the site age uses the raw
+validated clock, so fractional file mtimes keep their sub-second contribution.
+`warnings` is the core **union** of snapshot warnings with the derived
+`tick_epoch_unknown`, `tick_epoch_future` and `tick_stale` codes in their frozen
+order, and `snapshot_id` binds the same local sanitized public projection
+described above — never the raw metadata dictionaries, the pending queue or a
+filesystem diagnostic.
 
 ### Structural validation of published snapshots (frozen rules)
 

@@ -2357,3 +2357,747 @@ def test_list_endpoints_delegates_to_pure_query(monkeypatch, tmp_path):
     assert fresh3["gateways"]["z-last"]["models"]["shared/model"]["name"] == (
         "Z Shared")
     assert len(loads) == 1 and len(calls) == 1
+
+
+# ---------- watchdog_status local delegation (unit 2j-U4) ----------
+
+def test_watchdog_status_delegates_and_preserves_local_diagnostics(
+        monkeypatch, tmp_path):
+    """U4: the LOCAL ``watchdog_status`` captures the registry ONCE, validates
+    and captures its clock ONCE, reads the roster ONCE, adapts that same
+    observation to the validated public snapshot, delegates catalogue health,
+    freshness and each count/cardinality/coverage projection to the accepted
+    pure query, and keeps separately observed LOCAL operator diagnostics.
+
+    Fully synthetic globals plus a real tmp state dir read through the REAL
+    ``state.load_roster``; the REAL ``watchdog_catalog.query.watchdog_status``
+    is wrapped directly so a missing ACTUAL delegation is a real RED. The core
+    payload keeps its OWN null pending/site placeholders in the recorded call,
+    independent literal expectations cover every count/coverage/map, and a
+    returned-sentinel phase proves the local output really follows that core
+    result instead of recomputing health from the outer clock.
+    """
+    import copy
+    import os
+
+    import watchdog_catalog.query as real_query
+
+    real_status = real_query.watchdog_status
+    real_load = mcp_server.state.load_roster
+    real_capture = mcp_server._capture_registry
+    real_local_snapshot = mcp_server._local_snapshot
+
+    configs = {"z-last": {"name": "Zeta"},
+               "a-first": {"name": "Alpha"},
+               "m-zero": {"name": "Mu"}}
+    wiring = {
+        "z-last": {"chat_completions_url":
+                   "https://z.example/v1/chat/completions",
+                   "api_type": "openai_compatible"},
+        "a-first": {"chat_completions_url":
+                    "https://a.example/v1/chat/completions",
+                    "api_type": "openai_compatible"},
+        "m-zero": {"chat_completions_url":
+                   "https://m.example/v1/chat/completions",
+                   "api_type": "anthropic_compatible"},
+    }
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+    # Synthetic NON-DEFAULT cadence: a hardcoded 3600 would misgrade freshness.
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 1800)
+
+    shared_z = {"name": "Z Shared", "context_length": 8192,
+                "unknown_field": "Z-UNKNOWN",
+                "architecture": {"input_modalities": ["text"]},
+                "supported_parameters": ["temperature"],
+                "description": "Z desc", "pricing": {"prompt": "0"}}
+    shared_a = {"name": "A Shared", "context_length": 131072,
+                "unknown_field": "A-UNKNOWN",
+                "architecture": {"input_modalities": ["text", "image"],
+                                 "output_modalities": ["text"]},
+                "supported_parameters": [], "pricing": {"prompt": "0"}}
+    roster_doc = {
+        "tick_epoch": 1000,
+        "providers": {
+            # duplicates, empty, non-string, padded, non-free and literal
+            # non-ASCII/leading-zero ids in ONE tracked provider.
+            "z-last": ["shared/model", "z-extra-free", "dup", "dup", "",
+                       3, None, "empty-meta", " padded ", "non-free",
+                       "z2", "z02", "z10", "z\u0669", True],
+            "a-first": ["shared/model", "plain", "trk:free", "trk-free",
+                        "   "],
+            # unknown provider entry, malformed value: excluded by the local
+            # sanitizer before the accepted builder ever validates it.
+            "unknown-bad": "not-a-list",
+        },
+        "provider_models": {
+            "z-last": {"shared/model": shared_z,
+                       "z-extra-free": "BAD-CONTAINER",
+                       "empty-meta": {},
+                       "dup": {"name": "DupZ"}},
+            "a-first": {"shared/model": shared_a,
+                        "trk:free": {"name": "Trk",
+                                     "unknown_field": "TRK"},
+                        "trk-free": {"name": "TrkFree",
+                                     "nested": {"deep": [1, None,
+                                                         {"x": True}]}}},
+        },
+        # carried names keep ORIGINAL order/duplicates, inactive names included
+        "stale_providers": ["z-last", "ghost", "z-last"],
+        "private": {"deep": "SENTINEL"},
+    }
+    (tmp_path / "state").mkdir()
+    roster_path = tmp_path / "state" / "roster.json"
+    roster_path.write_text(json.dumps(roster_doc))
+    control = json.loads(roster_path.read_text())
+    site_path = tmp_path / "site" / "index.html"
+    site_path.parent.mkdir()
+    site_path.write_text("<html></html>")
+    os.utime(site_path, (1000.5, 1000.5))     # fractional mtime on purpose
+    pending_path = tmp_path / "state" / "pending_alerts.json"
+    pending_path.write_text(json.dumps([{"payload": {"a": 1}},
+                                        {"payload": {"b": 2}}]))
+
+    captures, loads, snapshots, calls = [], [], [], []
+    guard = {"load_count": 0, "swap": None, "inner_now": None,
+             "core_args": None, "sentinel": False}
+
+    def _spy_capture(base):
+        out = real_capture(base)
+        captures.append(out)
+        if guard["swap"] is not None:
+            # Replace BOTH module roots AFTER capture: the rest of this request
+            # must still use the already-captured records.
+            mcp_server.PROVIDERS, mcp_server.GATEWAY_WIRING = guard["swap"]
+        return out
+
+    def _spy_load(path):
+        out = real_load(path)
+        loads.append(out)
+        guard["load_count"] += 1
+        if guard["load_count"] > 1:
+            raise AssertionError("roster must be loaded exactly once per request")
+        return out
+
+    def _spy_local_snapshot(roster, registry, base):
+        out = real_local_snapshot(roster, registry, base)
+        # Same retained observation flows into the snapshot AND the local
+        # raw-metadata presence summary.
+        assert roster is loads[-1]
+        snapshots.append(out)
+        return out
+
+    def _spy_status(snapshot, arguments, *, now):
+        before = copy.deepcopy(snapshot)
+        core_args = (guard["core_args"] if guard["core_args"] is not None
+                     else arguments)
+        inner = guard["inner_now"]
+        out = real_status(snapshot, core_args,
+                          now=now if inner is None else inner)
+        calls.append({"snapshot": snapshot, "before": before,
+                      "arguments": arguments, "core_args": core_args,
+                      "now": now, "inner": inner, "result": out})
+        if guard["sentinel"]:
+            # A VALID returned payload with coherent mutated values: the local
+            # wrapper must carry THESE, not recompute health from its own clock.
+            out = dict(out)
+            out["snapshot_id"] = "SENTINEL-SNAPSHOT-ID"
+            out["last_tick_age_s"] = 4242
+            out["tick_fresh"] = False
+            out["provider_counts"] = {**out["provider_counts"], "a-first": 77}
+            out["metadata_coverage"] = {key: 9 for key in out["metadata_coverage"]}
+            out["counts"] = {"gateways": 9, "endpoints": 9,
+                             "distinct_raw_ids": 9, "marker_group_labels": 9}
+            out["warnings"] = ["tick_stale", "metadata_missing"]
+            out["pending_alerts"] = None
+            out["site_published"] = None
+            out["site_publish_age_s"] = None
+        return out
+
+    monkeypatch.setattr(mcp_server, "_capture_registry", _spy_capture)
+    monkeypatch.setattr(mcp_server, "_local_snapshot", _spy_local_snapshot)
+    monkeypatch.setattr(mcp_server.state, "load_roster", _spy_load)
+    monkeypatch.setattr(real_query, "watchdog_status", _spy_status)
+
+    def _reset():
+        captures.clear()
+        loads.clear()
+        snapshots.clear()
+        calls.clear()
+        guard["load_count"] = 0
+
+    # -- health: one capture/load/snapshot/core call, every count independent --
+    _reset()
+    res = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    assert res["ok"] is True
+    assert res["tool"] == "watchdog_status"
+    assert res["state_root"] == str(tmp_path.resolve())
+    assert len(captures) == 1 and len(loads) == 1
+    assert len(snapshots) == 1 and len(calls) == 1
+    assert calls[0]["arguments"] == {}
+    now_int = calls[0]["now"]
+    assert type(now_int) is int and now_int == 1060   # int() exactly once
+    assert set(res) == {
+        "tool", "state_root", "ok", "snapshot_id", "tick_epoch", "cadence_s",
+        "last_tick_age_s", "tick_fresh", "provider_staleness",
+        "provider_counts", "metadata_coverage", "counts", "pending_alerts",
+        "site_published", "site_publish_age_s", "warnings", "stale_providers",
+        "metadata_summary"}
+    assert res["tick_epoch"] == 1000
+    assert res["cadence_s"] == 1800
+    assert res["last_tick_age_s"] == 60 and res["tick_fresh"] is True
+    snap = calls[0]["snapshot"]
+    assert snap["provider_order"] == ["z-last", "a-first", "m-zero"]
+    assert snap["providers"]["z-last"]["model_ids"] == [
+        " padded ", "dup", "empty-meta", "non-free", "shared/model",
+        "z-extra-free", "z02", "z10", "z2", "z\u0669"]
+    assert snap["providers"]["a-first"]["model_ids"] == [
+        "   ", "plain", "shared/model", "trk-free", "trk:free"]
+    assert snap["providers"]["m-zero"]["model_ids"] == []
+    assert "unknown-bad" not in snap["providers"]
+    assert "m-zero" not in control["providers"]     # genuinely absent
+    assert res["provider_counts"] == {"z-last": 10, "a-first": 5, "m-zero": 0}
+    assert res["provider_staleness"] == {
+        "z-last": True, "a-first": False, "m-zero": False}
+    assert res["counts"] == {"gateways": 3, "endpoints": 15,
+                             "distinct_raw_ids": 14, "marker_group_labels": 13}
+    # projected-field knowledge: known 0/[]/"" count, null does not.
+    assert res["metadata_coverage"] == {
+        "endpoints": 15, "context_length_known": 2,
+        "input_modalities_known": 2, "output_modalities_known": 1,
+        "supported_parameters_known": 2, "description_known": 1}
+    assert res["warnings"] == ["metadata_missing", "metadata_invalid"]
+    assert res["snapshot_id"] == snap["snapshot_id"]
+    # LOCAL raw-dictionary PRESENCE over the core-selected scope: an EMPTY raw
+    # dict counts, a non-dict/missing value does not, and the total (6)
+    # deliberately differs from projected description coverage (1).
+    assert res["metadata_summary"] == {
+        "models_with_metadata": 6,
+        "provider_counts": {"z-last": 3, "a-first": 3, "m-zero": 0}}
+    assert res["stale_providers"] == ["z-last", "ghost", "z-last"]
+    # LOCAL operator observations, not core placeholders.
+    assert res["pending_alerts"] == 2
+    assert res["site_published"] is True
+    # RAW validated clock for the filesystem diagnostic: int(1060.75 - 1000.5)
+    # is 60, while prematurely normalized arithmetic would report 59.
+    assert res["site_publish_age_s"] == 60
+    # the recorded CORE envelope keeps its own null operator placeholders.
+    assert calls[0]["result"]["pending_alerts"] is None
+    assert calls[0]["result"]["site_published"] is None
+    assert calls[0]["result"]["site_publish_age_s"] is None
+    # one observation, never mutated; the raw dict stays authoritative.
+    loaded = loads[0]
+    assert loaded == control
+    assert snap == calls[0]["before"]
+    raw_z = loaded["provider_models"]["z-last"]["shared/model"]
+    assert raw_z["unknown_field"] == "Z-UNKNOWN"
+    proj_z = snap["providers"]["z-last"]["models"]["shared/model"]
+    assert proj_z is not raw_z and "unknown_field" not in proj_z
+
+    # -- local-only changes never move the snapshot hash ---------------------
+    site_path.unlink()
+    pending_path.write_text(json.dumps([{"payload": {"a": 1}}]))
+    _reset()
+    local_only = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    assert local_only["ok"] is True
+    assert local_only["snapshot_id"] == res["snapshot_id"]
+    assert local_only["pending_alerts"] == 1
+    assert local_only["site_published"] is False
+    assert local_only["site_publish_age_s"] is None
+    assert len(loads) == 1 and len(calls) == 1
+
+    # -- present site with a FUTURE mtime clamps to zero ---------------------
+    site_path.write_text("<html></html>")
+    os.utime(site_path, (2000.0, 2000.0))
+    _reset()
+    future_site = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    assert future_site["site_published"] is True
+    assert future_site["site_publish_age_s"] == 0
+    assert future_site["snapshot_id"] == res["snapshot_id"]
+
+    # -- local output follows the RETURNED core result (sentinel phase) ------
+    os.utime(site_path, (1000.5, 1000.5))
+    _reset()
+    guard["sentinel"] = True
+    try:
+        sent = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    finally:
+        guard["sentinel"] = False
+    assert sent["snapshot_id"] == "SENTINEL-SNAPSHOT-ID"
+    assert sent["last_tick_age_s"] == 4242 and sent["tick_fresh"] is False
+    assert sent["tick_epoch"] == 1000
+    assert sent["provider_counts"]["a-first"] == 77
+    assert sent["provider_counts"]["z-last"] == 10
+    assert sent["metadata_coverage"] == {
+        "endpoints": 9, "context_length_known": 9, "input_modalities_known": 9,
+        "output_modalities_known": 9, "supported_parameters_known": 9,
+        "description_known": 9}
+    assert sent["counts"] == {"gateways": 9, "endpoints": 9,
+                              "distinct_raw_ids": 9, "marker_group_labels": 9}
+    assert sent["warnings"] == ["tick_stale", "metadata_missing"]
+    # ... while LOCAL diagnostics stay independently observed.
+    assert sent["metadata_summary"] == {
+        "models_with_metadata": 6,
+        "provider_counts": {"z-last": 3, "a-first": 3, "m-zero": 0}}
+    assert sent["stale_providers"] == ["z-last", "ghost", "z-last"]
+    assert sent["pending_alerts"] == 1
+    assert sent["site_publish_age_s"] == 60
+    assert sent is not calls[0]["result"] and sent is not calls[0]["snapshot"]
+    assert calls[0]["snapshot"] == calls[0]["before"]
+
+    # -- genuine core result with a LATER inner clock plus the outer raw clock
+    _reset()
+    guard["inner_now"] = 6060
+    try:
+        inner_res = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    finally:
+        guard["inner_now"] = None
+    assert calls[0]["now"] == 1060 and calls[0]["inner"] == 6060
+    assert inner_res["last_tick_age_s"] == 5060     # the CORE age, not 60
+    assert inner_res["tick_fresh"] is False
+    assert inner_res["warnings"] == [
+        "metadata_missing", "metadata_invalid", "tick_stale"]
+    assert inner_res["site_publish_age_s"] == 60    # outer RAW clock
+    assert inner_res["snapshot_id"] == res["snapshot_id"]
+
+    # -- the real-core argument envelope maps to a flat local error ----------
+    _reset()
+    guard["core_args"] = {"provider": "not-an-argument"}
+    try:
+        envelope = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    finally:
+        guard["core_args"] = None
+    assert envelope["ok"] is False
+    assert envelope["error"] == "Invalid tool arguments."
+    assert set(envelope) == {"tool", "state_root", "ok", "error"}
+    assert calls[-1]["arguments"] == {}
+    assert calls[-1]["result"] == {
+        "ok": False,
+        "error": {"code": "invalid_arguments",
+                  "message": "Invalid tool arguments.", "parameter": None}}
+    assert len(loads) == 1 and len(snapshots) == 1
+
+    # -- capture-root and deferred structural failures stay fixed local errors
+    monkeypatch.setattr(mcp_server, "PROVIDERS", [])
+    _reset()
+    providers_root = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    assert providers_root == {"tool": "watchdog_status",
+                              "state_root": str(tmp_path.resolve()),
+                              "ok": False,
+                              "error": "Invalid catalogue snapshot."}
+    assert loads == [] and calls == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", {})
+    _reset()
+    wiring_root = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    assert wiring_root["ok"] is False
+    assert wiring_root["error"] == "Invalid catalogue snapshot."
+    assert set(wiring_root) == {"tool", "state_root", "ok", "error"}
+    assert len(loads) == 1 and calls == []
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    monkeypatch.setattr(mcp_server, "PROVIDERS", {"z-last": "not-a-dict"})
+    _reset()
+    bad_record = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    assert bad_record["ok"] is False
+    assert bad_record["error"] == "Invalid catalogue snapshot."
+    assert len(loads) == 1 and calls == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 0)
+    _reset()
+    bad_cadence = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    assert bad_cadence["ok"] is False
+    assert bad_cadence["error"] == "Invalid catalogue snapshot."
+    assert calls == []
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 1800)
+
+    # -- missing/corrupt/non-object/providers-map state + legacy defaults ----
+    _reset()
+    missing = mcp_server.watchdog_status(now=1060.75, root=tmp_path / "nope")
+    assert missing["ok"] is False
+    assert "roster" in missing["error"].lower()
+    assert missing["cadence_s"] == 1800
+    assert missing["pending_alerts"] is None
+    assert missing["site_published"] is False
+    assert loads == [] and calls == []
+
+    corrupt_root = tmp_path / "corrupt"
+    (corrupt_root / "state").mkdir(parents=True)
+    (corrupt_root / "state" / "roster.json").write_text("{not json!!")
+    _reset()
+    corrupt = mcp_server.watchdog_status(now=1060.75, root=corrupt_root)
+    assert corrupt["ok"] is False and "corrupt" in corrupt["error"].lower()
+    assert corrupt["cadence_s"] == 1800
+    assert corrupt["pending_alerts"] is None
+    assert corrupt["site_published"] is False
+    assert calls == []
+
+    nonobj_root = tmp_path / "nonobj"
+    (nonobj_root / "state").mkdir(parents=True)
+    (nonobj_root / "state" / "roster.json").write_text("[]")
+    _reset()
+    nonobj = mcp_server.watchdog_status(now=1060.75, root=nonobj_root)
+    assert nonobj["ok"] is False
+    assert "corrupt or unreadable roster" in nonobj["error"]
+    assert nonobj["pending_alerts"] is None and calls == []
+
+    map_root = tmp_path / "map"
+    (map_root / "state").mkdir(parents=True)
+    (map_root / "state" / "roster.json").write_text(json.dumps(
+        {"tick_epoch": 1000, "providers": []}))
+    _reset()
+    bad_map = mcp_server.watchdog_status(now=1060.75, root=map_root)
+    assert bad_map["ok"] is False
+    assert "'providers' is not a map" in bad_map["error"]
+    assert calls == []
+
+    # precedence: bad root > invalid clock > missing state > deferred content.
+    monkeypatch.setattr(mcp_server, "PROVIDERS", [])
+    _reset()
+    root_first = mcp_server.watchdog_status(now=-1, root=tmp_path / "nope")
+    assert root_first["error"] == "Invalid catalogue snapshot."
+    assert loads == [] and calls == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+
+    _reset()
+    clock_first = mcp_server.watchdog_status(now=-0.5, root=tmp_path / "nope")
+    assert clock_first["ok"] is False
+    assert clock_first["error"] == "now must be a finite non-negative safe number"
+    assert set(clock_first) == {"tool", "state_root", "ok", "error"}
+    assert loads == [] and calls == []
+
+    _reset()
+    clock_over_state = mcp_server.watchdog_status(now=-1, root=corrupt_root)
+    assert clock_over_state["error"] == (
+        "now must be a finite non-negative safe number")
+    assert loads == [] and calls == []
+
+    # -- exactly one capture stays authoritative when the roots are replaced --
+    conflicting = {"bogus": {"name": "Bogus"}}
+    conflicting_wiring = {"bogus": {
+        "chat_completions_url": "https://bogus.example/v1/chat/completions",
+        "api_type": "openai_compatible"}}
+    _reset()
+    guard["swap"] = (conflicting, conflicting_wiring)
+    try:
+        kept = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    finally:
+        guard["swap"] = None
+    assert kept["ok"] is True
+    assert [rec["key"] for rec in captures[0]] == ["z-last", "a-first", "m-zero"]
+    assert list(kept["provider_counts"]) == ["z-last", "a-first", "m-zero"]
+    assert list(kept["provider_staleness"]) == ["z-last", "a-first", "m-zero"]
+    assert list(kept["metadata_summary"]["provider_counts"]) == [
+        "z-last", "a-first", "m-zero"]
+    assert "bogus" not in kept["provider_counts"]
+    assert mcp_server.PROVIDERS == conflicting        # the swap really happened
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    # -- a programmer exception at the real call boundary PROPAGATES ----------
+    def _boom(snapshot, arguments, *, now):
+        raise RuntimeError("programming exception")
+
+    _reset()
+    monkeypatch.setattr(real_query, "watchdog_status", _boom)
+    with pytest.raises(RuntimeError, match="programming exception"):
+        mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    monkeypatch.setattr(real_query, "watchdog_status", _spy_status)
+
+    # -- legitimately empty captured registry is a valid empty success -------
+    empty_root = tmp_path / "emptyreg"
+    (empty_root / "state").mkdir(parents=True)
+    (empty_root / "state" / "roster.json").write_text(json.dumps(
+        {"tick_epoch": 0, "providers": {}}))
+    monkeypatch.setattr(mcp_server, "PROVIDERS", {})
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", {})
+    _reset()
+    empty = mcp_server.watchdog_status(now=0, root=empty_root)
+    assert empty["ok"] is True
+    assert empty["provider_counts"] == {} and empty["provider_staleness"] == {}
+    assert empty["counts"] == {"gateways": 0, "endpoints": 0,
+                               "distinct_raw_ids": 0, "marker_group_labels": 0}
+    assert empty["metadata_coverage"] == {
+        "endpoints": 0, "context_length_known": 0, "input_modalities_known": 0,
+        "output_modalities_known": 0, "supported_parameters_known": 0,
+        "description_known": 0}
+    assert empty["metadata_summary"] == {
+        "models_with_metadata": 0, "provider_counts": {}}
+    assert empty["tick_epoch"] == 0
+    assert empty["last_tick_age_s"] == 0 and empty["tick_fresh"] is True
+    assert empty["warnings"] == []
+    assert empty["pending_alerts"] == 0
+    assert empty["site_published"] is False
+    assert len(captures) == 1 and captures[0] == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    # -- mutation isolation: a returned diagnostic never corrupts the snapshot
+    _reset()
+    first = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    snap_a = calls[0]["snapshot"]
+    first["metadata_summary"]["provider_counts"]["z-last"] = 999
+    first["stale_providers"].append("MUTATED")
+    # the snapshot stays the deduplicated observation; the roster keeps both.
+    assert snap_a["providers"]["z-last"]["model_ids"].count("dup") == 1
+    assert loads[-1]["providers"]["z-last"].count("dup") == 2
+    assert snap_a["warnings"] == ["metadata_missing", "metadata_invalid"]
+    assert snap_a == calls[0]["before"]
+    _reset()
+    later = mcp_server.watchdog_status(now=1060.75, root=tmp_path)
+    assert later["metadata_summary"]["provider_counts"]["z-last"] == 3
+    assert later["stale_providers"] == ["z-last", "ghost", "z-last"]
+    assert later["snapshot_id"] == first["snapshot_id"]
+    assert loads[0] == control
+
+
+def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
+    """U4: the legacy ``now=None`` parameter keeps its local meaning with a
+    COMPLETE safe boundary: ``None`` reads ``time.time()`` exactly once and
+    validates what it got; an explicit native int or finite non-negative float
+    inside the safe integer range is used ONCE (0 is literal, never a fallback)
+    and normalized with ``int()`` exactly once for the fixed pure core clock;
+    negative fractional, negative/bool/non-numeric, NaN/Infinity, unsafe and
+    overhead integers fail with one fixed flat string BEFORE state, core, site
+    or pending I/O and never echo the value.
+
+    Tick validation stays a SEPARATE contract: the raw roster epoch is strict
+    and unknown/future means not fresh, with an inclusive cadence boundary and
+    the exact core warning union/order.
+    """
+    import inspect
+    import os
+
+    import watchdog_catalog.query as real_query
+
+    real_status = real_query.watchdog_status
+    real_load = mcp_server.state.load_roster
+    real_pending = mcp_server.state.load_pending
+
+    configs = {"p-one": {"name": "P One"}}
+    wiring = {"p-one": {
+        "chat_completions_url": "https://p.example/v1/chat/completions",
+        "api_type": "openai_compatible"}}
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 1000)
+
+    full_meta = {"context_length": 1000,
+                 "architecture": {"input_modalities": ["text"],
+                                  "output_modalities": ["text"]},
+                 "supported_parameters": [], "description": "d"}
+    (tmp_path / "state").mkdir()
+    (tmp_path / "site").mkdir()
+    roster_path = tmp_path / "state" / "roster.json"
+    site_path = tmp_path / "site" / "index.html"
+    pending_path = tmp_path / "state" / "pending_alerts.json"
+
+    def _write_roster(doc):
+        roster_path.write_text(json.dumps(doc))
+
+    def _std_roster(tick=None, **extra):
+        doc = {"providers": {"p-one": ["m"]},
+               "provider_models": {"p-one": {"m": full_meta}}}
+        if tick is not _MISSING:
+            doc["tick_epoch"] = tick
+        doc.update(extra)
+        return doc
+
+    _MISSING = object()
+    _write_roster({"tick_epoch": 1000, "providers": {"p-one": ["m"]},
+                   "provider_models": {"p-one": {"m": full_meta}}})
+    site_path.write_text("<html></html>")
+    os.utime(site_path, (1000.5, 1000.5))
+    pending_path.write_text(json.dumps([{"payload": {"a": 1}}]))
+
+    clock_reads, loads, calls, pending_reads, stats = [], [], [], [], []
+    real_stat = os.stat
+
+    def _fake_time():
+        clock_reads.append(True)
+        return 1060.75
+
+    def _spy_load(path):
+        loads.append(real_load(path))
+        return loads[-1]
+
+    def _spy_pending(path):
+        pending_reads.append(path)
+        return real_pending(path)
+
+    def _spy_status(snapshot, arguments, *, now):
+        out = real_status(snapshot, arguments, now=now)
+        calls.append({"arguments": arguments, "now": now, "result": out})
+        return out
+
+    def _spy_stat(path, *args, **kwargs):
+        stats.append(str(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(mcp_server.time, "time", _fake_time)
+    monkeypatch.setattr(mcp_server.state, "load_roster", _spy_load)
+    monkeypatch.setattr(mcp_server.state, "load_pending", _spy_pending)
+    monkeypatch.setattr(real_query, "watchdog_status", _spy_status)
+
+    def _reset():
+        clock_reads.clear()
+        loads.clear()
+        calls.clear()
+        pending_reads.clear()
+        stats.clear()
+
+    def _call_without_io(**kwargs):
+        """Call with os.stat spied: proves NO state/site/pending probe happened.
+
+        ``Path.resolve()`` never stats, so an empty record is a real assertion
+        that the rejection happened before every filesystem observation.
+        """
+        saved = os.stat
+        os.stat = _spy_stat
+        try:
+            return mcp_server.watchdog_status(**kwargs)
+        finally:
+            os.stat = saved
+
+    def _assert_core_clock(value):
+        now_seen = calls[-1]["now"]
+        assert type(now_seen) is int, (value, now_seen)
+        assert not isinstance(now_seen, bool)
+        assert 0 <= now_seen <= 9007199254740991
+        assert calls[-1]["arguments"] == {}
+
+    # -- the local signature is unchanged and exposes the SAME parameter -----
+    params = inspect.signature(mcp_server.watchdog_status).parameters
+    assert list(params) == ["now", "root"]
+    assert params["now"].default is None
+    assert params["now"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+
+    # -- None: one clock read, one normalization, raw value kept for site age -
+    _reset()
+    default = mcp_server.watchdog_status(root=tmp_path)
+    assert default["ok"] is True
+    assert clock_reads == [True]                 # read EXACTLY once
+    assert len(calls) == 1 and len(loads) == 1
+    _assert_core_clock(None)
+    assert calls[0]["now"] == 1060               # int(1060.75)
+    assert default["last_tick_age_s"] == 60
+    assert default["site_publish_age_s"] == 60   # raw 1060.75 - 1000.5
+
+    # -- explicit values never fall back; 0 is literal and stays 0 -----------
+    rows = [
+        # (now, expected core clock, expected last_tick_age_s, site age)
+        (0, 0, None, 0),            # tick 1000 is in the future of 0
+        (1060, 1060, 60, 59),       # integral explicit clock
+        (1060.0, 1060, 60, 59),     # finite float, exact
+        (1060.75, 1060, 60, 60),    # fractional: raw clock, NOT normalized
+        (0.0, 0, None, 0),
+    ]
+    for value, core_now, age, site_age in rows:
+        _reset()
+        row = mcp_server.watchdog_status(now=value, root=tmp_path)
+        assert row["ok"] is True, value
+        assert clock_reads == [], value          # no fallback clock read
+        _assert_core_clock(value)
+        assert calls[0]["now"] == core_now, value
+        assert row["last_tick_age_s"] == age, value
+        if age is None:
+            assert row["tick_fresh"] is False, value
+            assert row["warnings"] == ["tick_epoch_future"], value
+        else:
+            assert row["tick_fresh"] is True, value
+            assert row["warnings"] == [], value
+        assert row["site_publish_age_s"] == site_age, value
+
+    # explicit safe boundaries: the max is accepted, one past it is not.
+    for value in (9007199254740991, 9007199254740991.0):
+        _reset()
+        boundary = mcp_server.watchdog_status(now=value, root=tmp_path)
+        assert boundary["ok"] is True
+        _assert_core_clock(value)
+        assert calls[0]["now"] == 9007199254740991
+        assert boundary["last_tick_age_s"] == 9007199254739991
+        assert boundary["tick_fresh"] is False
+        assert boundary["warnings"] == ["tick_stale"]
+
+    # -- every invalid explicit clock: fixed flat string, ZERO I/O -----------
+    rejected = [-0.5, -1, True, False, "1060", float("nan"), float("inf"),
+                float("-inf"), 9007199254740992, 9007199254740992.0,
+                10**400, [0], {}, object()]
+    for bad in rejected:
+        _reset()
+        bad_res = _call_without_io(now=bad, root=tmp_path)
+        assert bad_res["ok"] is False, repr(bad)
+        assert bad_res["error"] == (
+            "now must be a finite non-negative safe number"), repr(bad)
+        assert set(bad_res) == {"tool", "state_root", "ok", "error"}
+        assert repr(bad) not in bad_res["error"]
+        assert loads == [] and calls == [] and pending_reads == []
+        assert clock_reads == [] and stats == [], repr(bad)
+
+    # -- the DEFAULT clock return is validated by the same boundary ----------
+    def _bad_clock(value):
+        def _fake_bad_clock():
+            clock_reads.append(True)
+            return value
+        return _fake_bad_clock
+
+    for bad_default in (-5.0, float("nan"), float("inf"), True, "nope",
+                        9007199254740992, 10**400):
+        monkeypatch.setattr(mcp_server.time, "time", _bad_clock(bad_default))
+        _reset()
+        bad_default_res = _call_without_io(root=tmp_path)
+        assert bad_default_res["ok"] is False, repr(bad_default)
+        assert bad_default_res["error"] == (
+            "now must be a finite non-negative safe number")
+        assert set(bad_default_res) == {"tool", "state_root", "ok", "error"}
+        assert len(clock_reads) == 1              # captured once, then rejected
+        assert loads == [] and calls == [] and pending_reads == []
+        assert stats == [], repr(bad_default)
+    monkeypatch.setattr(mcp_server.time, "time", _fake_time)
+
+    # -- tick validation is a SEPARATE contract -------------------------------
+    tick_rows = [
+        # (tick, now, epoch, age, fresh, warnings)
+        (1000, 1000, 1000, 0, True, []),
+        (None, 1000, None, None, False, ["tick_epoch_unknown"]),
+        (_MISSING, 1000, None, None, False, ["tick_epoch_unknown"]),
+        (1000.0, 1000, None, None, False, ["tick_epoch_unknown"]),
+        (True, 1000, None, None, False, ["tick_epoch_unknown"]),
+        (-5, 1000, None, None, False, ["tick_epoch_unknown"]),
+        (9007199254740992, 1000, None, None, False, ["tick_epoch_unknown"]),
+        (2000, 1000, 2000, None, False, ["tick_epoch_future"]),
+        (0, 1000, 0, 1000, True, []),             # exact cadence is FRESH
+        (0, 1001, 0, 1001, False, ["tick_stale"]),  # one second past
+    ]
+    for tick, now_value, epoch, age, fresh, warnings in tick_rows:
+        _write_roster(_std_roster(tick))
+        _reset()
+        row = mcp_server.watchdog_status(now=now_value, root=tmp_path)
+        assert row["ok"] is True, (tick, now_value)
+        assert row["tick_epoch"] == epoch, (tick, now_value)
+        assert row["last_tick_age_s"] == age, (tick, now_value)
+        assert row["tick_fresh"] is fresh, (tick, now_value)
+        assert isinstance(row["tick_fresh"], bool)
+        if age is not None:
+            assert type(row["last_tick_age_s"]) is int
+        assert row["warnings"] == warnings, (tick, now_value)
+        assert len(loads) == 1 and len(calls) == 1
+
+    # snapshot warnings are UNIONED with the derived status code, in the frozen
+    # order -- a status warning never replaces or reorders snapshot warnings.
+    _write_roster({"tick_epoch": 0, "providers": {"p-one": ["m"]}})
+    _reset()
+    union = mcp_server.watchdog_status(now=1001, root=tmp_path)
+    assert union["warnings"] == ["metadata_missing", "tick_stale"]
+    assert union["metadata_coverage"] == {
+        "endpoints": 1, "context_length_known": 0, "input_modalities_known": 0,
+        "output_modalities_known": 0, "supported_parameters_known": 0,
+        "description_known": 0}
+    assert union["metadata_summary"] == {
+        "models_with_metadata": 0, "provider_counts": {"p-one": 0}}
+
+    _write_roster({"tick_epoch": 1000, "providers": {"p-one": ["m"]},
+                   "provider_models": {"p-one": {"m": full_meta}}})
+

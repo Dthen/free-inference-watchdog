@@ -47,7 +47,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
-import re
 import sys
 import time
 from pathlib import Path
@@ -106,28 +105,6 @@ class _StateError(Exception):
         self.payload = payload
 
 
-def _natural_key(s):
-    """Split digit runs so 'gemma-4-26b' sorts after 'gemma-4-9b'."""
-    return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", s)]
-
-
-def _epoch_or_none(roster):
-    """Finite numeric tick_epoch as int, else None (bool/junk dropped)."""
-    tick = roster.get("tick_epoch")
-    if isinstance(tick, (int, float)) and not isinstance(tick, bool) \
-            and math.isfinite(tick):
-        return int(tick)
-    return None
-
-
-def _clean_ids(models):
-    """Sorted string ids from a provider value; hostile entries dropped."""
-    if not isinstance(models, list):
-        return []
-    return sorted((mid for mid in models if isinstance(mid, str)),
-                  key=_natural_key)
-
-
 def _model_metadata(roster, provider, ids):
     """Raw objects for tracked ids only; legacy/junk metadata degrades to {}."""
     providers = roster.get("provider_models")
@@ -141,9 +118,8 @@ def _model_metadata(roster, provider, ids):
 
 def _clean_names(values):
     """String entries from a roster list field (stale_providers); a
-    non-list value degrades to [] — same rule as _clean_ids, so a hostile
-    bare string like "zen" is dropped whole instead of char-splitting into
-    ['z', 'e', 'n']."""
+    non-list value degrades to [] — a hostile bare string like "zen" is
+    dropped whole instead of char-splitting into ['z', 'e', 'n']."""
     if not isinstance(values, list):
         return []
     return [v for v in values if isinstance(v, str)]
@@ -527,67 +503,154 @@ def list_endpoints(provider=None, root=None) -> dict:
 # ---------- tool: watchdog_status ----------
 
 def watchdog_status(now=None, root=None) -> dict:
-    """Tick age vs cadence, stale providers, counts, alert depth, site pub."""
-    now_v = time.time() if now is None else now
+    """Catalogue health from the pure core, plus LOCAL operator diagnostics.
+
+    Local compatibility wrapper: the captured registry and the roster read ONCE
+    through state.py are adapted to the validated public snapshot, and catalogue
+    health — tick age/freshness, provider staleness, every per-provider count,
+    the whole-catalogue cardinalities and the projected metadata coverage — is
+    delegated to the pure ``watchdog_catalog.query`` core with a fixed clock.
+    ``snapshot_id``, strict ``tick_epoch``, ``cadence_s``, ``counts``,
+    ``metadata_coverage``, ``provider_staleness`` and the core ``warnings`` UNION
+    (snapshot warnings plus the derived ``tick_epoch_unknown`` /
+    ``tick_epoch_future`` / ``tick_stale`` codes) are carried through unchanged.
+    ``snapshot_id`` binds that LOCAL sanitized public projection, NOT the raw
+    local metadata dictionaries, the pending queue or the site mtime, so it can
+    differ from a strictly published feed's id for the same tick.
+
+    Freshness is strict and inclusive: a null or future ``tick_epoch`` gives
+    ``last_tick_age_s`` None and ``tick_fresh`` False (never a healthy clamp or
+    a negative age), and an age exactly equal to ``cadence_s`` is still fresh.
+
+    ``now`` is the legacy LOCAL clock parameter (never a public tool argument).
+    ``None`` reads ``time.time()`` exactly ONCE; an explicit native int or
+    finite native float is used as given — ``0`` is literal and never triggers
+    a fallback clock read. The value must be non-negative and within
+    ``2**53 - 1``; a bool, non-number, NaN/Infinity, negative value (including a
+    negative fraction, which ``int()`` would truncate to a fake healthy ``0``)
+    or unsafe number is rejected with the flat local string
+    ``now must be a finite non-negative safe number`` BEFORE any roster, site,
+    pending-queue or core work, without echoing the value. The validated number
+    is converted with ``int()`` exactly ONCE for the pure core's fixed clock,
+    while the RAW validated numeric clock drives the legacy filesystem
+    diagnostic so fractional file mtimes keep their sub-second contribution.
+
+    The core payload is catalogue health only: its own ``pending_alerts``,
+    ``site_published`` and ``site_publish_age_s`` placeholders stay ``None``.
+    This LOCAL wrapper overwrites them with genuinely observed operator state
+    (pending queue depth; site presence plus ``max(0, int(raw_now - mtime))``),
+    and keeps the legacy carried ``stale_providers`` cleaned string list in its
+    original order/duplicates (inactive names included) — core
+    ``provider_staleness`` covers active providers only and is independent of
+    the tick age. ``metadata_summary`` stays a LOCAL raw-dictionary PRESENCE
+    summary over the core-selected ``(provider, raw id)`` scope: an empty raw
+    dict counts, a missing/non-dict value does not. It measures something else
+    than the projected-field ``metadata_coverage`` the core reports, and the two
+    are not aliases.
+
+    State unreadable (missing/corrupt/non-object roster, bad ``providers`` map)
+    still returns the existing legacy failure payload with ``cadence_s`` and
+    ``pending_alerts`` None / ``site_published`` False — never fabricated
+    healthy zeros. A structurally invalid local snapshot/wiring is the fixed
+    ``Invalid catalogue snapshot.`` error, and the core's frozen argument
+    envelope (it accepts only ``{}``) maps to a flat local string error.
+    Programming exceptions are not swallowed.
+    """
     r = Path(root).resolve() if root is not None else REPO
     base: dict = {"tool": "watchdog_status", "state_root": str(r)}
+
+    # Capture the resolved registry ONCE. A bad registry/wiring root outranks
+    # every clock and state error, so broken local wiring is never masked.
+    try:
+        registry = _capture_registry(base)
+    except _StateError as exc:
+        return exc.payload
+
+    # ONE clock observation, validated BEFORE any state/filesystem I/O. None is
+    # read exactly once; an explicit value (including 0) is used literally.
+    raw_now = time.time() if now is None else now
+    if isinstance(raw_now, bool) or not isinstance(raw_now, (int, float)):
+        return _error(base, "now must be a finite non-negative safe number")
+    if isinstance(raw_now, int):
+        # Integer bounds, never math.isfinite(int): a huge int would raise
+        # OverflowError on the float conversion instead of failing flat.
+        clock_ok = 0 <= raw_now <= 9007199254740991
+    else:
+        # Reject negatives BEFORE int(): int(-0.5) truncates to a fake 0.
+        clock_ok = (math.isfinite(raw_now)
+                    and 0 <= raw_now <= 9007199254740991)
+    if not clock_ok:
+        return _error(base, "now must be a finite non-negative safe number")
+    now_int = int(raw_now)  # exactly once, for the pure core precondition
 
     try:
         roster = _load_roster_checked(r, base)
     except _StateError as exc:
         # State unreadable: surface the failure payload plus UNKNOWN for the
-        # optional fields — ok:False must never masquerade as healthy zeros
-        # (a fabricated 0 alert depth would read as "queue drained").
+        # optional fields — ok:False must never masquerade as healthy zeros (a
+        # fabricated 0 alert depth would read as "queue drained").
         payload = exc.payload
         payload.setdefault("cadence_s", CADENCE_S)
         payload["pending_alerts"] = None
         payload["site_published"] = False
         return payload
 
-    tick = _epoch_or_none(roster)
-    last_tick_age_s = None
-    tick_fresh = None
-    if tick is not None:
-        last_tick_age_s = int(now_v - tick)
-        tick_fresh = 0 <= last_tick_age_s <= CADENCE_S
+    # Structural local wiring/snapshot fault: the accepted adapter boundary maps
+    # it to the existing fixed, non-reflective catalogue message — never a
+    # partially successful health payload.
+    try:
+        snapshot = _local_snapshot(roster, registry, base)
+    except _StateError as exc:
+        return exc.payload
 
-    provs = roster["providers"]
+    # Delegate catalogue health, freshness and every count/cardinality/coverage
+    # projection to the pure core ONCE. No public arguments exist: pass the
+    # empty object explicitly and the normalized fixed clock by keyword.
+    result = _query.watchdog_status(snapshot, {}, now=now_int)
+    if not result.get("ok"):
+        # Backstop only: the local checks above always pass ``{}``. Adapt the
+        # core's frozen argument envelope to the flat local string form.
+        return _error(base, "Invalid tool arguments.")
+
+    # Fresh outer mapping: neither the validated snapshot nor the returned core
+    # object is mutated by the local diagnostics below.
+    out = {**base, **result}
+
+    # LOCAL carried observation (original order/duplicates, inactive included).
+    out["stale_providers"] = _clean_names(roster.get("stale_providers", []))
+
+    # LOCAL raw-dictionary PRESENCE summary over the snapshot's captured
+    # provider scope and each provider's SELECTED ids — never another globals
+    # walk, another roster read or a projected-field count. An empty raw dict is
+    # present; a missing or non-dict value is not.
+    order = snapshot["provider_order"]
+    providers = snapshot["providers"]
+    raw_counts = {}
+    for gw in order:
+        raw_counts[gw] = len(_model_metadata(
+            roster, gw, providers[gw]["model_ids"]))
+    out["metadata_summary"] = {
+        # Pair count (gateway, model) over unique selected ids — not a union of
+        # model identities, which gateways rename.
+        "models_with_metadata": sum(raw_counts.values()),
+        "provider_counts": raw_counts,
+    }
+
+    # LOCAL operator observations (kept out of the core object and the hash).
     pending_path = r / "state" / "pending_alerts.json"
     site = r / "site" / "index.html"
+    out["pending_alerts"] = len(state.load_pending(pending_path))
     try:
         mtime = site.stat().st_mtime
     except OSError:
-        site_published = False
-        site_publish_age_s = None
+        out["site_published"] = False
+        out["site_publish_age_s"] = None
     else:
-        site_published = True
-        site_publish_age_s = max(0, int(now_v - mtime))
-
-    return {
-        **base,
-        "ok": True,
-        "cadence_s": CADENCE_S,
-        "last_tick_age_s": last_tick_age_s,
-        "tick_fresh": tick_fresh,
-        "stale_providers": _clean_names(roster.get("stale_providers", [])),
-        "provider_counts": {
-            gw: len(_clean_ids(provs.get(gw, []))) for gw in PROVIDERS
-        },
-        "metadata_summary": {
-            # Pair count (gateway, model), not unique-id union — gateways
-            # rename the same model, the raw objects still differ.
-            "models_with_metadata": sum(
-                len(_model_metadata(roster, gw, _clean_ids(provs.get(gw, []))))
-                for gw in PROVIDERS),
-            "provider_counts": {
-                gw: len(_model_metadata(roster, gw, _clean_ids(provs.get(gw, []))))
-                for gw in PROVIDERS
-            },
-        },
-        "pending_alerts": len(state.load_pending(pending_path)),
-        "site_published": site_published,
-        "site_publish_age_s": site_publish_age_s,
-    }
+        out["site_published"] = True
+        # RAW validated clock, not the normalized int: a fractional `now` and a
+        # fractional file mtime must not lose their sub-second contribution.
+        out["site_publish_age_s"] = max(0, int(raw_now - mtime))
+    return out
 
 
 # ---------- MCP transport wiring ----------
