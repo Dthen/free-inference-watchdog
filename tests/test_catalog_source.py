@@ -8,6 +8,7 @@ This module exercises only the small read-only source boundary:
     watchdog_catalog.source.SourceError
     watchdog_catalog.source.load_catalog_file   (unit 5a)
     watchdog_catalog.source.load_catalog_url    (unit 5b)
+    watchdog_catalog.source.DiskCache           (unit 5c)
 
 `load_catalog_file` is one explicit, byte-bounded binary read of an
 operator-selected path whose bytes are decoded as strict UTF-8 and then handed
@@ -28,10 +29,10 @@ a network-free double) and every non-200 / malformed / timed-out / disconnected
 ephemeral port; no test resolves a public host, and the production default URL
 is only exercised through a request/response double.
 
-Cache, conditional GET, fallback/freshness wrappers, CLI wiring and async
-refresh coalescing belong to later units and are NOT implemented, imported or
-exercised here. Nothing in this module writes outside pytest's own scratch
-directory.
+``DiskCache`` (unit 5c) is implemented and exercised here. Conditional GET,
+fallback/freshness wrappers, CLI wiring and async refresh coalescing belong to
+later units and are NOT implemented, imported or exercised here. Nothing in
+this module writes outside pytest's own scratch directory.
 """
 
 import hashlib
@@ -1747,10 +1748,11 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
     class _FaultHandle:
         """The real staged handle with ONE named step failing."""
 
-        def __init__(self, handle, step, error):
+        def __init__(self, handle, step, error, cleanup_error=None):
             self.handle = handle
             self._step = step
             self._error = error
+            self._cleanup_error = cleanup_error
             self.closed = 0
 
         def write(self, data):
@@ -1771,8 +1773,10 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
             self.handle.close()
             if self._step == "close":
                 raise self._error
+            if self._cleanup_error is not None:
+                raise self._cleanup_error
 
-    def install(scope, step, error):
+    def install(scope, step, error, cleanup=None):
         seen = {"fds": [], "handles": []}
 
         def raising(raised):
@@ -1780,6 +1784,8 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
                 raise raised
             return _fail
 
+        close_fault = (ValueError("cleanup close fault")
+                       if cleanup == "handle" else None)
         if step == "makedirs":
             scope.setattr(source.os, "makedirs", raising(error))
         elif step == "mkstemp":
@@ -1794,7 +1800,7 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
 
             def fdopen(fd, *args, **kwargs):
                 wrapper = _FaultHandle(
-                    real_fdopen(fd, *args, **kwargs), step, error)
+                    real_fdopen(fd, *args, **kwargs), step, error, close_fault)
                 seen["handles"].append(wrapper)
                 return wrapper
             scope.setattr(source.os, "fdopen", fdopen)
@@ -1802,6 +1808,12 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
             scope.setattr(source.os, "fsync", raising(error))
         else:
             scope.setattr(source.os, "replace", raising(error))
+        if cleanup == "unlink":
+            scope.setattr(source.os, "unlink",
+                          raising(ValueError("cleanup unlink fault")))
+        elif cleanup == "descriptor":
+            scope.setattr(source.os, "close",
+                          raising(ValueError("cleanup close fault")))
         return seen
 
     error = OSError(28, "No space left on device")
@@ -1904,3 +1916,109 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
     assert _temp_leftovers(concurrent_root) == []
     assert sorted(entry.name for entry in concurrent_root.iterdir()) == [
         writers[0].path.name]
+
+    # -- (h) filesystem VALUE/encoding faults stay inside the cache boundary -
+    # The path layer can reject a VALUE long before the syscall -- an embedded
+    # NUL, or a name the filesystem encoding cannot represent -- with ValueError
+    # (UnicodeError is a ValueError subclass). A cache write must contain those
+    # exactly like an OSError: strict False, last-good bytes kept, and no path
+    # repair, re-encoding or escaping exception.
+    nul_root = str(tmp_path / "nul-root") + "/nul\x00inside"
+    nul_cache = source.DiskCache("url", url + "?nul", cache_dir=nul_root)
+    assert nul_cache.path is not None
+    assert "\x00" in str(nul_cache.path)          # literal, never repaired
+    assert nul_cache.store(basic, fetched_at=9) is False
+    assert nul_cache.load() is None               # the reader contains it too
+    # a failing makedirs may have created a parent component, and the cache
+    # never deletes a directory: it must simply stage NO entry and NO temp.
+    nul_parent = tmp_path / "nul-root"
+    if nul_parent.exists():
+        assert list(nul_parent.iterdir()) == []
+
+    value_faults = (
+        ("value", ValueError("bad path value")),
+        ("encoding", UnicodeEncodeError(
+            "utf-8", "bad\udcff", 0, len("bad\udcff"),
+            "surrogates not allowed")),
+    )
+    for label, fault in value_faults:
+        for step in ("makedirs", "mkstemp", "replace"):
+            fault_root = tmp_path / ("%s-%s" % (label, step))
+            target = source.DiskCache("url", url + "?" + label + step,
+                                      cache_dir=fault_root)
+            unrelated = fault_root / "unrelated.txt"
+
+            # (i) no previous entry at all
+            with pytest.MonkeyPatch.context() as scope:
+                install(scope, step, fault)
+                assert target.store(basic, fetched_at=5) is False
+            assert not target.path.exists()
+            if fault_root.exists():
+                assert _temp_leftovers(fault_root) == []
+
+            # (ii) a pre-existing last-good entry and an unrelated neighbour
+            fault_root.mkdir(parents=True, exist_ok=True)
+            unrelated.write_text("keep me", encoding="utf-8")
+            assert target.store(basic, fetched_at=5) is True
+            good = target.path.read_bytes()
+            with pytest.MonkeyPatch.context() as scope:
+                install(scope, step, fault)
+                assert target.store(empty, fetched_at=6) is False
+            assert target.path.read_bytes() == good       # last-good untouched
+            assert target.load()["snapshot"] == basic
+            assert unrelated.read_text(encoding="utf-8") == "keep me"
+            assert _temp_leftovers(fault_root) == []
+            assert sorted(entry.name for entry in fault_root.iterdir()) == [
+                target.path.name, "unrelated.txt"]
+
+    # best-effort cleanup VALUE faults never mask the primary failure, expose
+    # their text or widen into a delete: the store still returns strict False.
+    cleanup_root = tmp_path / "cleanup-faults"
+    cleanup_cache = source.DiskCache("url", url + "?cleanup",
+                                     cache_dir=cleanup_root)
+    cleanup_root.mkdir(parents=True, exist_ok=True)
+    assert cleanup_cache.store(basic, fetched_at=5) is True
+    cleanup_good = cleanup_cache.path.read_bytes()
+
+    # (i) staged handle: write fails, and the cleanup close ALSO raises
+    with pytest.MonkeyPatch.context() as scope:
+        seen = install(scope, "write", OSError(28, "No space left on device"),
+                       cleanup="handle")
+        assert cleanup_cache.store(empty, fetched_at=6) is False
+        assert seen["handles"]
+        assert all(wrapper.handle.closed for wrapper in seen["handles"])
+    assert cleanup_cache.path.read_bytes() == cleanup_good
+    assert cleanup_cache.load()["snapshot"] == basic
+    assert _temp_leftovers(cleanup_root) == []
+
+    # (ii) wrapper open fails, and the cleanup descriptor close ALSO raises
+    with pytest.MonkeyPatch.context() as scope:
+        seen = install(scope, "fdopen", OSError(24, "Too many open files"),
+                       cleanup="descriptor")
+        assert cleanup_cache.store(empty, fetched_at=7) is False
+        assert len(seen["fds"]) == 1
+        leaked = seen["fds"][0]
+    os.close(leaked)              # the scoped close fault ended: ours to close
+    assert cleanup_cache.path.read_bytes() == cleanup_good
+    assert _temp_leftovers(cleanup_root) == []
+
+    # (iii) replace fails, and the cleanup unlink ALSO raises: the temp stays
+    # behind only because the fault is artificial, so the test owns its cleanup
+    with pytest.MonkeyPatch.context() as scope:
+        install(scope, "replace", OSError(28, "No space left on device"),
+                cleanup="unlink")
+        assert cleanup_cache.store(empty, fetched_at=8) is False
+    assert cleanup_cache.path.read_bytes() == cleanup_good
+    assert cleanup_cache.load()["snapshot"] == basic
+    leftovers = _temp_leftovers(cleanup_root)
+    assert len(leftovers) == 1
+    for name in leftovers:
+        (cleanup_root / name).unlink()
+    assert _temp_leftovers(cleanup_root) == []
+
+    # the boundary was not widened: a plain valid write still publishes
+    assert cleanup_cache.store(empty, fetched_at=9) is True
+    assert cleanup_cache.load()["snapshot"] == empty
+    assert _temp_leftovers(cleanup_root) == []
+    assert sorted(entry.name for entry in cleanup_root.iterdir()) == [
+        cleanup_cache.path.name]

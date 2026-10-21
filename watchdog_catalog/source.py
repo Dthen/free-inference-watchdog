@@ -811,11 +811,21 @@ class DiskCache:
         No rollback deletion of the final, no directory removal, no locking and
         no power-loss/directory-fsync durability claim: the last COMPLETED
         concurrent valid replacement wins.
+
+        A filesystem boundary can also reject a path VALUE rather than fail a
+        syscall: an embedded NUL or a name the filesystem encoding cannot
+        represent raises ``ValueError`` (``UnicodeError`` is a subclass) from
+        ``makedirs``/``mkstemp``/``replace`` before any I/O happens, and from
+        the best-effort close/unlink cleanup. Those are contained here exactly
+        like an ``OSError`` -- strict ``False`` for the write, never a path
+        repair or re-encoding, and never an escaping cleanup exception. Input
+        and snapshot validation stay outside this boundary and keep their own
+        exceptions.
         """
         directory = path.parent
         try:
             os.makedirs(directory, exist_ok=True)
-        except OSError:
+        except (OSError, ValueError):
             return False
         descriptor = None
         handle = None
@@ -825,7 +835,7 @@ class DiskCache:
                 descriptor, temp_path = tempfile.mkstemp(
                     dir=str(directory), prefix=_CACHE_TEMP_PREFIX,
                     suffix=_CACHE_TEMP_SUFFIX)
-            except OSError:
+            except (OSError, ValueError):
                 return False
             try:
                 handle = os.fdopen(descriptor, "wb")
@@ -842,7 +852,7 @@ class DiskCache:
                 return False
             try:
                 os.replace(temp_path, path)
-            except OSError:
+            except (OSError, ValueError):
                 return False
             temp_path = None             # published: nothing left to clean
             return True
@@ -855,10 +865,10 @@ class DiskCache:
             if descriptor is not None:
                 try:
                     os.close(descriptor)
-                except OSError:
+                except (OSError, ValueError):
                     pass
             if temp_path is not None:
                 try:
                     os.unlink(temp_path)
-                except OSError:
+                except (OSError, ValueError):
                     pass
