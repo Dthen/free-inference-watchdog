@@ -860,15 +860,16 @@ def write_artifact_pair(root, catalog_text, html_text):
     4. read back the EXACT final targets and validate the pair again before
        reporting success.
 
-    Raises :class:`_PairWriteError` on any staging, lock (open/acquire/
-    release/close) or publication failure. Owned temps are always removed;
-    unrelated files are never touched, the build lock file/inode is retained
-    (never unlinked), no unlock is attempted for a lock that was not acquired,
-    and no rollback is attempted (it could clobber a concurrent successful
-    writer). Every final file is left byte-identical (or absent) for a failure
-    BEFORE the first replacement; once replacement has begun a later failure
-    (interruption or second-replacement I/O error) may leave a mixed pair, which
-    is reported as an error -- no both-last-good promise is made there.
+    Raises :class:`_PairWriteError` on any staging (including a payload that is
+    not encodable as UTF-8), lock (open/acquire/release/close) or publication
+    failure. Owned temps are always removed; unrelated files are never touched,
+    the build lock file/inode is retained (never unlinked), no unlock is
+    attempted for a lock that was not acquired, and no rollback is attempted
+    (it could clobber a concurrent successful writer). Every final file is left
+    byte-identical (or absent) for a failure BEFORE the first replacement; once
+    replacement has begun a later failure (interruption or second-replacement
+    I/O error) may leave a mixed pair, which is reported as an error -- no
+    both-last-good promise is made there.
     """
     try:
         validate_artifact_pair(catalog_text, html_text)
@@ -884,6 +885,11 @@ def write_artifact_pair(root, catalog_text, html_text):
     staged = []
     lock_file = None
     locked = False
+    # This invocation's OWN outcome. ``sys.exc_info()`` is NOT consulted: in a
+    # ``finally`` it reports whatever exception the CALLER happens to be
+    # handling, so an unrelated ambient ``except`` block would silently absorb
+    # this writer's release/close failure.
+    published = False
     lock_path = site_dir / BUILD_LOCK_REL.name
     try:
         try:
@@ -892,6 +898,14 @@ def write_artifact_pair(root, catalog_text, html_text):
                 staged.append((_stage(site_dir, target, text), target))
         except OSError as exc:
             raise _PairWriteError(f"cannot stage artifacts: {exc}") from None
+        except UnicodeError as exc:
+            # A payload that cannot be encoded as UTF-8 (an unpaired surrogate
+            # in a raw id, say) is a staging fault like any other. The
+            # diagnostic is fixed and bounded: it never echoes the payload or
+            # the offending identifier, and no repair/replace encoding is done.
+            raise _PairWriteError(
+                "cannot stage artifacts: text is not encodable as UTF-8 "
+                f"({type(exc).__name__})") from None
 
         if fcntl is None:  # pragma: no cover - Windows support is later work
             raise _PairWriteError(
@@ -922,13 +936,16 @@ def write_artifact_pair(root, catalog_text, html_text):
         except (OSError, ValueError, catalog.CatalogError):
             raise _PairWriteError(
                 "published artifacts did not validate") from None
+        published = True
     finally:
         for temp, _ in staged:
             _discard(temp)
         # Release only a lock this invocation actually acquired; a release or
         # close failure is itself a publication failure (the pair may already
         # be valid, but success must NOT be reported), while an error already
-        # in flight stays the primary one.
+        # in flight stays the primary one. "In flight" means THIS writer's own
+        # error (``published`` is only set on full success), never an ambient
+        # exception belonging to a caller's enclosing ``except`` block.
         release_error = None
         if locked and fcntl is not None:
             try:
@@ -940,7 +957,7 @@ def write_artifact_pair(root, catalog_text, html_text):
                 lock_file.close()
             except OSError as exc:
                 release_error = release_error or exc
-        if release_error is not None and sys.exc_info()[0] is None:
+        if release_error is not None and published:
             raise _PairWriteError(
                 f"cannot release build lock {lock_path}: {release_error}") from None
 

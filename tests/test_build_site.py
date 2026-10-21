@@ -2918,7 +2918,7 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
 
 def test_cli_failure_retention_and_injected_write_failures(
         tmp_path, monkeypatch, capsys):
-    """Last-good bytes survive every failure; an injected mixed pair fails.
+    """Pre-replacement failures retain last-good bytes; an injected mixed pair fails.
 
     One row loop covers source, registry, logo, resource, serialization,
     render, validation and staging faults against BOTH absent and pre-existing
@@ -3118,6 +3118,72 @@ def test_cli_failure_retention_and_injected_write_failures(
         _assert_finals(root, mode, label)
         assert _site_leftovers(root) == [], label
 
+    # ---- REAL staging encoding fault: an unpaired-surrogate raw ID ---------
+    #
+    # A raw ID carrying a lone surrogate is legal input to the JSON roster and
+    # is accepted by the snapshot/schema surfaces, but it cannot be encoded as
+    # UTF-8 for the HTML payload. Nothing is mocked here: the fault is a real
+    # UnicodeEncodeError raised by the real staging write, so it must be
+    # normalized at the writer's staging boundary into exit 2 + a bounded
+    # diagnostic instead of escaping the CLI as a traceback. Both payloads
+    # reach staging (two exclusive creates) and neither final path is touched.
+    surrogate_id = "vendor-z/surrogate-\ud800-free"
+    surrogate_roster = json.loads(json.dumps(PAIR_ROSTER))
+    surrogate_roster["providers"]["nous"] = [
+        surrogate_id] + surrogate_roster["providers"]["nous"]
+
+    for mode in ("absent", "pre-existing"):
+        label = f"staging-encoding-{mode}"
+        root = tmp_path / label
+        root.mkdir()
+        _seed_logo(root)
+        _write_roster(root, surrogate_roster)
+        if mode == "pre-existing":
+            _seed_last_good(root)
+        capsys.readouterr()
+        stages = {"mkstemp": 0}
+        real_mkstemp_enc = build_site.tempfile.mkstemp
+
+        def counting_mkstemp_enc(*args, **kwargs):
+            stages["mkstemp"] += 1
+            return real_mkstemp_enc(*args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(build_site.tempfile, "mkstemp", counting_mkstemp_enc)
+            code = _run_cli(root)
+        assert code == 2, label
+        _assert_diag(capsys.readouterr(), label, "not encodable as UTF-8")
+        # The JSON payload staged successfully and the HTML temp was created
+        # before its write hit the encoding fault: the fault is at the staging
+        # boundary, not earlier in preparation.
+        assert stages["mkstemp"] == 2, label
+        _assert_finals(root, mode, label)
+        assert _site_leftovers(root) == [], label
+
+    # Control: an ordinary (encodable) non-ASCII id still publishes and
+    # round-trips through the existing public contract.
+    control_id = "vendor-z/\u00fcn\u00efcode-\u514d\u8d39-free"
+    control_roster = json.loads(json.dumps(PAIR_ROSTER))
+    control_roster["providers"]["nous"] = [
+        control_id] + control_roster["providers"]["nous"]
+    label = "staging-encoding-control"
+    root = tmp_path / label
+    root.mkdir()
+    _seed_logo(root)
+    _write_roster(root, control_roster)
+    capsys.readouterr()
+    assert _run_cli(root) == 0, label
+    captured = capsys.readouterr()
+    assert captured.out == "", (label, captured.out)
+    control_catalog, control_html = _targets(root)
+    control_catalog_text = control_catalog.read_bytes().decode("utf-8")
+    control_html_text = control_html.read_bytes().decode("utf-8")
+    assert control_id in control_html_text, label
+    assert control_id in validate_artifact_pair(
+        control_catalog_text, control_html_text)[
+            "providers"]["nous"]["model_ids"], label
+    assert _site_leftovers(root) == [], label
+
     # ---- lock lifetime: open / acquire / release / close -------------------
     #
     # Both temps exist before each of these faults. A pre-existing lock sentinel
@@ -3154,6 +3220,27 @@ def test_cli_failure_retention_and_injected_write_failures(
     }
     whole_entries = [".build.lock", "catalog.json", "index.html",
                      "unrelated.txt"]
+
+    def run_cli_inside_ambient_exception(root):
+        """Run the real CLI from inside a caller's UNRELATED, handled except.
+
+        Returns ``(exit_code, ambient_preserved)``. The ambient error belongs to
+        the CALLER, so after the writer returns ``sys.exc_info()`` must still be
+        that same handled exception: its own release/close fault may never be
+        suppressed by it, and it may never be replaced by it.
+        """
+        observed = {}
+
+        def caller():
+            try:
+                raise RuntimeError("ambient caller error")
+            except RuntimeError as ambient:
+                observed["code"] = _run_cli(root)
+                observed["active"] = sys.exc_info()[0] is RuntimeError
+                observed["same"] = sys.exc_info()[1] is ambient
+            return observed["code"], observed["active"] and observed["same"]
+
+        return caller()
 
     for mode in ("absent", "pre-existing"):
         # -- lock OPEN fails after both temps exist --------------------------
@@ -3266,6 +3353,52 @@ def test_cli_failure_retention_and_injected_write_failures(
         assert site_entries(root) == whole_entries, label
         assert lock_identity(root) == identity, label
 
+        # -- the SAME release/close faults, except the CLI now runs inside a
+        #    CALLER's unrelated handled except block: this writer's own
+        #    completion state must decide the outcome, so the caller's ambient
+        #    exception can neither suppress the fault into false success nor
+        #    become the reported error --------------------------------------
+        for kind in ("release", "close"):
+            label = f"lock-{kind}-ambient-{mode}"
+            root = lock_root(f"{kind}-ambient", mode)
+            identity = lock_identity(root)
+            seen = {}
+            capsys.readouterr()
+            if kind == "release":
+                def ambient_release(fd, operation):
+                    if operation == build_site.fcntl.LOCK_UN:
+                        seen["hit"] = True
+                        raise OSError("injected lock release failure")
+                    return real_flock(fd, operation)
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(build_site.fcntl, "flock", ambient_release)
+                    code, ambient_preserved = run_cli_inside_ambient_exception(
+                        root)
+            else:
+                def ambient_close(file, *args, **kwargs):
+                    handle = real_open(file, *args, **kwargs)
+                    if str(file).endswith(".build.lock"):
+                        seen["hit"] = True
+                        return _FailingLockFile(handle, seen)
+                    return handle
+
+                with monkeypatch.context() as patch:
+                    patch.setattr("builtins.open", ambient_close)
+                    code, ambient_preserved = run_cli_inside_ambient_exception(
+                        root)
+            assert seen.get("hit") is True, label
+            assert ambient_preserved is True, label
+            assert code == 2, (label, "ambient exception caused false success")
+            _assert_diag(capsys.readouterr(), label,
+                         f"injected lock {kind} failure")
+            assert (root / "site" / "catalog.json").read_bytes().decode(
+                "utf-8") == new_catalog, label
+            assert (root / "site" / "index.html").read_bytes().decode(
+                "utf-8") == new_html, label
+            assert site_entries(root) == whole_entries, label
+            assert lock_identity(root) == identity, label
+
         # -- publication AND release fail: the PRIMARY publication error is
         #    preserved (the release fault never masks it) ---------------------
         label = f"publish-and-release-{mode}"
@@ -3296,6 +3429,41 @@ def test_cli_failure_retention_and_injected_write_failures(
         captured = capsys.readouterr()
         _assert_diag(captured, label, "injected first replacement failure")
         assert "cannot release build lock" not in captured.err, label
+        _assert_finals(root, mode, label)
+        assert site_entries(root) == pre_entries[mode], label
+        assert lock_identity(root) == identity, label
+
+        # -- the SAME dual failure, this time with an unrelated caller
+        #    exception active: the writer's OWN publication error must remain
+        #    the reported one, never the caller's nor the secondary cleanup ---
+        label = f"publish-and-release-ambient-{mode}"
+        root = lock_root("both-ambient", mode)
+        identity = lock_identity(root)
+        seen = {}
+        capsys.readouterr()
+
+        def ambient_first_replace(src, dst):
+            seen["replace_hit"] = True
+            raise OSError("injected first replacement failure")
+
+        def ambient_unlock_also_fails(fd, operation):
+            if operation == build_site.fcntl.LOCK_UN:
+                seen["unlock_hit"] = True
+                raise OSError("injected lock release failure")
+            return real_flock(fd, operation)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(build_site.os, "replace", ambient_first_replace)
+            patch.setattr(build_site.fcntl, "flock", ambient_unlock_also_fails)
+            code, ambient_preserved = run_cli_inside_ambient_exception(root)
+        assert seen.get("replace_hit") is True, label
+        assert seen.get("unlock_hit") is True, label
+        assert ambient_preserved is True, label
+        assert code == 2, label
+        captured = capsys.readouterr()
+        _assert_diag(captured, label, "injected first replacement failure")
+        assert "cannot release build lock" not in captured.err, label
+        assert "ambient caller error" not in captured.err, label
         _assert_finals(root, mode, label)
         assert site_entries(root) == pre_entries[mode], label
         assert lock_identity(root) == identity, label
