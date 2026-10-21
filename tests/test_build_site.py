@@ -2603,6 +2603,123 @@ def _pair_tool_contract():
     return json.loads(PAIR_TOOLS.read_text(encoding="utf-8"))
 
 
+class _FailingTextHandle:
+    """Proxy over a REAL staged text handle that fails exactly one operation.
+
+    ``close`` releases the underlying descriptor FIRST and only then raises, so
+    the injected close fault never leaks a descriptor of its own (the leak under
+    test is the writer's, not the double's). ``seen['hit']`` is set when the
+    fault actually fires, proving the row reached the intended path.
+    """
+
+    def __init__(self, handle, operation, seen):
+        self._handle = handle
+        self._operation = operation
+        self._seen = seen
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    # Context-manager support keeps this double faithful to BOTH staging
+    # shapes (a ``with`` block or explicit close), so a regression row fails on
+    # the leftover/retention symptom instead of a double-compatibility TypeError.
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+    def _fire(self, message):
+        self._seen["hit"] = True
+        raise OSError(message)
+
+    def write(self, text):
+        if self._operation == "write":
+            self._fire("injected write failure")
+        return self._handle.write(text)
+
+    def flush(self):
+        if self._operation == "flush":
+            self._fire("injected flush failure")
+        return self._handle.flush()
+
+    def close(self):
+        self._handle.close()
+        if self._operation == "close":
+            self._fire("injected close failure")
+
+
+class _FailingLockFile:
+    """Proxy over a REAL lock file whose close releases then raises."""
+
+    def __init__(self, handle, seen):
+        self._handle = handle
+        self._seen = seen
+
+    def fileno(self):
+        return self._handle.fileno()
+
+    def close(self):
+        self._handle.close()
+        self._seen["hit"] = True
+        raise OSError("injected lock close failure")
+
+
+def _arm_stage_failure(patch, which, operation, seen):
+    """Inject ONE post-create staging fault on artifact #``which`` (1-based).
+
+    ``seen['hit']`` is set only when the injected fault actually fires, so a
+    row can prove it reached the intended ownership path; ``seen['fd']`` records
+    the descriptor handed to ``os.fdopen`` for that artifact so descriptor
+    closure is checkable deterministically.
+    """
+    import build_site
+    import os
+
+    real_fdopen = os.fdopen
+    real_fsync = os.fsync
+    real_mkstemp = build_site.tempfile.mkstemp
+    calls = {"fdopen": 0, "fsync": 0, "mkstemp": 0}
+
+    if operation == "mkstemp":
+        def mkstemp(*args, **kwargs):
+            calls["mkstemp"] += 1
+            if calls["mkstemp"] == which:
+                seen["hit"] = True
+                raise OSError("injected mkstemp failure")
+            return real_mkstemp(*args, **kwargs)
+
+        patch.setattr(build_site.tempfile, "mkstemp", mkstemp)
+        return
+
+    def fdopen(fd, *args, **kwargs):
+        calls["fdopen"] += 1
+        current = calls["fdopen"]
+        if current == which and operation == "fdopen":
+            seen["hit"] = True
+            seen["fd"] = fd
+            raise OSError("injected fdopen failure")
+        handle = real_fdopen(fd, *args, **kwargs)
+        if current == which:
+            seen["fd"] = fd
+            if operation in ("write", "flush", "close"):
+                return _FailingTextHandle(handle, operation, seen)
+        return handle
+
+    patch.setattr(build_site.os, "fdopen", fdopen)
+
+    if operation == "fsync":
+        def fsync(fd):
+            calls["fsync"] += 1
+            if calls["fsync"] == which:
+                seen["hit"] = True
+                raise OSError("injected fsync failure")
+            return real_fsync(fd)
+
+        patch.setattr(build_site.os, "fsync", fsync)
+
+
 def _expected_pair(root):
     """Independent oracle: the accepted capture -> build -> serialize -> render."""
     import build_site
@@ -2919,13 +3036,271 @@ def test_cli_failure_retention_and_injected_write_failures(
                         mode, label, name)
             assert _site_leftovers(root) == [], (mode, label)
 
-    # ---- injected replacement failures (first, then second) ---------------
+    # Independent oracle for the NEW pair, reused by the resource-ownership
+    # rows below and by the replacement/splice regressions after them.
     oracle_root = tmp_path / "oracle"
     _seed_logo(oracle_root)
     snapshot, new_catalog, new_html = _expected_pair(oracle_root)
     assert validate_artifact_pair(new_catalog, new_html)["snapshot_id"] == \
         snapshot["snapshot_id"]
 
+    # ---- owned staging resources: every post-create failure, both artifacts -
+    #
+    # _stage owns the descriptor AND the temp path from the instant the
+    # exclusive create returns. Every one of these injections fires AFTER a
+    # successful mkstemp (proved by seen["hit"]), so each row is a real
+    # resource-ownership failure path, not a missing-symbol check. `seen["fd"]`
+    # records the descriptor handed to fdopen so a leaked descriptor is
+    # detectable deterministically; the close double releases the real
+    # descriptor first so the double never leaks on its own.
+    def _assert_fd_released(fd, label):
+        try:
+            os.fstat(fd)
+        except OSError:
+            return
+        raise AssertionError(f"staging descriptor {fd} left open: {label}")
+
+    def _assert_diag(captured, label, needle=None):
+        assert captured.out == "", (label, captured.out)
+        assert captured.err.strip(), label
+        assert "Traceback" not in captured.err, label
+        if needle is not None:
+            assert needle in captured.err, (label, captured.err)
+
+    def _assert_finals(root, mode, label):
+        for name in LAST_GOOD:
+            target = root / "site" / name
+            if mode == "absent":
+                assert not target.exists(), (mode, label, name)
+            else:
+                assert target.read_bytes() == LAST_GOOD[name], (
+                    mode, label, name)
+
+    def staged_root(label, mode):
+        root = tmp_path / label
+        root.mkdir()
+        _seed_logo(root)
+        _write_roster(root, PAIR_ROSTER)
+        if mode == "pre-existing":
+            _seed_last_good(root)
+        return root
+
+    for mode in ("absent", "pre-existing"):
+        for which in (1, 2):
+            for operation in ("fdopen", "write", "flush", "fsync", "close"):
+                label = f"stage-{mode}-{which}-{operation}"
+                root = staged_root(label, mode)
+                capsys.readouterr()
+                seen = {}
+                with monkeypatch.context() as patch:
+                    _arm_stage_failure(patch, which, operation, seen)
+                    code = _run_cli(root)
+                assert seen.get("hit") is True, label
+                assert code == 2, label
+                _assert_fd_released(seen["fd"], label)
+                _assert_diag(capsys.readouterr(), label,
+                             f"injected {operation} failure")
+                _assert_finals(root, mode, label)
+                assert _site_leftovers(root) == [], label
+
+        # Partial staging: the SECOND exclusive create itself fails, so the
+        # first already-staged temp is inside the writer's own cleanup region.
+        label = f"partial-stage-{mode}"
+        root = staged_root(label, mode)
+        capsys.readouterr()
+        seen = {}
+        with monkeypatch.context() as patch:
+            _arm_stage_failure(patch, 2, "mkstemp", seen)
+            code = _run_cli(root)
+        assert seen.get("hit") is True, label
+        assert code == 2, label
+        _assert_diag(capsys.readouterr(), label, "injected mkstemp failure")
+        _assert_finals(root, mode, label)
+        assert _site_leftovers(root) == [], label
+
+    # ---- lock lifetime: open / acquire / release / close -------------------
+    #
+    # Both temps exist before each of these faults. A pre-existing lock sentinel
+    # plus an unrelated site file prove cleanup never unlinks the lock inode or
+    # arbitrary site contents, and never rewrites either.
+    LOCK_SENTINEL = b"pre-existing-build-lock"
+    real_flock = build_site.fcntl.flock
+    real_pair_replace = os.replace
+
+    def lock_root(label, mode):
+        root = tmp_path / f"lock-{mode}-{label}"
+        root.mkdir()
+        _seed_logo(root)
+        _write_roster(root, PAIR_ROSTER)
+        if mode == "pre-existing":
+            _seed_last_good(root)
+        site = root / "site"
+        site.mkdir(parents=True, exist_ok=True)
+        (site / ".build.lock").write_bytes(LOCK_SENTINEL)
+        (site / "unrelated.txt").write_bytes(b"keep me")
+        return root
+
+    def site_entries(root):
+        return sorted(p.name for p in (root / "site").iterdir())
+
+    def lock_identity(root):
+        lock = root / "site" / ".build.lock"
+        return lock.stat().st_ino, lock.read_bytes()
+
+    pre_entries = {
+        "absent": [".build.lock", "unrelated.txt"],
+        "pre-existing": [".build.lock", "catalog.json", "index.html",
+                         "unrelated.txt"],
+    }
+    whole_entries = [".build.lock", "catalog.json", "index.html",
+                     "unrelated.txt"]
+
+    for mode in ("absent", "pre-existing"):
+        # -- lock OPEN fails after both temps exist --------------------------
+        label = f"lock-open-{mode}"
+        root = lock_root("open", mode)
+        identity = lock_identity(root)
+        seen, calls = {}, {"replace": 0}
+        capsys.readouterr()
+
+        def counting_replace(src, dst):
+            calls["replace"] += 1
+            real_pair_replace(src, dst)
+
+        real_open = open
+
+        def failing_open(file, *args, **kwargs):
+            if str(file).endswith(".build.lock"):
+                seen["hit"] = True
+                raise OSError("injected lock open failure")
+            return real_open(file, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr("builtins.open", failing_open)
+            patch.setattr(build_site.os, "replace", counting_replace)
+            assert _run_cli(root) == 2, label
+        assert seen.get("hit") is True, label
+        assert calls["replace"] == 0, label
+        _assert_diag(capsys.readouterr(), label, "injected lock open failure")
+        _assert_finals(root, mode, label)
+        assert site_entries(root) == pre_entries[mode], label
+        assert lock_identity(root) == identity, label
+
+        # -- lock ACQUISITION fails: no replacement, no unlock of an
+        #    unacquired lock --------------------------------------------------
+        label = f"lock-acquire-{mode}"
+        root = lock_root("acquire", mode)
+        identity = lock_identity(root)
+        seen, calls, ops = {}, {"replace": 0}, []
+        capsys.readouterr()
+
+        def failing_acquire(fd, operation):
+            ops.append(operation)
+            if operation == build_site.fcntl.LOCK_EX:
+                seen["hit"] = True
+                raise OSError("injected lock acquisition failure")
+            return real_flock(fd, operation)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(build_site.fcntl, "flock", failing_acquire)
+            patch.setattr(build_site.os, "replace", counting_replace)
+            assert _run_cli(root) == 2, label
+        assert seen.get("hit") is True, label
+        assert calls["replace"] == 0, label
+        assert build_site.fcntl.LOCK_UN not in ops, (label, ops)
+        _assert_diag(capsys.readouterr(), label,
+                     "injected lock acquisition failure")
+        _assert_finals(root, mode, label)
+        assert site_entries(root) == pre_entries[mode], label
+        assert lock_identity(root) == identity, label
+
+        # -- lock RELEASE fails after a valid publication: exit 2, but the
+        #    surviving pair is the COMPLETE new pair (no success is reported) -
+        label = f"lock-release-{mode}"
+        root = lock_root("release", mode)
+        identity = lock_identity(root)
+        seen = {}
+        capsys.readouterr()
+
+        def failing_release(fd, operation):
+            if operation == build_site.fcntl.LOCK_UN:
+                seen["hit"] = True
+                raise OSError("injected lock release failure")
+            return real_flock(fd, operation)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(build_site.fcntl, "flock", failing_release)
+            assert _run_cli(root) == 2, label
+        assert seen.get("hit") is True, label
+        _assert_diag(capsys.readouterr(), label, "injected lock release failure")
+        assert (root / "site" / "catalog.json").read_bytes().decode("utf-8") == \
+            new_catalog, label
+        assert (root / "site" / "index.html").read_bytes().decode("utf-8") == \
+            new_html, label
+        assert site_entries(root) == whole_entries, label
+        assert lock_identity(root) == identity, label
+
+        # -- lock CLOSE fails after a valid publication ----------------------
+        label = f"lock-close-{mode}"
+        root = lock_root("close", mode)
+        identity = lock_identity(root)
+        seen = {}
+        capsys.readouterr()
+
+        def closing_open(file, *args, **kwargs):
+            handle = real_open(file, *args, **kwargs)
+            if str(file).endswith(".build.lock"):
+                seen["hit"] = True
+                return _FailingLockFile(handle, seen)
+            return handle
+
+        with monkeypatch.context() as patch:
+            patch.setattr("builtins.open", closing_open)
+            assert _run_cli(root) == 2, label
+        assert seen.get("hit") is True, label
+        _assert_diag(capsys.readouterr(), label, "injected lock close failure")
+        assert (root / "site" / "catalog.json").read_bytes().decode("utf-8") == \
+            new_catalog, label
+        assert (root / "site" / "index.html").read_bytes().decode("utf-8") == \
+            new_html, label
+        assert site_entries(root) == whole_entries, label
+        assert lock_identity(root) == identity, label
+
+        # -- publication AND release fail: the PRIMARY publication error is
+        #    preserved (the release fault never masks it) ---------------------
+        label = f"publish-and-release-{mode}"
+        root = lock_root("both", mode)
+        identity = lock_identity(root)
+        seen, calls = {}, {"replace": 0}
+        capsys.readouterr()
+
+        def failing_first_replace(src, dst):
+            calls["replace"] += 1
+            if calls["replace"] == 1:
+                seen["replace_hit"] = True
+                raise OSError("injected first replacement failure")
+            return real_pair_replace(src, dst)
+
+        def unlock_also_fails(fd, operation):
+            if operation == build_site.fcntl.LOCK_UN:
+                seen["unlock_hit"] = True
+                raise OSError("injected lock release failure")
+            return real_flock(fd, operation)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(build_site.os, "replace", failing_first_replace)
+            patch.setattr(build_site.fcntl, "flock", unlock_also_fails)
+            assert _run_cli(root) == 2, label
+        assert seen.get("replace_hit") is True, label
+        assert seen.get("unlock_hit") is True, label
+        captured = capsys.readouterr()
+        _assert_diag(captured, label, "injected first replacement failure")
+        assert "cannot release build lock" not in captured.err, label
+        _assert_finals(root, mode, label)
+        assert site_entries(root) == pre_entries[mode], label
+        assert lock_identity(root) == identity, label
+
+    # ---- injected replacement failures (first, then second) ---------------
     def injected_root(label):
         root = tmp_path / label
         root.mkdir()
@@ -3005,6 +3380,38 @@ def test_cli_failure_retention_and_injected_write_failures(
         validate_artifact_pair(spliced_catalog, spliced_html)
     assert other_catalog != spliced_catalog
     assert _site_leftovers(root) == []
+
+    # ---- direct writer: a known-bad PREPARED pair never reaches staging -----
+    # Both payloads are independently VALID (real builders), but they belong to
+    # different snapshots. write_artifact_pair must reject the pair BEFORE it
+    # creates a single temp or touches a final path.
+    assert validate_artifact_pair(new_catalog, new_html)
+    assert validate_artifact_pair(other_catalog, other_html)
+    for mode in ("absent", "pre-existing"):
+        label = f"known-bad-pair-{mode}"
+        root = tmp_path / label
+        root.mkdir()
+        if mode == "pre-existing":
+            _seed_last_good(root)
+        staged = {"n": 0}
+        real_mkstemp_pair = build_site.tempfile.mkstemp
+
+        def counting_mkstemp(*args, **kwargs):
+            staged["n"] += 1
+            return real_mkstemp_pair(*args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(build_site.tempfile, "mkstemp", counting_mkstemp)
+            with pytest.raises(build_site._PairWriteError):
+                build_site.write_artifact_pair(root, new_catalog, other_html)
+        assert staged["n"] == 0, label
+        assert _site_leftovers(root) == [], label
+        for name in LAST_GOOD:
+            target = root / "site" / name
+            if mode == "absent":
+                assert not target.exists(), (label, name)
+            else:
+                assert target.read_bytes() == LAST_GOOD[name], (label, name)
 
 
 def _rendered_other_pair(root):

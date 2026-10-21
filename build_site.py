@@ -59,8 +59,12 @@ Usage: python3 build_site.py [--root DIR]   (default root = repo dir)
 Exit codes: 0 both artifacts published; 2 for a missing/corrupt/structurally
 invalid roster, an invalid registry/snapshot, a missing/oversized/unreadable
 logo, an unusable tool resource, or a serialization/render/validation/staging/
-replacement failure — with stderr diagnostics, empty stdout and BOTH final
-files left byte-identical (or both absent).
+lock/replacement failure — with stderr diagnostics, empty stdout and, for every
+failure BEFORE replacement begins, BOTH final files left byte-identical (or both
+absent). Failures after the first replacement has begun (an interruption, a
+second-replacement I/O error, or a release/close failure after a valid pair) are
+still reported as exit 2, but only that later failure's own surviving pair is
+claimed: no rollback and no both-last-good promise is made there.
 """
 
 from __future__ import annotations
@@ -799,14 +803,42 @@ def _stage(site_dir, target, text):
     directory (same filesystem, so the later rename is atomic), including
     overlapping builds in one process/thread and separate processes. The file is
     fully written, flushed and fsynced before it is closed.
+
+    OWNERSHIP: from the instant the exclusive create succeeds this invocation
+    owns both the descriptor and the temp path, and every non-success exit
+    (fdopen, write, flush, fsync or close) closes what it owns and removes only
+    that temp before re-raising the PRIMARY error; cleanup errors are swallowed
+    so they can never mask it. The path is returned only on the successful
+    handoff, at which point the caller (the pair writer) owns it.
     """
     fd, name = tempfile.mkstemp(
         dir=str(site_dir), prefix=f".{target.name}.", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+    path = Path(name)
+    handle = None
+    handed_off = False
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        fd = -1  # the wrapper owns the descriptor from here on
         handle.write(text)
         handle.flush()
         os.fsync(handle.fileno())
-    return Path(name)
+        handle.close()
+        handle = None
+        handed_off = True
+        return path
+    finally:
+        if not handed_off:
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            _discard(path)
 
 
 def _read_published(path):
@@ -828,9 +860,15 @@ def write_artifact_pair(root, catalog_text, html_text):
     4. read back the EXACT final targets and validate the pair again before
        reporting success.
 
-    Raises :class:`_PairWriteError` on any failure. Owned temps are always
-    removed; unrelated files are never touched, and no rollback is attempted
-    (it could clobber a concurrent successful writer).
+    Raises :class:`_PairWriteError` on any staging, lock (open/acquire/
+    release/close) or publication failure. Owned temps are always removed;
+    unrelated files are never touched, the build lock file/inode is retained
+    (never unlinked), no unlock is attempted for a lock that was not acquired,
+    and no rollback is attempted (it could clobber a concurrent successful
+    writer). Every final file is left byte-identical (or absent) for a failure
+    BEFORE the first replacement; once replacement has begun a later failure
+    (interruption or second-replacement I/O error) may leave a mixed pair, which
+    is reported as an error -- no both-last-good promise is made there.
     """
     try:
         validate_artifact_pair(catalog_text, html_text)
@@ -844,49 +882,67 @@ def write_artifact_pair(root, catalog_text, html_text):
         raise _PairWriteError(f"cannot create {site_dir}: {exc}") from None
 
     staged = []
-    try:
-        for target, text in ((site_dir / CATALOG_REL.name, catalog_text),
-                             (site_dir / SITE_REL.name, html_text)):
-            staged.append((_stage(site_dir, target, text), target))
-    except OSError as exc:
-        for temp, _ in staged:
-            _discard(temp)
-        raise _PairWriteError(f"cannot stage artifacts: {exc}") from None
-
-    if fcntl is None:  # pragma: no cover - Windows producer support is later work
-        for temp, _ in staged:
-            _discard(temp)
-        raise _PairWriteError(
-            "artifact publication needs POSIX advisory locking (fcntl)")
-
+    lock_file = None
+    locked = False
     lock_path = site_dir / BUILD_LOCK_REL.name
     try:
-        lock_file = open(lock_path, "a+b")
-    except OSError as exc:
+        try:
+            for target, text in ((site_dir / CATALOG_REL.name, catalog_text),
+                                 (site_dir / SITE_REL.name, html_text)):
+                staged.append((_stage(site_dir, target, text), target))
+        except OSError as exc:
+            raise _PairWriteError(f"cannot stage artifacts: {exc}") from None
+
+        if fcntl is None:  # pragma: no cover - Windows support is later work
+            raise _PairWriteError(
+                "artifact publication needs POSIX advisory locking (fcntl)")
+
+        try:
+            lock_file = open(lock_path, "a+b")
+        except OSError as exc:
+            raise _PairWriteError(
+                f"cannot open build lock {lock_path}: {exc}") from None
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise _PairWriteError(
+                f"cannot acquire build lock {lock_path}: {exc}") from None
+        locked = True
+
+        for temp, target in staged:
+            try:
+                os.replace(temp, target)
+            except OSError as exc:
+                raise _PairWriteError(
+                    f"cannot publish {target.name}: {exc}") from None
+        try:
+            published_catalog = _read_published(site_dir / CATALOG_REL.name)
+            published_html = _read_published(site_dir / SITE_REL.name)
+            validate_artifact_pair(published_catalog, published_html)
+        except (OSError, ValueError, catalog.CatalogError):
+            raise _PairWriteError(
+                "published artifacts did not validate") from None
+    finally:
         for temp, _ in staged:
             _discard(temp)
-        raise _PairWriteError(f"cannot open build lock {lock_path}: {exc}") from None
-
-    with lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            for temp, target in staged:
-                try:
-                    os.replace(temp, target)
-                except OSError as exc:
-                    raise _PairWriteError(
-                        f"cannot publish {target.name}: {exc}") from None
+        # Release only a lock this invocation actually acquired; a release or
+        # close failure is itself a publication failure (the pair may already
+        # be valid, but success must NOT be reported), while an error already
+        # in flight stays the primary one.
+        release_error = None
+        if locked and fcntl is not None:
             try:
-                published_catalog = _read_published(site_dir / CATALOG_REL.name)
-                published_html = _read_published(site_dir / SITE_REL.name)
-                validate_artifact_pair(published_catalog, published_html)
-            except (OSError, ValueError, catalog.CatalogError):
-                raise _PairWriteError(
-                    "published artifacts did not validate") from None
-        finally:
-            for temp, _ in staged:
-                _discard(temp)
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            except OSError as exc:
+                release_error = exc
+        if lock_file is not None:
+            try:
+                lock_file.close()
+            except OSError as exc:
+                release_error = release_error or exc
+        if release_error is not None and sys.exc_info()[0] is None:
+            raise _PairWriteError(
+                f"cannot release build lock {lock_path}: {release_error}") from None
 
 
 def main(argv=None):
