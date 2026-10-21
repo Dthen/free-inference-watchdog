@@ -820,6 +820,18 @@ def test_catalog_url_source_loads_one_bounded_http_document(
             loopback.url("/no-length-oversize"), max_bytes=len(basic_raw)),
         ("127.0.0.1", "no-length-oversize"))
 
+    # a CHUNKED body has its OWN http.client reader, so it gets the same cap:
+    # one raw byte over fails, exactly at the cap the body is accepted.
+    loopback.serve(basic_raw + b" ", chunked=True)
+    _fixed_source_error(
+        lambda: source.load_catalog_url(
+            loopback.url("/chunked-oversize"), max_bytes=len(basic_raw)),
+        ("127.0.0.1", "chunked-oversize"))
+    loopback.serve(basic_raw, chunked=True)
+    assert source.load_catalog_url(
+        loopback.url("/chunked-at-cap"),
+        max_bytes=len(basic_raw))["snapshot_id"] == basic_doc["snapshot_id"]
+
     # oversize is rejected BEFORE any UTF-8 decode or catalogue validation.
     loopback.serve(b"\xff" * 64)
     _fixed_source_error(
