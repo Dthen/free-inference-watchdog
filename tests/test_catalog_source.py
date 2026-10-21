@@ -12,6 +12,9 @@ This module exercises only the small source/cache boundary:
     watchdog_catalog.source.fetch_catalog_url   (unit 5d)
     watchdog_catalog.source.CatalogSource       (unit 5e)
     watchdog_catalog.source.with_source         (unit 5e)
+    watchdog_catalog.source.AsyncCatalogSource  (unit 5f)
+    watchdog_catalog.source.DEFAULT_REFRESH_INTERVAL_S (unit 5f)
+    watchdog_catalog.source.DEFAULT_RETRY_BACKOFF_S    (unit 5f)
 
 `load_catalog_file` is one explicit, byte-bounded binary read of an
 operator-selected path whose bytes are decoded as strict UTF-8 and then handed
@@ -58,13 +61,24 @@ and ``with_source`` attaches that provenance to a pure query payload without
 querying or mutating it. Two further unparametrized groups cover the
 200/304/changed-body/fallback/freshness flow with detached views, warning
 propagation and source isolation; then every failure, corrupt-record, invalid
-clock/configuration and zero-I/O path. Scheduling, coalesced refresh,
-retries/backoff and async dispatch belong to later units, as does any CLI
-wiring -- none is implemented, imported or exercised here. Nothing in this
-module writes outside pytest's own scratch directory.
+clock/configuration and zero-I/O path.
+
+``AsyncCatalogSource`` (unit 5f) is implemented and exercised here as the small
+demand-driven asynchronous owner around one PRIVATE ``CatalogSource``: every
+source/cache/memory operation runs in a worker thread, callers that overlap a
+DUE refresh join exactly one attempt (cancelling a caller cancels only that
+wait), and eligibility is process-local MONOTONIC control state -- 300 seconds
+after a successful attempt COMPLETED, 30 seconds after a failed one. Two
+further unparametrized groups cover coalescing, off-loop dispatch, cancellation
+and single-loop ownership with deeply detached results; then both scheduling
+windows, wall-clock jumps, async URL/file failures and the clock/configuration
+gates. CLI, SDK and transport wiring remain later units. Nothing in this module
+writes outside pytest's own scratch directory.
 """
 
+import asyncio
 import copy
+import gc
 import hashlib
 import http.client
 import io
@@ -3275,3 +3289,879 @@ def test_catalog_source_failures_and_io_discipline(loopback, tmp_path,
     assert again["source"]["fetched_at"] == 5
     assert again["source"]["warnings"] == []
     assert leaked_acquisition["snapshot"] == fresh
+
+
+# ---------------------------------------------------------------------------
+# Unit 5f: coalesced async refresh, monotonic windows and off-loop dispatch
+# ---------------------------------------------------------------------------
+#
+# ``AsyncCatalogSource`` is ONE demand-driven asynchronous owner around ONE
+# private ``CatalogSource``. Every source/cache/memory operation runs in a
+# worker thread, callers that overlap a DUE refresh join exactly one attempt, and
+# eligibility is process-local MONOTONIC control state: 300 s after a successful
+# attempt COMPLETED, 30 s after a failed one. Nothing here sleeps for a real
+# interval, starts a background timer or reaches a public host.
+
+REFRESH_INTERVAL_S = 300
+RETRY_BACKOFF_S = 30
+LOOP_ERROR = "AsyncCatalogSource() must be used from one asyncio event loop"
+CLOCK_CALLABLE_ERROR = "AsyncCatalogSource() requires callable clocks or None"
+WALL_CLOCK_ERROR = (
+    "AsyncCatalogSource() requires wall_clock to return a finite non-negative "
+    "safe integer epoch")
+MONOTONIC_CLOCK_ERROR = (
+    "AsyncCatalogSource() requires monotonic_clock to return a finite number")
+
+
+class _FakeClock:
+    """A controllable clock: one explicit value plus a read counter."""
+
+    def __init__(self, value):
+        self.value = value
+        self.reads = 0
+
+    def __call__(self):
+        self.reads += 1
+        return self.value
+
+
+class _SwitchClock:
+    """A clock that is invalid on the chosen (1-based) reads only."""
+
+    def __init__(self, value, invalid_calls=()):
+        self.value = value
+        self.invalid_calls = tuple(invalid_calls)
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.calls in self.invalid_calls:
+            return "not a clock reading"
+        return self.value
+
+
+def _serve_rows(server, rows):
+    """Serve one scripted row per request of each path.
+
+    A row is ``(status, body, headers, length, chunked)``, a
+    ``(started, release, row)`` HOLD that announces the request and waits for
+    the test to release it, or ``("disconnect", body, declared)`` which writes a
+    short body and drops the connection. The LAST row of a path repeats, so an
+    unexpected extra request is still served (and visible in the request counts)
+    instead of hanging the fixture.
+    """
+    queues = {path: list(items) for path, items in rows.items()}
+
+    def respond(handler):
+        queue = queues.get(handler.path)
+        if not queue:
+            _write_response(handler, 500, b"", [], True, False)
+            return
+        row = queue.pop(0) if len(queue) > 1 else queue[0]
+        if row and row[0] == "disconnect":
+            _, body, declared = row
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(declared))
+            handler.end_headers()
+            handler.wfile.write(body)
+            handler.wfile.flush()
+            handler.close_connection = True
+            try:
+                handler.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            handler.connection.close()
+            return
+        if len(row) == 3 and hasattr(row[0], "wait"):
+            started, release, response = row
+            started.set()
+            release.wait(10.0)
+            _write_response(handler, *response)
+            return
+        _write_response(handler, *row)
+
+    server._responder = respond
+    return queues
+
+
+async def _wait_set(event, limit=1000):
+    """Await one test-owned ``threading.Event`` without blocking the loop."""
+    for _ in range(limit):
+        if event.is_set():
+            return True
+        await asyncio.sleep(0.01)
+    return event.is_set()
+
+
+def test_catalog_async_source_coalesces_off_loop_and_survives_cancellation(
+        loopback, tmp_path, monkeypatch):
+    assert source.DEFAULT_REFRESH_INTERVAL_S == REFRESH_INTERVAL_S
+    assert source.DEFAULT_RETRY_BACKOFF_S == RETRY_BACKOFF_S
+
+    basic = _clock_snapshot(tick_epoch=1_700_000_000)
+    basic_raw = _snapshot_bytes(basic)
+    other = _clock_snapshot(tick_epoch=1_700_000_000)
+    other_raw = _snapshot_bytes(other)
+    held_url = loopback.url("/held.json")
+    other_url = loopback.url("/other.json")
+    boom_url = loopback.url("/boom.json")
+    raised_url = loopback.url("/raised.json")
+    cache_root = tmp_path / "async-cache"
+    wall = _FakeClock(1_700_000_000)
+    mono = _FakeClock(1_000.0)
+
+    # -- (a) construction validates configuration and does NOTHING else -------
+    threading_before = threading.active_count()
+    assert not cache_root.exists()
+    owner = source.AsyncCatalogSource(
+        "url", held_url, cache_dir=cache_root, wall_clock=wall,
+        monotonic_clock=mono)
+    assert wall.reads == 0 and mono.reads == 0      # neither clock is read
+    assert not cache_root.exists()                   # no mkdir, no cache load
+    assert threading.active_count() == threading_before   # no thread/task
+    assert owner._loop is None and owner._flight is None
+    assert isinstance(owner._source, source.CatalogSource)
+    assert (owner._source.kind, owner._source.location) == ("url", held_url)
+
+    for bad in (5, True, "clock", object(), []):
+        with pytest.raises(TypeError) as excinfo:
+            source.AsyncCatalogSource("url", held_url, wall_clock=bad)
+        assert type(excinfo.value) is TypeError
+        assert str(excinfo.value) == CLOCK_CALLABLE_ERROR
+        with pytest.raises(TypeError) as excinfo:
+            source.AsyncCatalogSource("url", held_url, monotonic_clock=bad)
+        assert str(excinfo.value) == CLOCK_CALLABLE_ERROR
+    with pytest.raises(TypeError) as excinfo:
+        source.AsyncCatalogSource(None, held_url)
+    assert str(excinfo.value) == CACHE_KIND_TYPE_ERROR
+    with pytest.raises(ValueError) as excinfo:
+        source.AsyncCatalogSource("http", held_url)
+    assert str(excinfo.value) == CACHE_KIND_VALUE_ERROR
+    with pytest.raises(ValueError) as excinfo:
+        source.AsyncCatalogSource("file", "")
+    assert str(excinfo.value) == CACHE_LOCATION_ERROR
+    for bad in (0, -1, True, float("nan"), "10"):
+        with pytest.raises(ValueError) as excinfo:
+            source.AsyncCatalogSource("url", held_url, timeout_s=bad)
+        assert str(excinfo.value) == TIMEOUT_ERROR
+        with pytest.raises(ValueError) as excinfo:
+            source.AsyncCatalogSource("url", held_url, max_bytes=bad)
+        assert str(excinfo.value) == HTTP_BYTE_LIMIT_ERROR
+    assert not cache_root.exists()
+    assert wall.reads == 0 and mono.reads == 0
+    assert threading.active_count() == threading_before
+
+    # -- (b) instrument the owned synchronous object's worker threads ---------
+    calls = {"refresh": [], "current": [], "load": [], "store": []}
+    serial = {"active": {}, "maximum": 0, "lock": threading.Lock()}
+    hold = {"view": False, "view_entered": threading.Event(),
+            "view_release": threading.Event()}
+    real_refresh = source.CatalogSource.refresh
+    real_current = source.CatalogSource.current
+    real_load = source.DiskCache.load
+    real_store = source.DiskCache.store
+
+    def enter(label, owned):
+        calls[label].append(threading.get_ident())
+        with serial["lock"]:
+            key = id(owned)
+            serial["active"][key] = serial["active"].get(key, 0) + 1
+            serial["maximum"] = max(serial["maximum"],
+                                    serial["active"][key])
+
+    def leave(owned):
+        with serial["lock"]:
+            serial["active"][id(owned)] -= 1
+
+    def recording_refresh(self, *, now):
+        enter("refresh", self)
+        try:
+            return real_refresh(self, now=now)
+        finally:
+            leave(self)
+
+    def recording_current(self, *, now):
+        enter("current", self)
+        try:
+            if hold["view"] and not hold["view_entered"].is_set():
+                hold["view_entered"].set()
+                hold["view_release"].wait(10.0)
+            return real_current(self, now=now)
+        finally:
+            leave(self)
+
+    def recording_load(self):
+        calls["load"].append(threading.get_ident())
+        return real_load(self)
+
+    def recording_store(self, snapshot, **kwargs):
+        calls["store"].append(threading.get_ident())
+        return real_store(self, snapshot, **kwargs)
+
+    monkeypatch.setattr(source.CatalogSource, "refresh", recording_refresh)
+    monkeypatch.setattr(source.CatalogSource, "current", recording_current)
+    monkeypatch.setattr(source.DiskCache, "load", recording_load)
+    monkeypatch.setattr(source.DiskCache, "store", recording_store)
+
+    async def scenario():
+        loop_thread = threading.get_ident()
+        pulse = {"ticks": 0}
+        stop = asyncio.Event()
+
+        async def heartbeat():
+            while not stop.is_set():
+                pulse["ticks"] += 1
+                await asyncio.sleep(0.01)
+
+        beat = asyncio.create_task(heartbeat())
+        try:
+            # -- (c) several callers share ONE held loopback GET --------------
+            gate = {"started": threading.Event(), "release": threading.Event()}
+            _serve_rows(loopback, {
+                "/held.json": [(gate["started"], gate["release"],
+                                (200, basic_raw, [("ETag", 'W/"one"')],
+                                 True, False))],
+                "/other.json": [(200, other_raw, [("ETag", 'W/"other"')],
+                                 True, False)],
+            })
+            try:
+                first = asyncio.create_task(owner.aget())
+                assert await _wait_set(gate["started"])
+                assert loopback.hits.get("/held.json") == 1
+
+                second = asyncio.create_task(owner.aget())
+                third = asyncio.create_task(owner.aget())
+                await asyncio.sleep(0.05)
+                assert loopback.hits.get("/held.json") == 1
+
+                # a DISTINCT owner/source completes while the first is held --
+                bystander = source.AsyncCatalogSource(
+                    "url", other_url, cache_dir=tmp_path / "other-cache",
+                    wall_clock=wall, monotonic_clock=mono)
+                progressed = await bystander.aget()
+                assert progressed["snapshot"] == other
+                assert loopback.hits.get("/other.json") == 1
+                assert pulse["ticks"] >= 3      # the event loop kept beating
+
+                # cancelling one waiter cancels ONLY that wait ---------------
+                second.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await second
+                assert loopback.hits.get("/held.json") == 1
+                assert owner._flight is not None and not owner._flight.done()
+
+                # cancelling EVERY original waiter keeps the attempt alive ---
+                third.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await third
+                first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+                assert owner._flight is not None and not owner._flight.done()
+
+                # ... and a LATER caller joins it, not a second GET ----------
+                late = asyncio.create_task(owner.aget())
+                await asyncio.sleep(0.05)
+                assert loopback.hits.get("/held.json") == 1
+            finally:
+                gate["release"].set()
+            acquired = await late
+            metadata = _acquisition_metadata(acquired, snapshot=basic)
+            assert metadata["mode"] == "url" and metadata["url"] == held_url
+            assert metadata["cached"] is False
+            assert metadata["not_modified"] is False
+            assert metadata["fetched_at"] == 1_700_000_000
+            assert type(metadata["fetched_at"]) is int
+            assert metadata["fetch_age_s"] == 0
+            assert metadata["warnings"] == []
+            assert loopback.hits.get("/held.json") == 1
+
+            # -- (d) in-window views: no source, cache or network operation ---
+            requests_before = len(loopback.requests)
+            stores_before = len(calls["store"])
+            view = await owner.aget()
+            assert len(loopback.requests) == requests_before
+            assert len(calls["store"]) == stores_before
+            metadata = _acquisition_metadata(view, snapshot=basic)
+            assert metadata["cached"] is True
+            assert metadata["not_modified"] is False
+            assert metadata["fetched_at"] == 1_700_000_000
+            assert metadata["warnings"] == []
+
+            # every owned operation ran OFF the event-loop thread -------------
+            for label in ("refresh", "current", "load", "store"):
+                assert calls[label], label
+                assert all(thread != loop_thread for thread in calls[label]), \
+                    label
+
+            # -- (e) a held VIEW blocks a due REFRESH: one object, one order --
+            mono.value = 1_100.0        # still inside the 300 s success window
+            hold["view"] = True
+            gate_two = {"started": threading.Event(), "release": threading.Event()}
+            _serve_rows(loopback, {
+                "/held.json": [(gate_two["started"], gate_two["release"],
+                                (200, basic_raw, [("ETag", 'W/"two"')],
+                                 True, False))],
+                "/other.json": [(200, other_raw, [], True, False)],
+            })
+            try:
+                viewing = asyncio.create_task(owner.aget())
+                assert await _wait_set(hold["view_entered"])
+                assert loopback.hits.get("/held.json") == 1
+                mono.value = 1_300.0    # a due refresh now wants the object
+                refreshing = asyncio.create_task(owner.aget())
+                await asyncio.sleep(0.1)
+                # queued behind the held view, not racing it
+                assert serial["active"].get(id(owner._source)) == 1
+                assert loopback.hits.get("/held.json") == 1
+            finally:
+                hold["view_release"].set()
+            view_result = await viewing
+            assert view_result["snapshot"] == basic
+            assert view_result["source"]["cached"] is True
+            assert await _wait_set(gate_two["started"])
+            gate_two["release"].set()
+            refreshed = await refreshing
+            assert loopback.hits.get("/held.json") == 2
+            assert refreshed["snapshot"] == basic
+            assert serial["maximum"] == 1
+            hold["view"] = False
+
+            # -- (f) one shared result, one DEEPLY detached acquisition each --
+            mono.value = 1_600.0
+            gate_three = {"started": threading.Event(),
+                          "release": threading.Event()}
+            _serve_rows(loopback, {
+                "/held.json": [(gate_three["started"], gate_three["release"],
+                                (200, basic_raw, [], True, False))],
+                "/other.json": [(200, other_raw, [], True, False)],
+            })
+            try:
+                left = asyncio.create_task(owner.aget())
+                right = asyncio.create_task(owner.aget())
+                assert await _wait_set(gate_three["started"])
+            finally:
+                gate_three["release"].set()
+            one = await left
+            two = await right
+            assert loopback.hits.get("/held.json") == 3
+            assert one == two and one is not two
+            assert one["snapshot"] is not two["snapshot"]
+            assert one["source"] is not two["source"]
+            one["snapshot"]["providers"] = {}
+            one["snapshot"]["provider_order"].append("injected")
+            one["snapshot"]["snapshot_id"] = "0" * 64
+            one["source"]["warnings"].append("mutated")
+            one["source"]["fetched_at"] = -1
+            assert two["snapshot"] == basic
+            assert two["source"]["fetched_at"] == 1_700_000_000
+            assert two["source"]["warnings"] == []
+            retained = await owner.aget()       # 1600 < 1900: an in-window view
+            assert retained["snapshot"] == basic
+            assert retained["source"]["warnings"] == []
+            assert loopback.hits.get("/held.json") == 3
+
+            # -- (g) one shared FAILURE, a stable error for every caller ------
+            mono.value = 1_900.0
+            failing = source.AsyncCatalogSource(
+                "url", loopback.url("/fail.json"),
+                cache_dir=tmp_path / "fail-cache", wall_clock=wall,
+                monotonic_clock=mono)
+            gate_four = {"started": threading.Event(),
+                         "release": threading.Event()}
+            _serve_rows(loopback, {
+                "/held.json": [(200, basic_raw, [], True, False)],
+                "/other.json": [(200, other_raw, [], True, False)],
+                "/fail.json": [(gate_four["started"], gate_four["release"],
+                                (429, b"", [], True, False))],
+            })
+            try:
+                alpha = asyncio.create_task(failing.aget())
+                beta = asyncio.create_task(failing.aget())
+                assert await _wait_set(gate_four["started"])
+            finally:
+                gate_four["release"].set()
+            first_error = await alpha
+            second_error = await beta
+            assert first_error == _error_envelope() == second_error
+            assert first_error is not second_error
+            assert loopback.hits.get("/fail.json") == 1
+            # the 30 s FAILURE window is in force: no new attempt inside it
+            backoff_view = await failing.aget()
+            assert backoff_view == _error_envelope()
+            assert loopback.hits.get("/fail.json") == 1
+
+            # -- (h) programming faults stay exceptions and strand nothing ----
+            mono.value = 2_000.0
+            recorded = []
+            loop = asyncio.get_running_loop()
+            loop.set_exception_handler(
+                lambda listener, context: recorded.append(context))
+            original_fetch = source.fetch_catalog_url
+            explode = {"started": threading.Event(), "release": threading.Event()}
+
+            def exploding_fetch(url, **kwargs):
+                if url != boom_url:
+                    return original_fetch(url, **kwargs)
+                explode["started"].set()
+                explode["release"].wait(10.0)
+                raise RuntimeError("programming fault")
+
+            monkeypatch.setattr(source, "fetch_catalog_url", exploding_fetch)
+            boom_owner = source.AsyncCatalogSource(
+                "url", boom_url, cache_dir=tmp_path / "boom-cache",
+                wall_clock=wall, monotonic_clock=mono)
+            try:
+                doomed = asyncio.create_task(boom_owner.aget())
+                doomed_two = asyncio.create_task(boom_owner.aget())
+                assert await _wait_set(explode["started"])
+                doomed.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await doomed
+                doomed_two.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await doomed_two
+                assert boom_owner._flight is not None    # ownership is retained
+            finally:
+                explode["release"].set()
+            for _ in range(500):
+                if boom_owner._flight is None:
+                    break
+                await asyncio.sleep(0.01)
+            assert boom_owner._flight is None            # completed, none stranded
+            await asyncio.sleep(0.01)
+            gc.collect()
+            # The failure is never silently dropped: with no waiter left it is
+            # reported through the loop's exception handler (asyncio's shielded
+            # future observation) and the owner's own done callback retrieves it,
+            # so no unretrieved-task report exists for the flight.
+            assert not any("never retrieved" in context.get("message", "")
+                           for context in recorded)
+            assert {context.get("message") for context in recorded} <= {
+                "RuntimeError exception in shielded future"}
+            recorded.clear()
+
+            def raising_fetch(url, **kwargs):
+                if url != raised_url:
+                    return original_fetch(url, **kwargs)
+                raise RuntimeError("raised fault")
+
+            monkeypatch.setattr(source, "fetch_catalog_url", raising_fetch)
+            raised_owner = source.AsyncCatalogSource(
+                "url", raised_url, cache_dir=tmp_path / "raised-cache",
+                wall_clock=wall, monotonic_clock=mono)
+            with pytest.raises(RuntimeError) as excinfo:
+                await raised_owner.aget()
+            assert str(excinfo.value) == "raised fault"
+            assert raised_owner._flight is None
+            assert recorded == []
+            # no invented schedule and no stranding: a later call re-attempts
+            monkeypatch.setattr(source, "fetch_catalog_url", original_fetch)
+            _serve_rows(loopback, {
+                "/held.json": [(200, basic_raw, [], True, False)],
+                "/other.json": [(200, other_raw, [], True, False)],
+                "/raised.json": [(200, basic_raw, [], True, False)],
+            })
+            recovered = await raised_owner.aget()
+            assert recovered["ok"] is True
+            assert recovered["snapshot"] == basic
+            assert loopback.hits.get("/raised.json") == 1
+        finally:
+            stop.set()
+            await beat
+
+    asyncio.run(scenario())
+
+    # -- (i) one owner belongs to ONE running event loop ----------------------
+    held_before = loopback.hits.get("/held.json")
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(owner.aget())
+    assert type(excinfo.value) is RuntimeError
+    assert str(excinfo.value) == LOOP_ERROR
+    assert loopback.hits.get("/held.json") == held_before   # no dispatch
+
+    async def fresh_loop():
+        fresh = source.AsyncCatalogSource(
+            "url", held_url, cache_dir=tmp_path / "fresh-cache",
+            wall_clock=wall, monotonic_clock=mono)
+        return await fresh.aget()
+
+    assert asyncio.run(fresh_loop())["ok"] is True
+    assert loopback.hits.get("/held.json") == held_before + 1
+
+
+def test_catalog_async_source_schedules_success_and_failure_windows(
+        loopback, tmp_path, monkeypatch):
+    assert source.DEFAULT_REFRESH_INTERVAL_S == REFRESH_INTERVAL_S
+    assert source.DEFAULT_RETRY_BACKOFF_S == RETRY_BACKOFF_S
+
+    epoch = 1_700_000_000
+    observed = _clock_snapshot(tick_epoch=epoch)
+    observed_raw = _snapshot_bytes(observed)
+    fresher = _clock_snapshot(tick_epoch=epoch)
+    fresher["providers"]["synthetic-b"]["stale"] = True
+    fresher = _reseal(fresher)
+    fresher_raw = _snapshot_bytes(fresher)
+    assert observed["snapshot_id"] != fresher["snapshot_id"]
+    empty = _clock_snapshot(tick_epoch=epoch)
+    empty["provider_order"] = []
+    empty["providers"] = {}
+    empty = _reseal(empty)
+
+    url_a = loopback.url("/a.json")
+    wall = _FakeClock(epoch)
+    mono = _FakeClock(5_000.0)
+
+    store_calls = []
+    real_store = source.DiskCache.store
+
+    def counting_store(self, snapshot, **kwargs):
+        store_calls.append(kwargs.get("fetched_at"))
+        return real_store(self, snapshot, **kwargs)
+
+    file_reads = []
+    real_load_file = source.load_catalog_file
+
+    def counting_load_file(path, **kwargs):
+        file_reads.append(path)
+        return real_load_file(path, **kwargs)
+
+    monkeypatch.setattr(source.DiskCache, "store", counting_store)
+    monkeypatch.setattr(source, "load_catalog_file", counting_load_file)
+
+    # A RECENT disk record must not suppress the first, immediately-due call.
+    root_a = tmp_path / "cache-a"
+    seed = source.DiskCache("url", url_a, cache_dir=root_a)
+    assert seed.store(observed, fetched_at=epoch) is True
+    store_calls.clear()
+
+    a_owner = source.AsyncCatalogSource(
+        "url", url_a, cache_dir=root_a, wall_clock=wall, monotonic_clock=mono)
+    blocked = tmp_path / "blocked-cache"
+    blocked.write_bytes(b"not a cache directory")
+    w_owner = source.AsyncCatalogSource(
+        "url", loopback.url("/w.json"), cache_dir=blocked,
+        wall_clock=wall, monotonic_clock=mono)
+    n_owner = source.AsyncCatalogSource(
+        "url", loopback.url("/n.json"), cache_dir=tmp_path / "cache-n",
+        wall_clock=wall, monotonic_clock=mono)
+    m_owner = source.AsyncCatalogSource(
+        "url", loopback.url("/m.json"), cache_dir=tmp_path / "cache-m",
+        wall_clock=wall, monotonic_clock=mono)
+    d_owner = source.AsyncCatalogSource(
+        "url", loopback.url("/d.json"), cache_dir=tmp_path / "cache-d",
+        wall_clock=wall, monotonic_clock=mono)
+    selected_path = tmp_path / "selected.json"
+    selected_path.write_bytes(observed_raw)
+    file_owner = source.AsyncCatalogSource(
+        "file", selected_path, cache_dir=blocked, wall_clock=wall,
+        monotonic_clock=mono)
+    empty_path = tmp_path / "empty.json"
+    empty_path.write_bytes(_snapshot_bytes(empty))
+    empty_owner = source.AsyncCatalogSource(
+        "file", empty_path, cache_dir=tmp_path / "cache-e", wall_clock=wall,
+        monotonic_clock=mono)
+
+    gate_first = {"started": threading.Event(), "release": threading.Event()}
+    gate_fail = {"started": threading.Event(), "release": threading.Event()}
+    _serve_rows(loopback, {
+        "/a.json": [
+            (gate_first["started"], gate_first["release"],
+             (200, fresher_raw, [("ETag", 'W/"one"')], True, False)),
+            (304, b"", [("ETag", 'W/"one"')], False, False),
+            (gate_fail["started"], gate_fail["release"],
+             (500, b"", [], True, False)),
+            (200, observed_raw, [("ETag", 'W/"two"')], True, False),
+            (304, b"", [("ETag", 'W/"two"')], False, False),
+            (500, b"", [], True, False),
+        ],
+        "/w.json": [(200, observed_raw, [], True, False)],
+        "/n.json": [(404, b"", [], False, False),
+                    (200, observed_raw, [], True, False)],
+        "/m.json": [(200, b'{"schema_version": 1, ', [], True, False),
+                    (200, observed_raw, [], True, False)],
+        "/d.json": [("disconnect", observed_raw[:40], len(observed_raw)),
+                    (200, observed_raw, [], True, False)],
+        "/neg.json": [(200, observed_raw, [], True, False)],
+        "/c.json": [(200, observed_raw, [], True, False),
+                    (200, fresher_raw, [], True, False)],
+    })
+
+    async def scenario():
+        # -- (a) the first call is due even with a RECENT disk record ---------
+        try:
+            pending = asyncio.create_task(a_owner.aget())
+            assert await _wait_set(gate_first["started"])
+            mono.value = 5_100.0        # completion is anchored HERE, not at entry
+        finally:
+            gate_first["release"].set()
+        first = await pending
+        metadata = _acquisition_metadata(first, snapshot=fresher)
+        assert metadata["cached"] is False and metadata["not_modified"] is False
+        assert metadata["fetched_at"] == epoch and metadata["fetch_age_s"] == 0
+        assert metadata["observation_age_s"] == 0
+        assert metadata["warnings"] == []
+        assert loopback.hits.get("/a.json") == 1
+        _no_conditional(loopback.requests[0])
+        completed = mono.value                              # 5100
+
+        # -- (b) just-before / exactly-at the 300 s SUCCESS deadline ----------
+        mono.value = completed + RETRY_BACKOFF_S            # 30 s is too early
+        intermediate = await a_owner.aget()
+        metadata = _acquisition_metadata(intermediate, snapshot=fresher)
+        assert metadata["cached"] is True and metadata["not_modified"] is False
+        assert loopback.hits.get("/a.json") == 1
+        mono.value = completed + REFRESH_INTERVAL_S - 1
+        before_deadline = await a_owner.aget()
+        assert before_deadline["snapshot"] == fresher
+        assert loopback.hits.get("/a.json") == 1
+        mono.value = completed + REFRESH_INTERVAL_S         # equality IS due
+        revalidated = await a_owner.aget()
+        metadata = _acquisition_metadata(revalidated, snapshot=fresher)
+        assert metadata["cached"] is True and metadata["not_modified"] is True
+        assert metadata["fetched_at"] == epoch
+        assert loopback.hits.get("/a.json") == 2
+        _only_conditional(loopback.requests[1], "if-none-match", 'W/"one"')
+        completed = mono.value                              # 5400
+
+        # -- (c) failure: completion-anchored 30 s backoff, then recovery -----
+        mono.value = completed + REFRESH_INTERVAL_S
+        try:
+            failing = asyncio.create_task(a_owner.aget())
+            assert await _wait_set(gate_fail["started"])
+            mono.value += 10.0                              # completion moves
+        finally:
+            gate_fail["release"].set()
+        fallback = await failing
+        metadata = _acquisition_metadata(fallback, snapshot=fresher)
+        assert metadata["cached"] is True and metadata["not_modified"] is False
+        assert metadata["fetched_at"] == epoch              # original retrieval
+        assert metadata["warnings"] == ["refresh_failed", "cache_fallback"]
+        assert loopback.hits.get("/a.json") == 3
+        failed_at = mono.value                              # 5710
+        mono.value = failed_at + RETRY_BACKOFF_S - 1
+        stores_before = len(store_calls)
+        held_view = await a_owner.aget()
+        metadata = _acquisition_metadata(held_view, snapshot=fresher)
+        assert metadata["fetched_at"] == epoch
+        assert metadata["warnings"] == ["refresh_failed", "cache_fallback"]
+        assert loopback.hits.get("/a.json") == 3
+        assert len(store_calls) == stores_before
+        mono.value = failed_at + RETRY_BACKOFF_S            # equality IS due
+        wall.value = epoch + 5
+        recovered = await a_owner.aget()
+        metadata = _acquisition_metadata(recovered, snapshot=observed)
+        assert metadata["cached"] is False and metadata["not_modified"] is False
+        assert metadata["fetched_at"] == epoch + 5
+        assert metadata["warnings"] == []                   # success clears them
+        assert loopback.hits.get("/a.json") == 4
+        completed = mono.value                              # 5740
+
+        # -- (d) wall-clock jumps change AGES, never eligibility --------------
+        mono.value = completed + 100.0
+        wall.value = epoch + 1_005
+        forward = await a_owner.aget()
+        metadata = _acquisition_metadata(forward, snapshot=observed)
+        assert metadata["fetch_age_s"] == 1_000
+        assert metadata["observation_age_s"] == 1_005
+        assert metadata["observation_fresh"] is False
+        assert metadata["warnings"] == ["tick_stale"]
+        assert loopback.hits.get("/a.json") == 4
+        wall.value = epoch - 100
+        backward = await a_owner.aget()
+        metadata = _acquisition_metadata(backward, snapshot=observed)
+        assert metadata["fetch_age_s"] is None
+        assert metadata["observation_age_s"] is None
+        assert metadata["observation_fresh"] is False
+        assert metadata["warnings"] == ["fetch_time_future", "tick_epoch_future"]
+        assert loopback.hits.get("/a.json") == 4
+        wall.value = epoch + 5
+        mono.value = completed + REFRESH_INTERVAL_S - 1
+        assert (await a_owner.aget())["snapshot"] == observed
+        assert loopback.hits.get("/a.json") == 4
+        mono.value = completed + REFRESH_INTERVAL_S
+        again = await a_owner.aget()
+        assert _acquisition_metadata(again)["not_modified"] is True
+        assert loopback.hits.get("/a.json") == 5
+        completed = mono.value
+
+        # -- (e) a cache-write-only failure takes the SUCCESS interval --------
+        written = await w_owner.aget()
+        metadata = _acquisition_metadata(written, snapshot=observed)
+        assert metadata["warnings"] == ["cache_write_failed"]
+        assert loopback.hits.get("/w.json") == 1
+        w_completed = mono.value
+        mono.value = w_completed + RETRY_BACKOFF_S
+        still = await w_owner.aget()
+        metadata = _acquisition_metadata(still, snapshot=observed)
+        assert metadata["warnings"] == ["cache_write_failed"]
+        assert loopback.hits.get("/w.json") == 1
+
+        # -- (f) no source at all: error, 30 s backoff, then a real retry -----
+        assert await n_owner.aget() == _error_envelope()
+        assert loopback.hits.get("/n.json") == 1
+        n_completed = mono.value
+        mono.value = n_completed + RETRY_BACKOFF_S - 1
+        assert await n_owner.aget() == _error_envelope()
+        assert loopback.hits.get("/n.json") == 1
+        mono.value = n_completed + RETRY_BACKOFF_S
+        assert (await n_owner.aget())["snapshot"] == observed
+        assert loopback.hits.get("/n.json") == 2
+
+        # -- (g) malformed feed through the async wrapper --------------------
+        assert await m_owner.aget() == _error_envelope()
+        assert loopback.hits.get("/m.json") == 1
+        m_completed = mono.value
+        mono.value = m_completed + RETRY_BACKOFF_S - 1
+        assert await m_owner.aget() == _error_envelope()
+        assert loopback.hits.get("/m.json") == 1
+        mono.value = m_completed + RETRY_BACKOFF_S
+        assert (await m_owner.aget())["snapshot"] == observed
+        assert loopback.hits.get("/m.json") == 2
+
+        # -- (h) a real DISCONNECT through the async wrapper -----------------
+        assert await d_owner.aget() == _error_envelope()
+        assert loopback.hits.get("/d.json") == 1
+        d_completed = mono.value
+        mono.value = d_completed + RETRY_BACKOFF_S - 1
+        assert await d_owner.aget() == _error_envelope()
+        assert loopback.hits.get("/d.json") == 1
+        mono.value = d_completed + RETRY_BACKOFF_S
+        assert (await d_owner.aget())["snapshot"] == observed
+        assert loopback.hits.get("/d.json") == 2
+
+        # -- (i) FILE source: real re-read, same 300 s window ----------------
+        reads_before = len(file_reads)
+        local_first = await file_owner.aget()
+        metadata = _acquisition_metadata(local_first, snapshot=observed)
+        assert metadata["mode"] == "file" and metadata["url"] is None
+        assert metadata["warnings"] == ["cache_write_failed"]
+        assert metadata["fetched_at"] == wall.value
+        assert len(file_reads) == reads_before + 1
+        f_completed = mono.value
+        selected_path.write_bytes(fresher_raw)
+        mono.value = f_completed + RETRY_BACKOFF_S
+        cached_file = await file_owner.aget()
+        metadata = _acquisition_metadata(cached_file, snapshot=observed)
+        assert metadata["warnings"] == ["cache_write_failed"]
+        assert len(file_reads) == reads_before + 1          # no re-read in-window
+        mono.value = f_completed + REFRESH_INTERVAL_S
+        local_second = await file_owner.aget()
+        assert local_second["snapshot"] == fresher
+        assert len(file_reads) == reads_before + 2
+
+        # -- (j) fallback warnings survive all five attached tool results ----
+        mono.value = completed + REFRESH_INTERVAL_S
+        assert (await a_owner.aget())["source"]["warnings"] == [
+            "refresh_failed", "cache_fallback"]
+        assert loopback.hits.get("/a.json") == 6
+        j_completed = mono.value
+        mono.value = j_completed + RETRY_BACKOFF_S - 1
+        requests_before = len(loopback.requests)
+        stores_before = len(store_calls)
+        exposure = await a_owner.aget()
+        metadata = _acquisition_metadata(exposure, snapshot=observed)
+        assert metadata["fetched_at"] == epoch + 5
+        assert metadata["warnings"] == ["refresh_failed", "cache_fallback"]
+        for round_index in (1, 2):
+            for label, call in (
+                    ("list_free_models",
+                     lambda snapshot: query.list_free_models(snapshot, {})),
+                    ("get_model",
+                     lambda snapshot: query.get_model(
+                         snapshot, {"model_id": "alpha-1:free"})),
+                    ("list_endpoints",
+                     lambda snapshot: query.list_endpoints(snapshot, {})),
+                    ("watchdog_status",
+                     lambda snapshot: query.watchdog_status(
+                         snapshot, {}, now=epoch + 100)),
+                    ("search_models",
+                     lambda snapshot: query.search_models(snapshot, {}))):
+                attached = source.with_source(call(observed), exposure)
+                assert attached["source"]["warnings"] == [
+                    "refresh_failed", "cache_fallback"], (round_index, label)
+        assert len(loopback.requests) == requests_before
+        assert len(store_calls) == stores_before
+
+        # -- (k) a valid EMPTY catalogue is a SUCCESS, not a failure ---------
+        served = await empty_owner.aget()
+        assert served["ok"] is True
+        assert served["snapshot"]["provider_order"] == []
+        assert served["source"]["warnings"] == []
+        e_completed = mono.value
+        mono.value = e_completed + RETRY_BACKOFF_S
+        reads_before = len(file_reads)
+        assert (await empty_owner.aget())["snapshot"]["providers"] == {}
+        assert len(file_reads) == reads_before
+
+        # -- (l) invalid clocks stay PRE-I/O exceptions ----------------------
+        requests_before = len(loopback.requests)
+        stores_before = len(store_calls)
+        for bad in (True, "1", None, float("nan"), float("inf"), -1,
+                    catalog.MAX_SAFE_INT + 1):
+            guarded = source.AsyncCatalogSource(
+                "url", loopback.url("/bad.json"),
+                cache_dir=tmp_path / "cache-bad", wall_clock=_FakeClock(bad),
+                monotonic_clock=_FakeClock(0.0))
+            with pytest.raises(ValueError) as excinfo:
+                await guarded.aget()
+            assert type(excinfo.value) is ValueError
+            assert str(excinfo.value) == WALL_CLOCK_ERROR
+        for bad in (True, "0", float("nan"), float("inf")):
+            guarded = source.AsyncCatalogSource(
+                "url", loopback.url("/bad.json"),
+                cache_dir=tmp_path / "cache-bad",
+                wall_clock=_FakeClock(epoch),
+                monotonic_clock=_FakeClock(bad))
+            with pytest.raises(ValueError) as excinfo:
+                await guarded.aget()
+            assert str(excinfo.value) == MONOTONIC_CLOCK_ERROR
+        assert len(loopback.requests) == requests_before
+        assert len(store_calls) == stores_before
+        assert loopback.hits.get("/bad.json") is None
+
+        # -- (m) negative monotonic origin, fractional wall, raising clock ---
+        negative = source.AsyncCatalogSource(
+            "url", loopback.url("/neg.json"), cache_dir=tmp_path / "cache-neg",
+            wall_clock=_FakeClock(epoch + 0.75),
+            monotonic_clock=_FakeClock(-50.0))
+        modern = await negative.aget()
+        assert modern["source"]["fetched_at"] == epoch
+        assert type(modern["source"]["fetched_at"]) is int
+        assert (await negative.aget())["snapshot"] == observed
+        assert loopback.hits.get("/neg.json") == 1
+
+        def exploding_clock():
+            raise RuntimeError("clock fault")
+
+        broken = source.AsyncCatalogSource(
+            "url", loopback.url("/bad.json"), cache_dir=tmp_path / "cache-x",
+            wall_clock=exploding_clock, monotonic_clock=_FakeClock(0.0))
+        with pytest.raises(RuntimeError) as excinfo:
+            await broken.aget()
+        assert str(excinfo.value) == "clock fault"
+        assert broken._flight is None
+        assert loopback.hits.get("/bad.json") is None
+
+        # -- (n) an invalid COMPLETION reading: raise, keep, invent nothing --
+        switch = _SwitchClock(1_000.0, invalid_calls=(2,))
+        c_owner = source.AsyncCatalogSource(
+            "url", loopback.url("/c.json"), cache_dir=tmp_path / "cache-c",
+            wall_clock=wall, monotonic_clock=switch)
+        with pytest.raises(ValueError) as excinfo:
+            await c_owner.aget()
+        assert str(excinfo.value) == MONOTONIC_CLOCK_ERROR
+        assert loopback.hits.get("/c.json") == 1            # the source DID answer
+        assert c_owner._flight is None                      # nothing stranded
+        retained = c_owner._source.current(now=wall.value)
+        assert retained["snapshot"] == observed             # not rolled back
+        newer = await c_owner.aget()                        # no invented deadline
+        assert newer["snapshot"] == fresher
+        assert loopback.hits.get("/c.json") == 2
+
+        # -- (o) exact per-source request counts, no cross-source leakage ----
+        assert loopback.hits == {
+            "/a.json": 6, "/w.json": 1, "/n.json": 2, "/m.json": 2,
+            "/d.json": 2, "/neg.json": 1, "/c.json": 2}
+
+    asyncio.run(scenario())

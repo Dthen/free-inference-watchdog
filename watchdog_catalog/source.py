@@ -142,17 +142,52 @@ Last-good fallback and provenance (unit 5e):
   network or clock I/O -- and :func:`with_source` attaches the same provenance
   object to any pure query payload without mutating it.
 
-Scheduling, coalesced refresh, retries/backoff and async dispatch remain later
-units and are deliberately absent, as is any CLI wiring.
+Coalesced asynchronous acquisition (unit 5f):
+
+* :class:`AsyncCatalogSource` is a small DEMAND-DRIVEN asynchronous owner around
+  ONE private :class:`CatalogSource`. Its constructor validates the same literal
+  source/cache/bounds configuration plus the two optional clock callables, and
+  performs no clock read, source/cache load, directory creation or network
+  access and starts no task, thread or event loop;
+* every :meth:`AsyncCatalogSource.aget` runs the owned synchronous work in a
+  worker thread (``asyncio.to_thread``), so no blocking stdlib HTTP, disk read
+  or filesystem write runs on the event loop. Callers that overlap a DUE refresh
+  join ONE strongly referenced in-flight attempt -- including arrivals after
+  every earlier waiter was cancelled -- and each caller receives its own deeply
+  detached acquisition even when that attempt is shared. Cancelling a caller
+  cancels only that caller's wait, never the shared work;
+* scheduling is process-local MONOTONIC control state, never persisted and never
+  mixed with ``fetched_at``/``tick_epoch``/``cadence_s``: the first call is due
+  immediately regardless of a disk record's fetch time, a source SUCCESS (a
+  validated new body, an accepted 304, or a body whose only warning is
+  ``cache_write_failed``) is revalidated no sooner than
+  :data:`DEFAULT_REFRESH_INTERVAL_S` after the attempt COMPLETED, and a FAILED
+  attempt (the structured source error, or an ``ok`` last-good fallback carrying
+  ``refresh_failed``/``cache_fallback``) waits
+  :data:`DEFAULT_RETRY_BACKOFF_S`. Inside a window the owner answers from
+  :meth:`CatalogSource.current`, so warnings and ages are recalculated from the
+  caller's captured wall epoch instead of replaying an old acquisition;
+* one owner belongs to ONE running asyncio event loop, bound lazily on the first
+  ``aget``; a different loop is a fixed ``RuntimeError`` raised before any
+  dispatch. Wall-clock jumps change reported ages/future warnings but never move
+  a monotonic deadline. There is no background timer, eager startup fetch,
+  runtime sleep, immediate retry loop, ``Retry-After`` policy, interval
+  configuration or force-refresh API: refresh happens only when asked for.
+
+The synchronous loaders, transport and :class:`CatalogSource` remain the
+authority for validation, persistence, fallback and freshness. CLI, SDK and
+transport wiring remain later units and are deliberately absent.
 """
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import datetime
 import email.utils
 import hashlib
 import http.client
+import math
 import ntpath
 import os
 import posixpath
@@ -160,6 +195,8 @@ import re
 import ssl
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1499,3 +1536,225 @@ def with_source(payload, acquisition):
         attached["source"] = copy.deepcopy(acquisition["source"])
         return attached
     return copy.deepcopy(acquisition)
+
+
+# ---------------------------------------------------------------------------
+# Coalesced asynchronous refresh, monotonic scheduling and off-loop dispatch
+# (unit 5f)
+# ---------------------------------------------------------------------------
+#
+# ONE demand-driven asynchronous owner around ONE private CatalogSource. Every
+# source, cache, network and memory-view operation runs in a worker thread, an
+# overlapping DUE refresh is JOINED rather than repeated, and eligibility is
+# process-local MONOTONIC control state -- never persisted and never mixed with
+# the acquisition's own observation/retrieval times.
+
+#: Revalidate a successful source at most this often, in seconds.
+DEFAULT_REFRESH_INTERVAL_S = 300
+
+#: Wait this long after a FAILED source attempt before trying again, in seconds.
+DEFAULT_RETRY_BACKOFF_S = 30
+
+_LOOP_ERROR = "AsyncCatalogSource() must be used from one asyncio event loop"
+_CLOCK_CALLABLE_ERROR = "AsyncCatalogSource() requires callable clocks or None"
+_WALL_CLOCK_ERROR = (
+    "AsyncCatalogSource() requires wall_clock to return a finite non-negative "
+    "safe integer epoch")
+_MONOTONIC_CLOCK_ERROR = (
+    "AsyncCatalogSource() requires monotonic_clock to return a finite number")
+
+
+def _wall_epoch(clock):
+    """One validated capture of the supplied wall clock as a native epoch.
+
+    ``time.time`` semantics: a native ``int``/``float`` (``bool`` excluded),
+    finite, non-negative and inside
+    :data:`~watchdog_catalog.catalog.MAX_SAFE_INT`, truncated toward zero into a
+    native ``int`` so a positive fractional part is dropped. Every read -- the
+    captured operation time and an in-window view time alike -- goes through
+    this single gate, so an unusable clock is ONE fixed non-reflective
+    ``ValueError`` raised BEFORE new source/cache I/O instead of a repaired
+    epoch. The clock's own exceptions are never caught here.
+    """
+    value = clock()
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(_WALL_CLOCK_ERROR)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(_WALL_CLOCK_ERROR)
+    if not 0 <= value <= _catalog.MAX_SAFE_INT:
+        raise ValueError(_WALL_CLOCK_ERROR)
+    return int(value)
+
+
+def _monotonic_reading(clock):
+    """One validated capture of the supplied monotonic clock.
+
+    ``time.monotonic`` semantics: a finite native ``int``/``float`` (``bool``
+    excluded) with an ARBITRARY reference point, so a negative origin is
+    accepted. The value is returned natively and is only ever compared or added
+    to, so scheduling arithmetic stays in the clock's own units. An unusable
+    reading is ONE fixed non-reflective ``ValueError``; nothing invents a
+    substitute deadline, and the clock's own exceptions are never caught.
+    """
+    value = clock()
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(_MONOTONIC_CLOCK_ERROR)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(_MONOTONIC_CLOCK_ERROR)
+    return value
+
+
+def _source_attempt_failed(result):
+    """Whether one :class:`CatalogSource` result is a FAILED source attempt.
+
+    A structured no-source error (``ok`` not ``True``) and an ``ok`` last-good
+    fallback carrying ``refresh_failed``/``cache_fallback`` are both failures:
+    ``ok`` alone never proves the source answered. A validated new body, an
+    accepted 304 and a body whose only warning is ``cache_write_failed`` are
+    successes. Anything unrecognisable counts as a failure, so a malformed
+    result can only ever shorten the next attempt to the retry window.
+    """
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return True
+    metadata = result.get("source")
+    if not isinstance(metadata, dict):
+        return True
+    warnings = metadata.get("warnings")
+    if not isinstance(warnings, list):
+        return True
+    return "refresh_failed" in warnings or "cache_fallback" in warnings
+
+
+def _observe_task(task):
+    """Retrieve a completed flight's exception so none is left unobserved.
+
+    Every waiter still receives the exception through its own ``await``; this
+    callback only keeps a flight whose waiters all cancelled from being reported
+    as an unretrieved task exception at collection time.
+    """
+    if task.cancelled():
+        return
+    task.exception()
+
+
+class AsyncCatalogSource:
+    """ONE demand-driven asynchronous owner around ONE synchronous source.
+
+    ``kind``, ``location``, ``cache_dir``, ``timeout_s`` and ``max_bytes`` are
+    exactly :class:`CatalogSource`'s accepted literal source/cache/bounds
+    configuration; this object owns one PRIVATE instance of it and never shares
+    that instance. ``wall_clock`` (default ``time.time``) supplies the captured
+    operation epoch and ``monotonic_clock`` (default ``time.monotonic``) supplies
+    scheduling readings; both must be callable and neither is read at
+    construction.
+
+    Construction validates configuration and nothing else: no clock read, no
+    source/cache load, no directory creation, no network access, and no task,
+    thread or event loop is started. The owner binds itself to the running
+    asyncio event loop of its FIRST :meth:`aget`; use from another loop is a
+    fixed ``RuntimeError`` raised before any dispatch, so no foreign future is
+    awaited and the owned source's state is never touched from two loops. This
+    is a single-loop owner, not a cross-loop or cross-thread service.
+
+    Normal event-loop or process shutdown is NOT a promise to cancel an
+    executing stdlib thread, DNS lookup or socket immediately: the accepted
+    socket-operation ``timeout_s`` remains the only bound on a request that is
+    already in flight.
+    """
+
+    def __init__(self, kind, location, *, cache_dir=None,
+                 timeout_s=DEFAULT_TIMEOUT_S, max_bytes=MAX_SOURCE_BYTES,
+                 wall_clock=None, monotonic_clock=None):
+        selected_wall = time.time if wall_clock is None else wall_clock
+        selected_monotonic = (
+            time.monotonic if monotonic_clock is None else monotonic_clock)
+        if not callable(selected_wall) or not callable(selected_monotonic):
+            raise TypeError(_CLOCK_CALLABLE_ERROR)
+        self._source = CatalogSource(
+            kind, location, cache_dir=cache_dir, timeout_s=timeout_s,
+            max_bytes=max_bytes)
+        self._wall_clock = selected_wall
+        self._monotonic_clock = selected_monotonic
+        # One lock for the WHOLE owned object: a view and a refresh can never
+        # race on last-good state, and no worker thread enters a refresh while
+        # another is still finishing.
+        self._sync_lock = threading.Lock()
+        self._loop = None
+        self._flight = None
+        self._next_eligible = None
+
+    # -- worker-thread operations -----------------------------------------
+
+    def _refresh_in_worker(self, moment):
+        """ONE refresh of the owned source, serialized with every view."""
+        with self._sync_lock:
+            return self._source.refresh(now=moment)
+
+    def _view_in_worker(self, moment):
+        """ONE memory-only current view, serialized with every refresh."""
+        with self._sync_lock:
+            return self._source.current(now=moment)
+
+    # -- scheduling -------------------------------------------------------
+
+    async def _run_flight(self, moment):
+        """Run ONE shared source attempt and publish its monotonic deadline.
+
+        The interval is anchored at the COMPLETION monotonic reading, taken
+        after the worker returns. An unusable completion reading raises instead
+        of inventing a schedule: the accepted acquisition stays in memory (its
+        own truth is untouched), the flight is still cleared, and the next call
+        remains due because no deadline was published.
+        """
+        try:
+            result = await asyncio.to_thread(self._refresh_in_worker, moment)
+            completed = _monotonic_reading(self._monotonic_clock)
+            interval = (DEFAULT_RETRY_BACKOFF_S if _source_attempt_failed(result)
+                        else DEFAULT_REFRESH_INTERVAL_S)
+            self._next_eligible = completed + interval
+            return result
+        finally:
+            if self._flight is asyncio.current_task():
+                self._flight = None
+
+    @staticmethod
+    async def _joined(flight):
+        """Await one shared flight and hand THIS caller its own deep copy.
+
+        The flight is awaited through :func:`asyncio.shield`, so cancelling the
+        awaiting caller raises ``CancelledError`` here without cancelling the
+        shared attempt: awaiting a task directly would make that task the
+        waiter's own ``_fut_waiter``, and ``Task.cancel()`` would then cancel the
+        attempt for every other caller. Ownership of the flight therefore
+        outlives any individual waiter, and each successful waiter gets a freshly
+        allocated acquisition, so mutated snapshots, metadata or warnings can
+        never reach another waiter, retained memory, the disk entry or a later
+        view.
+        """
+        return copy.deepcopy(await asyncio.shield(flight))
+
+    async def aget(self):
+        """The acquisition for this source: one refresh, or a fresh view.
+
+        The first call is due immediately. A call that overlaps a due refresh
+        joins that one attempt; a call inside a success or failure window
+        returns an off-loop :meth:`CatalogSource.current` view instead, with the
+        surviving warnings and the real observation age of the caller's captured
+        wall epoch. There is no automatic retry, timer or force-refresh.
+        """
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif self._loop is not loop:
+            raise RuntimeError(_LOOP_ERROR)
+        flight = self._flight
+        if flight is not None:
+            return await self._joined(flight)
+        moment = _wall_epoch(self._wall_clock)
+        monotonic = _monotonic_reading(self._monotonic_clock)
+        if self._next_eligible is not None and monotonic < self._next_eligible:
+            return await asyncio.to_thread(self._view_in_worker, moment)
+        flight = loop.create_task(self._run_flight(moment))
+        self._flight = flight
+        flight.add_done_callback(_observe_task)
+        return await self._joined(flight)
