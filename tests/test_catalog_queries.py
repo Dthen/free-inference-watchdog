@@ -3451,6 +3451,10 @@ SEARCH_BOUNDARY_ROWS = (
                            ("alpha", "vendor/tool")]),
     ("vendor/tool", "alpha", [("alpha", "vendor/tool")]),
     ("vendor/tool:free", None, [("Alpha", "vendor/tool:free")]),
+    # A null description is NOT a text field: neither Python's `str(None)`
+    # spelling ("None") nor the JSON spelling ("null") may match a null.
+    ("none", None, []),
+    ("null", None, []),
     # Capability arrays, pricing, URL, provider key and object key names are
     # never searched.
     ("ImageToken", None, []),
