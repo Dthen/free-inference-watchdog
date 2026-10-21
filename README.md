@@ -288,9 +288,9 @@ validated local snapshot; the `snapshot_id` hash binds that **local sanitized
 public projection**, not the raw metadata dictionaries or any filesystem
 diagnostic, so it can differ from the strictly published feed for the same tick,
 and a structurally invalid raw source can prevent strict publication while this
-local compatibility view still answers. Both `list_free_models` and `get_model`
-delegate to the pure query here; `list_endpoints` and `watchdog_status` keep
-their own behaviour until their own units.
+local compatibility view still answers. `list_free_models`, `get_model` and
+`list_endpoints` delegate to the pure query here; `watchdog_status` keeps its
+own behaviour until its own unit.
 
 **Local `get_model` compatibility (literal membership, restored raw metadata).**
 The root-script `get_model` delegates exact membership, the separate
@@ -311,6 +311,26 @@ tracked. Surrounding padding is never trimmed. Additive core provenance
 four count definitions) is carried through, and `snapshot_id` binds the same
 local sanitized public projection described above — never the restored raw
 metadata dictionaries or a filesystem diagnostic.
+
+**Local `list_endpoints` compatibility (selected-provider counts, raw nested metadata).**
+The root-script `list_endpoints` delegates provider selection, raw-ID ordering
+and every count to that same pure query module while keeping the local
+interface. Each selected gateway entry keeps exactly its four fields
+(`chat_completions_url`, `api_type`, `model_ids`, `models`), and `models`
+restores the **ORIGINAL raw metadata dictionaries** for exactly the selected
+`(gateway, raw id)` pairs — unknown and nested upstream fields included, `{}`
+when the roster carries none, and no entry for a missing or non-dict value.
+`counts.gateways` is the number of **selected** providers including a zero-ID
+provider (never the full registry), `counts.endpoints` the selected
+`(gateway, raw id)` pairs, `counts.distinct_raw_ids` the selected literal raw
+strings and `counts.marker_group_labels` the selected delimiter-stripped labels;
+the legacy `counts.models` is the documented alias of that label count, never a
+verified underlying model identity, so a provider filter never leaks the
+registry-wide totals. Additive core provenance (`snapshot_id`, strict
+`tick_epoch`, `provider_staleness` over exactly the selected gateways, and
+snapshot-wide `warnings`) is carried through; `snapshot_id` binds the same local
+sanitized public projection described above — never the restored raw metadata
+dictionaries or a filesystem diagnostic.
 
 ### Structural validation of published snapshots (frozen rules)
 

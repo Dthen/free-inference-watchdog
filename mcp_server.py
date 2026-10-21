@@ -447,55 +447,81 @@ def get_model(model_id, root=None) -> dict:
 def list_endpoints(provider=None, root=None) -> dict:
     """All gateway wiring entries across the roster, or one gateway's.
 
-    Returns every (gateway, raw id) pair in the roster with the gateway's
-    wiring (chat-completions URL, api_type). Optional
-    provider=<name> filters to a
-    single gateway. Structured errors, no raises into the MCP layer.
+    Local compatibility wrapper: the captured registry and the roster read ONCE
+    through state.py are adapted to the validated public snapshot, and provider
+    selection, raw-ID ordering and every count are delegated to the pure
+    ``watchdog_catalog.query`` core. Only the OUTPUT is adapted back -- each
+    selected gateway keeps exactly its four fields while its ``models`` map is
+    rebuilt from the ORIGINAL raw metadata dictionaries of the same retained
+    roster, and the snapshot provenance (``snapshot_id``, ``tick_epoch``,
+    ``provider_staleness``, ``warnings``) is carried through.
+
+    ``counts.gateways`` is the number of SELECTED providers (zero-ID providers
+    included), never the full registry; ``counts.endpoints`` counts selected
+    ``(provider, raw id)`` pairs, ``counts.distinct_raw_ids`` the selected
+    literal raw strings, ``counts.marker_group_labels`` the selected
+    delimiter-stripped labels, and the legacy ``counts.models`` is the
+    documented alias of that label count -- never a verified model identity.
+    ``gateways[*].models`` restores raw tracked metadata ({} when the roster
+    predates metadata capture or the hierarchy/entry is malformed).
     """
     r = Path(root).resolve() if root is not None else REPO
     base: dict = {"tool": "list_endpoints", "state_root": str(r)}
 
+    # Capture the resolved registry ONCE. A bad registry root outranks every
+    # argument and state error, so a broken local wiring is never masked by a
+    # misspelled provider name.
+    try:
+        registry = _capture_registry(base)
+    except _StateError as exc:
+        return exc.payload
+    # Valid provider names are ONLY the captured records with a nonempty string
+    # key. A malformed captured key stays in the registry for the builder's
+    # later structural rejection but never reaches join() for error formatting.
+    valid_providers = [rec["key"] for rec in registry
+                       if isinstance(rec["key"], str) and rec["key"]]
+
     if provider is not None and (
-            not isinstance(provider, str) or provider not in PROVIDERS):
+            not isinstance(provider, str) or provider not in valid_providers):
+        # Arg validation outranks state problems: the caller asked for a
+        # specific gateway and misspelled it — tell them the valid names.
         return _error(
             base, f"unknown provider {provider!r}; "
-                  f"valid providers: {', '.join(PROVIDERS)}",
-            valid_providers=list(PROVIDERS))
+                  f"valid providers: {', '.join(valid_providers)}",
+            valid_providers=list(valid_providers))
     try:
         roster = _load_roster_checked(r, base)
+        snapshot = _local_snapshot(roster, registry, base)
     except _StateError as exc:
         return exc.payload
 
-    raw = roster["providers"]
-    gateways = {}
-    total_endpoints = 0
-    all_stripped = set()
-    for gw in PROVIDERS:
-        if provider is not None and gw != provider:
-            continue
-        ids = _clean_ids(raw.get(gw, []))
-        wiring = GATEWAY_WIRING.get(gw, {})
-        gateways[gw] = {
-            "chat_completions_url": wiring.get("chat_completions_url"),
-            "api_type": wiring.get("api_type"),
-            "model_ids": ids,
-            "models": _model_metadata(roster, gw, ids),
-        }
-        total_endpoints += len(ids)
-        all_stripped.update(strip_free_marker(mid) for mid in ids)
+    # Delegate selection/order/count to the pure core ONCE (including the
+    # all-provider case). The whole decoded argument object is passed; the pure
+    # argument validation stays the backstop, never the primary boundary.
+    result = _query.list_endpoints(snapshot, {"provider": provider})
+    if not result.get("ok"):
+        # Backstop only: with the real capture/validation above the core cannot
+        # reject the provider here. Map either declared provider argument code
+        # to the SAME existing local provider error, using the OUTER caller's
+        # value (the core envelope carries no value of its own).
+        return _error(
+            base, f"unknown provider {provider!r}; "
+                  f"valid providers: {', '.join(valid_providers)}",
+            valid_providers=list(valid_providers))
 
-    return {
-        **base,
-        "ok": True,
-        "gateways": gateways,
-        "counts": {
-            "endpoints": total_endpoints,
-            "models": len(all_stripped),
-            "gateways": len(PROVIDERS),
-        },
-        "provider": provider,
-        "tick_epoch": _epoch_or_none(roster),
-    }
+    # Fresh outer mapping: the spy-observed core result is never mutated.
+    out = {**base, **result}
+    out["warnings"] = list(snapshot["warnings"])
+    # Adapt ONLY the gateways the core selected, in its returned order: keep the
+    # exact four fields and replace only ``models`` with the ORIGINAL raw
+    # metadata objects for the returned raw IDs of the one retained roster.
+    gateways = {}
+    for key, entry in result["gateways"].items():
+        local = dict(entry)
+        local["models"] = _model_metadata(roster, key, entry["model_ids"])
+        gateways[key] = local
+    out["gateways"] = gateways
+    return out
 
 
 # ---------- tool: watchdog_status ----------

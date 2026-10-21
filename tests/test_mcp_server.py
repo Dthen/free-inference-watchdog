@@ -1744,3 +1744,616 @@ def test_get_model_delegates_to_pure_query(monkeypatch, tmp_path):
     _reset()
     fresh3 = mcp_server.get_model("shared/model", root=tmp_path)
     assert fresh3["endpoints"][0]["metadata"]["name"] == "Z Shared"
+
+
+# ---------- list_endpoints local delegation (unit 2j-U3) ----------
+
+def test_list_endpoints_delegates_to_pure_query(monkeypatch, tmp_path):
+    """U3: the LOCAL ``list_endpoints`` captures the registry ONCE, validates
+    the provider argument against the CAPTURED names, reads the roster ONCE,
+    adapts that same observation to the validated public snapshot, delegates
+    provider selection, raw-ID ordering and every count to the accepted pure
+    query, and rebuilds only the gateway ``models`` maps from the ORIGINAL raw
+    metadata dictionaries of the same retained roster.
+
+    Fully synthetic module globals plus a synthetic roster written to a real
+    tmp state dir and read back through the REAL ``state.load_roster``. The
+    REAL ``watchdog_catalog.query.list_endpoints`` is wrapped directly, so a
+    missing ACTUAL delegation fails here as a real RED, never as an
+    AttributeError from test setup. Independent literal expectations (order,
+    identities, the five count definitions, scopes) are asserted alongside the
+    spy, and identity is compared against the ACTUAL loaded JSON object, never
+    a pre-serialization literal.
+    """
+    import copy
+
+    import watchdog_catalog.query as real_query
+
+    real_query_endpoints = real_query.list_endpoints
+    real_load = mcp_server.state.load_roster
+    real_capture = mcp_server._capture_registry
+
+    # -- synthetic registry: nonalphabetic display order, two tracked providers
+    # sharing a raw id with CONFLICTING raw dicts, and a zero-ID provider that
+    # is ALSO missing from the roster providers map. Distinct wiring per key.
+    configs = {
+        "z-last": {"name": "Zeta"},
+        "a-first": {"name": "Alpha"},
+        "m-mid": {"name": "Mu"},
+    }
+    wiring = {
+        "z-last": {"chat_completions_url":
+                   "https://z.example/v1/chat/completions",
+                   "api_type": "openai_compatible"},
+        "a-first": {"chat_completions_url":
+                    "https://a.example/v1/chat/completions",
+                    "api_type": "openai_compatible"},
+        "m-mid": {"chat_completions_url":
+                  "https://m.example/v1/chat/completions",
+                  "api_type": "anthropic_compatible"},
+    }
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 3600)
+
+    shared_z = {"name": "Z Shared", "context_length": 8192,
+                "unknown_field": "Z-UNKNOWN",
+                "architecture": {"input_modalities": ["text"]},
+                "params": {"a": 1}, "pricing": {"prompt": "0"}}
+    shared_a = {"name": "A Shared", "context_length": 131072,
+                "unknown_field": "A-UNKNOWN",
+                "architecture": {"input_modalities": ["text", "image"]},
+                "pricing": {"prompt": "0"}}
+    roster_doc = {
+        "tick_epoch": 100,
+        "providers": {
+            # duplicates, empty, non-string, padded, non-free and literal
+            # non-ASCII/leading-zero ids all in ONE tracked provider.
+            "z-last": ["shared/model", "z-extra-free", "dup", "dup", "",
+                       3, None, "empty-meta", " padded ", "non-free",
+                       "z2", "z02", "z10", "z\u0669", True],
+            "a-first": ["shared/model", "plain", "trk:free", "trk-free",
+                        "   "],
+            # an UNKNOWN malformed provider entry: excluded by the local
+            # sanitizer before the accepted builder ever validates it.
+            "unknown-bad": "not-a-list",
+        },
+        "provider_models": {
+            "z-last": {"shared/model": shared_z,
+                       "z-extra-free": "BAD-CONTAINER",
+                       "empty-meta": {},
+                       "dup": {"name": "DupZ"}},
+            "a-first": {"shared/model": shared_a,
+                        "trk:free": {"name": "Trk",
+                                     "unknown_field": "TRK"},
+                        "trk-free": {"name": "TrkFree",
+                                     "nested": {"deep": [1, None,
+                                                         {"x": True}]}}},
+        },
+        "stale_providers": ["z-last"],
+        "private": {"deep": "SENTINEL"},
+    }
+    (tmp_path / "state").mkdir()
+    roster_path = tmp_path / "state" / "roster.json"
+    roster_path.write_text(json.dumps(roster_doc))
+    control = json.loads(roster_path.read_text())
+
+    # -- spies: exactly ONE capture and exactly ONE roster read per request ---
+    captures = []
+    loads = []
+    load_guard: dict = {"count": 0}
+    swap: dict = {"to": None}
+    calls = []
+    backstop: dict = {"args": None}
+    drop: dict = {"provider": None, "raw_id": None}
+
+    def _spy_capture(base):
+        out = real_capture(base)
+        captures.append(out)
+        if swap["to"] is not None:
+            # Replace the module roots AFTER capture: the rest of the request
+            # must still use the already-captured records.
+            mcp_server.PROVIDERS, mcp_server.GATEWAY_WIRING = swap["to"]
+        return out
+
+    def _spy_load(path):
+        out = real_load(path)
+        loads.append(out)
+        load_guard["count"] += 1
+        if load_guard["count"] > 1:
+            raise AssertionError("roster must be loaded exactly once per request")
+        return out
+
+    def _spy_query(snapshot, arguments):
+        before = copy.deepcopy(snapshot)
+        core_args = backstop["args"] if backstop["args"] is not None else arguments
+        out = real_query_endpoints(snapshot, core_args)
+        # The GENUINE core envelope before any wrapper reduction: used to prove
+        # the local adaptation below never mutated what the core returned.
+        pre_gateways = copy.deepcopy(out.get("gateways"))
+        pre_counts = dict(out.get("counts") or {})
+        if drop["provider"] is not None and out.get("ok"):
+            entry = out["gateways"].get(drop["provider"])
+            if entry is not None and drop["raw_id"] in entry["model_ids"]:
+                kept = [rid for rid in entry["model_ids"]
+                        if rid != drop["raw_id"]]
+                reduced = dict(entry)
+                reduced["model_ids"] = kept
+                reduced["models"] = {rid: entry["models"][rid] for rid in kept}
+                out = dict(out)
+                out["gateways"] = dict(out["gateways"])
+                out["gateways"][drop["provider"]] = reduced
+                out["counts"] = dict(out["counts"])
+                out["counts"]["endpoints"] = len(kept)
+                out["counts"]["distinct_raw_ids"] = len(set(kept))
+                labels = len({real_query.strip_free_marker(rid)
+                              for rid in kept})
+                out["counts"]["marker_group_labels"] = labels
+                out["counts"]["models"] = labels
+        calls.append({"snapshot": snapshot, "before": before, "result": out,
+                      "pre_gateways": pre_gateways,
+                      "pre_counts": pre_counts,
+                      "arguments": arguments, "core_args": core_args})
+        return out
+
+    monkeypatch.setattr(mcp_server, "_capture_registry", _spy_capture)
+    monkeypatch.setattr(mcp_server.state, "load_roster", _spy_load)
+    monkeypatch.setattr(real_query, "list_endpoints", _spy_query)
+
+    def _reset():
+        captures.clear()
+        loads.clear()
+        calls.clear()
+        load_guard["count"] = 0
+
+    # -- bulk: one capture/load/core call, selected-scope counts, literal order
+    _reset()
+    res = mcp_server.list_endpoints(root=tmp_path)
+    assert res["ok"] is True
+    assert res["tool"] == "list_endpoints"
+    assert res["state_root"] == str(tmp_path.resolve())
+    assert len(captures) == 1 and len(loads) == 1 and len(calls) == 1
+    assert calls[0]["arguments"] == {"provider": None}
+    assert calls[0]["core_args"] == {"provider": None}
+    snap = calls[0]["snapshot"]
+    assert snap["provider_order"] == ["z-last", "a-first", "m-mid"]
+    # local sanitization: empty/non-string/unknown-provider IDs dropped,
+    # duplicates collapsed, code-point order retained into the adapter.
+    assert snap["providers"]["z-last"]["model_ids"] == [
+        " padded ", "dup", "empty-meta", "non-free", "shared/model",
+        "z-extra-free", "z02", "z10", "z2", "z\u0669"]
+    assert "   " in snap["providers"]["a-first"]["model_ids"]
+    assert snap["providers"]["m-mid"]["model_ids"] == []
+    assert "unknown-bad" not in snap["providers"]
+    assert "m-mid" not in control["providers"]  # genuinely absent in the roster
+    assert set(res) == {
+        "tool", "state_root", "ok", "gateways", "counts", "provider",
+        "snapshot_id", "tick_epoch", "provider_staleness", "warnings"}
+    assert res["provider"] is None
+    assert res["tick_epoch"] == 100
+    assert res["snapshot_id"] == snap["snapshot_id"]
+    assert res["snapshot_id"] == calls[0]["result"]["snapshot_id"]
+    # all five count definitions, independently: selected providers (zero-ID
+    # included), selected pairs, selected literal strings, selected stripped
+    # labels, and the documented legacy alias of the label count.
+    assert res["counts"] == {
+        "gateways": 3, "endpoints": 15, "distinct_raw_ids": 14,
+        "marker_group_labels": 13, "models": 13}
+    assert res["provider_staleness"] == {
+        "z-last": True, "a-first": False, "m-mid": False}
+    assert res["warnings"] == snap["warnings"] == [
+        "metadata_missing", "metadata_invalid"]
+    assert res["warnings"] is not snap["warnings"]
+
+    # -- gateways: selected keys only, exact four fields, natural literal order
+    assert list(res["gateways"]) == ["z-last", "a-first", "m-mid"]
+    for entry in res["gateways"].values():
+        assert list(entry) == ["chat_completions_url", "api_type",
+                               "model_ids", "models"]
+    z = res["gateways"]["z-last"]
+    a = res["gateways"]["a-first"]
+    m = res["gateways"]["m-mid"]
+    assert z["model_ids"] == [
+        " padded ", "dup", "empty-meta", "non-free", "shared/model",
+        "z2", "z02", "z10", "z-extra-free", "z\u0669"]
+    assert a["model_ids"] == ["   ", "plain", "shared/model",
+                              "trk-free", "trk:free"]
+    assert m["model_ids"] == [] and m["models"] == {}
+    assert z["api_type"] == a["api_type"] == "openai_compatible"
+    assert m["api_type"] == "anthropic_compatible"
+    # three DISTINCT wiring URLs, passed through per selected key.
+    assert z["chat_completions_url"] == (
+        "https://z.example/v1/chat/completions")
+    assert a["chat_completions_url"] == (
+        "https://a.example/v1/chat/completions")
+    assert m["chat_completions_url"] == (
+        "https://m.example/v1/chat/completions")
+    assert len({z["chat_completions_url"], a["chat_completions_url"],
+                m["chat_completions_url"]}) == 3
+
+    # -- ORIGINAL raw metadata identity restored from the SAME loaded roster --
+    loaded = loads[0]
+    raw_z = loaded["provider_models"]["z-last"]["shared/model"]
+    raw_a = loaded["provider_models"]["a-first"]["shared/model"]
+    assert loaded == control                     # source unchanged by value
+    assert z["models"]["shared/model"] is raw_z
+    assert a["models"]["shared/model"] is raw_a
+    assert raw_z is not raw_a
+    assert raw_z["context_length"] != raw_a["context_length"]
+    assert raw_z["unknown_field"] == "Z-UNKNOWN"
+    assert raw_z["params"] == {"a": 1}
+    assert a["models"]["trk:free"]["unknown_field"] == "TRK"
+    # rich nested unknown metadata survives untouched on the label-sharing id.
+    nested_raw = loaded["provider_models"]["a-first"]["trk-free"]
+    assert a["models"]["trk-free"] is nested_raw
+    assert a["models"]["trk-free"]["nested"] == {
+        "deep": [1, None, {"x": True}]}
+    # empty raw dict IDENTITY is preserved (never `raw or {}`).
+    empty_raw = loaded["provider_models"]["z-last"]["empty-meta"]
+    assert z["models"]["empty-meta"] is empty_raw
+    assert z["models"]["empty-meta"] == {}
+    # missing / non-dict individual values are omitted from the models map.
+    assert "z-extra-free" not in z["models"]
+    assert "   " not in a["models"] and "plain" not in a["models"]
+    assert a["models"].get("   ") is None
+    # local raw metadata stays distinct from the projected public model object.
+    proj_z = snap["providers"]["z-last"]["models"]["shared/model"]
+    assert "unknown_field" not in proj_z and "params" not in proj_z
+    assert z["models"]["shared/model"] is not proj_z
+    # the core result carries the projected public model, not raw metadata.
+    core_model = calls[0]["result"]["gateways"]["z-last"]["models"][
+        "shared/model"]
+    assert "unknown_field" not in core_model
+    assert core_model == proj_z
+    # neither the validated snapshot nor the returned core object was mutated.
+    assert snap == calls[0]["before"]
+    assert calls[0]["result"]["counts"] == res["counts"]
+
+    # -- filtered nonempty provider: selected scope only, no registry leak ----
+    _reset()
+    filtered = mcp_server.list_endpoints("a-first", root=tmp_path)
+    assert filtered["ok"] is True
+    assert filtered["provider"] == "a-first"
+    assert list(filtered["gateways"]) == ["a-first"]
+    assert filtered["gateways"]["a-first"]["model_ids"] == a["model_ids"]
+    assert filtered["counts"] == {
+        "gateways": 1, "endpoints": 5, "distinct_raw_ids": 5,
+        "marker_group_labels": 4, "models": 4}
+    assert filtered["counts"]["endpoints"] != res["counts"]["endpoints"]
+    assert filtered["counts"]["gateways"] != res["counts"]["gateways"]
+    assert filtered["provider_staleness"] == {"a-first": False}
+    # snapshot-wide warnings stay snapshot-wide on a filtered response.
+    assert filtered["warnings"] == ["metadata_missing", "metadata_invalid"]
+    assert filtered["gateways"]["a-first"]["models"]["shared/model"] is (
+        loads[0]["provider_models"]["a-first"]["shared/model"])
+    assert len(captures) == 1 and len(loads) == 1 and len(calls) == 1
+
+    # -- filtered ZERO-ID provider: one gateway, every other count zero ------
+    _reset()
+    zero = mcp_server.list_endpoints("m-mid", root=tmp_path)
+    assert zero["ok"] is True
+    assert list(zero["gateways"]) == ["m-mid"]
+    assert zero["gateways"]["m-mid"]["model_ids"] == []
+    assert zero["gateways"]["m-mid"]["models"] == {}
+    assert zero["counts"] == {
+        "gateways": 1, "endpoints": 0, "distinct_raw_ids": 0,
+        "marker_group_labels": 0, "models": 0}
+    assert zero["provider_staleness"] == {"m-mid": False}
+    assert zero["warnings"] == ["metadata_missing", "metadata_invalid"]
+    assert zero["snapshot_id"] == snap["snapshot_id"]
+    assert len(captures) == 1 and len(loads) == 1 and len(calls) == 1
+
+    # -- non-list known-provider value degrades to empty, NEVER a failure -----
+    roster_path.write_text(json.dumps({
+        "tick_epoch": 7, "providers": {"a-first": "not-a-list"}}))
+    _reset()
+    degraded = mcp_server.list_endpoints("a-first", root=tmp_path)
+    assert degraded["ok"] is True
+    assert list(degraded["gateways"]) == ["a-first"]
+    assert degraded["gateways"]["a-first"]["model_ids"] == []
+    assert degraded["gateways"]["a-first"]["models"] == {}
+    assert degraded["counts"] == {
+        "gateways": 1, "endpoints": 0, "distinct_raw_ids": 0,
+        "marker_group_labels": 0, "models": 0}
+    assert degraded["tick_epoch"] == 7
+    assert degraded["warnings"] == []   # zero tracked IDs, no metadata rows
+    assert len(captures) == 1 and len(loads) == 1 and len(calls) == 1
+
+    # -- inherited strict tick provenance: zero and invalid epochs ------------
+    roster_path.write_text(json.dumps({
+        "tick_epoch": 0, "providers": {"z-last": ["shared/model"]}}))
+    _reset()
+    epoch_zero = mcp_server.list_endpoints(root=tmp_path)
+    assert epoch_zero["ok"] is True
+    assert epoch_zero["tick_epoch"] == 0
+    assert epoch_zero["counts"] == {
+        "gateways": 3, "endpoints": 1, "distinct_raw_ids": 1,
+        "marker_group_labels": 1, "models": 1}
+    assert epoch_zero["gateways"]["z-last"]["models"] == {}
+    assert epoch_zero["warnings"] == ["metadata_missing"]
+
+    roster_path.write_text(json.dumps({
+        "tick_epoch": -3, "providers": {"z-last": ["shared/model"]}}))
+    _reset()
+    bad_epoch = mcp_server.list_endpoints(root=tmp_path)
+    assert bad_epoch["ok"] is True
+    assert bad_epoch["tick_epoch"] is None
+    assert bad_epoch["counts"]["endpoints"] == 1
+    assert bad_epoch["warnings"] == ["tick_epoch_unknown", "metadata_missing"]
+
+    # -- malformed outer/provider metadata containers: truthful warnings -----
+    for bad_outer in ([], {"z-last": []}):
+        roster_path.write_text(json.dumps({
+            "tick_epoch": 0, "providers": {"z-last": ["shared/model"]},
+            "provider_models": bad_outer}))
+        _reset()
+        bad_meta = mcp_server.list_endpoints(root=tmp_path)
+        assert bad_meta["ok"] is True
+        assert bad_meta["gateways"]["z-last"]["models"] == {}
+        assert bad_meta["warnings"] == ["metadata_invalid"]
+        assert "metadata_missing" not in bad_meta["warnings"]
+    roster_path.write_text(json.dumps({
+        "tick_epoch": 0, "providers": {"z-last": ["shared/model"]}}))
+    _reset()
+    absent_meta = mcp_server.list_endpoints(root=tmp_path)
+    assert absent_meta["gateways"]["z-last"]["models"] == {}
+    assert absent_meta["warnings"] == ["metadata_missing"]
+    roster_path.write_text(json.dumps(roster_doc))
+
+    # -- wrapper subset: local output follows the RETURNED ids/counts ---------
+    _reset()
+    drop["provider"] = "z-last"
+    drop["raw_id"] = "shared/model"
+    try:
+        subset = mcp_server.list_endpoints("z-last", root=tmp_path)
+    finally:
+        drop["provider"] = None
+        drop["raw_id"] = None
+    assert subset["ok"] is True
+    assert list(subset["gateways"]) == ["z-last"]
+    kept = [rid for rid in z["model_ids"] if rid != "shared/model"]
+    assert subset["gateways"]["z-last"]["model_ids"] == kept
+    assert "shared/model" not in subset["gateways"]["z-last"]["models"]
+    assert subset["counts"] == {
+        "gateways": 1, "endpoints": len(kept), "distinct_raw_ids": len(kept),
+        "marker_group_labels": len(kept), "models": len(kept)}
+    assert subset["counts"]["endpoints"] == 9
+    # the roster still tracks the removed pair, and the GENUINE core envelope
+    # kept its own projected copy: local adaptation mutated neither.
+    assert "shared/model" in loads[0]["providers"]["z-last"]
+    assert "shared/model" in calls[0]["pre_gateways"]["z-last"]["models"]
+    assert calls[0]["pre_counts"]["endpoints"] == 10
+    assert calls[0]["result"]["counts"]["endpoints"] == 9
+    assert calls[0]["snapshot"] == calls[0]["before"]
+    assert subset["warnings"] == ["metadata_missing", "metadata_invalid"]
+
+    # -- exactly one capture stays authoritative when the roots are replaced --
+    conflicting = {"bogus": {"name": "Bogus"}}
+    conflicting_wiring = {"bogus": {
+        "chat_completions_url": "https://bogus.example/v1/chat/completions",
+        "api_type": "openai_compatible"}}
+    _reset()
+    swap["to"] = (conflicting, conflicting_wiring)
+    try:
+        kept_request = mcp_server.list_endpoints(root=tmp_path)
+    finally:
+        swap["to"] = None
+    assert kept_request["ok"] is True
+    assert len(captures) == 1
+    assert [r["key"] for r in captures[0]] == ["z-last", "a-first", "m-mid"]
+    assert list(kept_request["gateways"]) == ["z-last", "a-first", "m-mid"]
+    assert "bogus" not in kept_request["gateways"]
+    assert kept_request["gateways"]["a-first"]["chat_completions_url"] == (
+        "https://a.example/v1/chat/completions")
+    assert mcp_server.PROVIDERS == conflicting   # the swap really happened
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    # an error provider list also comes from the CAPTURE, not the later globals.
+    _reset()
+    swap["to"] = (conflicting, conflicting_wiring)
+    try:
+        arg_after_swap = mcp_server.list_endpoints("nope", root=tmp_path)
+    finally:
+        swap["to"] = None
+    assert arg_after_swap["ok"] is False
+    assert arg_after_swap["error"] == (
+        "unknown provider 'nope'; valid providers: z-last, a-first, m-mid")
+    assert arg_after_swap["valid_providers"] == ["z-last", "a-first", "m-mid"]
+    assert loads == [] and calls == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    # -- every invalid provider argument fails BEFORE any roster read ---------
+    for bad_value in (7, True, [], {}, "", " z-last", "Z-last", "nope"):
+        _reset()
+        bad = mcp_server.list_endpoints(bad_value, root=tmp_path)
+        assert bad["ok"] is False
+        assert bad["error"] == (
+            f"unknown provider {bad_value!r}; "
+            "valid providers: z-last, a-first, m-mid")
+        assert bad["valid_providers"] == ["z-last", "a-first", "m-mid"]
+        assert set(bad) == {"tool", "state_root", "ok", "error",
+                            "valid_providers"}
+        assert loads == [] and calls == []
+
+    # -- capture-root and deferred structural failures stay fixed local errors
+    monkeypatch.setattr(mcp_server, "PROVIDERS", [])
+    _reset()
+    root_guard = mcp_server.list_endpoints("nope", root=tmp_path)
+    assert root_guard["ok"] is False
+    assert root_guard["error"] == "Invalid catalogue snapshot."
+    assert set(root_guard) == {"tool", "state_root", "ok", "error"}
+    assert loads == [] and calls == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", {})
+    _reset()
+    bad_wiring = mcp_server.list_endpoints(root=tmp_path)
+    assert bad_wiring["ok"] is False
+    assert bad_wiring["error"] == "Invalid catalogue snapshot."
+    assert len(loads) == 1 and calls == []
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    monkeypatch.setattr(mcp_server, "PROVIDERS", {"z-last": "not-a-dict"})
+    _reset()
+    bad_record = mcp_server.list_endpoints(root=tmp_path)
+    assert bad_record["ok"] is False
+    assert bad_record["error"] == "Invalid catalogue snapshot."
+    assert len(loads) == 1 and calls == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 0)
+    _reset()
+    bad_cadence = mcp_server.list_endpoints(root=tmp_path)
+    assert bad_cadence["ok"] is False
+    assert bad_cadence["error"] == "Invalid catalogue snapshot."
+    assert calls == []
+    monkeypatch.setattr(mcp_server, "CADENCE_S", 3600)
+
+    # -- missing/corrupt/root/provider-map state failures ---------------------
+    _reset()
+    missing = mcp_server.list_endpoints(root=tmp_path / "nope")
+    assert missing["ok"] is False and "roster" in missing["error"].lower()
+    assert loads == [] and calls == []
+    corrupt_root = tmp_path / "corrupt"
+    (corrupt_root / "state").mkdir(parents=True)
+    (corrupt_root / "state" / "roster.json").write_text("{not json!!")
+    _reset()
+    corrupt = mcp_server.list_endpoints(root=corrupt_root)
+    assert corrupt["ok"] is False and "corrupt" in corrupt["error"].lower()
+    assert calls == []
+    map_root = tmp_path / "map"
+    (map_root / "state").mkdir(parents=True)
+    (map_root / "state" / "roster.json").write_text(json.dumps(
+        {"tick_epoch": 100, "providers": []}))
+    _reset()
+    bad_map = mcp_server.list_endpoints(root=map_root)
+    assert bad_map["ok"] is False
+    assert "'providers' is not a map" in bad_map["error"]
+    assert calls == []
+
+    # precedence: bad capture root > bad argument > missing state > deferred.
+    _reset()
+    monkeypatch.setattr(mcp_server, "PROVIDERS", [])
+    root_first = mcp_server.list_endpoints("nope", root=tmp_path / "nope")
+    assert root_first["error"] == "Invalid catalogue snapshot."
+    assert loads == [] and calls == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+
+    _reset()
+    arg_first = mcp_server.list_endpoints("nope", root=tmp_path / "nope")
+    assert arg_first["ok"] is False
+    assert arg_first["error"] == (
+        "unknown provider 'nope'; valid providers: z-last, a-first, m-mid")
+    assert set(arg_first) == {"tool", "state_root", "ok", "error",
+                              "valid_providers"}
+    assert loads == [] and calls == []
+
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", {})
+    _reset()
+    state_first = mcp_server.list_endpoints(root=tmp_path / "nope")
+    assert state_first["ok"] is False
+    assert "roster" in state_first["error"].lower()
+    assert calls == []
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+
+    # -- the real-core argument envelopes map to the SAME flat local error ----
+    _reset()
+    backstop["args"] = {"provider": "not-captured"}
+    try:
+        unknown_core = mcp_server.list_endpoints(root=tmp_path)
+    finally:
+        backstop["args"] = None
+    assert unknown_core["ok"] is False
+    assert unknown_core["error"] == (
+        "unknown provider None; valid providers: z-last, a-first, m-mid")
+    assert unknown_core["valid_providers"] == ["z-last", "a-first", "m-mid"]
+    assert set(unknown_core) == {"tool", "state_root", "ok", "error",
+                                 "valid_providers"}
+    assert calls[-1]["arguments"] == {"provider": None}
+    assert calls[-1]["result"]["error"] == {
+        "code": "unknown_provider", "message": "Unknown provider.",
+        "parameter": "provider"}
+
+    _reset()
+    backstop["args"] = {"provider": 7}
+    try:
+        invalid_core = mcp_server.list_endpoints(root=tmp_path)
+    finally:
+        backstop["args"] = None
+    assert invalid_core["ok"] is False
+    assert invalid_core["error"] == (
+        "unknown provider None; valid providers: z-last, a-first, m-mid")
+    assert set(invalid_core) == {"tool", "state_root", "ok", "error",
+                                 "valid_providers"}
+    assert calls[-1]["result"]["error"] == {
+        "code": "invalid_arguments", "message": "Invalid tool arguments.",
+        "parameter": "provider"}
+
+    # unexpected PROGRAMMING exceptions are never swallowed at this boundary.
+    def _boom(snapshot, arguments):
+        raise RuntimeError("programming exception")
+
+    _reset()
+    monkeypatch.setattr(real_query, "list_endpoints", _boom)
+    with pytest.raises(RuntimeError, match="programming exception"):
+        mcp_server.list_endpoints(root=tmp_path)
+    monkeypatch.setattr(real_query, "list_endpoints", _spy_query)
+
+    # -- legitimately empty captured registry is a valid empty success --------
+    _reset()
+    monkeypatch.setattr(mcp_server, "PROVIDERS", {})
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", {})
+    roster_path.write_text(json.dumps({"tick_epoch": 0, "providers": {}}))
+    empty = mcp_server.list_endpoints(root=tmp_path)
+    assert empty["ok"] is True
+    assert empty["gateways"] == {}
+    assert empty["provider_staleness"] == {}
+    assert empty["counts"] == {
+        "gateways": 0, "endpoints": 0, "distinct_raw_ids": 0,
+        "marker_group_labels": 0, "models": 0}
+    assert empty["provider"] is None
+    assert empty["tick_epoch"] == 0 and empty["warnings"] == []
+    assert len(captures) == 1 and captures[0] == []
+    monkeypatch.setattr(mcp_server, "PROVIDERS", configs)
+    monkeypatch.setattr(mcp_server, "GATEWAY_WIRING", wiring)
+    roster_path.write_text(json.dumps(roster_doc))
+
+    # -- freshness, unchanged sources, mutation isolation ---------------------
+    _reset()
+    fresh1 = mcp_server.list_endpoints("z-last", root=tmp_path)
+    assert len(captures) == 1 and len(loads) == 1 and len(calls) == 1
+    snap_a = calls[0]["snapshot"]
+    before_a = calls[0]["before"]
+    core_a = calls[0]["result"]
+    load1 = loads[0]
+    assert load1 == control
+    assert snap_a == before_a
+    assert fresh1["warnings"] == ["metadata_missing", "metadata_invalid"]
+    assert fresh1["warnings"] is not snap_a["warnings"]
+
+    _reset()
+    fresh2 = mcp_server.list_endpoints("z-last", root=tmp_path)
+    assert len(loads) == 1 and len(captures) == 1 and len(calls) == 1
+    assert fresh2["warnings"] == fresh1["warnings"]
+    assert fresh2["warnings"] is not fresh1["warnings"]
+    assert fresh2["gateways"]["z-last"]["models"]["shared/model"] is not (
+        fresh1["gateways"]["z-last"]["models"]["shared/model"])
+    assert loads[0] == control
+
+    # a local raw mutation touches only the intentionally aliased captured raw
+    # dict -- never the projected snapshot, the saved core result, or a fresh
+    # independently loaded request.
+    fresh1["gateways"]["z-last"]["models"]["shared/model"]["name"] = "MUTATED"
+    assert snap_a["providers"]["z-last"]["models"]["shared/model"]["name"] == (
+        "Z Shared")
+    assert core_a["gateways"]["z-last"]["models"]["shared/model"]["name"] == (
+        "Z Shared")
+    assert load1["provider_models"]["z-last"]["shared/model"]["name"] == (
+        "MUTATED")
+    _reset()
+    fresh3 = mcp_server.list_endpoints("z-last", root=tmp_path)
+    assert fresh3["gateways"]["z-last"]["models"]["shared/model"]["name"] == (
+        "Z Shared")
+    assert len(loads) == 1 and len(calls) == 1
