@@ -1,38 +1,54 @@
-"""Runtime tests for the validated local catalogue-FILE source (unit 5a).
+"""Runtime tests for the validated local-FILE and bounded HTTP sources.
 
-This module exercises ONLY the small read-only file boundary:
+This module exercises only the small read-only source boundary:
 
     watchdog_catalog.source.MAX_SOURCE_BYTES
+    watchdog_catalog.source.DEFAULT_CATALOG_URL
+    watchdog_catalog.source.DEFAULT_TIMEOUT_S
     watchdog_catalog.source.SourceError
-    watchdog_catalog.source.load_catalog_file
+    watchdog_catalog.source.load_catalog_file   (unit 5a)
+    watchdog_catalog.source.load_catalog_url    (unit 5b)
 
 `load_catalog_file` is one explicit, byte-bounded binary read of an
 operator-selected path whose bytes are decoded as strict UTF-8 and then handed
 EXACTLY ONCE to the accepted ``watchdog_catalog.catalog.load_snapshot``
-validator. The accepted validator -- not this layer -- owns JSON, schema and
-hash truth, so a malformed document keeps its frozen core ``CatalogError``
-code/message. Only transport-shaped faults (open/read/close failure, oversize,
-invalid path or byte-limit configuration) become the fixed, non-reflective
+validator. `load_catalog_url` is one explicit, byte-bounded, credential-free
+HTTP GET of an operator-selected URL, with the same single delegation. The
+accepted validator -- not these layers -- owns JSON, schema and hash truth, so
+a malformed document keeps its frozen core ``CatalogError`` code/message. Only
+transport-shaped faults (open/read/close failure, oversize, invalid
+path/URL/byte-limit/timeout configuration) become the fixed, non-reflective
 ``SourceError`` with code ``source_unavailable``.
 
-The two behavioral groups below are deliberately unparametrized and share
-small literal tables: group 1 covers accepted scratch-file loading (fixture
-bytes copied verbatim, typed values, literal path preservation, delegation
-identity, byte bounds); group 2 covers stable failures, pre-open type
-rejection, preserved core errors and fresh-process import isolation.
+Two unparametrized local-file behavioural groups cover accepted scratch-file
+loading and stable failures/import isolation. Two further unparametrized HTTP
+groups cover one accepted 200 document (framing, byte bounds, defaults through
+a network-free double) and every non-200 / malformed / timed-out / disconnected
+/ misconfigured case. Every socket is a numeric-loopback stdlib server on an
+ephemeral port; no test resolves a public host, and the production default URL
+is only exercised through a request/response double.
 
-Remote HTTP, cache/fallback/freshness wrappers and CLI wiring belong to later
-units and are NOT implemented, imported or exercised here. Nothing in this
-module writes outside pytest's own scratch directory, and no test touches the
-network.
+Cache, conditional GET, fallback/freshness wrappers, CLI wiring and async
+refresh coalescing belong to later units and are NOT implemented, imported or
+exercised here. Nothing in this module writes outside pytest's own scratch
+directory.
 """
 
 import hashlib
+import http.client
+import io
 import json
 import os
+import socket
+import ssl
 import subprocess
 import sys
+import threading
+import time
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError as _HTTPError
 
 import pytest
 
@@ -464,3 +480,673 @@ report["leaked_modules"] = [
            for prefix in forbidden)]
 sys.stdout.write(json.dumps(report))
 '''
+
+
+# ---------------------------------------------------------------------------
+# Unit 5b: one bounded, credential-free HTTP 200 catalogue document
+# ---------------------------------------------------------------------------
+#
+# The two behavioral groups below cover ONE synchronous GET of ONE explicit
+# URL. Every socket is a numeric-loopback stdlib server on an ephemeral port;
+# nothing here resolves a public host, and the published default URL is only
+# ever exercised through a network-free ``OpenerDirector.open`` double.
+
+ACCEPT_HEADER = "application/json"
+ENCODING_HEADER = "identity"
+URL_TYPE_ERROR = "load_catalog_url() requires an http or https URL string"
+URL_VALUE_ERROR = (
+    "load_catalog_url() requires an absolute http or https URL with a host")
+TIMEOUT_ERROR = (
+    "load_catalog_url() requires a finite positive timeout in seconds")
+HTTP_BYTE_LIMIT_ERROR = (
+    "load_catalog_url() requires a positive integer byte limit")
+
+
+def _headers_message(pairs=()):
+    """A minimal read-only header mapping with ``email.message`` semantics."""
+    class _Headers:
+        def __init__(self, items):
+            self._items = tuple(items)
+
+        def get_all(self, name):
+            found = [value for key, value in self._items
+                     if key.lower() == name.lower()]
+            return found or None
+
+        def get(self, name, default=None):
+            found = self.get_all(name)
+            return found[0] if found else default
+
+        def items(self):
+            return list(self._items)
+
+    return _Headers(pairs)
+
+
+class _FakeResponse:
+    """A scripted response double: no socket, recorded reads, close counter."""
+
+    def __init__(self, body, status=200, headers=(), read_error=None,
+                 close_error=None):
+        self._body = body
+        self._offset = 0
+        self.status = status
+        self.headers = _headers_message(headers)
+        self._read_error = read_error
+        self._close_error = close_error
+        self.closed = 0
+        self.reads = []
+
+    def getcode(self):
+        return self.status
+
+    def read(self, amt=None):
+        self.reads.append(amt)
+        if self._read_error is not None:
+            raise self._read_error
+        if amt is None:
+            chunk = self._body[self._offset:]
+        else:
+            chunk = self._body[self._offset:self._offset + amt]
+        self._offset += len(chunk)
+        return chunk
+
+    def close(self):
+        self.closed += 1
+        if self._close_error is not None:
+            raise self._close_error
+
+
+def _write_response(handler, status, body, headers, length, chunked):
+    handler.send_response(status)
+    for name, value in headers:
+        handler.send_header(name, value)
+    if chunked:
+        handler.send_header("Transfer-Encoding", "chunked")
+        handler.end_headers()
+        for start in range(0, len(body), 1024):
+            piece = body[start:start + 1024]
+            handler.wfile.write(b"%x\r\n" % len(piece) + piece + b"\r\n")
+        handler.wfile.write(b"0\r\n\r\n")
+        handler.close_connection = True
+        return
+    if length and status not in (204, 304):
+        handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    if status not in (204, 304) and body:
+        handler.wfile.write(body)
+    handler.close_connection = True
+
+
+class _LoopbackServer:
+    """One stdlib loopback HTTP server with scripted, per-test responses."""
+
+    def __init__(self):
+        self.requests = []
+        self.hits = {}
+        self.release = threading.Event()
+        self._responder = None
+        self._server = None
+        self._thread = None
+
+    def start(self):
+        owner = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            timeout = 5
+
+            def log_message(self, *args):
+                pass
+
+            def log_error(self, *args):
+                pass
+
+            def do_GET(self):
+                owner.hits[self.path] = owner.hits.get(self.path, 0) + 1
+                owner.requests.append({
+                    "method": self.command,
+                    "path": self.path,
+                    "headers": dict(self.headers.items()),
+                })
+                owner._responder(self)
+
+        class _Server(ThreadingHTTPServer):
+            daemon_threads = True
+            block_on_close = False
+
+            def handle_error(self, request, client_address):
+                pass
+
+        self._server = _Server(("127.0.0.1", 0), _Handler)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": 0.05},
+            name="catalogue-loopback", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(5.0)
+            assert not self._thread.is_alive()
+
+    @property
+    def port(self):
+        return self._server.server_address[1]
+
+    def url(self, path):
+        return "http://127.0.0.1:%d%s" % (self.port, path)
+
+    def serve(self, body=b"", status=200, headers=(), length=True,
+              chunked=False):
+        self._responder = lambda handler: _write_response(
+            handler, status, body, headers, length, chunked)
+
+    def serve_stall(self, body, declared):
+        def respond(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(declared))
+            handler.end_headers()
+            handler.wfile.write(body)
+            handler.wfile.flush()
+            self.release.wait(3.0)
+            handler.close_connection = True
+        self._responder = respond
+
+    def serve_disconnect(self, body, declared):
+        def respond(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(declared))
+            handler.end_headers()
+            handler.wfile.write(body)
+            handler.wfile.flush()
+            handler.close_connection = True
+            try:
+                handler.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            handler.connection.close()
+        self._responder = respond
+
+
+@pytest.fixture
+def loopback():
+    server = _LoopbackServer().start()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+def _sent_headers(request):
+    return {name.lower(): value for name, value in request["headers"].items()}
+
+
+def test_catalog_url_source_loads_one_bounded_http_document(
+        loopback, tmp_path, monkeypatch):
+    # -- (a) the published defaults are fixed literals ------------------------
+    assert source.DEFAULT_CATALOG_URL == (
+        "https://raw.githubusercontent.com/Dthen/free-inference-watchdog/"
+        "master/site/catalog.json")
+    assert source.DEFAULT_TIMEOUT_S == 10
+    assert source.MAX_SOURCE_BYTES == 8 * 1024 * 1024
+
+    basic_raw = (FIXTURE_DIR / "basic.json").read_bytes()
+    basic_doc = json.loads(basic_raw.decode("utf-8"))
+
+    # -- (b) ONE literal GET of a 200 document; accepted snapshot and hash ----
+    loopback.serve(basic_raw)
+    url = loopback.url("/catalog.json")
+    snapshot = source.load_catalog_url(url)
+    assert snapshot == basic_doc
+    assert snapshot["snapshot_id"] == basic_doc["snapshot_id"]
+    assert catalog.snapshot_hash(snapshot) == basic_doc["snapshot_id"]
+    assert len(loopback.requests) == 1
+    request = loopback.requests[0]
+    assert request["method"] == "GET"
+    assert request["path"] == "/catalog.json"
+    sent = _sent_headers(request)
+    assert sent["accept"] == ACCEPT_HEADER
+    assert sent["accept-encoding"] == ENCODING_HEADER
+    for credential in ("authorization", "cookie", "proxy-authorization"):
+        assert credential not in sent
+
+    # -- (c) the selected URL reaches the request literally -------------------
+    loopback.serve(basic_raw)
+    literal = "/catalog.json?source=./literal&mirror=none"
+    assert source.load_catalog_url(loopback.url(literal))["snapshot_id"] == \
+        basic_doc["snapshot_id"]
+    assert loopback.requests[-1]["path"] == literal
+
+    # -- (d) a legitimately EMPTY catalogue is a 200 success ------------------
+    empty_doc = json.loads(basic_raw.decode("utf-8"))
+    empty_doc["provider_order"] = []
+    empty_doc["providers"] = {}
+    _reseal(empty_doc)
+    loopback.serve(json.dumps(empty_doc, indent=2).encode("utf-8"))
+    empty = source.load_catalog_url(loopback.url("/empty.json"))
+    assert empty["provider_order"] == [] and empty["providers"] == {}
+    assert empty["snapshot_id"] == empty_doc["snapshot_id"] == \
+        catalog.snapshot_hash(empty)
+
+    # -- (e) typed optional metadata survives the HTTP boundary ---------------
+    loopback.serve((FIXTURE_DIR / "metadata-edge-cases.json").read_bytes())
+    metadata = source.load_catalog_url(
+        loopback.url("/metadata.json"))["providers"]["synthetic-a"]["models"]
+    known = metadata["vendor/known-context"]
+    assert known["context_length"] == 65536
+    assert type(known["context_length"]) is int
+    assert known["pricing"] == {"prompt": "0", "completion": 0}
+    assert type(known["pricing"]["prompt"]) is str
+    assert type(known["pricing"]["completion"]) is int
+    assert metadata["vendor/unknown-context"]["context_length"] is None
+    assert metadata["vendor/unknown-context"]["pricing"] is None
+    assert metadata["vendor/zero-context"]["context_length"] == 0
+
+    # -- (f) exactly ONE core delegation; the returned object is forwarded ----
+    calls, forwarded = [], []
+    accepted_load_snapshot = catalog.load_snapshot
+
+    def spy(text):
+        calls.append(text)
+        result = accepted_load_snapshot(text)
+        forwarded.append(result)
+        return result
+
+    loopback.serve(basic_raw)
+    monkeypatch.setattr(catalog, "load_snapshot", spy)
+    delegated = source.load_catalog_url(loopback.url("/delegated.json"))
+    monkeypatch.undo()
+    assert len(calls) == 1
+    assert calls[0] == basic_raw.decode("utf-8")
+    assert delegated is forwarded[0]
+
+    # -- (g) byte bounds count RAW BYTES, exactly ----------------------------
+    loopback.serve(basic_raw)
+    bounded = loopback.url("/bounded.json")
+    assert source.load_catalog_url(
+        bounded, max_bytes=len(basic_raw))["snapshot_id"] == \
+        basic_doc["snapshot_id"]
+    _fixed_source_error(
+        lambda: source.load_catalog_url(
+            bounded, max_bytes=len(basic_raw) - 1),
+        ("127.0.0.1", "bounded.json",
+         basic_raw[:16].decode("utf-8", "replace")))
+
+    multibyte = json.loads(basic_raw.decode("utf-8"))
+    alpha = multibyte["providers"]["synthetic-a"]
+    alpha["display_name"] = "Café 東京"
+    alpha["models"]["alpha-1:free"]["name"] = "Alpha Ünïcode 東京"
+    _reseal(multibyte)
+    multibyte_raw = json.dumps(
+        multibyte, indent=2, ensure_ascii=False).encode("utf-8")
+    character_count = len(multibyte_raw.decode("utf-8"))
+    assert len(multibyte_raw) > character_count
+    loopback.serve(multibyte_raw)
+    _fixed_source_error(
+        lambda: source.load_catalog_url(
+            loopback.url("/multibyte.json"), max_bytes=character_count),
+        ("127.0.0.1", "multibyte.json", "Café 東京"))
+    loaded = source.load_catalog_url(
+        loopback.url("/multibyte.json"), max_bytes=len(multibyte_raw))
+    assert loaded["providers"]["synthetic-a"]["display_name"] == "Café 東京"
+    assert loaded["snapshot_id"] == multibyte["snapshot_id"]
+
+    # -- (h) framing variants: no Content-Length, chunked, identity encoding --
+    loopback.serve(basic_raw, length=False)
+    assert source.load_catalog_url(
+        loopback.url("/no-length"))["snapshot_id"] == \
+        basic_doc["snapshot_id"]
+    loopback.serve(basic_raw, chunked=True)
+    assert source.load_catalog_url(
+        loopback.url("/chunked"))["snapshot_id"] == basic_doc["snapshot_id"]
+    loopback.serve(basic_raw, headers=[("Content-Encoding", "identity")])
+    assert source.load_catalog_url(
+        loopback.url("/identity"))["snapshot_id"] == basic_doc["snapshot_id"]
+    # a non-JSON Content-Type is NOT a reason to reject a valid document
+    loopback.serve(basic_raw,
+                   headers=[("Content-Type", "text/plain; charset=utf-8")])
+    assert source.load_catalog_url(
+        loopback.url("/plain"))["snapshot_id"] == basic_doc["snapshot_id"]
+
+    # -- (i) the READ cap, not a declaration, bounds a body ------------------
+    loopback.serve(basic_raw + b" ", length=False)
+    _fixed_source_error(
+        lambda: source.load_catalog_url(
+            loopback.url("/no-length-oversize"), max_bytes=len(basic_raw)),
+        ("127.0.0.1", "no-length-oversize"))
+
+    # oversize is rejected BEFORE any UTF-8 decode or catalogue validation.
+    loopback.serve(b"\xff" * 64)
+    _fixed_source_error(
+        lambda: source.load_catalog_url(
+            loopback.url("/oversize-binary"), max_bytes=32),
+        ("127.0.0.1", "oversize-binary"))
+
+    # a declared over-limit length fails without trusting the socket
+    loopback.serve(basic_raw,
+                   headers=[("Content-Length", str(len(basic_raw) + 1))],
+                   length=False)
+    _fixed_source_error(
+        lambda: source.load_catalog_url(
+            loopback.url("/declared"), max_bytes=len(basic_raw)),
+        ("127.0.0.1", "declared"))
+
+    # a COMPLETE valid snapshot followed by early EOF is still a failure
+    loopback.serve(basic_raw,
+                   headers=[("Content-Length", str(len(basic_raw) + 10))],
+                   length=False)
+    _fixed_source_error(
+        lambda: source.load_catalog_url(loopback.url("/promised")),
+        ("127.0.0.1", "promised", basic_raw[:16].decode("utf-8", "replace")))
+
+    # -- (j) defaults (URL, timeout, cap) through a network-free double ------
+    opened = []
+
+    def install(response):
+        def open_with(self, fullurl, data=None, timeout=None):
+            opened.append((fullurl, data, timeout))
+            return response
+        monkeypatch.setattr(urllib.request.OpenerDirector, "open", open_with)
+
+    # a declared default-cap overflow is rejected before any body read
+    big = b"x" * (source.MAX_SOURCE_BYTES + 1)
+    oversized = _FakeResponse(
+        big, headers=[("Content-Length", str(len(big)))])
+    install(oversized)
+    _fixed_source_error(
+        lambda: source.load_catalog_url(),
+        ("raw.githubusercontent.com", "master/site", "http://", "https://"))
+    request, data, timeout = opened[0]
+    assert request.full_url == source.DEFAULT_CATALOG_URL
+    assert request.get_method() == "GET"
+    assert data is None
+    assert timeout == source.DEFAULT_TIMEOUT_S == 10
+    assert request.get_header("Accept") == ACCEPT_HEADER
+    sent_default = {name.lower(): value
+                    for name, value in request.header_items()}
+    assert sent_default["accept-encoding"] == ENCODING_HEADER
+    assert oversized.closed == 1
+    assert oversized.reads == []
+
+    # with no declaration the READ cap itself is the default bound
+    undeclared = _FakeResponse(b" " * (source.MAX_SOURCE_BYTES + 1))
+    install(undeclared)
+    _fixed_source_error(
+        lambda: source.load_catalog_url(), ("raw.githubusercontent.com",))
+    assert sum(undeclared.reads) == source.MAX_SOURCE_BYTES + 1
+    assert all(amount > 0 for amount in undeclared.reads)
+    assert undeclared.closed == 1
+
+    # an exactly-at-limit body reaches core validation (not a size failure)
+    at_limit = _FakeResponse(b" " * source.MAX_SOURCE_BYTES)
+    install(at_limit)
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        source.load_catalog_url()
+    assert excinfo.value.code == catalog.INVALID_JSON
+    assert at_limit.closed == 1
+
+    # a successful default call forwards the default-capped snapshot
+    ok_response = _FakeResponse(
+        basic_raw, headers=[("Content-Length", str(len(basic_raw)))])
+    install(ok_response)
+    opened.clear()
+    assert source.load_catalog_url()["snapshot_id"] == \
+        basic_doc["snapshot_id"]
+    assert len(opened) == 1
+    assert opened[0][0].full_url == source.DEFAULT_CATALOG_URL
+    assert ok_response.closed == 1
+
+
+def test_catalog_url_source_failures_stay_stable_and_non_reflective(
+        loopback, tmp_path, monkeypatch):
+    basic_raw = (FIXTURE_DIR / "basic.json").read_bytes()
+
+    # -- (a) EVERY non-200 status is one fixed failure, one GET, no redirect --
+    for status in (204, 206, 301, 302, 304, 307, 308, 404, 429, 500, 503):
+        redirect = 300 <= status < 400
+        loopback.serve(
+            b"", status=status,
+            headers=[("Location", "/elsewhere")] if redirect else ())
+        target = loopback.url("/status-%d" % status)
+        before = len(loopback.requests)
+        _fixed_source_error(
+            lambda: source.load_catalog_url(target),
+            ("127.0.0.1", "/status-%d" % status, str(status), "elsewhere",
+             "Moved", "Not Found", "Too Many", "Internal", "Unavailable"))
+        assert len(loopback.requests) == before + 1
+    assert loopback.hits.get("/elsewhere", 0) == 0
+
+    # -- (b) unsupported encodings and ambiguous/invalid lengths -------------
+    framing_cases = (
+        ("content-encoding", [("Content-Encoding", "gzip")]),
+        ("content-encoding-list",
+         [("Content-Encoding", "identity, gzip")]),
+        ("length-nondigit", [("Content-Length", "12x")]),
+        ("length-negative", [("Content-Length", "-5")]),
+        ("length-duplicated",
+         [("Content-Length", str(len(basic_raw))),
+          ("Content-Length", str(len(basic_raw)))]),
+        ("length-empty", [("Content-Length", "")]),
+    )
+    for label, headers in framing_cases:
+        loopback.serve(basic_raw, headers=headers, length=False)
+        _fixed_source_error(
+            lambda: source.load_catalog_url(loopback.url("/" + label)),
+            ("127.0.0.1", label, "gzip", "12x", "-5", "Content-Length"))
+
+    # -- (c) accepted core errors survive the HTTP boundary untouched --------
+    tampered = json.loads(basic_raw.decode("utf-8"))
+    tampered["snapshot_id"] = "0" * 64
+    future_version = json.loads(basic_raw.decode("utf-8"))
+    future_version["schema_version"] = 2
+    core_cases = (
+        ("malformed", b'{"schema_version": 1, "snapshot_id": ',
+         catalog.INVALID_JSON, "Invalid catalogue JSON."),
+        ("invalid-utf8", b'{"schema_version": 1, "snapshot_id": "\xff\xfe"}',
+         catalog.INVALID_JSON, "Invalid catalogue JSON."),
+        ("tampered", json.dumps(tampered).encode("utf-8"),
+         catalog.INVALID_SNAPSHOT, "Invalid catalogue snapshot."),
+        ("future-schema", json.dumps(future_version).encode("utf-8"),
+         catalog.UNSUPPORTED_SCHEMA_VERSION,
+         "Unsupported catalogue schema version."),
+    )
+    for label, body, code, message in core_cases:
+        loopback.serve(body)
+        with pytest.raises(catalog.CatalogError) as excinfo:
+            source.load_catalog_url(loopback.url("/" + label))
+        error = excinfo.value
+        assert not isinstance(error, source.SourceError)
+        assert (error.code, error.message, str(error)) == (
+            code, message, message)
+        assert error.to_payload() == {
+            "ok": False, "error": {"code": code, "message": message}}
+        assert "127.0.0.1" not in str(error)
+        assert label not in str(error)
+        assert "codec" not in str(error)
+
+    # -- (d) a stalled body is a bounded socket-operation timeout ------------
+    loopback.serve_stall(b"x" * 4, declared=4096)
+    started = time.monotonic()
+    _fixed_source_error(
+        lambda: source.load_catalog_url(
+            loopback.url("/stalled"), timeout_s=0.3),
+        ("127.0.0.1", "stalled", "timed out", "timeout"))
+    assert time.monotonic() - started < 5.0
+    loopback.release.set()
+
+    # -- (e) a mid-body disconnect is the same fixed failure -----------------
+    loopback.serve_disconnect(basic_raw[:24], declared=len(basic_raw))
+    _fixed_source_error(
+        lambda: source.load_catalog_url(loopback.url("/disconnect")),
+        ("127.0.0.1", "disconnect", "400"))
+
+    # -- (f) invalid URL / limit / timeout configuration never dials ---------
+    opened = []
+
+    def forbidden_open(self, *args, **kwargs):
+        opened.append(args)
+        raise AssertionError(
+            "invalid configuration must not reach the network")
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", forbidden_open)
+
+    type_cases = (None, b"https://example.test/catalog.json", 3, True, 3.5,
+                  object(), ["https://example.test/x"])
+    for bad in type_cases:
+        with pytest.raises(TypeError) as excinfo:
+            source.load_catalog_url(bad)
+        assert type(excinfo.value) is TypeError
+        assert str(excinfo.value) == URL_TYPE_ERROR
+        assert "example.test" not in str(excinfo.value)
+
+    value_cases = (
+        "", "https://", "https:///catalog.json",
+        "ftp://example.test/catalog.json", "catalog.json",
+        "//example.test/catalog.json",
+        "https://user:pw@example.test/catalog.json",
+        "https://example.test/catalog.json#fragment",
+        "https://example.test/c a talog.json",
+        "https://example.test/catalog.json\tx",
+        "https://example.test/catalog.json\x00",
+        "https://example.test:99999/catalog.json",
+        "https://example.test:abc/catalog.json",
+        "https://example.test:/catalog.json",
+    )
+    for bad in value_cases:
+        with pytest.raises(ValueError) as excinfo:
+            source.load_catalog_url(bad)
+        assert type(excinfo.value) is ValueError
+        assert str(excinfo.value) == URL_VALUE_ERROR
+        assert "example.test" not in str(excinfo.value)
+
+    for bad_limit in (0, -1, True, 1.0, "8388608", None):
+        with pytest.raises(ValueError) as excinfo:
+            source.load_catalog_url(
+                "http://127.0.0.1:1/catalog.json", max_bytes=bad_limit)
+        assert type(excinfo.value) is ValueError
+        assert str(excinfo.value) == HTTP_BYTE_LIMIT_ERROR
+
+    for bad_timeout in (0, -0.5, True, float("nan"), float("inf"), "10",
+                        None):
+        with pytest.raises(ValueError) as excinfo:
+            source.load_catalog_url(
+                "http://127.0.0.1:1/catalog.json", timeout_s=bad_timeout)
+        assert type(excinfo.value) is ValueError
+        assert str(excinfo.value) == TIMEOUT_ERROR
+    assert opened == []
+    monkeypatch.undo()
+
+    # -- (g) scoped fault doubles: HTTPError and read/close cleanup ----------
+    class _TrackingHTTPError(_HTTPError):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            super().close()
+
+    http_error = _TrackingHTTPError(
+        "http://127.0.0.1:1/catalogue", 500, "Internal Server Error",
+        _headers_message([("X-Secret", "s3cr3t")]),
+        io.BytesIO(b"secret-body"))
+
+    def raise_http_error(self, fullurl, data=None, timeout=None):
+        raise http_error
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open",
+                        raise_http_error)
+    _fixed_source_error(
+        lambda: source.load_catalog_url("http://127.0.0.1:1/catalogue"),
+        ("127.0.0.1:1", "catalogue", "500", "Internal", "secret", "s3cr3t"))
+    assert http_error.close_calls == 1
+
+    read_failures = (
+        ("oserror", OSError(104, "Connection reset by peer")),
+        ("incomplete", http.client.IncompleteRead(b"s3cr3t-partial", 512)),
+        ("protocol", http.client.BadStatusLine("\x00junk")),
+    )
+    for label, fault in read_failures:
+        response = _FakeResponse(b"", read_error=fault)
+        monkeypatch.setattr(
+            urllib.request.OpenerDirector, "open",
+            lambda self, fullurl, data=None, timeout=None, _r=response: _r)
+        _fixed_source_error(
+            lambda: source.load_catalog_url(
+                "http://127.0.0.1:1/" + label),
+            ("127.0.0.1:1", label, "s3cr3t", "junk", "reset", "peer"))
+        assert response.closed == 1
+
+    close_fault = _FakeResponse(
+        basic_raw, headers=[("Content-Length", str(len(basic_raw)))],
+        close_error=OSError(5, "close failed s3cr3t"))
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector, "open",
+        lambda self, fullurl, data=None, timeout=None: close_fault)
+    _fixed_source_error(
+        lambda: source.load_catalog_url("http://127.0.0.1:1/close"),
+        ("127.0.0.1:1", "close", "s3cr3t", "failed"))
+    assert close_fault.closed == 1
+
+    both = _FakeResponse(
+        b"", read_error=OSError(104, "boom"),
+        close_error=OSError(5, "s3cr3t close"))
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector, "open",
+        lambda self, fullurl, data=None, timeout=None: both)
+    _fixed_source_error(
+        lambda: source.load_catalog_url("http://127.0.0.1:1/both"),
+        ("127.0.0.1:1", "both", "s3cr3t", "boom"))
+    assert both.closed == 1
+    monkeypatch.undo()
+
+    # -- (h) private opener/TLS, hostile global settings, no writes ----------
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    neutral = tmp_path / "neutral-cwd"
+    neutral.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(neutral)
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+                 "all_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+
+    global_hits = []
+
+    class _GlobalHandler(urllib.request.BaseHandler):
+        def http_open(self, request):
+            global_hits.append(request.full_url)
+            raise AssertionError("the global opener must never be used")
+
+    installed = urllib.request.build_opener(_GlobalHandler())
+    monkeypatch.setattr(urllib.request, "_opener", installed)
+
+    contexts = []
+    real_create_default_context = ssl.create_default_context
+
+    def create_default_context(*args, **kwargs):
+        contexts.append((args, kwargs))
+        return real_create_default_context(*args, **kwargs)
+
+    monkeypatch.setattr(ssl, "create_default_context", create_default_context)
+
+    loopback.serve(basic_raw)
+    loaded = source.load_catalog_url(loopback.url("/private"))
+    assert loaded["snapshot_id"] == \
+        json.loads(basic_raw.decode("utf-8"))["snapshot_id"]
+    assert global_hits == []
+    assert urllib.request._opener is installed
+    assert contexts == [((), {})]
+    assert loopback.hits["/private"] == 1
+    assert list(home.iterdir()) == []
+    assert list(neutral.iterdir()) == []
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [
+        "empty-home", "neutral-cwd"]
+    monkeypatch.undo()
