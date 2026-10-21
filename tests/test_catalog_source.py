@@ -44,6 +44,7 @@ units and are NOT implemented, imported or exercised here. Nothing in this
 module writes outside pytest's own scratch directory.
 """
 
+import copy
 import hashlib
 import http.client
 import io
@@ -63,7 +64,7 @@ from urllib.error import HTTPError as _HTTPError
 
 import pytest
 
-from watchdog_catalog import catalog, source
+from watchdog_catalog import catalog, query, source
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO / "tests" / "fixtures" / "catalog"
@@ -2619,3 +2620,638 @@ def test_catalog_revalidation_invalid_304_and_stale_candidates_fail_closed(
     # nothing above persisted anything, and the candidate is still pristine
     assert valid == pristine
     assert sorted(item.name for item in tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Unit 5e: last-good fallback, provenance and observation freshness
+# ---------------------------------------------------------------------------
+#
+# ``CatalogSource`` is the synchronous acquisition/state layer over the
+# accepted loaders, revalidator and ``DiskCache``. It owns ONE selected source,
+# keeps at most one validated last-good snapshot in memory (bootstrapped ONCE
+# from its source-scoped disk entry) and reports that snapshot's REAL
+# observation age separately from its retrieval time. A failed refresh returns
+# the last-good body with ``refresh_failed``/``cache_fallback`` warnings, or the
+# frozen ``SourceError`` envelope when nothing valid was ever captured -- never
+# an invented empty success. ``with_source`` attaches that provenance to any
+# pure query payload without touching it.
+
+SOURCE_METADATA_KEYS = frozenset({
+    "mode", "url", "cached", "fetched_at", "fetch_age_s", "observation_age_s",
+    "observation_fresh", "not_modified", "warnings"})
+NOW_ERROR = (
+    "CatalogSource() requires now as a non-negative integer epoch in seconds")
+WITH_SOURCE_ERROR = (
+    "with_source() requires a payload object and an acquisition object")
+
+
+def _clock_snapshot(*, tick_epoch, cadence_s=60):
+    """A committed accepted snapshot with an explicit observation clock."""
+    document = _scratch_snapshot()
+    document["tick_epoch"] = tick_epoch
+    document["cadence_s"] = cadence_s
+    if tick_epoch is None:
+        # The accepted schema requires a null tick to say it is unknown.
+        document["warnings"] = ["tick_epoch_unknown"]
+    return _reseal(document)
+
+
+def _snapshot_bytes(snapshot):
+    return json.dumps(snapshot, indent=2).encode("utf-8")
+
+
+def _error_envelope():
+    return {"ok": False,
+            "error": {"code": SOURCE_CODE, "message": SOURCE_MESSAGE}}
+
+
+def _acquisition_metadata(acquisition, *, snapshot=None):
+    """Assert the exact successful-acquisition envelope and return its source."""
+    assert set(acquisition) == {"ok", "snapshot", "source"}
+    assert acquisition["ok"] is True
+    metadata = acquisition["source"]
+    assert set(metadata) == SOURCE_METADATA_KEYS
+    assert type(metadata["cached"]) is bool
+    assert type(metadata["not_modified"]) is bool
+    assert type(metadata["warnings"]) is list
+    if metadata["fetch_age_s"] is not None:
+        assert metadata["fetch_age_s"] >= 0
+    if snapshot is not None:
+        assert acquisition["snapshot"] == snapshot
+        assert catalog.snapshot_hash(acquisition["snapshot"]) == \
+            snapshot["snapshot_id"]
+    return metadata
+
+
+def test_catalog_source_refresh_fallback_and_freshness(loopback, tmp_path,
+                                                      monkeypatch):
+    fresh = _clock_snapshot(tick_epoch=0)
+    fresh_raw = _snapshot_bytes(fresh)
+    newer = _clock_snapshot(tick_epoch=120)
+    newer["providers"]["synthetic-b"]["stale"] = True
+    newer = _reseal(newer)
+    newer_raw = _snapshot_bytes(newer)
+    url = loopback.url("/catalog.json")
+    cache_root = tmp_path / "cache-root"
+    stamp = "Wed, 21 Oct 2026 10:00:00 GMT"
+
+    origin = source.CatalogSource("url", url, cache_dir=cache_root)
+    assert not cache_root.exists()          # construction performs no I/O
+
+    # -- (a) no capture yet: a STRUCTURED source error, never an empty ok -----
+    assert origin.current(now=60) == _error_envelope()
+    assert not cache_root.exists()
+
+    # -- (b) 200: fetched_at is NOW; observation age comes from tick_epoch ----
+    loopback.requests.clear()
+    _script(loopback, (200, fresh_raw,
+                       [("ETag", 'W/"one"'), ("Last-Modified", stamp)],
+                       True, False))
+    first = origin.refresh(now=60)
+    metadata = _acquisition_metadata(first, snapshot=fresh)
+    assert metadata["mode"] == "url" and metadata["url"] == url
+    assert metadata["cached"] is False and metadata["not_modified"] is False
+    assert metadata["fetched_at"] == 60 and metadata["fetch_age_s"] == 0
+    # In the inclusive one-cadence boundary at 60 seconds: still fresh.
+    assert metadata["observation_age_s"] == 60
+    assert metadata["observation_fresh"] is True
+    assert metadata["warnings"] == []
+    assert len(loopback.requests) == 1
+    assert cache_root.is_dir()
+
+    # -- (c) 304: retrieval time moves, the OBSERVATION time does not ---------
+    loopback.requests.clear()
+    _script(loopback, (304, b"", [("ETag", 'W/"one"')], False, False))
+    revalidated = origin.refresh(now=61)
+    metadata = _acquisition_metadata(revalidated, snapshot=fresh)
+    assert metadata["cached"] is True and metadata["not_modified"] is True
+    assert metadata["fetched_at"] == 61 and metadata["fetch_age_s"] == 0
+    # One second past the cadence: a brand-new download is NOT a new
+    # observation.
+    assert metadata["observation_age_s"] == 61
+    assert metadata["observation_fresh"] is False
+    assert metadata["warnings"] == ["tick_stale"]
+    _only_conditional(loopback.requests[0], "if-none-match", 'W/"one"')
+
+    # -- (d) a changed 200 replaces body AND validators -----------------------
+    loopback.requests.clear()
+    _script(loopback, (200, newer_raw, [], True, False))
+    replaced = origin.refresh(now=130)
+    metadata = _acquisition_metadata(replaced, snapshot=newer)
+    assert metadata["cached"] is False and metadata["not_modified"] is False
+    assert metadata["fetched_at"] == 130
+    assert metadata["observation_age_s"] == 10
+    assert metadata["observation_fresh"] is True
+    assert metadata["warnings"] == []
+    _only_conditional(loopback.requests[0], "if-none-match", 'W/"one"')
+    loopback.requests.clear()
+    _script(loopback, (200, newer_raw, [], True, False))
+    origin.refresh(now=131)
+    _no_conditional(loopback.requests[0])   # the new body has no validators
+
+    # -- (e) failed refresh: last-good body, real age, explicit warnings ------
+    loopback.requests.clear()
+    _script(loopback, (404, b"", [], False, False))
+    fallback = origin.refresh(now=200)
+    metadata = _acquisition_metadata(fallback, snapshot=newer)
+    assert metadata["cached"] is True and metadata["not_modified"] is False
+    assert metadata["fetched_at"] == 131   # original retrieval time preserved
+    assert metadata["fetch_age_s"] == 69
+    assert metadata["observation_age_s"] == 80
+    assert metadata["observation_fresh"] is False
+    assert metadata["warnings"] == [
+        "refresh_failed", "cache_fallback", "tick_stale"]
+    assert fallback["snapshot"]["snapshot_id"] == newer["snapshot_id"]
+    assert fallback["snapshot"]["tick_epoch"] == 120
+    for provider in newer["provider_order"]:
+        assert fallback["snapshot"]["providers"][provider]["stale"] is \
+            newer["providers"][provider]["stale"]
+        assert fallback["snapshot"]["providers"][provider]["model_ids"] == \
+            newer["providers"][provider]["model_ids"]
+    assert fallback["snapshot"]["providers"]["synthetic-b"]["stale"] is True
+
+    # -- (f) cold start: the source-scoped DISK entry is the last-good body ---
+    cold = source.CatalogSource("url", url, cache_dir=cache_root)
+    loopback.requests.clear()
+    _script(loopback, (500, b"", [], True, False))
+    recovered = cold.refresh(now=500)
+    metadata = _acquisition_metadata(recovered, snapshot=newer)
+    assert metadata["cached"] is True and metadata["not_modified"] is False
+    assert metadata["fetched_at"] == 131
+    assert metadata["fetch_age_s"] == 369
+    assert metadata["observation_age_s"] == 380
+    assert metadata["warnings"] == [
+        "refresh_failed", "cache_fallback", "tick_stale"]
+    loopback.requests.clear()
+    view = cold.current(now=500)
+    metadata = _acquisition_metadata(view, snapshot=newer)
+    assert metadata["cached"] is True and metadata["not_modified"] is False
+    assert metadata["warnings"] == [
+        "refresh_failed", "cache_fallback", "tick_stale"]
+    assert loopback.requests == []
+
+    # -- (g) explicit FILE refresh: frozen absolute path, real re-read --------
+    file_dir = tmp_path / "selected"
+    file_dir.mkdir()
+    selected = file_dir / "catalog.json"
+    selected.write_bytes(fresh_raw)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(file_dir)
+    local = source.CatalogSource("file", "catalog.json",
+                                 cache_dir=tmp_path / "file-cache")
+    monkeypatch.chdir(elsewhere)
+    (elsewhere / "catalog.json").write_bytes(newer_raw)
+    local_first = local.refresh(now=5)
+    metadata = _acquisition_metadata(local_first, snapshot=fresh)
+    assert metadata["mode"] == "file" and metadata["url"] is None
+    assert metadata["cached"] is False and metadata["not_modified"] is False
+    assert metadata["fetched_at"] == 5 and metadata["fetch_age_s"] == 0
+    assert metadata["observation_age_s"] == 5
+    assert metadata["observation_fresh"] is True
+    assert metadata["warnings"] == []
+    # The SAME frozen file is re-read explicitly -- never a cwd reselection.
+    selected.write_bytes(newer_raw)
+    local_second = local.refresh(now=200)
+    metadata = _acquisition_metadata(local_second, snapshot=newer)
+    assert metadata["cached"] is False and metadata["not_modified"] is False
+    assert metadata["fetched_at"] == 200
+    # A recent successful download of OLD observations remains stale.
+    assert metadata["observation_age_s"] == 80
+    assert metadata["observation_fresh"] is False
+    assert metadata["warnings"] == ["tick_stale"]
+    selected.unlink()
+    local_fallback = local.refresh(now=201)
+    metadata = _acquisition_metadata(local_fallback, snapshot=newer)
+    assert metadata["cached"] is True
+    assert metadata["fetched_at"] == 200
+    assert metadata["observation_age_s"] == 81
+    assert metadata["warnings"] == [
+        "refresh_failed", "cache_fallback", "tick_stale"]
+
+    # -- (h) future and unknown observation clocks ----------------------------
+    future_path = tmp_path / "future.json"
+    future_path.write_bytes(_snapshot_bytes(_clock_snapshot(tick_epoch=70)))
+    future_source = source.CatalogSource(
+        "file", future_path, cache_dir=tmp_path / "future-cache")
+    captured = future_source.refresh(now=80)
+    assert _acquisition_metadata(captured)["fetched_at"] == 80
+    backwards = future_source.current(now=61)
+    metadata = _acquisition_metadata(backwards)
+    assert metadata["fetched_at"] == 80
+    assert metadata["fetch_age_s"] is None       # never clamped to zero
+    assert metadata["observation_age_s"] is None
+    assert metadata["observation_fresh"] is False
+    assert metadata["warnings"] == ["fetch_time_future", "tick_epoch_future"]
+
+    unknown_path = tmp_path / "unknown.json"
+    unknown_path.write_bytes(_snapshot_bytes(_clock_snapshot(tick_epoch=None)))
+    unknown_source = source.CatalogSource(
+        "file", unknown_path, cache_dir=tmp_path / "unknown-cache")
+    metadata = _acquisition_metadata(unknown_source.refresh(now=10))
+    assert metadata["observation_age_s"] is None
+    assert metadata["observation_fresh"] is False
+    assert metadata["warnings"] == ["tick_epoch_unknown"]
+
+    # -- (i) optional persistence failure is a WARNING, not a data failure ----
+    blocked = tmp_path / "blocked-root"
+    blocked.write_bytes(b"not a cache directory")
+    stalled = source.CatalogSource("url", url, cache_dir=blocked)
+    loopback.requests.clear()
+    _script(loopback, (200, fresh_raw, [], True, False))
+    stored = stalled.refresh(now=60)
+    metadata = _acquisition_metadata(stored, snapshot=fresh)
+    assert metadata["warnings"] == ["cache_write_failed"]
+    assert stalled.current(now=60)["source"]["warnings"] == [
+        "cache_write_failed"]
+    # A LATER successful store clears the persistence warning.
+    healing = source.CatalogSource("url", url,
+                                   cache_dir=tmp_path / "healing-cache")
+    loopback.requests.clear()
+    _script(loopback, (200, fresh_raw, [], True, False))
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source.DiskCache, "store", lambda self, *a, **k: False)
+        broken = healing.refresh(now=60)
+    assert _acquisition_metadata(broken)["warnings"] == ["cache_write_failed"]
+    loopback.requests.clear()
+    _script(loopback, (200, fresh_raw, [], True, False))
+    healed = healing.refresh(now=61)
+    metadata = _acquisition_metadata(healed, snapshot=fresh)
+    assert metadata["fetched_at"] == 61
+    # The persistence warning is gone; the observation age is still real.
+    assert metadata["warnings"] == ["tick_stale"]
+    assert healing.current(now=61)["source"]["warnings"] == ["tick_stale"]
+
+    # -- (j) all five pure tools + with_source expose the SAME warnings -------
+    tools = (
+        ("list_free_models",
+         lambda snapshot: query.list_free_models(snapshot, {})),
+        ("get_model",
+         lambda snapshot: query.get_model(
+             snapshot, {"model_id": "alpha-1:free"})),
+        ("list_endpoints",
+         lambda snapshot: query.list_endpoints(snapshot, {})),
+        ("watchdog_status",
+         lambda snapshot: query.watchdog_status(snapshot, {}, now=200)),
+        ("search_models",
+         lambda snapshot: query.search_models(snapshot, {})),
+    )
+    exposed = cold.current(now=500)
+    for round_index in (1, 2):
+        for label, call in tools:
+            base = call(newer)
+            attached = source.with_source(base, exposed)
+            assert attached == {**copy.deepcopy(base),
+                                "source": copy.deepcopy(
+                                    exposed["source"])}, (round_index, label)
+            assert attached["ok"] is base["ok"], label
+            assert attached["source"]["warnings"] == [
+                "refresh_failed", "cache_fallback", "tick_stale"], label
+            assert call(newer) == base, label  # the core payload is untouched
+    # An argument-error result keeps its shape and still gains provenance.
+    argument_error = query.get_model(newer, {"model_id": 3})
+    assert argument_error["ok"] is False
+    attached_error = source.with_source(argument_error, exposed)
+    assert attached_error["ok"] is False
+    assert attached_error["error"] == argument_error["error"]
+    assert attached_error["source"]["warnings"] == [
+        "refresh_failed", "cache_fallback", "tick_stale"]
+    assert query.get_model(newer, {"model_id": 3}) == argument_error
+    # A FAILED acquisition attaches as its own structured error, never an ok.
+    missing = source.CatalogSource("url", loopback.url("/absent.json"),
+                                   cache_dir=tmp_path / "absent-cache")
+    loopback.requests.clear()
+    _script(loopback, (404, b"", [], False, False))
+    failure = missing.refresh(now=10)
+    assert failure == _error_envelope()
+    attached_failure = source.with_source(
+        query.list_free_models(newer, {}), failure)
+    assert attached_failure == _error_envelope()
+    assert attached_failure is not failure
+    for bad in (None, [], "payload", 3, True):
+        with pytest.raises(TypeError) as excinfo:
+            source.with_source(bad, exposed)
+        assert type(excinfo.value) is TypeError
+        assert str(excinfo.value) == WITH_SOURCE_ERROR
+        with pytest.raises(TypeError) as excinfo:
+            source.with_source({"ok": False}, bad)
+        assert str(excinfo.value) == WITH_SOURCE_ERROR
+
+    # -- (k) mutation cannot poison retained memory or another instance -------
+    pristine = copy.deepcopy(newer)
+    hostile = cold.current(now=500)
+    hostile["snapshot"]["providers"] = {}
+    hostile["snapshot"]["provider_order"].append("injected")
+    hostile["snapshot"]["snapshot_id"] = "0" * 64
+    hostile["source"]["warnings"].append("mutated")
+    hostile["source"]["fetched_at"] = -1
+    first["snapshot"]["providers"].clear()
+    first["source"]["warnings"].append("mutated")
+    assert cold.current(now=500)["snapshot"] == pristine
+    again = cold.current(now=500)["source"]
+    assert again["fetched_at"] == 131
+    assert again["warnings"] == [
+        "refresh_failed", "cache_fallback", "tick_stale"]
+    assert origin.current(now=131)["snapshot"] == pristine
+
+    # -- (l) distinct sources stay distinct through success and fallback ------
+    other_url = loopback.url("/other.json")
+    shared = tmp_path / "shared-cache"
+    alpha = source.CatalogSource("url", url, cache_dir=shared)
+    beta = source.CatalogSource("url", other_url, cache_dir=shared)
+    loopback.requests.clear()
+    _script(loopback, (200, fresh_raw, [], True, False),
+            (200, newer_raw, [], True, False))
+    alpha_snapshot = alpha.refresh(now=10)
+    beta_snapshot = beta.refresh(now=10)
+    assert _acquisition_metadata(alpha_snapshot)["fetched_at"] == 10
+    assert alpha_snapshot["snapshot"]["tick_epoch"] == 0
+    assert beta_snapshot["snapshot"]["tick_epoch"] == 120
+    assert alpha._cache.path != beta._cache.path
+    assert sorted(item.name for item in shared.iterdir()) == sorted(
+        [alpha._cache.path.name, beta._cache.path.name])
+    loopback.requests.clear()
+    _script(loopback, (404, b"", [], False, False))
+    alpha_fallback = alpha.refresh(now=20)
+    assert _acquisition_metadata(alpha_fallback)["cached"] is True
+    assert alpha_fallback["snapshot"]["tick_epoch"] == 0
+    assert beta.current(now=20)["snapshot"]["tick_epoch"] == 120
+
+
+def test_catalog_source_failures_and_io_discipline(loopback, tmp_path,
+                                                   monkeypatch):
+    fresh = _clock_snapshot(tick_epoch=0)
+    fresh_raw = _snapshot_bytes(fresh)
+    url = loopback.url("/catalog.json")
+    fresh_path = tmp_path / "fresh.json"
+    fresh_path.write_bytes(fresh_raw)
+
+    # -- (a) failure without a valid capture is a STRUCTURED source error -----
+    tampered = _scratch_snapshot()
+    tampered["snapshot_id"] = "0" * 64
+    failure_rows = (
+        ("404", (404, b"", [], False, False)),
+        ("429", (429, b"", [], False, False)),
+        ("500", (500, b"", [], True, False)),
+        ("unsolicited-304", (304, b"", [], False, False)),
+        ("invalid-json", (200, b'{"schema_version": 1, ', [], True, False)),
+        ("tampered-body", (200, json.dumps(tampered).encode("utf-8"),
+                           [], True, False)),
+    )
+    for label, response in failure_rows:
+        client = source.CatalogSource(
+            "url", url, cache_dir=tmp_path / ("failure-" + label))
+        loopback.requests.clear()
+        _script(loopback, response)
+        assert client.refresh(now=1) == _error_envelope(), label
+        assert len(loopback.requests) == 1, label
+        assert client.current(now=1) == _error_envelope(), label
+        assert not (tmp_path / ("failure-" + label)).exists(), label
+
+    # -- (b) a corrupt/foreign/old DISK record is a MISS, never an empty ok ---
+    old_schema = _scratch_snapshot()
+    old_schema["schema_version"] = 2
+    record_rows = (
+        ("corrupt", b"{not json"),
+        ("foreign", catalog.canonical_bytes(_cache_document(
+            _scratch_snapshot(),
+            identity=_identity("url", "https://other.test/catalog.json")))),
+        ("old-version", catalog.canonical_bytes(_cache_document(
+            _scratch_snapshot(), identity=_identity("url", url), version=0))),
+        ("old-schema", catalog.canonical_bytes(_cache_document(
+            old_schema, identity=_identity("url", url)))),
+        ("tampered-record", catalog.canonical_bytes(_cache_document(
+            tampered, identity=_identity("url", url)))),
+    )
+    for label, payload in record_rows:
+        root = tmp_path / ("record-" + label)
+        entry = source.DiskCache("url", url, cache_dir=root)
+        entry.path.parent.mkdir(parents=True)
+        entry.path.write_bytes(payload)
+        client = source.CatalogSource("url", url, cache_dir=root)
+        loopback.requests.clear()
+        _script(loopback, (500, b"", [], True, False))
+        assert client.refresh(now=1) == _error_envelope(), label
+        assert entry.path.read_bytes() == payload, label   # never repaired
+        assert _temp_leftovers(root) == [], label
+
+    # -- (c) failed FILE selection stays a structured error -------------------
+    corrupt_file = tmp_path / "corrupt.json"
+    corrupt_file.write_bytes(b"not a catalogue")
+    as_directory = tmp_path / "as-directory"
+    as_directory.mkdir()
+    file_rows = (
+        ("missing", tmp_path / "missing.json"),
+        ("corrupt", corrupt_file),
+        ("directory", as_directory),
+    )
+    for label, selected in file_rows:
+        client = source.CatalogSource(
+            "file", selected, cache_dir=tmp_path / ("file-" + label))
+        assert client.refresh(now=1) == _error_envelope(), label
+        assert client.current(now=1) == _error_envelope(), label
+
+    # -- (d) a legitimately EMPTY snapshot still succeeds and can fall back ---
+    empty = _empty_snapshot()
+    empty_path = tmp_path / "empty.json"
+    empty_path.write_bytes(_snapshot_bytes(empty))
+    empty_client = source.CatalogSource(
+        "file", empty_path, cache_dir=tmp_path / "empty-cache")
+    served = empty_client.refresh(now=1759200010)
+    assert served["ok"] is True
+    assert served["snapshot"]["provider_order"] == []
+    assert served["snapshot"]["providers"] == {}
+    assert served["source"]["warnings"] == []
+    empty_path.unlink()
+    empty_fallback = empty_client.refresh(now=1759200020)
+    metadata = _acquisition_metadata(empty_fallback)
+    assert empty_fallback["snapshot"]["provider_order"] == []
+    assert empty_fallback["snapshot"]["snapshot_id"] == empty["snapshot_id"]
+    assert metadata["warnings"] == ["refresh_failed", "cache_fallback"]
+
+    # -- (e) no safe default root / unavailable explicit root: warning only ---
+    with pytest.MonkeyPatch.context() as scope:
+        scope.delenv("XDG_CACHE_HOME", raising=False)
+        scope.delenv("HOME", raising=False)
+        rootless = source.CatalogSource("file", fresh_path)
+        assert rootless._cache.path is None
+        rootless_result = rootless.refresh(now=5)
+    metadata = _acquisition_metadata(rootless_result, snapshot=fresh)
+    assert metadata["warnings"] == ["cache_write_failed"]
+    unavailable = tmp_path / "unavailable-root"
+    unavailable.write_bytes(b"file, not a directory")
+    explicit = source.CatalogSource("file", fresh_path, cache_dir=unavailable)
+    explicit_result = explicit.refresh(now=5)
+    metadata = _acquisition_metadata(explicit_result, snapshot=fresh)
+    assert metadata["warnings"] == ["cache_write_failed"]
+
+    # -- (f) invalid `now` and configuration fail BEFORE any I/O --------------
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("invalid input must never reach operational I/O")
+
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "fetch_catalog_url", forbidden)
+        scope.setattr(source, "load_catalog_file", forbidden)
+        scope.setattr(source.DiskCache, "load", forbidden)
+        scope.setattr(source.DiskCache, "store", forbidden)
+        guarded = source.CatalogSource("url", url, cache_dir=tmp_path / "guard")
+        for bad in (True, False, 1.0, "1", None, -1,
+                    catalog.MAX_SAFE_INT + 1, -(10 ** 30)):
+            for label, invoke in (("refresh", guarded.refresh),
+                                  ("current", guarded.current)):
+                with pytest.raises(ValueError) as excinfo:
+                    invoke(now=bad)
+                assert type(excinfo.value) is ValueError, (label, bad)
+                assert str(excinfo.value) == NOW_ERROR, (label, bad)
+        with pytest.raises(TypeError) as excinfo:
+            source.CatalogSource(None, url)
+        assert type(excinfo.value) is TypeError
+        with pytest.raises(TypeError) as excinfo:
+            source.CatalogSource("file", b"/tmp/catalogue.json")
+        assert type(excinfo.value) is TypeError
+        with pytest.raises(ValueError) as excinfo:
+            source.CatalogSource("http", url)
+        assert type(excinfo.value) is ValueError
+        with pytest.raises(ValueError) as excinfo:
+            source.CatalogSource("file", "")
+        assert type(excinfo.value) is ValueError
+        for bad in (0, -1, True, float("nan"), float("inf"), "10"):
+            with pytest.raises(ValueError) as excinfo:
+                source.CatalogSource("url", url, timeout_s=bad)
+            assert str(excinfo.value) == TIMEOUT_ERROR
+        for bad in (0, -1, True, 1.0, None):
+            with pytest.raises(ValueError) as excinfo:
+                source.CatalogSource("url", url, max_bytes=bad)
+            assert str(excinfo.value) == HTTP_BYTE_LIMIT_ERROR
+            with pytest.raises(ValueError) as excinfo:
+                source.CatalogSource("file", fresh_path, max_bytes=bad)
+            assert str(excinfo.value) == BYTE_LIMIT_ERROR
+        assert calls == []
+        assert not (tmp_path / "guard").exists()
+
+    # -- (g) bootstrap happens ONCE per instance, and current() never bootstraps
+    counted = {"load": 0}
+    accepted_load = source.DiskCache.load
+
+    def counting_load(self):
+        counted["load"] += 1
+        return accepted_load(self)
+
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source.DiskCache, "load", counting_load)
+        counted_client = source.CatalogSource(
+            "file", fresh_path, cache_dir=tmp_path / "counted-cache")
+        assert counted["load"] == 0
+        assert counted_client.current(now=1) == _error_envelope()
+        assert counted["load"] == 0
+        counted_client.refresh(now=1)
+        assert counted["load"] == 1
+        counted_client.refresh(now=2)
+        counted_client.current(now=2)
+        assert counted["load"] == 1
+
+    # -- (h) current()/with_source() perform ZERO operational I/O -------------
+    quiet = source.CatalogSource("url", url, cache_dir=tmp_path / "quiet-cache")
+    loopback.requests.clear()
+    _script(loopback, (200, fresh_raw, [], True, False))
+    acquired = quiet.refresh(now=60)
+    requests_before = len(loopback.requests)
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "fetch_catalog_url", forbidden)
+        scope.setattr(source, "load_catalog_file", forbidden)
+        scope.setattr(source.DiskCache, "load", forbidden)
+        scope.setattr(source.DiskCache, "store", forbidden)
+        scope.setattr(urllib.request.OpenerDirector, "open", forbidden)
+        view = quiet.current(now=60)
+        attached = source.with_source(query.list_free_models(fresh, {}),
+                                      acquired)
+        repeated = quiet.current(now=60)
+    assert _acquisition_metadata(view)["fetched_at"] == 60
+    assert attached["source"] == acquired["source"]
+    assert repeated["snapshot"] == fresh
+    assert len(loopback.requests) == requests_before
+    assert calls == []
+
+    # -- (i) a failed refresh preserves last-good DISK bytes and metadata -----
+    cache_file = quiet._cache.path
+    stored_bytes = cache_file.read_bytes()
+    loopback.requests.clear()
+    _script(loopback, (429, b"", [], True, False))
+    fallback = quiet.refresh(now=61)
+    metadata = _acquisition_metadata(fallback, snapshot=fresh)
+    assert metadata["fetched_at"] == 60
+    assert metadata["fetch_age_s"] == 1
+    assert metadata["warnings"] == [
+        "refresh_failed", "cache_fallback", "tick_stale"]
+    assert cache_file.read_bytes() == stored_bytes
+    assert _temp_leftovers(cache_file.parent) == []
+
+    # -- (j) disk retrieval metadata is preserved literally: future and float -
+    for label, fetched_at in (("future", 1000), ("float", 5.5)):
+        root = tmp_path / ("seed-" + label)
+        seed = source.DiskCache("url", url, cache_dir=root)
+        assert seed.store(fresh, fetched_at=fetched_at) is True
+        client = source.CatalogSource("url", url, cache_dir=root)
+        loopback.requests.clear()
+        _script(loopback, (500, b"", [], True, False))
+        recovered = client.refresh(now=10)
+        metadata = _acquisition_metadata(recovered, snapshot=fresh)
+        assert metadata["fetched_at"] == fetched_at, label
+        assert type(metadata["fetched_at"]) is type(fetched_at), label
+        assert metadata["observation_age_s"] == 10, label
+        assert metadata["observation_fresh"] is True, label
+        if label == "future":
+            assert metadata["fetch_age_s"] is None
+            assert metadata["warnings"] == [
+                "refresh_failed", "cache_fallback", "fetch_time_future"]
+        else:
+            assert metadata["fetch_age_s"] == 4.5
+            assert type(metadata["fetch_age_s"]) is float
+            assert metadata["warnings"] == [
+                "refresh_failed", "cache_fallback"]
+
+    # -- (k) no implicit source switch, no private path or error-text leak ----
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "load_catalog_file", forbidden)
+        url_client = source.CatalogSource(
+            "url", url, cache_dir=tmp_path / "no-switch")
+        loopback.requests.clear()
+        _script(loopback, (404, b"", [], False, False))
+        assert url_client.refresh(now=1) == _error_envelope()
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "fetch_catalog_url", forbidden)
+        file_client = source.CatalogSource(
+            "file", fresh_path, cache_dir=tmp_path / "no-switch-file")
+        assert file_client.refresh(now=5)["ok"] is True
+
+    leak_root = tmp_path / "leak-cache"
+    leaked = source.CatalogSource("file", fresh_path, cache_dir=leak_root)
+    leaked_acquisition = leaked.refresh(now=5)
+    rendered = json.dumps(leaked_acquisition, sort_keys=True)
+    for secret in (str(tmp_path), str(fresh_path), fresh_path.name,
+                   str(leak_root), leaked._cache.path.name):
+        assert secret not in rendered
+    assert leaked_acquisition["source"]["url"] is None
+    missing_path = tmp_path / "hidden-secret-catalogue.json"
+    hidden = source.CatalogSource("file", missing_path,
+                                  cache_dir=tmp_path / "hidden-cache")
+    hidden_error = hidden.refresh(now=1)
+    assert hidden_error == _error_envelope()
+    assert "hidden-secret" not in repr(hidden_error)
+    assert str(tmp_path) not in repr(hidden_error)
+
+    # -- (l) views are detached deep copies -----------------------------------
+    detached = leaked.current(now=5)
+    detached["snapshot"]["provider_order"].clear()
+    detached["snapshot"]["providers"] = {}
+    detached["source"]["warnings"].append("mutated")
+    detached_source = detached["source"]
+    detached_source["fetched_at"] = -1
+    again = leaked.current(now=5)
+    assert again["snapshot"] == fresh
+    assert again["source"]["fetched_at"] == 5
+    assert again["source"]["warnings"] == []
+    assert leaked_acquisition["snapshot"] == fresh

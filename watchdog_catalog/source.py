@@ -110,14 +110,45 @@ consults, writes or creates a cache, falls back to another source, retries or
 reads a clock beyond the socket timeout. :func:`fetch_catalog_url` performs at
 most one GET of its selected URL and neither reads nor writes a cache file.
 :class:`DiskCache` reads and writes only its own entry and never fetches,
-retries, infers freshness, reseals a snapshot or reads a clock. Last-good
-fallback, cache/freshness warnings, async dispatch and coalesced refresh belong
-to later units and are deliberately absent: this primitive reports a 304
-honestly instead of deciding what a caller should do with it.
+retries, infers freshness, reseals a snapshot or reads a clock.
+
+Last-good fallback and provenance (unit 5e):
+
+* :class:`CatalogSource` is the synchronous acquisition/state layer over those
+  accepted primitives. It freezes ONE selected source -- a literal URL, or a
+  file whose lexical absolute path is selected at construction -- and owns one
+  source-specific :class:`DiskCache`. Construction validates configuration and
+  performs NO read, network access or directory creation;
+* every call takes the caller's fixed ``now`` (a required keyword, native int,
+  ``bool`` excluded). That argument is the ONLY clock this layer reads: the
+  retrieval time (``fetched_at``) is this unit's statement about the download,
+  while the observation age is derived by the accepted
+  :func:`watchdog_catalog.query.watchdog_status` from the snapshot's own
+  ``tick_epoch``/``cadence_s``. A recent download of old observations therefore
+  stays stale, and a future tick or retrieval time stays ``None``-aged rather
+  than being clamped to a healthy zero;
+* :meth:`CatalogSource.refresh` bootstraps its disk entry ONCE per instance and
+  then makes exactly ONE explicit refresh attempt of its selected source. A
+  validated new body becomes the owned in-memory last-good entry (validators
+  from that body); a 304 reuses the accepted snapshot unchanged and updates
+  only the retrieval time. Persistence through :class:`DiskCache` is OPTIONAL:
+  a failed store keeps the fresh memory entry usable and reports
+  ``cache_write_failed``;
+* a failed refresh with a valid last-good entry returns that body with its real
+  ages and explicit ``refresh_failed``/``cache_fallback`` warnings; without one
+  it returns the frozen :class:`SourceError` envelope. No failure ever becomes
+  an ``ok`` empty catalogue, and no refresh implicitly switches source;
+* :meth:`CatalogSource.current` is a memory-only view -- no source, cache,
+  network or clock I/O -- and :func:`with_source` attaches the same provenance
+  object to any pure query payload without mutating it.
+
+Scheduling, coalesced refresh, retries/backoff and async dispatch remain later
+units and are deliberately absent, as is any CLI wiring.
 """
 
 from __future__ import annotations
 
+import copy
 import datetime
 import email.utils
 import hashlib
@@ -1171,3 +1202,300 @@ def fetch_catalog_url(url=DEFAULT_CATALOG_URL, *, cached_entry=None,
             response_headers, "Last-Modified", _usable_last_modified),
         "not_modified": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# Last-good fallback, provenance and observation freshness (unit 5e)
+# ---------------------------------------------------------------------------
+#
+# ONE selected source, ONE owned in-memory last-good entry (bootstrapped once
+# from that source's disk entry), ONE explicit refresh attempt per call. The
+# caller's fixed `now` is the whole clock interface: retrieval time and
+# observation age are separate statements, and the observation age is derived
+# by the accepted core status query rather than a second freshness algorithm.
+# Persistence stays optional, and no failure ever becomes an empty success.
+
+#: The frozen source-warning order. The core status warning codes keep their
+#: accepted relative order after the retrieval/cache codes.
+_SOURCE_WARNING_ORDER = (
+    "refresh_failed", "cache_fallback", "cache_write_failed",
+    "fetch_time_future", "tick_epoch_unknown", "metadata_missing",
+    "metadata_invalid", "tick_epoch_future", "tick_stale")
+
+_NOW_ERROR = (
+    "CatalogSource() requires now as a non-negative integer epoch in seconds")
+_WITH_SOURCE_ERROR = (
+    "with_source() requires a payload object and an acquisition object")
+
+
+def _now_argument(now):
+    """The caller's fixed clock: a native non-negative safe integer.
+
+    ``bool`` is excluded (``True`` is not an epoch), as are floats, strings and
+    values outside :data:`~watchdog_catalog.catalog.MAX_SAFE_INT`. Invalid
+    input is ONE fixed non-reflective ``ValueError`` raised before any disk,
+    source or state work. This function never reads a wall or monotonic clock.
+    """
+    if isinstance(now, bool) or not isinstance(now, int) \
+            or not 0 <= now <= _catalog.MAX_SAFE_INT:
+        raise ValueError(_NOW_ERROR)
+    return now
+
+
+def _detached_entry(entry, identity):
+    """A fresh decode of one validated, SOURCE-MATCHED v1 cache entry.
+
+    Returns ``None`` unless ``entry`` is a complete version-1 record for
+    ``identity`` -- so a foreign record can never become this source's
+    last-good body -- and detachment is a canonical encode/decode round trip,
+    so a caller -- or a loader/revalidator double -- mutating its object
+    afterwards cannot change what this layer retains. Unlike the transport's
+    candidate gate this has NO cache-serialization size bound: a valid source
+    body may be too large to persist while remaining a perfectly valid
+    in-memory observation.
+    """
+    if not isinstance(entry, dict):
+        return None
+    if not _valid_cache_entry(entry, identity):
+        return None
+    try:
+        payload = _catalog.canonical_bytes(entry)
+        owned = _catalog.load_json(payload.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError):
+        return None
+    if not _valid_cache_entry(owned, identity):
+        return None
+    return owned
+
+
+def _observation_status(snapshot, now):
+    """The accepted core status payload for one retained snapshot.
+
+    The query module is imported at CALL time, never at module import, so this
+    module stays inert and query-free under the package's fresh-process import
+    guard. This reuses the frozen inclusive cadence boundary, unknown/future
+    tick handling and provider-independent observation health; the snapshot and
+    the query result are never modified.
+    """
+    from . import query as _query
+    return _query.watchdog_status(snapshot, {}, now=now)
+
+
+class CatalogSource:
+    """ONE selected catalogue source with last-good fallback and provenance.
+
+    ``kind`` is exactly ``"url"`` or ``"file"``. A URL ``location`` is consumed
+    under the accepted literal policy and stays literal; a file ``location`` is
+    frozen to its lexical absolute path at construction -- no tilde/environment
+    expansion and no symlink resolution -- and that SAME path is read on every
+    refresh, so a later ``chdir`` cannot mix two files. ``cache_dir`` and the
+    optional bounds are the accepted :class:`DiskCache`,
+    :func:`fetch_catalog_url` and loader configurations.
+
+    Construction only validates configuration and selects paths: it performs no
+    source/cache read, no network access and no directory creation. The disk
+    entry is bootstrapped lazily and ONCE by the first :meth:`refresh`.
+
+    State is deliberately small: one owned validated entry (or ``None``), a
+    refresh-failure flag and an optional-persistence flag. Every acquisition is
+    a freshly allocated container, so mutating a result -- including its nested
+    snapshot or warnings -- cannot poison retained memory, the disk entry or
+    another instance.
+    """
+
+    def __init__(self, kind, location, *, cache_dir=None,
+                 timeout_s=DEFAULT_TIMEOUT_S,
+                 max_bytes=MAX_SOURCE_BYTES):
+        if not isinstance(kind, str):
+            raise TypeError(_CACHE_KIND_TYPE_ERROR)
+        if kind not in _CACHE_KINDS:
+            raise ValueError(_CACHE_KIND_VALUE_ERROR)
+        if kind == "url":
+            selected = _selected_url(location)
+            limit = _http_byte_limit(max_bytes)
+        else:
+            selected = _selected_path(location)
+            if not selected:
+                raise ValueError(_CACHE_LOCATION_ERROR)
+            # Lexical absolute freeze: no expansion and no realpath, so the
+            # identity, the cache key and the file actually read stay one path.
+            selected = os.path.abspath(selected)
+            limit = _byte_limit(max_bytes)
+        timeout = _timeout_seconds(timeout_s)
+        self.kind = kind
+        self.location = selected
+        self._url = selected if kind == "url" else None
+        self._path = None if kind == "url" else selected
+        self._timeout_s = timeout
+        self._max_bytes = limit
+        self._identity = {"kind": kind, "location": selected}
+        self._cache = DiskCache(kind, selected, cache_dir=cache_dir)
+        self._entry = None
+        self._bootstrapped = False
+        self._refresh_failed = False
+        self._cache_write_failed = False
+
+    # -- state ------------------------------------------------------------
+
+    def _bootstrap(self):
+        """Load this source's disk entry at most ONCE per instance.
+
+        A miss, a corrupt/foreign/old-version record and an unavailable cache
+        are all simply "no last-good" -- nothing is deleted, repaired or
+        searched across sources -- and the attempt is not repeated.
+        """
+        if self._bootstrapped:
+            return
+        loaded = self._cache.load()
+        if loaded is not None:
+            owned = _detached_entry(loaded, self._identity)
+            if owned is not None:
+                self._entry = owned
+        self._bootstrapped = True
+
+    def _read_source(self):
+        """Make exactly ONE explicit refresh attempt of the selected source."""
+        if self.kind == "url":
+            return fetch_catalog_url(
+                self._url, cached_entry=self._entry,
+                timeout_s=self._timeout_s, max_bytes=self._max_bytes)
+        return {
+            "snapshot": load_catalog_file(
+                self._path, max_bytes=self._max_bytes),
+            "etag": None,
+            "last_modified": None,
+            "not_modified": False,
+        }
+
+    def _candidate(self, result, moment):
+        """The owned six-key v1 memory entry for one accepted refresh result."""
+        entry = {
+            "cache_version": _CACHE_VERSION,
+            "source": dict(self._identity),
+            "fetched_at": moment,
+            "etag": result["etag"],
+            "last_modified": result["last_modified"],
+            "snapshot": result["snapshot"],
+        }
+        return _detached_entry(entry, self._identity)
+
+    def _acquisition(self, moment, *, cached, not_modified, refresh_failed):
+        """Build ONE fresh successful acquisition from retained memory."""
+        entry = self._entry
+        fetched_at = entry["fetched_at"]
+        future = fetched_at > moment
+        status = _observation_status(entry["snapshot"], moment)
+        present = set()
+        if refresh_failed:
+            # A cached fallback is exactly a failed refresh served from memory.
+            present.update(("refresh_failed", "cache_fallback"))
+        if self._cache_write_failed:
+            present.add("cache_write_failed")
+        if future:
+            present.add("fetch_time_future")
+        present.update(status["warnings"])
+        return {
+            "ok": True,
+            "snapshot": copy.deepcopy(entry["snapshot"]),
+            "source": {
+                "mode": self.kind,
+                "url": self._url,
+                "cached": cached,
+                "fetched_at": fetched_at,
+                "fetch_age_s": None if future else moment - fetched_at,
+                "observation_age_s": status["last_tick_age_s"],
+                "observation_fresh": status["tick_fresh"],
+                "not_modified": not_modified,
+                "warnings": [code for code in _SOURCE_WARNING_ORDER
+                             if code in present],
+            },
+        }
+
+    def _failed(self, moment):
+        """The documented outcome of one failed source attempt."""
+        if self._entry is None:
+            return SourceError().to_payload()
+        self._refresh_failed = True
+        return self._acquisition(moment, cached=True, not_modified=False,
+                                 refresh_failed=True)
+
+    # -- public API -------------------------------------------------------
+
+    def refresh(self, *, now):
+        """Bootstrap if needed, then make ONE explicit source refresh attempt.
+
+        ``now`` is the caller-supplied fixed clock. A validated new 200/file
+        body becomes the retained last-good entry with ``fetched_at=now``; a
+        304 reuses the accepted complete snapshot unchanged, updates ONLY the
+        retrieval time and retains its validators. Persistence is attempted
+        after the memory entry is owned: a ``False`` store keeps the snapshot
+        usable and reports ``cache_write_failed``.
+
+        A :class:`SourceError` or accepted
+        :class:`~watchdog_catalog.catalog.CatalogError` is a failed attempt: the
+        last-good entry (memory or the once-bootstrapped disk entry) is returned
+        with its original body, validators and retrieval time plus explicit
+        ``refresh_failed``/``cache_fallback`` warnings, or the frozen source
+        error envelope when nothing valid was ever captured. Programming and
+        configuration errors keep their accepted exceptions.
+        """
+        moment = _now_argument(now)
+        self._bootstrap()
+        try:
+            result = self._read_source()
+        except (SourceError, _catalog.CatalogError):
+            return self._failed(moment)
+        candidate = self._candidate(result, moment)
+        if candidate is None:
+            return self._failed(moment)
+        # Publish only an owned, fully validated candidate ...
+        self._entry = candidate
+        self._refresh_failed = False
+        # ... then let optional persistence fail without touching the data.
+        stored = self._cache.store(
+            candidate["snapshot"], fetched_at=candidate["fetched_at"],
+            etag=candidate["etag"], last_modified=candidate["last_modified"])
+        self._cache_write_failed = not stored
+        revalidated = result["not_modified"] is True
+        return self._acquisition(moment, cached=revalidated,
+                                 not_modified=revalidated,
+                                 refresh_failed=False)
+
+    def current(self, *, now):
+        """A memory-only view: no source, cache, network or clock I/O.
+
+        Before the first :meth:`refresh` there is no memory entry, so the
+        frozen structured source error is returned; this method never triggers
+        the one-time disk bootstrap. A retained entry returns a detached result
+        with ``cached=True`` and the current failure/persistence warnings, which
+        only a documented successful refresh clears.
+        """
+        moment = _now_argument(now)
+        if self._entry is None:
+            return SourceError().to_payload()
+        return self._acquisition(moment, cached=True, not_modified=False,
+                                 refresh_failed=self._refresh_failed)
+
+
+def with_source(payload, acquisition):
+    """Attach one acquisition's provenance to a pure query payload.
+
+    This is the thin, transport-independent attachment point: it neither
+    queries nor acquires. A successful acquisition returns a deep copy of
+    ``payload`` with only ``source`` added (itself a fresh copy), preserving the
+    payload's ``ok``/``error`` shape, counts, metadata, snapshot identity and
+    existing top-level warnings. A failed acquisition returns a fresh copy of
+    that structured source error instead -- an argument-error payload therefore
+    keeps its own shape rather than being promoted to a success.
+
+    ``payload`` and ``acquisition`` are the programming interface: anything but
+    a ``dict`` is one fixed non-reflective ``TypeError``. Neither argument is
+    ever mutated.
+    """
+    if not isinstance(payload, dict) or not isinstance(acquisition, dict):
+        raise TypeError(_WITH_SOURCE_ERROR)
+    if acquisition.get("ok") is True:
+        attached = copy.deepcopy(payload)
+        attached["source"] = copy.deepcopy(acquisition["source"])
+        return attached
+    return copy.deepcopy(acquisition)
