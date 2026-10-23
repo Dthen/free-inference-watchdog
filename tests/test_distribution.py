@@ -12,7 +12,13 @@ The first two are the preserved unit-6a archive/core checks:
    imports the SDK, provider configuration or the producer modules to read a
    version. The distribution version is declared statically in the TOML and is
    deliberately NOT duplicated here, so a version bump cannot fail a test that
-   is really about the wheel/metadata relationship.
+   is really about the wheel/metadata relationship. It also pins PREREQUISITE
+   DISCOVERY as portable: an explicit interpreter/installer override is
+   authoritative, discovery uses ordinary executables, a ``python3.11`` that is
+   not CPython 3.11 is rejected on its own probed identity, and an unset
+   ``TMPDIR`` uses the standard temporary root instead of inventing a Hermes
+   cache under ``HOME``. Those rows use a controlled discovery double only --
+   never real floor evidence.
 
 2. ``test_wheel_payload_and_core_smoke`` stages the real package, the reviewed
    ``tools.json`` contract, ``README.md``, ``LICENSE`` and the committed
@@ -82,15 +88,23 @@ configuration changes are out of scope. The dependency wheels come from a
 one-time preparation performed OUTSIDE pytest; the test performs no public
 network operation and contacts only its own loopback feed.
 
-Build tooling is a prerequisite, not a runtime dependency: group 2 needs a
-``setuptools>=77.0.3`` interpreter (``FREE_INFERENCE_WATCHDOG_BUILD_PYTHON``
-overrides the default of the current interpreter), and group 3 additionally
-needs an exact CPython 3.11
-(``FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON``), the ``uv`` frontend
-(``FREE_INFERENCE_WATCHDOG_UV``) and a prepared wheelhouse
-(``FREE_INFERENCE_WATCHDOG_WHEELHOUSE``, default
-``~/.cache/free-inference-watchdog-mcp/cp311-sdk2.3.0/``). A missing prerequisite
-is an actionable failure with the exact preparation command, never a skip.
+Build tooling is a prerequisite, not a runtime dependency. Nothing here assumes
+this machine's account layout: every interpreter is probed for its own
+implementation and version, never accepted because a path exists. Group 2 needs
+a ``setuptools>=77.0.3`` interpreter (``FREE_INFERENCE_WATCHDOG_BUILD_PYTHON``
+overrides the default of the current interpreter) and only a ``>=3.11``
+interpreter for its archive/core smoke. Group 3 additionally needs an EXACT
+CPython 3.11 (``FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON``, else an ordinary
+``python3.11`` on ``PATH``, else the current interpreter when it really is
+3.11), the real ``uv`` frontend (``FREE_INFERENCE_WATCHDOG_UV``, else ``uv`` on
+``PATH``) and a prepared wheelhouse (``FREE_INFERENCE_WATCHDOG_WHEELHOUSE``,
+default the portable account cache
+``~/.cache/free-inference-watchdog-mcp/cp311-sdk2.3.0/``). An explicit override
+is authoritative: naming a wrong interpreter fails with the reason instead of
+silently selecting another one. Owned temporary artifacts live under the
+caller's ``TMPDIR`` when set and under the standard temporary root otherwise; an
+unset ``TMPDIR`` never creates a Hermes directory. A missing prerequisite is an
+actionable failure with the exact preparation command, never a skip.
 """
 
 import hashlib
@@ -118,6 +132,14 @@ DIST_NAME = "free-inference-watchdog-mcp"
 CONSOLE_COMMAND = "free-inference-watchdog-mcp"
 CONSOLE_TARGET = "watchdog_catalog.__main__:main"
 MINIMUM_BACKEND = (77, 0, 3)
+
+#: A controlled discovery double. It reports a CPython identity that is NOT the
+#: 3.11 floor so the interpreter probe's version gate can be exercised without
+#: touching any installed interpreter. It is never used as real floor evidence.
+_NON_FLOOR_DOUBLE = """#!/bin/sh
+# controlled discovery double: never a real interpreter
+printf '{"implementation": "CPython", "version": [3, 14]}\\n'
+"""
 
 # The only legal SDK import in this wheel arrives with the transport modules in
 # a later unit; the pure core and its resource must import neither the SDK nor
@@ -253,14 +275,24 @@ def _clean_environment():
 
 
 def _scratch_directory(prefix):
-    base = Path(os.environ.get("TMPDIR")
-                or (Path.home() / ".hermes" / "cache" / "scratch"))
+    """An owned scratch directory under the CALLER's configured temp root.
+
+    An explicit ``TMPDIR`` always owns the artifacts; otherwise this is the
+    ordinary platform temporary directory. No application cache (and in
+    particular no Hermes directory) is invented when ``TMPDIR`` is unset.
+    """
+    base = Path(os.environ.get("TMPDIR") or tempfile.gettempdir())
     base.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix=prefix, dir=str(base)))
 
 
 def _floor_python():
-    """A >= 3.11 interpreter for out-of-process smokes, preferring 3.11."""
+    """A >= 3.11 interpreter for the archive/core smoke, preferring 3.11.
+
+    This smoke's requirement is the declared ``>=3.11`` floor, NOT proof that
+    an exact 3.11 interpreter exists: the exact-floor evidence is
+    ``_installed_python()`` below, which probes identity and version.
+    """
     candidates = [os.environ.get("FREE_INFERENCE_WATCHDOG_SMOKE_PYTHON"),
                   shutil.which("python3.11"), sys.executable]
     tried = []
@@ -316,7 +348,7 @@ def _build_python():
 # --------------------------------------------------------------------------
 # group 1: static PEP 621 metadata contract
 # --------------------------------------------------------------------------
-def test_packaging_metadata_contract():
+def test_packaging_metadata_contract(tmp_path, monkeypatch):
     assert PYPROJECT.is_file(), "pyproject.toml carries the distribution contract"
     with PYPROJECT.open("rb") as handle:
         document = tomllib.load(handle)
@@ -380,10 +412,7 @@ def test_packaging_metadata_contract():
         assert not (REPO / legacy).exists(), (
             "one static configuration source; no legacy metadata file")
 
-    neutral = Path(os.environ.get("TMPDIR")
-                   or (Path.home() / ".hermes" / "cache" / "scratch"))
-    neutral = neutral / "unit6a-inert-cwd"
-    neutral.mkdir(parents=True, exist_ok=True)
+    neutral = _scratch_directory("unit6a-inert-cwd-")
     probe = subprocess.run(
         [sys.executable, "-I", "-c", _INERT_ROOT_PROBE, str(REPO),
          *BLOCKED_IMPORTS],
@@ -393,6 +422,68 @@ def test_packaging_metadata_contract():
     assert probe.returncode == 0, probe.stderr[-4000:]
     assert probe.stdout == "" and probe.stderr == "", (
         "importing the package root stays silent and inert")
+
+    # ------------------------------------------------------------------
+    # prerequisite discovery is PORTABLE, never account-specific
+    # ------------------------------------------------------------------
+    # The controlled double below is the only interpreter involved: it reports
+    # CPython 3.14 and must be rejected on identity/version, whether it is
+    # named by an override or found as an ordinary ``python3.11`` executable.
+    # No installed interpreter is read or modified by these rows.
+    caller_path = os.environ.get("PATH", "/usr/bin:/bin")
+    empty_home = tmp_path / "empty-home"
+    empty_bin = tmp_path / "empty-bin"
+    configured_tmp = tmp_path / "configured-tmp"
+    for directory in (empty_home, empty_bin, configured_tmp):
+        directory.mkdir()
+    double = empty_bin / "python3.11"
+    double.write_text(_NON_FLOOR_DOUBLE, encoding="utf-8")
+    double.chmod(0o755)
+
+    # An explicit TMPDIR owns every temporary artifact this module creates.
+    monkeypatch.setenv("TMPDIR", str(configured_tmp))
+    assert _scratch_directory("unit9a-tmpdir-").parent == configured_tmp
+
+    # An UNSET TMPDIR uses the ordinary temp root. It must never invent a
+    # Hermes-owned cache directory under the caller's HOME.
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.setenv("HOME", str(empty_home))
+    standard = _scratch_directory("unit9a-standard-")
+    assert standard.parent == Path(tempfile.gettempdir()), standard.parent
+    assert not (empty_home / ".hermes").exists(), (
+        "an unset TMPDIR must not create a Hermes cache under HOME")
+    monkeypatch.setenv("TMPDIR", str(configured_tmp))
+
+    # A missing installer frontend is an actionable failure, never a silent
+    # download and never a hard-coded account path.
+    monkeypatch.setenv("PATH", str(empty_bin))
+    monkeypatch.delenv(UV_ENVIRONMENT, raising=False)
+    with pytest.raises(AssertionError) as no_installer:
+        _uv_binary()
+    assert UV_ENVIRONMENT in str(no_installer.value), no_installer.value
+
+    # A ``python3.11`` that is not CPython 3.11 is not the installed floor.
+    monkeypatch.delenv(INSTALLED_PYTHON_ENVIRONMENT, raising=False)
+    if (sys.implementation.name == "cpython"
+            and sys.version_info[:2] == INSTALLED_MINOR):
+        # The current interpreter IS the floor: legitimate even though its
+        # executable is not named ``python3.11``.
+        assert Path(_installed_python()).resolve() == Path(sys.executable).resolve()
+    else:
+        with pytest.raises(AssertionError) as wrong_floor:
+            _installed_python()
+        assert str(double) in str(wrong_floor.value), wrong_floor.value
+        assert "CPython 3.11" in str(wrong_floor.value), wrong_floor.value
+
+    # An explicitly named interpreter is authoritative: a wrong one fails
+    # actionably instead of silently falling back to another installation.
+    monkeypatch.setenv(INSTALLED_PYTHON_ENVIRONMENT, str(double))
+    with pytest.raises(AssertionError) as named_wrong_floor:
+        _installed_python()
+    assert str(double) in str(named_wrong_floor.value), named_wrong_floor.value
+    assert INSTALLED_PYTHON_ENVIRONMENT in str(named_wrong_floor.value)
+
+    monkeypatch.setenv("PATH", caller_path)
 
 
 # --------------------------------------------------------------------------
@@ -933,24 +1024,51 @@ def _host_probe_environment():
 
 
 def _installed_python():
-    """The exact CPython 3.11 interpreter the fresh environment is created from."""
+    """The exact CPython 3.11 interpreter the fresh environment is created from.
+
+    An explicit ``FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON`` is AUTHORITATIVE:
+    naming a wrong interpreter there is an actionable failure, never a reason
+    to silently try a different installation. Without an override, an ordinary
+    ``python3.11`` executable is discovered on PATH and finally the CURRENT
+    interpreter is accepted when it really is CPython 3.11 (its executable may
+    be named ``python``). A path that merely exists is not evidence: the
+    interpreter's own implementation and version are probed every time.
+    """
     override = os.environ.get(INSTALLED_PYTHON_ENVIRONMENT)
-    candidates = [override, "/home/kimbo/.local/bin/python3.11",
-                  shutil.which("python3.11")]
+    candidates = ([override] if override
+                  else [shutil.which("python3.11"), sys.executable])
     tried = []
     for candidate in candidates:
-        if not candidate or not Path(candidate).exists():
+        if not candidate:
             continue
-        probe = subprocess.run(
-            [candidate, "-I", "-c",
-             "import json, sys; print(json.dumps(list(sys.version_info[:2])))"],
-            capture_output=True, text=True, timeout=60,
-            env=_host_probe_environment())
+        if not Path(candidate).is_file():
+            tried.append(f"{candidate}: no such executable file")
+            continue
+        try:
+            probe = subprocess.run(
+                [candidate, "-I", "-c",
+                 "import json, sys; print(json.dumps({'implementation': "
+                 "sys.implementation.name, 'version': "
+                 "list(sys.version_info[:2])}))"],
+                capture_output=True, text=True, timeout=60,
+                env=_host_probe_environment())
+        except OSError as error:
+            tried.append(f"{candidate}: cannot run ({error})")
+            continue
         if probe.returncode != 0:
             tried.append(f"{candidate}: cannot run ({probe.stderr.strip()[:200]})")
             continue
-        if tuple(json.loads(probe.stdout)) != INSTALLED_MINOR:
-            tried.append(f"{candidate}: {probe.stdout.strip()} is not exactly "
+        try:
+            facts = json.loads(probe.stdout)
+            identity = (facts["implementation"], tuple(facts["version"]))
+        except (ValueError, KeyError, TypeError):
+            tried.append(f"{candidate}: unreadable interpreter probe "
+                         f"{probe.stdout.strip()[:120]!r}")
+            continue
+        if identity != ("cpython", INSTALLED_MINOR):
+            tried.append(f"{candidate}: {identity[0]} "
+                         f"{'.'.join(str(part) for part in identity[1])} is not "
+                         f"exactly CPython "
                          f"{'.'.join(str(part) for part in INSTALLED_MINOR)}")
             continue
         return str(candidate)
@@ -964,15 +1082,21 @@ def _installed_python():
 
 def _uv_binary():
     """The real installer frontend, or an actionable failure."""
-    candidates = [os.environ.get(UV_ENVIRONMENT), shutil.which("uv"),
-                  "/home/kimbo/.local/bin/uv"]
+    candidates = [os.environ.get(UV_ENVIRONMENT), shutil.which("uv")]
     tried = []
     for candidate in candidates:
-        if not candidate or not Path(candidate).is_file():
+        if not candidate:
             continue
-        probe = subprocess.run([candidate, "--version"], capture_output=True,
-                               text=True, timeout=60,
-                               env=_host_probe_environment())
+        if not Path(candidate).is_file():
+            tried.append(f"{candidate}: no such executable file")
+            continue
+        try:
+            probe = subprocess.run([candidate, "--version"], capture_output=True,
+                                   text=True, timeout=60,
+                                   env=_host_probe_environment())
+        except OSError as error:
+            tried.append(f"{candidate}: cannot run ({error})")
+            continue
         if probe.returncode == 0 and probe.stdout.strip():
             return str(candidate), probe.stdout.strip()
         tried.append(f"{candidate}: {probe.stderr.strip()[:200]}")

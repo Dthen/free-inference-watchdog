@@ -41,7 +41,11 @@ Six unparametrized groups:
    empty HOME: ``--help`` under blocked SDK/legacy imports on this interpreter
    and on the Python 3.11 floor, parse/configuration failures (exit 2, empty
    stdout, no cache or cwd effects), and a real fixture-file launch whose
-   immediate stdin EOF exits 0 with empty stdout and no cache directory. It then
+   immediate stdin EOF exits 0 with empty stdout and no cache directory. The
+   floor itself is DISCOVERED portably and probed for CPython identity/version
+   (an explicit ``FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON`` is authoritative, then
+   an ordinary ``python3.11``, then the current interpreter when it really is
+   3.11); a controlled double proves a path that exists is not enough. It then
    loads the UNCHANGED root ``mcp_server.py`` in a fresh interpreter with an
    explicitly synthetic no-auth ``config_loader`` and proves ``--root`` is still
    accepted and defaulted, forwarded once to the local ``build_server``, awaited
@@ -102,6 +106,7 @@ import asyncio
 import copy
 import importlib.resources
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -916,9 +921,77 @@ BLOCKED_LEGACY_ONLY = tuple(
     name for name in BLOCKED_FOR_CLI
     if name not in ("mcp", "mcp_types", "pydantic", "watchdog_catalog.server"))
 
-#: The floor interpreter for the stdlib-only help path, overridable for the
-#: legitimate "my 3.11 lives elsewhere" case.
-FLOOR_PYTHON = "/home/kimbo/.local/bin/python3.11"
+#: The stdlib-only help path must run on the exact CPython 3.11 floor stated by
+#: the package metadata. Discovery is portable: an explicit override wins, then
+#: an ordinary ``python3.11`` executable, then a CURRENT interpreter that really
+#: is CPython 3.11 (its executable may be named ``python``). A path that exists
+#: is not enough -- the interpreter's own identity and version are probed.
+FLOOR_ENVIRONMENT = "FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+FLOOR_MINOR = (3, 11)
+
+#: A controlled discovery double. It reports a CPython identity that is NOT the
+#: 3.11 floor so the probe's version gate can be exercised without touching any
+#: installed interpreter. It is never used as real floor evidence.
+_NON_FLOOR_DOUBLE = """#!/bin/sh
+# controlled discovery double: never a real interpreter
+printf '{"implementation": "CPython", "version": [3, 14]}\\n'
+"""
+
+
+def _floor_python():
+    """Resolve an interpreter that really IS the CPython 3.11 floor.
+
+    An explicit ``FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON`` is AUTHORITATIVE: a
+    wrong interpreter named there is an actionable failure, never a silent
+    fallback to some other installation. Otherwise an ordinary ``python3.11``
+    executable is discovered on PATH and finally the CURRENT interpreter is
+    accepted when it really is CPython 3.11. Existence is not evidence: every
+    candidate is probed for implementation and version.
+    """
+    override = os.environ.get(FLOOR_ENVIRONMENT)
+    candidates = ([override] if override
+                  else [shutil.which("python3.11"), sys.executable])
+    tried = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if not Path(candidate).is_file():
+            tried.append(f"{candidate}: no such executable file")
+            continue
+        try:
+            probe = subprocess.run(
+                [candidate, "-I", "-c",
+                 "import json, sys; print(json.dumps({'implementation': "
+                 "sys.implementation.name, 'version': "
+                 "list(sys.version_info[:2])}))"],
+                capture_output=True, text=True, timeout=60,
+                env={"PATH": "/usr/bin:/bin", "PYTHONNOUSERSITE": "1"})
+        except OSError as error:
+            tried.append(f"{candidate}: cannot run ({error})")
+            continue
+        if probe.returncode != 0:
+            tried.append(f"{candidate}: cannot run ({probe.stderr.strip()[:200]})")
+            continue
+        try:
+            facts = json.loads(probe.stdout)
+            identity = (facts["implementation"], tuple(facts["version"]))
+        except (ValueError, KeyError, TypeError):
+            tried.append(f"{candidate}: unreadable interpreter probe "
+                         f"{probe.stdout.strip()[:120]!r}")
+            continue
+        if identity != ("cpython", FLOOR_MINOR):
+            tried.append(f"{candidate}: {identity[0]} "
+                         f"{'.'.join(str(part) for part in identity[1])} is not "
+                         f"exactly CPython "
+                         f"{'.'.join(str(part) for part in FLOOR_MINOR)}")
+            continue
+        return str(candidate)
+    raise AssertionError(
+        "the Python 3.11 floor interpreter is missing or wrong; tried: "
+        + "; ".join(tried)
+        + f". Install CPython 3.11 once outside pytest or set "
+        f"{FLOOR_ENVIRONMENT}=/path/to/python3.11.")
+
 
 _LEGACY_LAUNCH_PROBE = '''\
 """Owned probe: load the UNCHANGED root mcp_server.py with synthetic config.
@@ -990,7 +1063,8 @@ print(json.dumps(observed))
 '''
 
 
-def test_fresh_process_cli_help_launch_and_legacy_root_preservation(tmp_path):
+def test_fresh_process_cli_help_launch_and_legacy_root_preservation(
+        tmp_path, monkeypatch):
     import json as json_module
     import os
 
@@ -1036,12 +1110,55 @@ def test_fresh_process_cli_help_launch_and_legacy_root_preservation(tmp_path):
     assert blocked_help.stderr == ""
     assert_no_effects()
 
-    # -- the same stdlib-only help on the floor interpreter ----------------
-    floor = Path(os.environ.get("FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON",
-                                FLOOR_PYTHON))
-    assert floor.exists(), (
-        f"the Python 3.11 floor interpreter is missing: {floor}. Install it "
-        "or set FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON to a 3.11 interpreter.")
+    # -- the floor interpreter must really BE CPython 3.11 -----------------
+    # Discovery is a prerequisite, not an account assumption. A controlled
+    # double (never used as floor evidence) reports CPython 3.14: it must be
+    # rejected on identity/version, whether it is named explicitly or found as
+    # an ordinary ``python3.11`` executable. A named path that does not exist
+    # is an actionable failure, never a silent fallback or a skip.
+    double_directory = scratch / "floor-double"
+    double_directory.mkdir()
+    double = double_directory / "python3.11"
+    double.write_text(_NON_FLOOR_DOUBLE, encoding="utf-8")
+    double.chmod(0o755)
+    caller_path = os.environ.get("PATH", "/usr/bin:/bin")
+
+    monkeypatch.setenv(FLOOR_ENVIRONMENT, str(double))
+    with pytest.raises(AssertionError) as wrong_version:
+        _floor_python()
+    assert str(double) in str(wrong_version.value), wrong_version.value
+    assert "3.11" in str(wrong_version.value), wrong_version.value
+
+    monkeypatch.setenv("PATH", str(double_directory))
+    monkeypatch.delenv(FLOOR_ENVIRONMENT, raising=False)
+    if sys.implementation.name == "cpython" and sys.version_info[:2] == FLOOR_MINOR:
+        # A CURRENT interpreter that really is CPython 3.11 is legitimate even
+        # when its executable is not named ``python3.11``.
+        assert Path(_floor_python()).resolve() == Path(sys.executable).resolve()
+    else:
+        with pytest.raises(AssertionError) as discovered_wrong:
+            _floor_python()
+        assert str(double) in str(discovered_wrong.value), discovered_wrong.value
+
+    absent = double_directory / "python3.11-absent"
+    monkeypatch.setenv(FLOOR_ENVIRONMENT, str(absent))
+    with pytest.raises(AssertionError) as missing_floor:
+        _floor_python()
+    assert FLOOR_ENVIRONMENT in str(missing_floor.value), missing_floor.value
+
+    monkeypatch.delenv(FLOOR_ENVIRONMENT, raising=False)
+    monkeypatch.setenv("PATH", caller_path)
+    floor = Path(_floor_python())
+    assert floor.is_file(), f"the discovered floor is not a file: {floor}"
+    floor_probe = json_module.loads(subprocess.run(
+        [str(floor), "-I", "-c",
+         "import json, sys; print(json.dumps({'implementation': "
+         "sys.implementation.name, 'version': list(sys.version_info[:2])}))"],
+        capture_output=True, text=True, timeout=60,
+        env={"PATH": "/usr/bin:/bin", "PYTHONNOUSERSITE": "1"}).stdout)
+    assert (floor_probe["implementation"], tuple(floor_probe["version"])) == (
+        "cpython", FLOOR_MINOR), (
+        f"the floor interpreter is {floor_probe}, not CPython 3.11")
 
     # The floor interpreter has no mcp/pytest, which is exactly the point: help
     # must not need them.
