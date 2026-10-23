@@ -62,7 +62,14 @@ Six unparametrized groups:
    integers and encoded-list strings -- are transmitted verbatim, rejected over
    the wire, and followed by a still-usable session. The exact raw stdout bytes
    of the whole session are retained and audited as protocol-only JSON-RPC, and
-   stdin is closed so the child exits naturally with status 0.
+   stdin is closed so the child exits naturally with status 0. Every dynamic age
+   is checked against the CALLER's own wall-clock bracket around that request,
+   and the status wrapper's ``last_tick_age_s`` is an independently validated
+   capture: it is never assumed equal to the source's own earlier observation
+   epoch. A fixed-time oracle regression inside this group pins that decision --
+   equal, adjacent and descheduled captures are accepted, while an
+   out-of-bracket capture, bool/fractional/negative ages, a wrong source age, a
+   reset retrieval age and unchanged-clock payload drift are rejected.
 
 6. ``test_loopback_url_stdio_last_good_and_unavailable_source`` serves a
    synthetic validated catalogue from a bounded 127.0.0.1 listener with a
@@ -73,11 +80,14 @@ Six unparametrized groups:
    directory must fail refresh but serve the validated last-good snapshot with
    preserved ``snapshot_id``/``tick_epoch``/``fetched_at`` and explicit
    ``refresh_failed``/``cache_fallback`` warnings, leaving the persisted bytes
-   untouched. Absent and deliberately corrupt caches for that same unavailable
-   URL must return the exact semantic ``SourceError().to_payload()``, never an
-   empty success or a leaked exception; a legitimate empty query on a valid
-   snapshot stays distinct from that failure. Every restart negotiates over the
-   real transport, closes stdin and exits 0.
+   untouched. The preserved ``fetched_at`` gives the retrieval age a real lower
+   bound on every restart, checked against that request's own bracket and kept
+   independent of the status wrapper's age. Absent and deliberately corrupt
+   caches for that same unavailable URL must return the exact semantic
+   ``SourceError().to_payload()``, never an empty success or a leaked exception;
+   a legitimate empty query on a valid snapshot stays distinct from that
+   failure. Every restart negotiates over the real transport, closes stdin and
+   exits 0.
 
 Honest scope: groups 1-4 are direct SDK calls plus CLI launch/checkout evidence;
 groups 5-6 add a real SDK client over a real child subprocess and its exact raw
@@ -1138,7 +1148,7 @@ from mcp import ClientSession
 from mcp import types as mcp_types
 from mcp.client.session import HANDSHAKE_PROTOCOL_VERSIONS
 from mcp.shared.message import SessionMessage
-from watchdog_catalog.source import DiskCache
+from watchdog_catalog.source import CatalogSource, DiskCache
 
 #: The installed SDK's own accepted handshake tuple. Membership is the support
 #: claim, so no universal protocol-version literal is invented here.
@@ -1465,6 +1475,20 @@ async def _wire_call(child, session, tool, arguments):
     return result
 
 
+async def _call_with_bracket(child, session, tool, arguments):
+    """One wire call plus the CALLER's own wall-clock bracket around it.
+
+    The child reads its clocks inside this window, so every age reported by
+    the request must fall inside it; an age outside the bracket is wrong data,
+    not a scheduling accident.
+    """
+    low = int(time.time())
+    result = await _wire_call(child, session, tool, arguments)
+    high = int(time.time())
+    assert low <= high, (low, high)
+    return result, low, high
+
+
 def _decoded_payload(result, label):
     """The decoded tool payload, rejecting transport-level error results."""
     assert result.is_error is not True, f"{label}: the tool reported an error"
@@ -1494,44 +1518,135 @@ def _assert_rejection(result, label):
         f"{label}: a rejected request produced a successful query payload")
 
 
-def _expected_core(core, arguments, now):
-    """The accepted pure-core payload for one wire request."""
+def _expected_core(core, arguments, *, status_epoch=None):
+    """The accepted pure-core payload for one request.
+
+    A non-status core is clock-free. ``watchdog_status`` needs the status
+    wrapper's OWN capture, validated independently by
+    :func:`_assert_status_capture`; the source's observation epoch describes a
+    DIFFERENT capture and is never substituted for it.
+    """
     if core is query.watchdog_status:
-        assert now is not None
-        return query.watchdog_status(SNAPSHOT, arguments, now=now)
+        assert status_epoch is not None, (
+            "the status core needs its independently validated capture")
+        return query.watchdog_status(SNAPSHOT, arguments, now=status_epoch)
+    assert status_epoch is None, "a non-status core takes no clock"
     return core(SNAPSHOT, arguments)
 
 
 def _assert_provenance(source, *, mode, url, cached, fetched_at, low, high,
                        warnings):
-    """Compare one acquisition's provenance, bounding only the real ages.
+    """Compare one acquisition's OWN provenance against its capture bracket.
 
-    ``low``/``high`` are this session's own wall-clock brackets: they prove the
-    retrieval age and observation age are real elapsed values without masking,
-    patching or rewriting any field. The returned ``now`` is the epoch the source
-    itself reported (tick + observation age), so core parity stays exact.
+    ``low``/``high`` bracket the acquisition call that produced ``source``, so
+    the retrieval age and the observation age are proven to be real elapsed
+    values of THAT capture without masking, patching or rewriting any field.
+    Both bounds are meaningful where the fixed old fixture tick and a preserved
+    ``fetched_at`` make them known.
+
+    The returned epoch is the SOURCE's own capture
+    (``tick_epoch + observation_age_s``). The status wrapper captures wall time
+    SEPARATELY, possibly in another second, so this value is provenance
+    evidence only -- never the status clock.
     """
     assert isinstance(source, dict), source
     assert set(source) == set(PROVENANCE), sorted(source)
-    assert source["mode"] == mode
-    assert source["url"] == url
-    assert source["cached"] is cached
-    assert source["not_modified"] is False
-    assert source["fetched_at"] == fetched_at
+    assert source["mode"] == mode, ("mode", source["mode"], mode)
+    assert source["url"] == url, ("url", source["url"], url)
+    assert source["cached"] is cached, ("cached", source["cached"], cached)
+    assert source["not_modified"] is False, source["not_modified"]
+    assert source["fetched_at"] == fetched_at, (
+        "fetched_at", source["fetched_at"], fetched_at)
     fetch_age = source["fetch_age_s"]
-    assert isinstance(fetch_age, int) and not isinstance(fetch_age, bool), fetch_age
-    assert 0 <= fetch_age <= max(0, high - fetched_at), (
-        fetch_age, fetched_at, high)
+    assert isinstance(fetch_age, int) and not isinstance(fetch_age, bool), (
+        "fetch_age_s", fetch_age)
+    assert max(0, low - fetched_at) <= fetch_age <= max(0, high - fetched_at), (
+        "fetch_age_s", fetch_age, fetched_at, low, high)
     tick_epoch = SNAPSHOT["tick_epoch"]
     observation_age = source["observation_age_s"]
     assert isinstance(observation_age, int) and not isinstance(
-        observation_age, bool), observation_age
+        observation_age, bool), ("observation_age_s", observation_age)
     assert max(0, low - tick_epoch) <= observation_age <= max(
-        0, high - tick_epoch), (observation_age, low, high, tick_epoch)
+        0, high - tick_epoch), (
+            "observation_age_s", observation_age, low, high, tick_epoch)
     assert source["observation_fresh"] is False, (
         "the fixture tick is deliberately old")
     assert source["warnings"] == warnings, source["warnings"]
     return tick_epoch + observation_age
+
+
+def _assert_status_capture(payload, *, low, high, label):
+    """Validate the status wrapper's INDEPENDENT clock capture.
+
+    ``low``/``high`` are the CALLER's own wall-clock bracket around the request
+    that produced ``payload``. The epoch is trusted only AFTER the age that
+    implies it is a native, non-bool, non-negative integer inside that bracket:
+    an epoch merely derived from an unchecked field is never taken as the
+    clock. The age/cadence boundary is re-derived here too, so a flipped fresh
+    flag cannot ride along with an unchanged age.
+    """
+    tick_epoch = payload["tick_epoch"]
+    assert tick_epoch == SNAPSHOT["tick_epoch"], (label, tick_epoch)
+    cadence_s = payload["cadence_s"]
+    assert cadence_s == SNAPSHOT["cadence_s"], (label, cadence_s)
+    age = payload["last_tick_age_s"]
+    assert isinstance(age, int) and not isinstance(age, bool), (
+        f"{label}: last_tick_age_s must be a non-negative native integer, "
+        f"got {age!r}")
+    assert age >= 0, f"{label}: last_tick_age_s must not be negative, got {age!r}"
+    assert low - tick_epoch <= age <= high - tick_epoch, (
+        f"{label}: last_tick_age_s {age} is outside the caller's bracket "
+        f"[{low - tick_epoch}, {high - tick_epoch}]")
+    epoch = tick_epoch + age
+    assert low <= epoch <= high, (label, epoch, low, high)
+    assert payload["tick_fresh"] is (age <= cadence_s), (
+        f"{label}: tick_fresh does not match the validated age/cadence "
+        f"boundary ({age} vs {cadence_s})")
+    return epoch
+
+
+def _assert_core_payload(payload, core, arguments, *, low, high, source_epoch,
+                         label):
+    """Compare one decoded payload with the accepted core, clock-aware.
+
+    Every non-status tool stays an exact, clock-free full-payload comparison.
+    ``watchdog_status`` is compared at the STATUS wrapper's independently
+    validated capture; ``source_epoch`` is the same request's earlier source
+    capture and is deliberately NOT used as the status clock.
+    """
+    if core is query.watchdog_status:
+        status_epoch = _assert_status_capture(
+            payload, low=low, high=high, label=label)
+        assert payload == _expected_core(
+            core, arguments, status_epoch=status_epoch), (
+                f"{label}: the wire payload differs from the pure core at the "
+                "independently validated status epoch")
+        return
+    assert payload == _expected_core(core, arguments), (
+        f"{label}: the wire payload differs from the pure core")
+
+
+def _fixed_clock_status(root, label, *, source_now, status_now):
+    """A REAL file acquisition and the REAL SDK server on fixed clocks.
+
+    Only the two documented programming seams are used: the core's
+    ``CatalogSource.refresh(now=...)`` and the public
+    ``create_server(..., wall_clock=...)``. No production clock is patched, no
+    package code is replaced and no WIRE result is replaced -- this block pins
+    the ORACLE that decides what a real wire result must equal.
+
+    ``source_now`` is the acquisition's own capture and ``status_now`` is the
+    status wrapper's INDEPENDENT capture; they are deliberately allowed to
+    differ by more than the same second.
+    """
+    owner = CatalogSource(
+        "file", FIXTURE, cache_dir=str(root / (label.replace(" ", "-") + "-cache")))
+    acquisition = owner.refresh(now=source_now)
+    assert acquisition["ok"] is True, acquisition
+    assert acquisition["source"]["fetched_at"] == source_now
+    server = create_server(_AcquisitionDouble(acquisition),
+                           wall_clock=lambda: status_now)
+    return asyncio.run(_payload(server, "watchdog_status", {}))
 
 
 def _outbound_frames(child):
@@ -1751,8 +1866,9 @@ async def _file_stdio_session(child):
 
         for tool_name, arguments, core in WIRE_VALID_ROWS:
             label = f"{tool_name}({arguments!r})"
-            payload = _decoded_payload(
-                await _wire_call(child, session, tool_name, arguments), label)
+            result, call_low, call_high = await _call_with_bracket(
+                child, session, tool_name, arguments)
+            payload = _decoded_payload(result, label)
             source = payload.pop("source")
             if fetched_at is None:
                 assert source["cached"] is False, "the first call is a fetch"
@@ -1765,35 +1881,38 @@ async def _file_stdio_session(child):
                 cached = False
             else:
                 cached = True
-            derived_now = _assert_provenance(
+            source_epoch = _assert_provenance(
                 source, mode="file", url=None, cached=cached,
-                fetched_at=fetched_at, low=low, high=int(time.time()) + 1,
+                fetched_at=fetched_at, low=call_low, high=call_high,
                 warnings=["tick_stale"])
-            assert payload == _expected_core(core, arguments, derived_now), (
-                f"{label}: the wire payload differs from the pure core")
+            _assert_core_payload(
+                payload, core, arguments, low=call_low, high=call_high,
+                source_epoch=source_epoch, label=label)
 
         # Integral floats are preserved as ORIGINALS: they travel as JSON
         # numbers with a fraction and the core's literal filter echo keeps the
         # float, while the page integers normalise to ints.
         label = "search_models integral floats"
-        payload = _decoded_payload(await _wire_call(
+        result, float_low, float_high = await _call_with_bracket(
             child, session, "search_models",
-            {"min_context_length": 1.0, "offset": 0.0, "limit": 1.0}), label)
+            {"min_context_length": 1.0, "offset": 0.0, "limit": 1.0})
+        payload = _decoded_payload(result, label)
         sent = json.loads(child.stdin_lines[-1].decode("utf-8"))["params"][
             "arguments"]
         assert type(sent["min_context_length"]) is float, sent
         assert type(sent["offset"]) is float, sent
         source = payload.pop("source")
-        _assert_provenance(
+        source_epoch = _assert_provenance(
             source, mode="file", url=None, cached=True, fetched_at=fetched_at,
-            low=low, high=int(time.time()) + 1, warnings=["tick_stale"])
+            low=float_low, high=float_high, warnings=["tick_stale"])
         assert type(payload["filters"]["min_context_length"]) is float, (
             "the raw filter echo was coerced to an integer")
         assert payload["filters"]["min_context_length"] == 1.0
-        assert payload == _expected_core(
-            query.search_models,
+        _assert_core_payload(
+            payload, query.search_models,
             {"min_context_length": 1.0, "offset": 0.0, "limit": 1.0},
-            None), label
+            low=float_low, high=float_high, source_epoch=source_epoch,
+            label=label)
 
         # Every invalid original goes OVER the wire and is rejected there; the
         # session then still serves a valid request.
@@ -1810,15 +1929,17 @@ async def _file_stdio_session(child):
         _assert_rejection(
             await _wire_call(child, session, "watchdog_status_typo", {}),
             "unknown tool name")
-        final = _decoded_payload(
-            await _wire_call(child, session, "get_model",
-                             {"model_id": "alpha-1:free"}), "final valid call")
+        result, final_low, final_high = await _call_with_bracket(
+            child, session, "get_model", {"model_id": "alpha-1:free"})
+        final = _decoded_payload(result, "final valid call")
         source = final.pop("source")
-        _assert_provenance(
+        source_epoch = _assert_provenance(
             source, mode="file", url=None, cached=True, fetched_at=fetched_at,
-            low=low, high=int(time.time()) + 1, warnings=["tick_stale"])
-        assert final == _expected_core(
-            query.get_model, {"model_id": "alpha-1:free"}, None)
+            low=final_low, high=final_high, warnings=["tick_stale"])
+        _assert_core_payload(
+            final, query.get_model, {"model_id": "alpha-1:free"},
+            low=final_low, high=final_high, source_epoch=source_epoch,
+            label="final valid call")
 
     frames, outbound = _audit_clean_stdio(child)
     assert outbound[0]["method"] == "initialize", outbound[0]
@@ -1878,6 +1999,115 @@ def test_file_source_stdio_discovery_calls_and_invalid_requests(tmp_path):
     assert sorted(home.iterdir()) == [], "the child created HOME state"
     assert cache.is_dir() and list(cache.glob("*.json")), (
         "the acquiring file-mode session persisted no cache entry")
+
+    # ------------------------------------------------------------------
+    # Clock-oracle regression: the source acquisition and the status wrapper
+    # capture wall time INDEPENDENTLY. This block is fixed-time oracle
+    # evidence through the two documented seams; it is clearly separate from
+    # every real wire result above and never replaces one.
+    # ------------------------------------------------------------------
+    oracle_root = root / "clock-oracle"
+    oracle_root.mkdir()
+    source_now = 1760200000
+    tick_epoch = SNAPSHOT["tick_epoch"]
+
+    def seam_payload(label, status_now):
+        payload = _fixed_clock_status(
+            oracle_root, label, source_now=source_now, status_now=status_now)
+        source = payload.pop("source")
+        # The acquisition's OWN bracket: this fixed-time refresh captured
+        # exactly ``source_now``, so its ages are exact, not merely bounded.
+        source_epoch = _assert_provenance(
+            source, mode="file", url=None, cached=False, fetched_at=source_now,
+            low=source_now, high=source_now, warnings=["tick_stale"])
+        return payload, source_epoch
+
+    def accepted(label, status_now, *, low, high):
+        payload, source_epoch = seam_payload(label, status_now)
+        _assert_core_payload(
+            payload, query.watchdog_status, {}, low=low, high=high,
+            source_epoch=source_epoch, label=label)
+        return payload
+
+    # Positive rows: independently valid captures are accepted, including a
+    # separation beyond one second (descheduling) and a genuine multi-second
+    # caller window rather than one hard-coded instant.
+    for label, status_now, low, high in (
+            ("equal captures", source_now, source_now, source_now),
+            ("adjacent seconds", source_now + 1, source_now + 1, source_now + 1),
+            ("separated captures", source_now + 3, source_now + 3, source_now + 3),
+            ("descheduled capture", source_now + 4, source_now + 2,
+             source_now + 5)):
+        payload = accepted(label, status_now, low=low, high=high)
+        assert payload["ok"] is True, label
+        assert payload["snapshot_id"] == SNAPSHOT["snapshot_id"], label
+        assert payload["last_tick_age_s"] == status_now - tick_epoch, (
+            label, payload["last_tick_age_s"])
+        assert payload["tick_fresh"] is False, label
+
+    def rejected(label, *, status_now, low, high, match, mutate=None):
+        payload, source_epoch = seam_payload(label, status_now)
+        if mutate is not None:
+            mutate(payload)
+        with pytest.raises(AssertionError, match=match):
+            _assert_core_payload(
+                payload, query.watchdog_status, {}, low=low, high=high,
+                source_epoch=source_epoch, label=label)
+
+    def mutate_age(value):
+        return lambda payload: payload.update(last_tick_age_s=value)
+
+    # A status capture outside the caller's bracket is wrong data, not a
+    # scheduling accident; the type and sign checks are separate assertions.
+    rejected("status outside bracket", status_now=source_now + 60,
+             low=source_now, high=source_now + 5, match="last_tick_age_s")
+    for label, value in (("bool age", True), ("fractional age", 1.5),
+                         ("negative age", -1)):
+        rejected(label, status_now=source_now, low=source_now,
+                 high=source_now, match="last_tick_age_s",
+                 mutate=mutate_age(value))
+    # Payload drift at an UNCHANGED clock still fails the full-core parity.
+    rejected("wrong count", status_now=source_now, low=source_now,
+             high=source_now, match="differs from the pure core",
+             mutate=lambda payload: payload["counts"].update(
+                 gateways=payload["counts"]["gateways"] + 1))
+    rejected("wrong stale flag", status_now=source_now, low=source_now,
+             high=source_now, match="tick_fresh",
+             mutate=lambda payload: payload.update(
+                 tick_fresh=not payload["tick_fresh"]))
+    rejected("warning drift", status_now=source_now, low=source_now,
+             high=source_now, match="differs from the pure core",
+             mutate=lambda payload: payload["warnings"].remove("tick_stale"))
+
+    # Provenance has its own capture: a wrong observation age or a reset
+    # retrieval age violates a known lower bound and is rejected there.
+    _, provenance_epoch = seam_payload("provenance lower bounds", source_now)
+    assert provenance_epoch == source_now, provenance_epoch
+    for label, mutation, match in (
+            ("wrong observation age",
+             lambda source: source.update(observation_age_s=0),
+             "observation_age_s"),
+            ("future observation age",
+             lambda source: source.update(observation_age_s=2000000),
+             "observation_age_s")):
+        source = _fixed_clock_status(
+            oracle_root, label, source_now=source_now,
+            status_now=source_now)["source"]
+        mutation(source)
+        with pytest.raises(AssertionError, match=match):
+            _assert_provenance(
+                source, mode="file", url=None, cached=False,
+                fetched_at=source_now, low=source_now, high=source_now,
+                warnings=["tick_stale"])
+    reset = _fixed_clock_status(
+        oracle_root, "reset retrieval age", source_now=source_now,
+        status_now=source_now)["source"]
+    reset.update(fetched_at=source_now - 600, fetch_age_s=0)
+    with pytest.raises(AssertionError, match="fetch_age_s"):
+        _assert_provenance(
+            reset, mode="file", url=None, cached=False,
+            fetched_at=source_now - 600, low=source_now, high=source_now,
+            warnings=["tick_stale"])
 
 
 # --------------------------------------------------------------------------
@@ -1947,32 +2177,37 @@ async def _first_url_stdio_session(child, feed):
         assert feed.requests == [], (
             "startup or tool discovery fetched the feed: %r" % (feed.requests,))
 
-        first = _decoded_payload(
-            await _wire_call(child, session, "get_model",
-                             {"model_id": "alpha-1:free"}), "first acquisition")
+        result, first_low, first_high = await _call_with_bracket(
+            child, session, "get_model", {"model_id": "alpha-1:free"})
+        first = _decoded_payload(result, "first acquisition")
         assert feed.requests == ["/catalog.json"], feed.requests
         source = first.pop("source")
         assert source["cached"] is False, "the first query must be a real fetch"
         fetched_at = source["fetched_at"]
         assert low <= fetched_at <= int(time.time()) + 1
         assert source["fetch_age_s"] == 0
-        derived_now = _assert_provenance(
+        source_epoch = _assert_provenance(
             source, mode="url", url=feed.url, cached=False,
-            fetched_at=fetched_at, low=low, high=int(time.time()) + 1,
+            fetched_at=fetched_at, low=first_low, high=first_high,
             warnings=["tick_stale"])
-        assert first == _expected_core(
-            query.get_model, {"model_id": "alpha-1:free"}, derived_now)
+        _assert_core_payload(
+            first, query.get_model, {"model_id": "alpha-1:free"},
+            low=first_low, high=first_high, source_epoch=source_epoch,
+            label="first acquisition")
 
         for tool_name, arguments, core in URL_VALID_ROWS:
             label = f"{tool_name}({arguments!r})"
-            payload = _decoded_payload(
-                await _wire_call(child, session, tool_name, arguments), label)
+            result, call_low, call_high = await _call_with_bracket(
+                child, session, tool_name, arguments)
+            payload = _decoded_payload(result, label)
             source = payload.pop("source")
-            derived_now = _assert_provenance(
+            source_epoch = _assert_provenance(
                 source, mode="url", url=feed.url, cached=True,
-                fetched_at=fetched_at, low=low, high=int(time.time()) + 1,
+                fetched_at=fetched_at, low=call_low, high=call_high,
                 warnings=["tick_stale"])
-            assert payload == _expected_core(core, arguments, derived_now), label
+            _assert_core_payload(
+                payload, core, arguments, low=call_low, high=call_high,
+                source_epoch=source_epoch, label=label)
         assert feed.requests == ["/catalog.json"], (
             "the same owner/cache window issued another feed request: %r"
             % (feed.requests,))
@@ -2007,7 +2242,6 @@ async def _first_url_stdio_session(child, feed):
 
 async def _offline_url_stdio_session(child, fetched_at, warnings):
     """A fresh process must fail its refresh yet serve the validated last-good."""
-    low = int(time.time()) - 1
     observed_source = None
     async with child.session() as session:
         init = await session.initialize()
@@ -2016,17 +2250,20 @@ async def _offline_url_stdio_session(child, fetched_at, warnings):
         await session.list_tools()
         for tool_name, arguments, core in URL_VALID_ROWS:
             label = f"offline {tool_name}({arguments!r})"
-            payload = _decoded_payload(
-                await _wire_call(child, session, tool_name, arguments), label)
+            result, call_low, call_high = await _call_with_bracket(
+                child, session, tool_name, arguments)
+            payload = _decoded_payload(result, label)
             source = payload.pop("source")
             observed_source = source
-            derived_now = _assert_provenance(
+            source_epoch = _assert_provenance(
                 source, mode="url", url=child.url, cached=True,
-                fetched_at=fetched_at, low=low, high=int(time.time()) + 1,
+                fetched_at=fetched_at, low=call_low, high=call_high,
                 warnings=warnings)
             assert payload["snapshot_id"] == SNAPSHOT["snapshot_id"], label
             assert payload["tick_epoch"] == SNAPSHOT["tick_epoch"], label
-            assert payload == _expected_core(core, arguments, derived_now), label
+            _assert_core_payload(
+                payload, core, arguments, low=call_low, high=call_high,
+                source_epoch=source_epoch, label=label)
 
         # Retrieval and observation stay separate: a failed refresh preserves the
         # original fetch time, and the old fixture tick is never made fresh.
