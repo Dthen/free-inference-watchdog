@@ -44,8 +44,10 @@ The first two are the preserved unit-6a archive/core checks:
    refuses every outbound connection except the one owned 127.0.0.1 feed port,
    and reports the child's real pid, cwd, interpreter, prefix, ``sys.path`` and
    per-module import digests, so installed-origin and byte claims never rest on
-   the launch command. It covers no-feed ``--help`` (plus a missing-file
-   selection followed by ``--help``), an SDK-blocker positive control, the
+   the launch command. It covers no-feed ``--help`` plus a missing-file
+   selection followed by ``--help`` (each with its own report destination, the
+   same origin checker and its own stdout/stderr/side-effect evidence), an
+   SDK-blocker positive control, the
    installed pure core/resource in an isolated process, a no-feed stdin-EOF
    launch, a full real-SDK file session, loopback acquisition, last-good cache
    fallback, absent/corrupt-cache source errors and five complete raw
@@ -1437,6 +1439,16 @@ def _installed_url_child(harness, label, console, url, cache_dir, environment,
     return child
 
 
+def _directory_entries(*directories):
+    """The immediate entries of each owned directory: a child's side-effect row.
+
+    Snapshotted around ONE invocation, so a difference is attributable to that
+    child rather than to whatever earlier control happened to run first.
+    """
+    return {str(directory): sorted(entry.name for entry in directory.iterdir())
+            for directory in directories}
+
+
 def _owned_fixture(path):
     """An owned, validated copy of the reviewed fixture input."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1664,22 +1676,52 @@ def test_installed_console_clean_install_and_stdio_isolation():
 
     # An explicit MISSING file selection followed by --help still succeeds:
     # parsing and help happen before any source validation or catalogue read.
+    # This invocation keeps its OWN evidence: a distinct report/audit pair, the
+    # same installed-origin checker as the primary help run, its own stderr and
+    # side-effect snapshots taken around THIS child rather than inherited.
     missing = root / "inputs" / "absent-catalogue.json"
     ordered_argv = [str(console), "--catalog-file", str(missing), "--help"]
     ordered_env = _with_report(
         help_env, report=evidence / "help-missing-file-report.json",
         audit=evidence / "help-missing-file-guard.jsonl")
+    ordered_before = _directory_entries(neutral, home, cache_home)
     ordered = _run_console(ordered_argv, ordered_env, neutral)
+    ordered_after = _directory_entries(neutral, home, cache_home)
     _report_entry(reports, label="help-missing-file",
                   kind="console missing-file --help", run=ordered,
                   report=evidence / "help-missing-file-report.json",
                   audit=evidence / "help-missing-file-guard.jsonl",
                   argv=ordered_argv)
     assert ordered.returncode == 0, ordered.stderr[-4000:]
+    assert ordered.stderr == "", "missing-file help must keep stderr empty"
     assert ordered.stdout == help_stdout, "help depends on the selection order"
+    # No catalogue read, fetch or cache creation for THIS child: the owned
+    # directories are unchanged and the selection's own directory was never
+    # created. The guard audit below independently forbids any network attempt.
+    changed = {key: (ordered_before[key], ordered_after[key])
+               for key in ordered_after
+               if ordered_before[key] != ordered_after[key]}
+    assert ordered_after == ordered_before, (
+        "the missing-file help wrote cwd/HOME/cache state: " + str(changed))
+    assert not missing.parent.exists(), (
+        "the missing-file help created the selection's directory: "
+        f"{missing.parent}")
     assert not missing.exists()
     _assert_guard_clean(evidence / "help-missing-file-guard.jsonl",
                         "missing-file --help")
+    # Same checker, same environment, this child's pid: the run is installed
+    # evidence about the installed console, not about the checkout.
+    ordered_report = _assert_installed_origin(
+        evidence / "help-missing-file-report.json",
+        label="missing-file --help", pid=ordered.pid, cwd=neutral,
+        env_prefix=environment_dir, purelib=purelib,
+        module_hashes=module_hashes,
+        required_modules={"watchdog_catalog", "watchdog_catalog.__main__",
+                          "watchdog_catalog.source"},
+        absent_modules=("watchdog_catalog.server",) + blocked_sdk,
+        blocked_legacy=blocked_legacy, blocked_sdk=blocked_sdk)
+    assert ordered_report["argv"] == [str(part) for part in ordered_argv], (
+        ordered_report["argv"])
 
     # ------------------------------------------------------------------
     # 4. the installed pure core/resource with SDK and legacy imports blocked
