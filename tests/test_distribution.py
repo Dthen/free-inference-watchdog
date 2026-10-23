@@ -13,9 +13,9 @@ The first two are the preserved unit-6a archive/core checks:
    version. The distribution version is declared statically in the TOML and is
    deliberately NOT duplicated here, so a version bump cannot fail a test that
    is really about the wheel/metadata relationship. It also pins PREREQUISITE
-   DISCOVERY as portable: an explicit interpreter/installer override is
-   authoritative, discovery uses ordinary executables, a ``python3.11`` that is
-   not CPython 3.11 is rejected on its own probed identity, and an unset
+   DISCOVERY as portable: an explicit interpreter override is authoritative,
+   discovery uses ordinary executables, a ``python3.11`` that is not CPython
+   3.11 is rejected on its own probed version, and an unset
    ``TMPDIR`` uses the standard temporary root instead of inventing a Hermes
    cache under ``HOME``. Those rows use a controlled discovery double only --
    never real floor evidence.
@@ -99,9 +99,11 @@ CPython 3.11 (``FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON``, else an ordinary
 3.11), the real ``uv`` frontend (``FREE_INFERENCE_WATCHDOG_UV``, else ``uv`` on
 ``PATH``) and a prepared wheelhouse (``FREE_INFERENCE_WATCHDOG_WHEELHOUSE``,
 default the portable account cache
-``~/.cache/free-inference-watchdog-mcp/cp311-sdk2.3.0/``). An explicit override
-is authoritative: naming a wrong interpreter fails with the reason instead of
-silently selecting another one. Owned temporary artifacts live under the
+``~/.cache/free-inference-watchdog-mcp/cp311-sdk2.3.0/``). An explicit
+INTERPRETER override is authoritative: naming a wrong interpreter fails with
+the reason instead of silently selecting another one. The ``uv`` override is
+simply tried first, with an ordinary ``uv`` on ``PATH`` as the existing
+fallback when it is absent or unusable. Owned temporary artifacts live under the
 caller's ``TMPDIR`` when set and under the standard temporary root otherwise; an
 unset ``TMPDIR`` never creates a Hermes directory. A missing prerequisite is an
 actionable failure with the exact preparation command, never a skip.
@@ -133,12 +135,14 @@ CONSOLE_COMMAND = "free-inference-watchdog-mcp"
 CONSOLE_TARGET = "watchdog_catalog.__main__:main"
 MINIMUM_BACKEND = (77, 0, 3)
 
-#: A controlled discovery double. It reports a CPython identity that is NOT the
-#: 3.11 floor so the interpreter probe's version gate can be exercised without
-#: touching any installed interpreter. It is never used as real floor evidence.
+#: A controlled discovery double. It reports the REAL CPython implementation
+#: identity (``sys.implementation.name`` is lowercase ``cpython``) with the
+#: version 3.14, so ONLY the interpreter probe's version gate can reject it: a
+#: wrong identity name would prove nothing about the version rule. It is never
+#: used as real floor evidence.
 _NON_FLOOR_DOUBLE = """#!/bin/sh
 # controlled discovery double: never a real interpreter
-printf '{"implementation": "CPython", "version": [3, 14]}\\n'
+printf '{"implementation": "cpython", "version": [3, 14]}\\n'
 """
 
 # The only legal SDK import in this wheel arrives with the transport modules in
@@ -427,10 +431,10 @@ def test_packaging_metadata_contract(tmp_path, monkeypatch):
     # prerequisite discovery is PORTABLE, never account-specific
     # ------------------------------------------------------------------
     # The controlled double below is the only interpreter involved: it reports
-    # CPython 3.14 and must be rejected on identity/version, whether it is
-    # named by an override or found as an ordinary ``python3.11`` executable.
-    # No installed interpreter is read or modified by these rows.
-    caller_path = os.environ.get("PATH", "/usr/bin:/bin")
+    # the REAL CPython identity with the version 3.14, so only the version gate
+    # can reject it, whether it is named by an override or found as an ordinary
+    # ``python3.11`` executable. No installed interpreter is read or modified
+    # by these rows.
     empty_home = tmp_path / "empty-home"
     empty_bin = tmp_path / "empty-bin"
     configured_tmp = tmp_path / "configured-tmp"
@@ -439,51 +443,74 @@ def test_packaging_metadata_contract(tmp_path, monkeypatch):
     double = empty_bin / "python3.11"
     double.write_text(_NON_FLOOR_DOUBLE, encoding="utf-8")
     double.chmod(0o755)
+    # These rows are NEGATIVES: they must not become the next group's
+    # configuration. One contained monkeypatch context restores the caller's
+    # temporary root, HOME, PATH and prerequisite overrides exactly --
+    # presence, absence and values -- before anything real runs again.
+    caller_state = {name: os.environ.get(name)
+                    for name in ("TMPDIR", "HOME", "PATH", UV_ENVIRONMENT,
+                                 INSTALLED_PYTHON_ENVIRONMENT)}
+    caller_floor = caller_state[INSTALLED_PYTHON_ENVIRONMENT]
 
-    # An explicit TMPDIR owns every temporary artifact this module creates.
-    monkeypatch.setenv("TMPDIR", str(configured_tmp))
-    assert _scratch_directory("unit9a-tmpdir-").parent == configured_tmp
+    with monkeypatch.context() as probe_patch:
+        # An explicit TMPDIR owns every temporary artifact this module creates.
+        probe_patch.setenv("TMPDIR", str(configured_tmp))
+        assert _scratch_directory("unit9a-tmpdir-").parent == configured_tmp
 
-    # An UNSET TMPDIR uses the ordinary temp root. It must never invent a
-    # Hermes-owned cache directory under the caller's HOME.
-    monkeypatch.delenv("TMPDIR", raising=False)
-    monkeypatch.setenv("HOME", str(empty_home))
-    standard = _scratch_directory("unit9a-standard-")
-    assert standard.parent == Path(tempfile.gettempdir()), standard.parent
-    assert not (empty_home / ".hermes").exists(), (
-        "an unset TMPDIR must not create a Hermes cache under HOME")
-    monkeypatch.setenv("TMPDIR", str(configured_tmp))
+        # An UNSET TMPDIR uses the ordinary temp root. It must never invent a
+        # Hermes-owned cache directory under the caller's HOME.
+        probe_patch.delenv("TMPDIR", raising=False)
+        probe_patch.setenv("HOME", str(empty_home))
+        standard = _scratch_directory("unit9a-standard-")
+        assert standard.parent == Path(tempfile.gettempdir()), standard.parent
+        assert not (empty_home / ".hermes").exists(), (
+            "an unset TMPDIR must not create a Hermes cache under HOME")
+        probe_patch.setenv("TMPDIR", str(configured_tmp))
 
-    # A missing installer frontend is an actionable failure, never a silent
-    # download and never a hard-coded account path.
-    monkeypatch.setenv("PATH", str(empty_bin))
-    monkeypatch.delenv(UV_ENVIRONMENT, raising=False)
-    with pytest.raises(AssertionError) as no_installer:
-        _uv_binary()
-    assert UV_ENVIRONMENT in str(no_installer.value), no_installer.value
+        # A missing installer frontend is an actionable failure, never a silent
+        # download and never a hard-coded account path.
+        probe_patch.setenv("PATH", str(empty_bin))
+        probe_patch.delenv(UV_ENVIRONMENT, raising=False)
+        with pytest.raises(AssertionError) as no_installer:
+            _uv_binary()
+        assert UV_ENVIRONMENT in str(no_installer.value), no_installer.value
 
-    # A ``python3.11`` that is not CPython 3.11 is not the installed floor.
-    monkeypatch.delenv(INSTALLED_PYTHON_ENVIRONMENT, raising=False)
-    if (sys.implementation.name == "cpython"
-            and sys.version_info[:2] == INSTALLED_MINOR):
-        # The current interpreter IS the floor: legitimate even though its
-        # executable is not named ``python3.11``.
-        assert Path(_installed_python()).resolve() == Path(sys.executable).resolve()
-    else:
-        with pytest.raises(AssertionError) as wrong_floor:
+        # A ``python3.11`` that is not CPython 3.11 is not the installed floor.
+        probe_patch.delenv(INSTALLED_PYTHON_ENVIRONMENT, raising=False)
+        if (sys.implementation.name == "cpython"
+                and sys.version_info[:2] == INSTALLED_MINOR):
+            # The current interpreter IS the floor: legitimate even though its
+            # executable is not named ``python3.11``.
+            assert Path(_installed_python()).resolve() == Path(sys.executable).resolve()
+        else:
+            with pytest.raises(AssertionError) as wrong_floor:
+                _installed_python()
+            assert str(double) in str(wrong_floor.value), wrong_floor.value
+            # The double IS CPython by identity: pin the VERSION rejection.
+            assert ("cpython 3.14 is not exactly CPython 3.11"
+                    in str(wrong_floor.value)), wrong_floor.value
+
+        # An explicitly named interpreter is authoritative: a wrong one fails
+        # actionably instead of silently falling back to another installation.
+        probe_patch.setenv(INSTALLED_PYTHON_ENVIRONMENT, str(double))
+        with pytest.raises(AssertionError) as named_wrong_floor:
             _installed_python()
-        assert str(double) in str(wrong_floor.value), wrong_floor.value
-        assert "CPython 3.11" in str(wrong_floor.value), wrong_floor.value
+        assert str(double) in str(named_wrong_floor.value), named_wrong_floor.value
+        assert INSTALLED_PYTHON_ENVIRONMENT in str(named_wrong_floor.value)
+        assert ("cpython 3.14 is not exactly CPython 3.11"
+                in str(named_wrong_floor.value)), named_wrong_floor.value
 
-    # An explicitly named interpreter is authoritative: a wrong one fails
-    # actionably instead of silently falling back to another installation.
-    monkeypatch.setenv(INSTALLED_PYTHON_ENVIRONMENT, str(double))
-    with pytest.raises(AssertionError) as named_wrong_floor:
-        _installed_python()
-    assert str(double) in str(named_wrong_floor.value), named_wrong_floor.value
-    assert INSTALLED_PYTHON_ENVIRONMENT in str(named_wrong_floor.value)
-
-    monkeypatch.setenv("PATH", caller_path)
+    # The caller's environment is back EXACTLY as supplied -- including an
+    # absent variable and the original PATH -- before the installed-console
+    # group consumes it.
+    for name, value in caller_state.items():
+        assert os.environ.get(name) == value, (
+            f"{name} was not restored to the caller's value {value!r}")
+    if caller_floor:
+        # A supplied override is the floor genuine integration must use; it is
+        # consumed here with no test-time patch in effect.
+        assert Path(_installed_python()) == Path(caller_floor), (
+            "the caller's installed-floor override was not used")
 
 
 # --------------------------------------------------------------------------

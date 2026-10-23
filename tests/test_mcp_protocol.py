@@ -929,12 +929,14 @@ BLOCKED_LEGACY_ONLY = tuple(
 FLOOR_ENVIRONMENT = "FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
 FLOOR_MINOR = (3, 11)
 
-#: A controlled discovery double. It reports a CPython identity that is NOT the
-#: 3.11 floor so the probe's version gate can be exercised without touching any
-#: installed interpreter. It is never used as real floor evidence.
+#: A controlled discovery double. It reports the REAL CPython implementation
+#: identity (``sys.implementation.name`` is lowercase ``cpython``) with the
+#: version 3.14, so ONLY the probe's version gate can reject it: a wrong
+#: identity name would prove nothing about the version rule. It is never used
+#: as real floor evidence.
 _NON_FLOOR_DOUBLE = """#!/bin/sh
 # controlled discovery double: never a real interpreter
-printf '{"implementation": "CPython", "version": [3, 14]}\\n'
+printf '{"implementation": "cpython", "version": [3, 14]}\\n'
 """
 
 
@@ -1112,43 +1114,68 @@ def test_fresh_process_cli_help_launch_and_legacy_root_preservation(
 
     # -- the floor interpreter must really BE CPython 3.11 -----------------
     # Discovery is a prerequisite, not an account assumption. A controlled
-    # double (never used as floor evidence) reports CPython 3.14: it must be
-    # rejected on identity/version, whether it is named explicitly or found as
-    # an ordinary ``python3.11`` executable. A named path that does not exist
-    # is an actionable failure, never a silent fallback or a skip.
+    # double (never used as floor evidence) reports the REAL ``cpython``
+    # identity with the version 3.14, so only the probe's VERSION gate can
+    # reject it -- whether it is named explicitly or found as an ordinary
+    # ``python3.11`` executable. A named path that does not exist is an
+    # actionable failure, never a silent fallback or a skip.
     double_directory = scratch / "floor-double"
     double_directory.mkdir()
     double = double_directory / "python3.11"
     double.write_text(_NON_FLOOR_DOUBLE, encoding="utf-8")
     double.chmod(0o755)
-    caller_path = os.environ.get("PATH", "/usr/bin:/bin")
-
-    monkeypatch.setenv(FLOOR_ENVIRONMENT, str(double))
-    with pytest.raises(AssertionError) as wrong_version:
-        _floor_python()
-    assert str(double) in str(wrong_version.value), wrong_version.value
-    assert "3.11" in str(wrong_version.value), wrong_version.value
-
-    monkeypatch.setenv("PATH", str(double_directory))
-    monkeypatch.delenv(FLOOR_ENVIRONMENT, raising=False)
-    if sys.implementation.name == "cpython" and sys.version_info[:2] == FLOOR_MINOR:
-        # A CURRENT interpreter that really is CPython 3.11 is legitimate even
-        # when its executable is not named ``python3.11``.
-        assert Path(_floor_python()).resolve() == Path(sys.executable).resolve()
-    else:
-        with pytest.raises(AssertionError) as discovered_wrong:
-            _floor_python()
-        assert str(double) in str(discovered_wrong.value), discovered_wrong.value
-
     absent = double_directory / "python3.11-absent"
-    monkeypatch.setenv(FLOOR_ENVIRONMENT, str(absent))
-    with pytest.raises(AssertionError) as missing_floor:
-        _floor_python()
-    assert FLOOR_ENVIRONMENT in str(missing_floor.value), missing_floor.value
+    # The caller's OWN configuration is the integration condition: a supplied
+    # FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON override is authoritative even when
+    # no floor is discoverable on PATH. Every discovery NEGATIVE therefore
+    # lives in one contained monkeypatch context, so the exact caller
+    # environment (presence, absence and values) is back BEFORE the genuine
+    # floor work and no test default can replace it.
+    caller_state = {name: os.environ.get(name)
+                    for name in (FLOOR_ENVIRONMENT, "PATH")}
+    caller_floor = caller_state[FLOOR_ENVIRONMENT]
 
-    monkeypatch.delenv(FLOOR_ENVIRONMENT, raising=False)
-    monkeypatch.setenv("PATH", caller_path)
+    with monkeypatch.context() as probe_patch:
+        probe_patch.setenv(FLOOR_ENVIRONMENT, str(double))
+        with pytest.raises(AssertionError) as wrong_version:
+            _floor_python()
+        assert str(double) in str(wrong_version.value), wrong_version.value
+        # The double IS CPython by identity: pin the VERSION rejection itself,
+        # never an identity mismatch that could pass for another reason.
+        assert ("cpython 3.14 is not exactly CPython 3.11"
+                in str(wrong_version.value)), wrong_version.value
+
+        probe_patch.setenv("PATH", str(double_directory))
+        probe_patch.delenv(FLOOR_ENVIRONMENT, raising=False)
+        if (sys.implementation.name == "cpython"
+                and sys.version_info[:2] == FLOOR_MINOR):
+            # A CURRENT interpreter that really is CPython 3.11 is legitimate
+            # even when its executable is not named ``python3.11``.
+            assert Path(_floor_python()).resolve() == Path(sys.executable).resolve()
+        else:
+            with pytest.raises(AssertionError) as discovered_wrong:
+                _floor_python()
+            assert str(double) in str(discovered_wrong.value), discovered_wrong.value
+            assert ("cpython 3.14 is not exactly CPython 3.11"
+                    in str(discovered_wrong.value)), discovered_wrong.value
+
+        probe_patch.setenv(FLOOR_ENVIRONMENT, str(absent))
+        with pytest.raises(AssertionError) as missing_floor:
+            _floor_python()
+        assert FLOOR_ENVIRONMENT in str(missing_floor.value), missing_floor.value
+
+    # Nothing above leaked: the caller's state is restored EXACTLY -- presence,
+    # absence and values -- before any real interpreter, help, build, install
+    # or session work.
+    for name, value in caller_state.items():
+        assert os.environ.get(name) == value, (
+            f"{name} was not restored to the caller's value {value!r}")
     floor = Path(_floor_python())
+    if caller_floor:
+        # Genuine integration consumes a caller's valid explicit override even
+        # when no floor is discoverable on PATH.
+        assert floor == Path(caller_floor), (
+            f"the caller's floor override was not used: {floor}")
     assert floor.is_file(), f"the discovered floor is not a file: {floor}"
     floor_probe = json_module.loads(subprocess.run(
         [str(floor), "-I", "-c",
