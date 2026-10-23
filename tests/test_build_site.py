@@ -415,26 +415,35 @@ def test_oversized_logo_in_root_exits_2_without_writing(tmp_path):
 
 
 # ---------- I4: wrapper logs builder stderr instead of swallowing it --------
+#
+# OPERATOR READ-BACK, NOT A DEFAULT-SUITE CHECK. These two checks read a
+# DEPLOYED tick wrapper, which a portable checkout/CI run neither has nor may
+# assume. There is no path default and no HOME lookup: without
+# `--operator-tick-wrapper=PATH` both checks skip with an actionable opt-in
+# reason. A skip here is NOT evidence that the deployed wrapper passes.
 
-TICK_WRAPPER = Path.home() / ".hermes" / "scripts" / "inference-watchdog-tick.sh"
 
-
-def test_wrapper_build_stage_redirects_stderr_to_log():
+@pytest.mark.operator
+def test_wrapper_build_stage_redirects_stderr_to_log(operator_tick_wrapper):
     """Task-8 fix round I4: `|| true` alone swallowed builder failures
     forever-silently; stderr must now append to state/site_build.log (log,
     never page) while the || true never-page contract stays intact."""
     line = next(
-        l for l in TICK_WRAPPER.read_text(encoding="utf-8").splitlines()
+        l for l in operator_tick_wrapper.read_text(encoding="utf-8").splitlines()
         if "build_site.py" in l and not l.lstrip().startswith("#")
     )
     assert "2>> state/site_build.log" in line, f"build stage lost its log: {line}"
     assert line.rstrip().endswith("|| true"), "never-page contract broken"
 
 
-def test_wrapper_still_parses_bash_n():
-    """The real wrapper file must stay valid shell after the I4 edit."""
+@pytest.mark.operator
+def test_wrapper_still_parses_bash_n(operator_tick_wrapper):
+    """The selected wrapper file must stay valid shell after the I4 edit."""
     proc = subprocess.run(
-        ["bash", "-n", str(TICK_WRAPPER)], capture_output=True, text=True
+        ["bash", "-n", str(operator_tick_wrapper)],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
 
