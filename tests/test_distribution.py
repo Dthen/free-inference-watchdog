@@ -57,6 +57,22 @@ The first two are the preserved unit-6a archive/core checks:
    loaded explicitly in the host process, so no second protocol implementation
    exists and no test/helper/repo path is ever given to a server child.
 
+   Group 3 attributes its evidence per invocation: every hook-enabled child (the
+   primary help run, each blocker control, the missing-file help, the core probe,
+   the EOF launch, every protocol session and the shadow console) writes to its
+   OWN report/audit destination, because the owned hook reports from ``atexit``
+   and would otherwise overwrite an earlier child's evidence. Retained reports
+   are reconciled by label/pid/argv against the saved files both before and after
+   the manifest is written, and the shadow control is rejected at the
+   ``outside the installed site-packages`` branch specifically -- never by an
+   earlier missing-report or foreign-pid branch. Retained ``.session.json``
+   records are validated for ``returncode``/``natural_exit``/``stdin_closed``/
+   ``protocol_violations`` AND ``forced_cleanup is False`` (with a negative row
+   proving that last guard), since the live unit-6d audit cannot speak for a
+   saved record. The manifest keeps the declared backend's own build transcript
+   for the exact installed wheel (the ``uv build`` frontend transcript stays
+   separately labelled), plus SHA-256 of both executed test files.
+
 Honest scope of group 3: this is a LOCAL wheel-only clean installation. Published
 Git-source ``uvx --from git+...`` evidence is deliberately absent because no
 public ref contains this package yet, and PyPI publication, rollout and operator
@@ -397,8 +413,16 @@ def _stage_source(destination):
     return destination
 
 
-def _build_wheel(source, output):
-    """Build a genuine wheel through the declared backend, in a subprocess."""
+def _build_wheel(source, output, *, log_path=None):
+    """Build a genuine wheel through the declared backend, in a subprocess.
+
+    ``log_path`` is an OPTIONAL, keyword-only destination for this invocation's
+    own transcript (command, return status, stdout and stderr). It defaults to
+    ``None`` so every pre-existing caller keeps the exact same command, build
+    behaviour and return value; a caller that passes it gets the REAL transcript
+    of the wheel it will install, written before any build assertion can discard
+    the diagnostics.
+    """
     python, _version = _build_python()
     output.mkdir(parents=True, exist_ok=True)
     marker = output / "wheel-name.txt"
@@ -410,10 +434,13 @@ def _build_wheel(source, output):
         "name = backend.build_wheel(output)\n"
         "pathlib.Path(marker).write_text(name, encoding='utf-8')\n"
     )
+    command = [python, "-c", script, str(output), str(marker)]
     completed = subprocess.run(
-        [python, "-c", script, str(output), str(marker)],
+        command,
         cwd=str(source), capture_output=True, text=True, timeout=300,
         env=_clean_environment())
+    if log_path is not None:
+        _write_log(log_path, completed, command)
     assert completed.returncode == 0, (
         "the declared backend failed to build the wheel:\n"
         + completed.stderr[-6000:])
@@ -1249,6 +1276,128 @@ def _assert_installed_origin(report_path, *, label, pid, cwd, env_prefix, pureli
     return report
 
 
+def _with_report(environment, *, report, audit):
+    """A SCOPED copy of a child environment pointed at its OWN evidence paths.
+
+    The owned hook writes its report from an ``atexit`` handler, so it fires on
+    EVERY interpreter exit -- including a blocked-import failure. Two children
+    started from one environment dictionary would therefore leave only the
+    LAST report on disk, which is how a guard control silently destroys the
+    console evidence it was meant to protect. Callers derive a fresh copy with
+    unique destinations instead of mutating a shared dictionary.
+    """
+    scoped = dict(environment)
+    scoped["WD_PROBE_REPORT"] = str(report)
+    scoped["WD_GUARD_AUDIT"] = str(audit)
+    return scoped
+
+
+def _script_argv(*arguments):
+    """The ``sys.argv`` a ``python -c SCRIPT [args...]`` child will observe."""
+    return ["-c"] + [str(argument) for argument in arguments]
+
+
+def _report_entry(index, *, label, kind, run, report, audit, argv):
+    """Attribute one hook-enabled invocation to its OWN report destination."""
+    index.append({"label": label, "kind": kind, "report": str(report),
+                  "audit": str(audit), "pid": run.pid,
+                  "argv": [str(part) for part in argv]})
+
+
+def _assert_report_index(index, evidence):
+    """Prove every guarded invocation still owns its report, on disk, at the end.
+
+    Uniqueness of the destinations is what makes accidental reuse impossible,
+    and the PID/argv reconciliation is what detects an overwrite that slipped
+    through: a surviving report would carry another child's pid or argv, so this
+    is a real attribution check rather than a count of files.
+    """
+    for field, values in (
+            ("label", [entry["label"] for entry in index]),
+            ("report", [entry["report"] for entry in index]),
+            ("audit", [entry["audit"] for entry in index])):
+        assert len(set(values)) == len(values), (
+            f"two invocations share a {field} destination, so one would "
+            f"overwrite the other: "
+            f"{sorted({value for value in values if values.count(value) > 1})}")
+    for entry in index:
+        path = Path(entry["report"])
+        assert path.parent == Path(evidence), (entry["label"], str(path))
+        assert path.is_file(), (
+            f"{entry['label']}: the {entry['kind']} invocation lost its report "
+            f"at {path}")
+        report = json.loads(path.read_text(encoding="utf-8"))
+        assert report["hook"] == INSTALLED_HOOK_ID, (
+            f"{entry['label']}: the retained report was not written by the "
+            "owned hook")
+        assert report["pid"] == entry["pid"], (
+            f"{entry['label']}: the retained report belongs to pid "
+            f"{report['pid']}, not to the {entry['kind']} child {entry['pid']} "
+            "-- an invocation overwrote another's evidence")
+        assert report["argv"] == entry["argv"], (
+            f"{entry['label']}: the retained argv {report['argv']!r} is not this "
+            f"{entry['kind']} invocation's {entry['argv']!r}")
+        _assert_guard_clean(entry["audit"], entry["label"])
+    return [entry["label"] for entry in index]
+
+
+def _assert_shadow_console_report(report_path, *, run, console, module_hashes):
+    """The negative control's OWN saved state: real console pid/argv, checkout bytes."""
+    report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert report["hook"] == INSTALLED_HOOK_ID, (
+        "the negative control must keep the guards active")
+    assert report["pid"] == run.pid, (
+        f"the saved shadow report belongs to pid {report['pid']}, not to the "
+        f"shadow console child {run.pid}")
+    assert report["argv"] == [str(console), "--help"], report["argv"]
+    module = report["application_modules"]["watchdog_catalog"]
+    assert module["file"] == str(REPO / "watchdog_catalog" / "__init__.py"), (
+        module)
+    assert module["sha256"] == module_hashes["watchdog_catalog"], (
+        "the negative control needs IDENTICAL module bytes")
+    return report
+
+
+def _assert_retained_session(summary, *, label):
+    """Validate a RETAINED ``.session.json`` record, as a later reader sees it.
+
+    This is the DISK/MANIFEST boundary. The reused unit-6d helpers already call
+    ``_audit_clean_stdio``, which rejects a LIVE ``forced_cleanup``; nothing in
+    that live audit survives into the saved record, and a drain timeout can set
+    ``forced_cleanup=True`` while ``natural_exit`` stays true. Graceful EOF is
+    therefore only claimed here when the SAVED record says nothing was killed.
+    """
+    assert summary["returncode"] == 0, (label, summary["returncode"])
+    assert summary["natural_exit"] is True, (
+        f"{label}: the retained session records no natural exit")
+    assert summary["stdin_closed"] is True, (
+        f"{label}: the retained session never closed the child's stdin")
+    assert summary["protocol_violations"] == [], (
+        label, summary["protocol_violations"])
+    assert summary["forced_cleanup"] is False, (
+        f"{label}: the retained session records forced_cleanup="
+        f"{summary['forced_cleanup']!r}; a bounded drain or exit timeout "
+        "force-killed the child, so this record does not prove a graceful EOF")
+    return summary
+
+
+def _test_identity(harness):
+    """SHA-256 of the two test files THIS run actually executed."""
+    distribution = Path(__file__).resolve()
+    protocol = Path(harness.__file__).resolve()
+    assert distribution == (REPO / "tests" / "test_distribution.py").resolve(), (
+        distribution)
+    assert protocol == (REPO / "tests" / "test_mcp_protocol.py").resolve(), protocol
+    return {
+        "distribution_test": {
+            "path": str(distribution),
+            "sha256": hashlib.sha256(distribution.read_bytes()).hexdigest()},
+        "protocol_harness": {
+            "path": str(protocol),
+            "sha256": hashlib.sha256(protocol.read_bytes()).hexdigest()},
+    }
+
+
 def _protocol_harness():
     """Load the reviewed group-5/6 stdio harness explicitly in THIS process.
 
@@ -1356,9 +1505,21 @@ def test_installed_console_clean_install_and_stdio_isolation():
     # 1. stage, build and audit the EXACT wheel this group installs
     # ------------------------------------------------------------------
     stage = _stage_source(root / "source")
-    wheel = _build_wheel(stage, root / "wheel")
+    backend_log = evidence / "backend-build.log"
+    wheel = _build_wheel(stage, root / "wheel", log_path=backend_log)
     assert wheel.name == (
         f"free_inference_watchdog_mcp-{version}-py3-none-any.whl"), wheel.name
+    # The retained transcript must belong to THIS wheel: it is the declared
+    # backend's own command/status/streams for the exact file installed below,
+    # not the independent frontend build that runs later on a separate export.
+    transcript = backend_log.read_text(encoding="utf-8")
+    assert "RETURNCODE: 0" in transcript, transcript[-4000:]
+    assert "COMMAND: " in transcript and str(wheel.parent) in transcript, (
+        transcript[:2000])
+    assert "--- STDOUT ---" in transcript and "--- STDERR ---" in transcript
+    assert wheel.name in transcript, (
+        "the backend transcript does not name the wheel it produced: "
+        + transcript[-4000:])
     facts = _read_wheel(wheel)
     expected_python, expected_resource = _expected_payload()
     violations = _payload_violations(facts, expected_python, expected_resource)
@@ -1448,7 +1609,14 @@ def test_installed_console_clean_install_and_stdio_isolation():
     help_env = _installed_environment(
         home, cache_home, temp, help_hooks, evidence / "help-report.json",
         evidence / "help-guard.jsonl")
-    help_run = _run_console([console, "--help"], help_env, neutral)
+    # Every hook-enabled invocation below owns a DISTINCT report/audit pair; the
+    # index is reconciled against the saved files again at the end of the group.
+    reports = []
+    help_argv = [str(console), "--help"]
+    help_run = _run_console(help_argv, help_env, neutral)
+    _report_entry(reports, label="help", kind="console --help", run=help_run,
+                  report=evidence / "help-report.json",
+                  audit=evidence / "help-guard.jsonl", argv=help_argv)
     assert help_run.returncode == 0, help_run.stderr[-4000:]
     assert help_run.stderr == "", "help must keep stderr empty"
     help_stdout = help_run.stdout
@@ -1472,23 +1640,46 @@ def test_installed_console_clean_install_and_stdio_isolation():
         blocked_legacy=blocked_legacy, blocked_sdk=blocked_sdk)
 
     # The SDK blocker is ACTIVE in that exact environment: a positive control.
+    # Each control is a SEPARATE hook-enabled child, so each gets its own
+    # report/audit pair: the hook writes on exit, and reusing the console's
+    # destination here would replace the help evidence with a ``-c`` child.
     for module in ("mcp", "pydantic"):
+        sdk_report = evidence / f"help-sdk-{module}-report.json"
+        sdk_audit = evidence / f"help-sdk-{module}-guard.jsonl"
+        control_env = _with_report(help_env, report=sdk_report, audit=sdk_audit)
         control = _run_console([env_python, "-B", "-c", f"import {module}"],
-                               help_env, neutral)
+                               control_env, neutral)
         assert control.returncode != 0, f"{module} was importable in help mode"
         assert (f"blocked import during installed-console probe: {module}"
                 in control.stderr), control.stderr[-2000:]
         assert control.stdout == ""
+        control_report = json.loads(sdk_report.read_text(encoding="utf-8"))
+        assert control_report["pid"] == control.pid, control_report["pid"]
+        assert control_report["application_modules"] == {}, (
+            f"the {module} blocker did not raise before any package code: "
+            f"{control_report['application_modules']}")
+        _report_entry(reports, label=f"help-sdk-{module}",
+                      kind=f"SDK blocker control ({module})", run=control,
+                      report=sdk_report, audit=sdk_audit, argv=_script_argv())
 
     # An explicit MISSING file selection followed by --help still succeeds:
     # parsing and help happen before any source validation or catalogue read.
     missing = root / "inputs" / "absent-catalogue.json"
-    ordered = _run_console(
-        [console, "--catalog-file", str(missing), "--help"], help_env, neutral)
+    ordered_argv = [str(console), "--catalog-file", str(missing), "--help"]
+    ordered_env = _with_report(
+        help_env, report=evidence / "help-missing-file-report.json",
+        audit=evidence / "help-missing-file-guard.jsonl")
+    ordered = _run_console(ordered_argv, ordered_env, neutral)
+    _report_entry(reports, label="help-missing-file",
+                  kind="console missing-file --help", run=ordered,
+                  report=evidence / "help-missing-file-report.json",
+                  audit=evidence / "help-missing-file-guard.jsonl",
+                  argv=ordered_argv)
     assert ordered.returncode == 0, ordered.stderr[-4000:]
     assert ordered.stdout == help_stdout, "help depends on the selection order"
     assert not missing.exists()
-    _assert_guard_clean(evidence / "help-guard.jsonl", "missing-file --help")
+    _assert_guard_clean(evidence / "help-missing-file-guard.jsonl",
+                        "missing-file --help")
 
     # ------------------------------------------------------------------
     # 4. the installed pure core/resource with SDK and legacy imports blocked
@@ -1501,6 +1692,10 @@ def test_installed_console_clean_install_and_stdio_isolation():
     core_run = _run_console(
         [env_python, "-B", "-c", _INSTALLED_CORE_PROBE, str(fixture),
          ",".join(blocked_help)], core_env, neutral)
+    _report_entry(reports, label="core", kind="installed pure core probe",
+                  run=core_run, report=evidence / "core-report.json",
+                  audit=evidence / "core-guard.jsonl",
+                  argv=_script_argv(fixture, ",".join(blocked_help)))
     assert core_run.returncode == 0, core_run.stderr[-4000:]
     assert core_run.stderr == "", core_run.stderr[-2000:]
     core = json.loads(core_run.stdout)
@@ -1550,6 +1745,9 @@ def test_installed_console_clean_install_and_stdio_isolation():
         home, cache_home, temp, serve_hooks, evidence / "eof-report.json",
         evidence / "eof-guard.jsonl")
     eof = _run_console([console], eof_env, neutral)
+    _report_entry(reports, label="eof", kind="no-feed stdin-EOF launch",
+                  run=eof, report=evidence / "eof-report.json",
+                  audit=evidence / "eof-guard.jsonl", argv=[str(console)])
     assert eof.returncode == 0, eof.stderr[-4000:]
     assert eof.stdout == "", "a no-feed EOF launch printed into the protocol stream"
     assert eof.stderr == "", eof.stderr[-2000:]
@@ -1597,27 +1795,52 @@ def test_installed_console_clean_install_and_stdio_isolation():
             "cwd": str(child.cwd),
             "returncode": child.proc.returncode,
             "natural_exit": child.natural_exit,
+            "stdin_closed": child.stdin_closed,
+            "forced_cleanup": child.forced_cleanup,
+            "protocol_violations": list(child.protocol_violations),
             "stdout_frames": len(child.stdout_lines),
             "outbound_frames": len(child.stdin_lines),
             "stdout_bytes": len(child.raw_stdout),
             "artifacts": sorted(str(path) for path in artifacts.glob(label + ".*")),
+            "report": environment["WD_PROBE_REPORT"],
             "sys_path": report["sys_path"],
             "import_origins": {name: fact["file"]
                                for name, fact in
                                report["application_modules"].items()},
         }
+        _report_entry(reports, label=label,
+                      kind="installed console protocol session", run=child,
+                      report=environment["WD_PROBE_REPORT"],
+                      audit=environment["WD_GUARD_AUDIT"], argv=child.argv)
 
     # The legacy blocker raises in THIS child environment, before package code.
+    # Its own report destination keeps the session's report intact: the blocking
+    # child exits through the same hook, so a shared path would hand the session
+    # assertion a ``-c`` report instead of the session's.
     file_environment = _installed_environment(
         home, cache_home, temp, serve_hooks,
         evidence / "file-session-report.json",
         evidence / "file-session-guard.jsonl")
+    file_control_env = _with_report(
+        file_environment, report=evidence / "file-legacy-control-report.json",
+        audit=evidence / "file-legacy-control-guard.jsonl")
     control = _run_console([env_python, "-B", "-c", "import config_loader"],
-                           file_environment, neutral)
+                           file_control_env, neutral)
+    _report_entry(reports, label="file-legacy-control",
+                  kind="legacy blocker control", run=control,
+                  report=evidence / "file-legacy-control-report.json",
+                  audit=evidence / "file-legacy-control-guard.jsonl",
+                  argv=_script_argv())
     assert control.returncode != 0, "the legacy blocker did not raise"
     assert ("blocked import during installed-console probe: config_loader"
             in control.stderr), control.stderr[-2000:]
     assert control.stdout == ""
+    file_control_report = json.loads(
+        (evidence / "file-legacy-control-report.json").read_text(
+            encoding="utf-8"))
+    assert file_control_report["application_modules"] == {}, (
+        "the legacy blocker must raise before any package code: "
+        f"{file_control_report['application_modules']}")
 
     file_cache = root / "cache-file"
     file_child = _installed_child(
@@ -1745,12 +1968,32 @@ def test_installed_console_clean_install_and_stdio_isolation():
             assert marker not in raw_stderr, (label, raw_stderr[-2000:])
         summary = json.loads((artifacts / (label + ".session.json")).read_text(
             encoding="utf-8"))
-        assert summary["protocol_violations"] == [], (label, summary)
-        assert summary["stdin_closed"] is True, (label, summary)
+        # The retained record must stand on its own: the live 6d audit above is
+        # gone once the process ends, and only these saved fields remain.
+        _assert_retained_session(summary, label=label)
     assert sorted(neutral.iterdir()) == [], "a session wrote into its cwd"
     assert sorted(home.iterdir()) == [], "a session created HOME state"
     assert sorted(cache_home.iterdir()) == [], (
         "a session without an explicit cache root used the platform cache")
+
+    # The DISK/MANIFEST boundary, negatively: a retained record that also says
+    # the child had to be killed must NOT count as graceful EOF. The reused 6d
+    # helpers reject a LIVE ``forced_cleanup`` via ``_audit_clean_stdio``; this
+    # row proves the SAVED record is validated just as strictly, from a copy of
+    # an authentic summary with nothing changed but that one flag.
+    authentic_path = artifacts / "installed-file.session.json"
+    authentic_bytes = authentic_path.read_bytes()
+    authentic = json.loads(authentic_bytes)
+    _assert_retained_session(authentic, label="installed-file")
+    tampered = json.loads(authentic_bytes)
+    tampered["forced_cleanup"] = True
+    with pytest.raises(AssertionError) as rejected_summary:
+        _assert_retained_session(tampered, label="forced-cleanup-row")
+    retained_reason = str(rejected_summary.value)
+    assert "records forced_cleanup=True" in retained_reason, retained_reason
+    assert "no natural exit" not in retained_reason, retained_reason
+    assert authentic_path.read_bytes() == authentic_bytes, (
+        "the evidence-boundary row must never rewrite an authentic session file")
 
     # ------------------------------------------------------------------
     # 8. strict origin negative control: identical bytes, wrong origin
@@ -1759,32 +2002,63 @@ def test_installed_console_clean_install_and_stdio_isolation():
     shadow_env = _installed_environment(
         home, cache_home, temp, shadow_hooks, evidence / "shadow-report.json",
         evidence / "shadow-guard.jsonl")
+    # The ONE deliberate difference from a clean install: the reviewed checkout
+    # joins the import path, so resolution -- not the bytes -- is wrong.
     shadow_env["PYTHONPATH"] = os.pathsep.join([str(shadow_hooks), str(REPO)])
-    shadow = _run_console([console, "--help"], shadow_env, neutral)
+    shadow_argv = [str(console), "--help"]
+    shadow = _run_console(shadow_argv, shadow_env, neutral)
     assert shadow.returncode == 0, shadow.stderr[-4000:]
     assert shadow.stdout == help_stdout
-    shadow_report = json.loads(
-        (evidence / "shadow-report.json").read_text(encoding="utf-8"))
-    assert shadow_report["hook"] == INSTALLED_HOOK_ID, (
-        "the negative control must keep the guards active")
-    assert shadow_report["pid"] == shadow.pid
-    assert shadow_report["application_modules"]["watchdog_catalog"]["file"] == str(
-        REPO / "watchdog_catalog" / "__init__.py"), (
-            shadow_report["application_modules"])
-    assert shadow_report["application_modules"]["watchdog_catalog"][
-        "sha256"] == module_hashes["watchdog_catalog"], (
-            "the negative control needs IDENTICAL module bytes")
+    _report_entry(reports, label="shadow-console",
+                  kind="checkout-shadow console --help", run=shadow,
+                  report=evidence / "shadow-report.json",
+                  audit=evidence / "shadow-guard.jsonl", argv=shadow_argv)
+    # The saved state belongs to the real shadow CONSOLE: its pid, its `--help`
+    # argv and the identical-byte checkout module. Only then is rejecting it
+    # evidence about ORIGIN rather than about a destroyed report.
+    _assert_shadow_console_report(
+        evidence / "shadow-report.json", run=shadow, console=console,
+        module_hashes=module_hashes)
+
     control = _run_console([env_python, "-B", "-c", "import config_loader"],
-                           shadow_env, neutral)
+                           _with_report(
+                               shadow_env,
+                               report=evidence / "shadow-control-report.json",
+                               audit=evidence / "shadow-control-guard.jsonl"),
+                           neutral)
+    _report_entry(reports, label="shadow-legacy-control",
+                  kind="legacy blocker control with the checkout import path",
+                  run=control, report=evidence / "shadow-control-report.json",
+                  audit=evidence / "shadow-control-guard.jsonl",
+                  argv=_script_argv())
     assert control.returncode != 0 and (
         "blocked import during installed-console probe: config_loader"
         in control.stderr), control.stderr[-2000:]
-    with pytest.raises(AssertionError, match="installed"):
+    # The control could not have overwritten the console report: it is intact.
+    _assert_shadow_console_report(
+        evidence / "shadow-report.json", run=shadow, console=console,
+        module_hashes=module_hashes)
+    # The SAME checker used for every successful installed child must reject
+    # this saved state AT THE ORIGIN BRANCH -- not earlier at a missing report,
+    # a foreign pid, a version or a prefix complaint.
+    with pytest.raises(AssertionError) as rejected_shadow:
         _assert_installed_origin(
             evidence / "shadow-report.json", label="checkout-shadow control",
             pid=shadow.pid, cwd=neutral, env_prefix=environment_dir,
             purelib=purelib, module_hashes=module_hashes,
             required_modules={"watchdog_catalog"}, blocked_legacy=blocked_legacy)
+    shadow_reason = str(rejected_shadow.value)
+    assert "outside the installed site-packages" in shadow_reason, shadow_reason
+    assert "watchdog_catalog imported from" in shadow_reason, shadow_reason
+    assert str(REPO / "watchdog_catalog" / "__init__.py") in shadow_reason, (
+        shadow_reason)
+    for earlier_branch in ("wrote no report", "the report came from pid",
+                           "is not the fresh environment",
+                           "this is no virtual environment",
+                           "bytes differ from the installed wheel"):
+        assert earlier_branch not in shadow_reason, (
+            f"the control was rejected before the origin branch ({earlier_branch}): "
+            + shadow_reason)
     _assert_guard_clean(evidence / "shadow-guard.jsonl",
                         "checkout-shadow control")
 
@@ -1898,18 +2172,38 @@ def test_installed_console_clean_install_and_stdio_isolation():
     # ------------------------------------------------------------------
     # 11. retained evidence manifest
     # ------------------------------------------------------------------
+    # Every guarded invocation still owns the report it wrote: verify BEFORE the
+    # manifest records the index, and again from disk after it is written.
+    labels = _assert_report_index(reports, evidence)
+    assert labels == [
+        "help", "help-sdk-mcp", "help-sdk-pydantic", "help-missing-file", "core",
+        "eof", "file-legacy-control", "installed-file", "installed-url-first",
+        "installed-url-offline", "installed-url-absent", "installed-url-corrupt",
+        "shadow-console", "shadow-legacy-control"], labels
+    test_identity = _test_identity(harness)
     manifest = {
         "kind": "LOCAL wheel-only clean installation (no published Git/PyPI)",
         "repo": str(REPO),
+        "test_identity": test_identity,
         "distribution": {"name": DIST_NAME, "version": version,
                          "requires_python": project["requires-python"],
                          "requires": installed["requires"]},
-        "build": {"backend_python": build_python,
+        "build": {"transcript_kind": (
+                      "declared setuptools.build_meta backend, exact installed "
+                      "wheel"),
+                  "transcript": str(backend_log),
+                  "transcript_sha256": hashlib.sha256(
+                      backend_log.read_bytes()).hexdigest(),
+                  "backend_python": build_python,
                   "backend_setuptools": backend_version,
                   "wheel": str(wheel), "wheel_sha256": wheel_sha,
                   "wheel_bytes": wheel.stat().st_size,
                   "payload_entries": sorted(facts["names"])},
-        "frontend_build": {"uv": uv_version, "command": frontend_command,
+        "frontend_build": {"transcript_kind": (
+                               "independent uv build frontend of a SEPARATE "
+                               "staged export; not the installed wheel's build"),
+                           "uv": uv_version, "command": frontend_command,
+                           "log": str(frontend_log),
                            "wheel": str(frontend_wheel),
                            "wheel_sha256": hashlib.sha256(
                                frontend_wheel.read_bytes()).hexdigest()},
@@ -1924,9 +2218,14 @@ def test_installed_console_clean_install_and_stdio_isolation():
                         "console_shebang": installed["console_shebang"],
                         "installer": installed["installer"],
                         "sdk_versions": installed["versions"],
+                        "create_transcript": str(
+                            evidence / "create-environment.log"),
+                        "install_transcript": str(evidence / "install.log"),
                         "created": created},
         "installed_module_sha256": module_hashes,
         "help": {"exit": help_run.returncode, "pid": help_run.pid,
+                 "report": str(evidence / "help-report.json"),
+                 "argv": [str(part) for part in help_argv],
                  "stderr": help_run.stderr,
                  "stdout_sha256": hashlib.sha256(
                      help_run.stdout.encode()).hexdigest(),
@@ -1936,6 +2235,7 @@ def test_installed_console_clean_install_and_stdio_isolation():
                      help_report["application_modules"].items()},
                  "sys_path": help_report["sys_path"]},
         "sessions": sessions,
+        "report_index": reports,
         "loopback_feed_hits": feed_hits,
         "variants": variant_outcomes,
         "hidden_staged_source": str(stage),
@@ -1945,3 +2245,39 @@ def test_installed_console_clean_install_and_stdio_isolation():
         json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
     assert json.loads((evidence / "manifest.json").read_text(
         encoding="utf-8")) == manifest
+
+    # The manifest is only evidence if it still describes the FILES: reconcile
+    # every session record with its retained summary, the help block with the
+    # primary help report, and the index with every saved report.
+    retained_manifest = json.loads((evidence / "manifest.json").read_text(
+        encoding="utf-8"))
+    assert retained_manifest["report_index"] == reports
+    _assert_report_index(retained_manifest["report_index"], evidence)
+    _assert_shadow_console_report(
+        evidence / "shadow-report.json", run=shadow, console=console,
+        module_hashes=module_hashes)
+    assert retained_manifest["test_identity"] == test_identity
+    for label in ("tests/test_distribution.py", "tests/test_mcp_protocol.py"):
+        recorded = next(item for item in retained_manifest[
+            "test_identity"].values() if item["path"].endswith(label))
+        assert recorded["sha256"] == hashlib.sha256(
+            Path(recorded["path"]).read_bytes()).hexdigest(), label
+    assert retained_manifest["help"]["report"] == str(
+        evidence / "help-report.json")
+    retained_help = json.loads(
+        (evidence / "help-report.json").read_text(encoding="utf-8"))
+    assert retained_help["pid"] == help_run.pid, (
+        "the manifest's help report is not the primary help invocation")
+    assert retained_help["argv"] == [str(part) for part in help_argv]
+    assert set(retained_help["application_modules"]) == set(
+        help_report["application_modules"])
+    assert retained_manifest["build"]["transcript"] == str(backend_log)
+    for label, record in retained_manifest["sessions"].items():
+        summary = json.loads((artifacts / (label + ".session.json")).read_text(
+            encoding="utf-8"))
+        _assert_retained_session(summary, label=label)
+        for field in ("pid", "argv", "cwd", "returncode", "natural_exit",
+                      "stdin_closed", "forced_cleanup"):
+            assert record[field] == summary[field], (label, field)
+        assert record["forced_cleanup"] is False, label
+        assert record["protocol_violations"] == [], label
