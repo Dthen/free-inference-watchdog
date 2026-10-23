@@ -6,10 +6,14 @@ Two unparametrized groups:
    source double that fails if acquired and a clock that fails if read. It
    discovers exactly the five reviewed names/descriptions/order, normalizes the
    SDK's ACTUALLY advertised input schemas against the packaged ``tools.json``
-   oracle, proves the comparator keeps a numeric-bound and an
-   ``additionalProperties`` difference, and runs a fresh interpreter to show
-   that the package/core import graph still excludes the transport, SDK,
-   producer, provider, config, state and site modules.
+   oracle, compares every advertised TOOL and PARAMETER description with the
+   reviewed string by exact equality (separately from that structural
+   normalizer, which ignores prose at every depth), proves the structural
+   comparator keeps a numeric-bound and an ``additionalProperties`` difference,
+   proves the description comparator keeps an altered and a missing parameter
+   description, and runs a fresh interpreter to show that the package/core
+   import graph still excludes the transport, SDK, producer, provider, config,
+   state and site modules.
 
 2. ``test_direct_sdk_calls_and_raw_argument_boundary`` calls every tool through
    the real ``MCPServer.call_tool`` and compares the payload with the pure core
@@ -64,10 +68,13 @@ PROVENANCE = {
 ACQUISITION = {"ok": True, "snapshot": SNAPSHOT, "source": PROVENANCE}
 
 #: Normalizations that are documented presentation-only equivalences, never
-#: semantic relaxations: generated titles, prose descriptions (tool-level prose
-#: is compared directly from the resource), absent-vs-empty ``required``,
-#: ``anyOf`` nullable versus a ``type`` array, and list order for unordered
-#: schema arrays. An absent ``additionalProperties`` stays absent.
+#: semantic relaxations: generated titles, prose descriptions, absent-vs-empty
+#: ``required``, ``anyOf`` nullable versus a ``type`` array, and list order for
+#: unordered schema arrays. An absent ``additionalProperties`` stays absent.
+#: Stripping ``description`` here keeps the STRUCTURAL comparison prose-blind;
+#: it is never the prose evidence. Reviewed tool-level text is compared
+#: directly from the resource and every parameter description is compared by
+#: ``_assert_parameter_descriptions``.
 PRESENTATION_ONLY_KEYS = frozenset({"title", "description"})
 
 
@@ -144,6 +151,34 @@ def _assert_schema_matches(actual, expected, label):
         f"CONTRACT: {json.dumps(right, sort_keys=True)}")
 
 
+def _assert_parameter_descriptions(actual_properties, reviewed_properties,
+                                   label):
+    """Compare reviewed per-parameter prose exactly; return the names checked.
+
+    This is the prose path, deliberately independent of ``_canonical``: every
+    reviewed property must carry a non-empty description and the SDK-advertised
+    value must equal it character for character. A property-set mismatch or a
+    missing reviewed description fails here rather than silently decorating the
+    wrong callable.
+    """
+    assert set(actual_properties) == set(reviewed_properties), (
+        f"{label}: parameter names drifted from tools.json\n"
+        f"SDK:      {sorted(actual_properties)}\n"
+        f"CONTRACT: {sorted(reviewed_properties)}")
+    for name in sorted(reviewed_properties):
+        expected = reviewed_properties[name].get("description")
+        assert isinstance(expected, str) and expected, (
+            f"{label}.{name}: the reviewed contract carries no parameter "
+            "description")
+        actual = actual_properties[name].get("description")
+        assert actual == expected, (
+            f"{label}.{name}: the SDK-advertised parameter description differs "
+            "from tools.json\n"
+            f"SDK:      {actual!r}\n"
+            f"CONTRACT: {expected!r}")
+    return set(reviewed_properties)
+
+
 def _has_key(node, needle):
     if isinstance(node, dict):
         return needle in node or any(_has_key(value, needle)
@@ -189,6 +224,7 @@ def test_typed_registration_discovery_contract():
     assert [tool.name for tool in tools] == names, (
         "the five reviewed tools, in the reviewed order")
     by_name = {tool.name: tool for tool in tools}
+    described = set()
     for entry in contract:
         tool = by_name[entry["name"]]
         assert tool.description == entry["description"], (
@@ -197,6 +233,10 @@ def test_typed_registration_discovery_contract():
                                tool.name)
         assert set(tool.model_dump()["input_schema"]["properties"]) == set(
             entry["inputSchema"]["properties"])
+        described |= {
+            (tool.name, name) for name in _assert_parameter_descriptions(
+                tool.input_schema["properties"],
+                entry["inputSchema"]["properties"], tool.name)}
         for closed in ("root", "clock", "wall_clock", "cache_dir", "source",
                        "snapshot", "path"):
             assert closed not in tool.input_schema["properties"], (
@@ -207,6 +247,12 @@ def test_typed_registration_discovery_contract():
         if provider is not None:
             assert _canonical(provider)["type"] == ["null", "string"], (
                 f"{tool.name}: provider stays a literal string, never an enum")
+
+    reviewed_parameters_set = {(entry["name"], name) for entry in contract
+                               for name in entry["inputSchema"]["properties"]}
+    assert described == reviewed_parameters_set, (
+        "every parameter in the reviewed contract must be covered by the "
+        "exact-match description comparison")
 
     assert source.calls == 0, "construction and discovery must not acquire"
     assert clock.reads == 0, "construction and discovery must not read a clock"
@@ -249,6 +295,33 @@ def test_typed_registration_discovery_contract():
     opened.pop("additionalProperties")
     with pytest.raises(AssertionError):
         _assert_schema_matches(opened, reviewed, "absent additionalProperties")
+
+    # The description comparator is its own path: the untouched per-parameter
+    # prose passes, while an altered and a missing description each fail that
+    # same exact-match check. Prose never rides on the structural normalizer,
+    # so a prose-only difference passes ``_assert_schema_matches`` yet is
+    # rejected here.
+    actual_properties = by_name["search_models"].input_schema["properties"]
+    reviewed_properties = reviewed["properties"]
+    _assert_parameter_descriptions(actual_properties, reviewed_properties,
+                                   "description positive control")
+    altered = copy.deepcopy(actual_properties)
+    altered["limit"]["description"] = "Deliberately altered parameter prose."
+    with pytest.raises(AssertionError) as altered_error:
+        _assert_parameter_descriptions(altered, reviewed_properties,
+                                       "altered parameter description")
+    assert "parameter description differs" in str(altered_error.value)
+    missing = copy.deepcopy(actual_properties)
+    missing["provider"].pop("description")
+    with pytest.raises(AssertionError) as missing_error:
+        _assert_parameter_descriptions(missing, reviewed_properties,
+                                       "missing parameter description")
+    assert "parameter description differs" in str(missing_error.value)
+    prose_only = copy.deepcopy(candidate)
+    prose_only["properties"]["limit"]["description"] = (
+        "Deliberately altered parameter prose.")
+    _assert_schema_matches(prose_only, reviewed,
+                           "prose outside the structural normalizer")
 
     blocked = (
         "mcp", "mcp_types", "pydantic", "watchdog_catalog.server",

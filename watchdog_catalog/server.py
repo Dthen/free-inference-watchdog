@@ -7,9 +7,12 @@ resource stays stdlib-only: the package root re-exports nothing from here.
 Registration is annotation-derived. Every exposed callable is a named
 ``async def`` whose parameters, defaults and constrained aliases are the single
 source of the advertised input schema, which the SDK derives with Pydantic.
-The packaged ``tools.json`` is read through ``importlib.resources`` for the
-reviewed tool descriptions and as the parity oracle; it is never assigned as a
-replacement ``inputSchema``.
+The packaged ``tools.json`` supplies the reviewed TOOL and PARAMETER prose for
+those registrations and is the parity oracle. Its only contribution to the
+generated schema is each parameter's reviewed description text, copied after
+the generated and reviewed property-name sets are proven equal; no type, bound,
+default, requiredness, pattern, item or unknown-argument constraint is ever
+taken from it, and it is never assigned as a replacement ``inputSchema``.
 
 Boundary configuration (installed ``mcp`` 2.3.0, Pydantic 2.14.1) is deliberately
 narrow and scoped to these five registrations:
@@ -169,7 +172,17 @@ def _strict_arguments_model(base):
 
 
 def _tool(fn, entry):
-    """Register one annotated wrapper as a real SDK ``Tool``."""
+    """Register one annotated wrapper as a real SDK ``Tool``.
+
+    The generated argument model remains the only source of the advertised
+    schema: its types, bounds, defaults, requiredness, patterns, item schemas
+    and unknown-argument policy are what validation uses. ``tools.json``
+    contributes SHARED PROSE only -- the reviewed tool description and, for
+    every generated property with the same name, that property's reviewed
+    description text. The reviewed and generated property-name sets must match
+    exactly before any text is copied, so a contract drift fails closed rather
+    than decorating the wrong callable.
+    """
     if entry["name"] != fn.__name__:
         raise ValueError(
             f"tool contract name {entry['name']!r} does not match {fn.__name__!r}")
@@ -181,11 +194,19 @@ def _tool(fn, entry):
         output_model=metadata.output_model,
         wrap_output=metadata.wrap_output,
     )
+    parameters = arguments_model.model_json_schema(by_alias=True)
+    reviewed = entry["inputSchema"]["properties"]
+    if set(parameters["properties"]) != set(reviewed):
+        raise ValueError(
+            f"tool contract properties for {entry['name']!r} do not match the "
+            "generated argument model")
+    for name, property_schema in parameters["properties"].items():
+        property_schema["description"] = reviewed[name]["description"]
     return Tool(
         fn=fn,
         name=entry["name"],
         description=entry["description"],
-        parameters=arguments_model.model_json_schema(by_alias=True),
+        parameters=parameters,
         fn_metadata=strict_metadata,
         is_async=True,
     )
