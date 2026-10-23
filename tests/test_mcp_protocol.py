@@ -1,6 +1,6 @@
-"""Typed SDK registration and direct-call contract for the stdio MCP (unit 6b).
+"""Typed SDK registration, direct-call contract and the CLI launch (units 6b/6c).
 
-Two unparametrized groups:
+Four unparametrized groups:
 
 1. ``test_typed_registration_discovery_contract`` builds the factory with a
    source double that fails if acquired and a clock that fails if read. It
@@ -25,10 +25,34 @@ Two unparametrized groups:
    ``AsyncCatalogSource`` over an owned temporary fixture proves end-to-end
    source metadata without any network.
 
-Honest scope: these are direct SDK calls, not stdio subprocess negotiation, not
-a clean install and not the console command. ``structured_content`` is asserted
-equal to the text JSON whenever this SDK supplies both (a bare ``dict`` return
-annotation does not publish an output schema here).
+3. ``test_cli_source_selection_and_awaited_launch`` pins the source-selection
+   CLI: help as a deliberate stdout response before any source work, ``argv=None``
+   versus explicit argv, the exact published default feed, an explicit literal
+   URL, literal (including relative) file paths, optional ``--cache-dir``
+   pass-through, mutual exclusion in both flag orders, missing values,
+   unknown/abbreviated options and installed ``--root`` rejection, plus the one
+   fixed non-reflective configuration diagnostic. Construction is WRAPPED, not
+   faked: the real owner validates each selection, its identity reaches the
+   factory, and a real coroutine probe is awaited exactly once by the real
+   ``asyncio.run`` on the main thread, with no acquisition or cache write.
+
+4. ``test_fresh_process_cli_help_launch_and_legacy_root_preservation`` runs real
+   ``python -m watchdog_catalog`` subprocesses from a neutral owned cwd with an
+   empty HOME: ``--help`` under blocked SDK/legacy imports on this interpreter
+   and on the Python 3.11 floor, parse/configuration failures (exit 2, empty
+   stdout, no cache or cwd effects), and a real fixture-file launch whose
+   immediate stdin EOF exits 0 with empty stdout and no cache directory. It then
+   loads the UNCHANGED root ``mcp_server.py`` in a fresh interpreter with an
+   explicitly synthetic no-auth ``config_loader`` and proves ``--root`` is still
+   accepted and defaulted, forwarded once to the local ``build_server``, awaited
+   once, and never replaced by the published transport or remote feed.
+
+Honest scope: these are direct SDK calls, one CLI launch/EOF smoke and
+checkout/module evidence -- not stdio client negotiation, not a clean-install
+console launch, not a wheel transport check and not Git-source publication.
+``structured_content`` is asserted equal to the text JSON whenever this SDK
+supplies both (a bare ``dict`` return annotation does not publish an output
+schema here).
 """
 
 import asyncio
@@ -568,3 +592,492 @@ async def _real_source(workspace):
 def test_direct_sdk_calls_and_raw_argument_boundary(tmp_path):
     asyncio.run(_direct_calls())
     asyncio.run(_real_source(tmp_path))
+
+
+# --------------------------------------------------------------------------
+# group 3: CLI parsing, one literal source selection and the awaited launch
+# --------------------------------------------------------------------------
+class _LaunchProbeServer:
+    """The factory seam's server: a REAL coroutine that proves it was awaited.
+
+    It registers no tools and speaks no protocol -- this is launch WIRING
+    evidence, never a transport claim (real client negotiation is a later unit).
+    """
+
+    def __init__(self):
+        self.body_runs = 0
+        self.loop_runs = 0
+        self.thread_names = []
+
+    async def run_stdio_async(self):
+        import threading
+
+        asyncio.get_running_loop()
+        self.loop_runs += 1
+        self.thread_names.append(threading.current_thread().name)
+        self.body_runs += 1
+
+
+class _CliSeams:
+    """Observe the construction/factory/runner seams around the REAL owner.
+
+    ``_construct_source`` is WRAPPED, never faked: the real
+    :class:`AsyncCatalogSource` still validates the selection, so the recorded
+    arguments are exactly what the CLI selected and the recorded owner is a
+    genuinely configured owner. ``_create_server`` yields the coroutine probe and
+    ``_run_coroutine`` delegates to the real :func:`asyncio.run`.
+    """
+
+    def __init__(self, cli):
+        self.cli = cli
+        self.real_construct = cli._construct_source
+        self.real_runner = cli._run_coroutine
+        self.reset()
+
+    def reset(self):
+        self.probe = _LaunchProbeServer()
+        self.constructed = []
+        self.factory_owners = []
+        self.runner_calls = 0
+
+    def install(self, monkeypatch):
+        import inspect
+
+        seams = self
+
+        def construct(kind, location, cache_dir):
+            owner = seams.real_construct(kind, location, cache_dir)
+            seams.constructed.append((kind, location, cache_dir, owner))
+            return owner
+
+        def create_server(owner):
+            seams.factory_owners.append(owner)
+            return seams.probe
+
+        def run(coroutine):
+            assert inspect.iscoroutine(coroutine), (
+                "the CLI must give asyncio.run a coroutine object, not "
+                f"{type(coroutine).__name__}")
+            seams.runner_calls += 1
+            return seams.real_runner(coroutine)
+
+        monkeypatch.setattr(self.cli, "_construct_source", construct)
+        monkeypatch.setattr(self.cli, "_create_server", create_server)
+        monkeypatch.setattr(self.cli, "_run_coroutine", run)
+
+
+SELECTION_HELP_NEEDLES = (
+    "stdio",
+    "stdin",
+    "stderr",
+    "--catalog-url",
+    "--catalog-file",
+    "--cache-dir",
+    "mutually exclusive",
+)
+
+
+def test_cli_source_selection_and_awaited_launch(tmp_path, monkeypatch):
+    import contextlib
+    import io
+    import os
+    import sys as system
+
+    import watchdog_catalog.__main__ as cli
+    from watchdog_catalog import source as source_module
+
+    published = source_module.DEFAULT_CATALOG_URL
+    assert published.startswith("https://raw.githubusercontent.com/"), (
+        f"the published default feed is not the reviewed HTTPS feed: {published!r}")
+
+    # Importing the entrypoint defines the command and runs nothing.
+    assert cli.PROGRAM == "free-inference-watchdog-mcp"
+    assert callable(cli.main) and cli.main.__module__ == "watchdog_catalog.__main__"
+
+    seams = _CliSeams(cli)
+    seams.install(monkeypatch)
+
+    # -- help is a deliberate stdout response, before any source work --------
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with pytest.raises(SystemExit) as helped:
+            cli.main(["--help"])
+    assert helped.value.code == 0
+    help_text = out.getvalue()
+    assert err.getvalue() == ""
+    assert help_text.startswith("usage: free-inference-watchdog-mcp"), help_text
+    for needle in SELECTION_HELP_NEEDLES:
+        assert needle in help_text, (needle, help_text)
+    assert published in help_text, "help names the default remote feed"
+    assert "--root" not in help_text, "the installed command exposes no --root"
+    assert seams.constructed == [] and seams.factory_owners == []
+    assert seams.runner_calls == 0
+
+    fixture = str(FIXTURE)
+    literal_url = "http://127.0.0.1:9/synthetic-catalogue.json"
+    relative_file = "owned/relative-catalogue.json"
+    cache = tmp_path / "selected-cache"
+
+    # -- argv=None reads sys.argv exactly like the console entrypoint --------
+    monkeypatch.setattr(system, "argv", [cli.PROGRAM])
+    seams.reset()
+    assert cli.main() == 0
+    assert [row[:3] for row in seams.constructed] == [("url", published, None)], (
+        "with no selection the published DEFAULT_CATALOG_URL is chosen verbatim")
+
+    monkeypatch.setattr(system, "argv",
+                        [cli.PROGRAM, "--catalog-file", relative_file])
+    seams.reset()
+    assert cli.main() == 0
+    assert [row[:3] for row in seams.constructed] == [
+        ("file", relative_file, None)], (
+        "an explicit file stays file mode with the literal path unchanged")
+
+    # -- every accepted selection, wired once and awaited once --------------
+    launch_rows = [
+        ([], ("url", published, None)),
+        (["--catalog-url", literal_url], ("url", literal_url, None)),
+        (["--catalog-file", relative_file], ("file", relative_file, None)),
+        (["--catalog-url", literal_url, "--cache-dir", str(cache)],
+         ("url", literal_url, str(cache))),
+        (["--catalog-file", fixture, "--cache-dir", str(cache)],
+         ("file", fixture, str(cache))),
+        # flag order is not semantic
+        (["--cache-dir", str(cache), "--catalog-file", relative_file],
+         ("file", relative_file, str(cache))),
+    ]
+    for argv, expected in launch_rows:
+        seams.reset()
+        assert cli.main(argv) == 0, argv
+        assert len(seams.constructed) == 1, (argv, seams.constructed)
+        kind, location, cache_dir, owner = seams.constructed[0]
+        assert (kind, location, cache_dir) == expected, (argv, expected)
+        assert seams.factory_owners == [owner], (
+            f"{argv}: the selected owner must be the object handed to the factory")
+        assert type(owner) is source_module.AsyncCatalogSource
+        # The accepted owner freezes the FILE's lexical absolute path and keeps
+        # an explicit URL literal; it is the constructor, not this CLI, that
+        # decides that.
+        if kind == "file":
+            assert owner._source.location == os.path.abspath(location), (
+                f"{argv}: the real owner freezes the lexical absolute path")
+        else:
+            assert owner._source.location == location, (
+                f"{argv}: an explicit URL stays literal")
+        # Startup is lazy: the accepted owner has read nothing, retained
+        # nothing and written nothing.
+        assert owner._source._bootstrapped is False, argv
+        assert owner._source._entry is None, argv
+        assert seams.probe.body_runs == 1, (
+            f"{argv}: the stdio coroutine body must really run")
+        assert seams.probe.loop_runs == 1, argv
+        assert seams.runner_calls == 1, argv
+        assert seams.probe.thread_names == ["MainThread"], (
+            "the coroutine is awaited in this thread, not a wrapper or process")
+    assert not cache.exists(), "no cache directory is created at startup"
+
+    # -- argument-shape failures exit 2 through argparse, before any wiring --
+    rejected_rows = [
+        (["--catalog-url", literal_url, "--catalog-file", relative_file],
+         "not allowed with argument"),
+        (["--catalog-file", relative_file, "--catalog-url", literal_url],
+         "not allowed with argument"),
+        (["--catalog-url"], "expected one argument"),
+        (["--catalog-file"], "expected one argument"),
+        (["--catalog"], "unrecognized arguments"),
+        (["--catalog-u", literal_url], "unrecognized arguments"),
+        (["--cach", str(cache)], "unrecognized arguments"),
+        (["--root", str(REPO)], "unrecognized arguments"),
+        (["--catalog-file", fixture, "loose-positional"], "unrecognized arguments"),
+    ]
+    for argv, needle in rejected_rows:
+        seams.reset()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with pytest.raises(SystemExit) as rejected:
+                cli.main(argv)
+        assert rejected.value.code == 2, argv
+        assert out.getvalue() == "", f"{argv}: parse failures never write stdout"
+        assert needle in err.getvalue(), (argv, err.getvalue())
+        assert seams.constructed == [] and seams.factory_owners == []
+        assert seams.runner_calls == 0
+    assert not cache.exists()
+
+    # -- the accepted constructor, not the CLI, owns configuration truth ------
+    invalid_rows = [
+        (["--catalog-file", ""], ""),
+        (["--catalog-url", ""], ""),
+        (["--catalog-url", "not-a-url"], "not-a-url"),
+        (["--catalog-url", "ftp://example.com/catalogue.json"],
+         "ftp://example.com/catalogue.json"),
+        (["--catalog-url", "https://"], "https://"),
+        (["--catalog-file", fixture, "--cache-dir", ""], ""),
+    ]
+    fixed = "free-inference-watchdog-mcp: error: Invalid catalogue source configuration.\n"
+    for argv, supplied in invalid_rows:
+        seams.reset()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with pytest.raises(SystemExit) as invalid:
+                cli.main(argv)
+        assert invalid.value.code == 2, argv
+        assert out.getvalue() == "", argv
+        stderr = err.getvalue()
+        assert stderr.endswith(fixed), (argv, stderr)
+        assert "Traceback" not in stderr, argv
+        if supplied:
+            assert supplied not in stderr, (
+                f"{argv}: the fixed diagnostic must not echo the selection")
+        assert seams.constructed == [] and seams.factory_owners == []
+        assert seams.runner_calls == 0
+    assert not cache.exists()
+
+
+# --------------------------------------------------------------------------
+# group 4: fresh-process help/launch isolation and legacy root preservation
+# --------------------------------------------------------------------------
+#: Owned probe hook: refuses the named modules from a scratch ``sitecustomize``
+#: so a real ``python -m watchdog_catalog`` run proves the import graph, rather
+#: than a claim about a spelling of an import statement.
+_ISOLATION_HOOK = '''\
+"""Owned isolation probe: refuse the named modules at interpreter start."""
+import importlib.abc
+import sys
+
+BLOCKED = frozenset(%r)
+
+
+class _Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in BLOCKED or fullname.split(".")[0] in BLOCKED:
+            raise ImportError("blocked import during CLI isolation probe: "
+                              + fullname)
+        return None
+
+
+sys.meta_path.insert(0, _Blocker())
+'''
+
+#: The SDK-dependent and legacy graphs the INSTALLED command must not need for
+#: help, parse failures or serving.
+BLOCKED_FOR_CLI = (
+    "mcp", "mcp_types", "pydantic", "watchdog_catalog.server", "config_loader",
+    "providers", "inference_watchdog", "catalog_export", "envfile", "notify",
+    "diffing", "detection", "alive", "build_site", "pending_removals",
+    "probe_select", "probe_state", "probe_zero_credit", "state",
+)
+
+#: Only the legacy producer/config/state graph: the SDK stays available so the
+#: real serving path can be exercised.
+BLOCKED_LEGACY_ONLY = tuple(
+    name for name in BLOCKED_FOR_CLI
+    if name not in ("mcp", "mcp_types", "pydantic", "watchdog_catalog.server"))
+
+#: The floor interpreter for the stdlib-only help path, overridable for the
+#: legitimate "my 3.11 lives elsewhere" case.
+FLOOR_PYTHON = "/home/kimbo/.local/bin/python3.11"
+
+_LEGACY_LAUNCH_PROBE = '''\
+"""Owned probe: load the UNCHANGED root mcp_server.py with synthetic config.
+
+The real ``config_loader`` resolves provider auth at module scope, so this
+probe installs an explicitly synthetic no-auth module first: no provider file,
+``.env``, HOME token or production state is ever read.
+"""
+import contextlib
+import importlib.util
+import io
+import json
+import sys
+import types
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+explicit = None if sys.argv[2] == "-" else sys.argv[2]
+
+synthetic = types.ModuleType("config_loader")
+synthetic.PROVIDERS = {"synthetic-a": False, "synthetic-b": False}
+synthetic.GATEWAY_WIRING = {"synthetic-a": {}, "synthetic-b": {}}
+sys.modules["config_loader"] = synthetic
+
+sys.path.insert(0, str(repo))
+spec = importlib.util.spec_from_file_location("legacy_mcp_server",
+                                             repo / "mcp_server.py")
+module = importlib.util.module_from_spec(spec)
+sys.modules["legacy_mcp_server"] = module
+spec.loader.exec_module(module)
+
+observed = {"roots": [], "body_runs": 0, "loop_runs": 0}
+
+
+class ProbeServer:
+    async def run_stdio_async(self):
+        import asyncio
+        asyncio.get_running_loop()
+        observed["loop_runs"] += 1
+        observed["body_runs"] += 1
+
+
+probe = ProbeServer()
+
+
+def build_server(root=None):
+    observed["roots"].append(None if root is None else str(root))
+    return probe
+
+
+module.build_server = build_server
+
+help_buffer = io.StringIO()
+with contextlib.redirect_stdout(help_buffer):
+    try:
+        module.main(["--help"])
+    except SystemExit as exit_code:
+        observed["help_code"] = exit_code.code
+observed["help_text"] = help_buffer.getvalue()
+
+observed["code"] = module.main([] if explicit is None else ["--root", explicit])
+observed["repo"] = str(module.REPO)
+observed["cwd"] = str(Path.cwd())
+observed["published"] = sorted(
+    name for name in ("watchdog_catalog.__main__", "watchdog_catalog.server",
+                      "watchdog_catalog.source")
+    if name in sys.modules)
+print(json.dumps(observed))
+'''
+
+
+def test_fresh_process_cli_help_launch_and_legacy_root_preservation(tmp_path):
+    import json as json_module
+    import os
+
+    scratch = tmp_path / "probe"
+    neutral = scratch / "cwd"
+    home = scratch / "home"
+    hooks_sdk = scratch / "hooks-sdk"
+    hooks_legacy = scratch / "hooks-legacy"
+    scratch.mkdir()
+    for directory in (neutral, home, hooks_sdk, hooks_legacy):
+        directory.mkdir()
+    (hooks_sdk / "sitecustomize.py").write_text(
+        _ISOLATION_HOOK % (tuple(sorted(BLOCKED_FOR_CLI)),), encoding="utf-8")
+    (hooks_legacy / "sitecustomize.py").write_text(
+        _ISOLATION_HOOK % (tuple(sorted(BLOCKED_LEGACY_ONLY)),), encoding="utf-8")
+
+    def environment(hooks=None):
+        path = [str(REPO)] if hooks is None else [str(hooks), str(REPO)]
+        return {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": str(home),
+            "PYTHONPATH": os.pathsep.join(path),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+        }
+
+    def module_cli(python, argv, *, hooks=None):
+        return subprocess.run(
+            [str(python), "-B", "-m", "watchdog_catalog", *argv],
+            cwd=str(neutral), env=environment(hooks), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=180)
+
+    def assert_no_effects():
+        assert sorted(neutral.iterdir()) == [], "the CLI wrote into cwd"
+        assert sorted(home.iterdir()) == [], "the CLI created cache/HOME state"
+
+    # -- help with the SDK and the whole legacy graph blocked ---------------
+    blocked_help = module_cli(sys.executable, ["--help"], hooks=hooks_sdk)
+    assert blocked_help.returncode == 0, blocked_help.stderr[-4000:]
+    assert "usage: free-inference-watchdog-mcp" in blocked_help.stdout
+    for needle in SELECTION_HELP_NEEDLES:
+        assert needle in blocked_help.stdout, needle
+    assert blocked_help.stderr == ""
+    assert_no_effects()
+
+    # -- the same stdlib-only help on the floor interpreter ----------------
+    floor = Path(os.environ.get("FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON",
+                                FLOOR_PYTHON))
+    assert floor.exists(), (
+        f"the Python 3.11 floor interpreter is missing: {floor}. Install it "
+        "or set FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON to a 3.11 interpreter.")
+
+    # The floor interpreter has no mcp/pytest, which is exactly the point: help
+    # must not need them.
+    floor_help = module_cli(floor, ["--help"], hooks=hooks_sdk)
+    assert floor_help.returncode == 0, floor_help.stderr[-4000:]
+    assert "usage: free-inference-watchdog-mcp" in floor_help.stdout
+    for needle in SELECTION_HELP_NEEDLES:
+        assert needle in floor_help.stdout, needle
+    assert floor_help.stderr == ""
+    assert_no_effects()
+
+    # -- subprocess parse/configuration failures: exit 2, empty stdout -----
+    subprocess_failures = [
+        (["--catalog-url", "http://127.0.0.1:9/catalogue.json",
+          "--catalog-file", str(FIXTURE)], "not allowed with argument"),
+        (["--catalog-file", str(FIXTURE), "--catalog-url",
+          "http://127.0.0.1:9/catalogue.json"], "not allowed with argument"),
+        (["--root", str(REPO)], "unrecognized arguments"),
+        (["--catalog-file"], "expected one argument"),
+        (["--catalog-url", "not-a-url"],
+         "Invalid catalogue source configuration."),
+    ]
+    for argv, needle in subprocess_failures:
+        failed = module_cli(sys.executable, argv, hooks=hooks_sdk)
+        assert failed.returncode == 2, (argv, failed.stderr[-2000:])
+        assert failed.stdout == "", f"{argv}: parse failures must not use stdout"
+        assert needle in failed.stderr, (argv, failed.stderr[-2000:])
+        assert "blocked import" not in failed.stderr, argv
+    assert_no_effects()
+
+    # -- the REAL package CLI: fixture file + immediate stdin EOF ----------
+    # Legacy modules stay blocked: the installed command must serve the
+    # projected public catalogue without the producer/config/state graph. This
+    # is a launch/EOF smoke, NOT an initialize/tools/call protocol claim.
+    cache = scratch / "launch-cache"
+    launch = module_cli(
+        sys.executable,
+        ["--catalog-file", str(FIXTURE), "--cache-dir", str(cache)],
+        hooks=hooks_legacy)
+    assert launch.returncode == 0, launch.stderr[-4000:]
+    assert launch.stdout == "", (
+        "protocol stdout carried incidental messages: " + launch.stdout[:2000])
+    assert "Traceback" not in launch.stderr, launch.stderr[-4000:]
+    assert "was never awaited" not in launch.stderr, launch.stderr[-4000:]
+    assert not cache.exists(), "an EOF-only run acquires and caches nothing"
+    assert_no_effects()
+
+    # -- the unchanged root script keeps its LOCAL compatibility route ------
+    script = scratch / "legacy_launch_probe.py"
+    script.write_text(_LEGACY_LAUNCH_PROBE, encoding="utf-8")
+    explicit_root = scratch / "owned-legacy-root"
+    explicit_root.mkdir()
+
+    def legacy(*args):
+        return subprocess.run(
+            [sys.executable, "-I", "-B", str(script), str(REPO), *args],
+            cwd=str(neutral),
+            env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                 "HOME": str(home)},
+            capture_output=True, text=True, timeout=180)
+
+    for argument, expected_root in (("-", str(REPO)),
+                                    (str(explicit_root), str(explicit_root))):
+        result = legacy(argument)
+        assert result.returncode == 0, result.stderr[-4000:]
+        assert result.stderr == "", result.stderr[-4000:]
+        observed = json_module.loads(result.stdout)
+        assert observed["code"] == 0
+        assert observed["roots"] == [expected_root], (
+            "the root script forwards exactly one root to its LOCAL build_server")
+        assert observed["body_runs"] == 1 and observed["loop_runs"] == 1, (
+            "the root script still awaits its own stdio coroutine exactly once")
+        assert observed["repo"] == str(REPO)
+        assert observed["published"] == [], (
+            "the local route must not import the published transport: "
+            f"{observed['published']}")
+        assert observed["help_code"] == 0
+        assert "--root" in observed["help_text"]
+        assert "--catalog-url" not in observed["help_text"] and \
+            "--cache-dir" not in observed["help_text"], (
+            "the root script's CLI surface stays --root only")
+    assert_no_effects()
