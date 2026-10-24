@@ -1,14 +1,24 @@
-"""Units 9b-9c: publisher lock, validated-build gate and restricted local commit.
+"""Units 9b-9d: publisher lock, validated-build gate, local commit, opt-in push.
 
-The helper is a LOCAL gate: it takes ONE dedicated publish lock, runs the real
-``build_site.py`` against an explicit ``--root``, reads the EXACT final
-``site/catalog.json`` + ``site/index.html`` bytes back and hands them to the
-builder's own ``validate_artifact_pair``, and -- only after that pair is
+The helper is a local publication gate: it takes ONE dedicated publish lock,
+runs the real ``build_site.py`` against an explicit ``--root``, reads the EXACT
+final ``site/catalog.json`` + ``site/index.html`` bytes back and hands them to
+the builder's own ``validate_artifact_pair``, and -- only after that pair is
 accepted -- commits exactly those two allowlisted paths in the selected root's
-own Git repository, inside the SAME lock lifetime. It pushes nothing, deploys
-nothing and never touches the network: exit 0 means only that the local
-artifact pair was validated and its local commit handled, never that GitHub or
-the public site changed.
+own Git repository, inside the SAME lock lifetime. Without ``--push`` it contacts
+no remote at all: exit 0 means only that the local artifact pair was validated
+and its local commit handled, never that GitHub or the public site changed.
+
+With the explicit ``--push`` opt-in (unit 9d) the SAME lock lifetime then covers
+publication: the verified candidate commit is pushed to the selected root's one
+configured upstream branch ref at its one resolved PUSH URL, and the exact
+destination ref is read back before any success is claimed. A no-artifact-change
+run rejoins that path instead of exiting early, so a previously committed (or
+previously rejected) artifact commit is retried rather than forgotten. A
+zero-exit push is never trusted, a remote write is never rolled back, and no
+force, rebase, reset, fetch, branch bootstrap, config write or tag publication is
+authorized. Ref equality is a Git-ref publication, NOT proof of Pages deployment,
+hosted CI or any public read-back.
 
 Pinned here, through real Bash subprocess execution against owned synthetic
 roots (no provider call, credential, installed Hermes state, public remote or
@@ -68,12 +78,20 @@ live roster):
   normalisation, performed by Bash command substitution);
 * the publication lock is still held INSIDE a real commit hook: a second
   helper cannot enter its builder while the hook runs, and an independent
-  nonblocking acquisition of the same inode only succeeds afterwards.
+  nonblocking acquisition of the same inode only succeeds afterwards;
+* the explicit ``--push`` opt-in publishes the verified candidate to the one
+  configured upstream branch at the one resolved PUSH URL, refuses to guess a
+  remote, branch, ``push.default`` or tag set, retries a previously committed but
+  unpushed candidate on a no-change run, refuses a divergent destination or an
+  unpublished range that carries a foreign path, and never claims success from a
+  zero-exit push or a stale ref read-back (see the publication test below).
 
 Fault injection and coordination live ONLY in this test module: the production
 helper exposes no test switch, callback or fake-success mode. Artifact commits
-are created only in owned temporary repositories; nothing here pushes, and no
-remote exists.
+and pushes are created only in owned temporary repositories: every push and every
+remote read-back in this module targets a local BARE repository created under the
+test's own tmp dir, never the public repository, never a provider and never an
+installed wrapper.
 """
 
 from __future__ import annotations
@@ -351,6 +369,16 @@ elif MODE == "invalid_json":
 elif MODE == "non_utf8":
     (site / "catalog.json").write_bytes(
         b'{"schema_version": 1, "note": "\\xff\\xfe"}')
+elif MODE == "postbuild_symlink":
+    # The builder just rewrote the pair (atomically, so a pre-arranged symlink
+    # could not survive it). Replace the published page with a link to a copy
+    # holding EXACTLY those bytes: a byte-only comparison cannot see the
+    # difference, and ``git diff`` is made to report no change by the owned
+    # launcher -- only the frozen working-artifact TYPE check can refuse this.
+    saved = site / "index.html.saved"
+    shutil.copyfile(site / "index.html", saved)
+    (site / "index.html").unlink()
+    (site / "index.html").symlink_to(saved.name)
 raise SystemExit(0)
 '''
 
@@ -417,10 +445,14 @@ def _args(root, interpreter=None):
     return args
 
 
-def _run(root, interpreter, env, cwd):
-    """Run the helper synchronously, capturing stdout and stderr separately."""
+def _run(root, interpreter, env, cwd, extra=()):
+    """Run the helper synchronously, capturing stdout and stderr separately.
+
+    ``extra`` carries only interface flags the helper really exposes (the
+    explicit ``--push`` opt-in); nothing here drives the helper internals.
+    """
     return subprocess.run(
-        [str(HELPER)] + _args(root, interpreter),
+        [str(HELPER)] + _args(root, interpreter) + list(extra),
         capture_output=True,
         text=True,
         env=env,
@@ -437,13 +469,13 @@ class _Helper:
     still available for diagnostics after the process is gone.
     """
 
-    def __init__(self, root, interpreter, env, cwd, tag):
+    def __init__(self, root, interpreter, env, cwd, tag, extra=()):
         out_dir = Path(env["PUBLISH_TEST_LOG"]).parent
         self.stdout_path = out_dir / f"{tag}.stdout"
         self.stderr_path = out_dir / f"{tag}.stderr"
         self._handles = (self.stdout_path.open("wb"), self.stderr_path.open("wb"))
         self.proc = subprocess.Popen(
-            [str(HELPER)] + _args(root, interpreter),
+            [str(HELPER)] + _args(root, interpreter) + list(extra),
             stdout=self._handles[0],
             stderr=self._handles[1],
             env=env,
@@ -772,6 +804,86 @@ def _with_path(env, shim_dir):
 
 def _shim_calls(log):
     return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+# --------------------------------------------------------------------------
+# owned publication scaffolding: local BARE destinations, scoped launchers
+# --------------------------------------------------------------------------
+
+def _bare(tmp_path, name):
+    """An owned local BARE repository: the only push destination in these tests."""
+    path = tmp_path / name
+    _git(tmp_path, "init", "-q", "--bare", "--initial-branch=main", str(path))
+    return path
+
+
+def _remote_refs(bare):
+    """Every ref of an owned bare destination, as ``{refname: object id}``."""
+    out = _git(bare, "for-each-ref", "--format=%(refname) %(objectname)").stdout
+    refs = {}
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        name, _, oid = line.partition(" ")
+        refs[name] = oid.strip()
+    return refs
+
+
+def _remote_head(bare):
+    """The destination branch tip actually stored in the owned bare repo."""
+    return _remote_refs(bare).get("refs/heads/main")
+
+
+def _configure_upstream(root, destination, remote="origin", branch="main"):
+    """Explicit synthetic upstream: one named remote, one branch destination."""
+    _git(root, "remote", "add", remote, str(destination))
+    _git(root, "config", f"branch.{branch}.remote", remote)
+    _git(root, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+
+
+def _receive_hook(bare, name, lines):
+    """Owned receive-side hook inside a bare destination (real, executed)."""
+    hook = bare / "hooks" / name
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/usr/bin/env bash\nset -u\n" + "".join(lines),
+                    encoding="utf-8")
+    hook.chmod(0o755)
+    return hook
+
+
+def _git_branch_shim(tmp_path, name, subcommand, lines, extra_handlers=None):
+    """Owned git launcher: SUBCOMMAND runs LINES instead of the real git.
+
+    The real git still performs every other subcommand, and the named ones too
+    when their LINES fall through without exiting, so a test can make a zero-exit
+    push that pushed nothing, a real push whose ref is then rewound, an
+    unreadable post-push endpoint, or Git's own "no change" observation --
+    without any switch in the production helper.
+    """
+    real = shutil.which("git")
+    assert real, "these publication tests require the git executable"
+    shim_dir = tmp_path / name
+    shim_dir.mkdir()
+    log = tmp_path / f"{name}.log"
+    handlers = {}
+    if subcommand is not None:
+        handlers[subcommand] = list(lines)
+    handlers.update({key: list(value)
+                     for key, value in (extra_handlers or {}).items()})
+    body = [
+        "#!/usr/bin/env bash",
+        "set -u",
+        f"printf '%s\\n' \"$*\" >> {str(log)!r}",
+    ]
+    for handled, handled_lines in handlers.items():
+        body.append(f'case " $* " in *" {handled} "*)')
+        body += ["    " + line for line in handled_lines]
+        body += ["    ;;", "esac"]
+    body.append(f'exec {real} "$@"')
+    shim = shim_dir / "git"
+    shim.write_text("\n".join(body) + "\n", encoding="utf-8")
+    shim.chmod(0o755)
+    return shim_dir, log
 
 
 def _wait_path(path, timeout=HOLD_S):
@@ -2117,10 +2229,708 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     # The allowlist is literal: no glob, no directory, no computed path.
     assert "readonly ARTIFACT_INDEX='site/index.html'" in source
     assert "readonly ARTIFACT_CATALOG='site/catalog.json'" in source
-    assert "no-verify" not in source, "the helper must never bypass commit hooks"
+    assert "no-verify" not in source, "the helper must never bypass hooks"
     assert "git_root init" not in source, "the helper must never initialise a repository"
-    assert not any("git_root" in line and "push" in line
-                   for line in source.splitlines()), "no push in this unit"
+    # Publication is ONE explicitly scoped, non-forcing refspec per push, sent
+    # through the bounded noninteractive remote wrapper to the resolved PUSH
+    # URL -- never through the root's default refspec, push.default, a mirror,
+    # a forced update, a tag publication or an upstream configuration write.
+    assert source.count("push --quiet --no-follow-tags") == 1, "one scoped push"
+    push_command = [line for line in source.splitlines()
+                    if "push --quiet --no-follow-tags" in line][0]
+    for forbidden in ("--force", "--delete", "--mirror", "--all", "--tags",
+                      "set-upstream", "no-verify"):
+        assert forbidden not in push_command, (forbidden, push_command)
+    for token in ("--no-follow-tags", "--recurse-submodules=no",
+                  "remote get-url --push --all", "ls-remote --refs --exit-code",
+                  "merge-base --is-ancestor", "push/config", "push/inspect",
+                  "push/history", "push/send", "push/verify",
+                  "GIT_TERMINAL_PROMPT=0"):
+        assert token in source, token
+    # No git command line may force, delete, mirror, fetch, initialise, rewrite
+    # configuration or create an upstream/tracking relationship.
+    command_lines = [line.strip() for line in source.splitlines()
+                     if line.strip().startswith(("remote_git ", "git_root "))]
+    for forbidden in ("--force", "--delete", "--mirror", "remote add",
+                      "remote set-url", "remote update", "remote prune",
+                      " fetch ", " init ", " config --add", " config --set",
+                      " config --replace-all", " config --unset"):
+        assert not any(forbidden in line for line in command_lines), (
+            forbidden, command_lines)
 
     # --- this helper's own checkout was never a commit target -------------
     assert _head(REPO) == helper_source_head
+# --------------------------------------------------------------------------
+# 5. opt-in publication: one destination, retry, exact read-back
+# --------------------------------------------------------------------------
+
+def test_push_mode_publishes_retries_and_reads_the_exact_destination(tmp_path):
+    """Opt-in ``--push``: one destination, retry after failure, exact read-back.
+
+    Every push here targets an owned local BARE repository created under this
+    test's tmp dir; no provider config, credential, public remote or installed
+    wrapper is involved and no command here contacts the network.
+
+    (A) first publication: the real artifact commit reaches the single
+        configured upstream branch and its remote blobs are the verified local
+        candidate; only that branch moves (``push.default=matching`` and a
+        second local branch change nothing) and an unrelated annotated tag stays
+        unpublished even with ``push.followTags`` configured; all six unrelated
+        dirty/index shapes survive; a later default (no ``--push``) invocation
+        commits locally while issuing NO remote command;
+    (B) a real rejecting ``pre-receive`` hook: exit 2 at ``stage=push/send``, the
+        local artifact commit is kept, the destination stays at the seeded tip
+        and the endpoint path is never echoed; after the owned rejector is
+        removed the SAME bytes are retried with no new local commit, and a
+        further identical run takes the already-current path without a push;
+    (C) two artifact-only commits that were never pushed publish in order, and
+        the earlier one is really on the destination afterwards;
+    (D) a failed build, an invalid pair and a rejected local commit issue no
+        push at all, and a same-bytes no-change run whose candidate blobs do not
+        match the frozen identities -- or whose working artifact was replaced by
+        a same-bytes symlink -- neither pushes nor claims already-current (with
+        an owned launcher that hides Git's own no-diff observation);
+    (E) an absent/duplicated upstream, the local repository as upstream, two
+        push URLs, a mirror remote and a missing destination branch are refused
+        instead of guessed;
+    (F) discovery and read-back use the ACTUAL push URL when the fetch URL is a
+        different repository;
+    (G) the history boundary fails closed: a divergent destination tip that is
+        known locally, an ahead range carrying an unrelated private path, and an
+        artifact-only range whose intermediate pair the real validator rejects;
+    (H) a zero-exit push that pushed nothing, a ref that reads back stale and an
+        endpoint that cannot be read back at all after a real push are all
+        rejected with an honest "a remote write may already have occurred";
+    (I) the publish lock covers publication AND the post-push read-back: a
+        blocking receive hook and a blocking read-back launcher both find the
+        same lock inode held, and a second helper cannot enter its builder.
+    """
+    from catalog_export import validate_artifact_pair
+
+    cwd = tmp_path / "push cwd"
+    cwd.mkdir()
+    env = _env()
+    real_git = shutil.which("git")
+    assert real_git, "the publication tests require the git executable"
+
+    # --- (A) first publication to one owned bare destination --------------
+    root = tmp_path / "push root"
+    _plant_tracked(root)
+    baseline = _init_repo(root, tracked=sorted(TRACKED_FILES))
+    bare = _bare(tmp_path, "destination bare.git")
+    _configure_upstream(root, bare)
+    # The destination is seeded EXPLICITLY from the synthetic baseline.
+    _git(root, "push", "-q", str(bare), "HEAD:refs/heads/main")
+    assert _remote_refs(bare) == {"refs/heads/main": baseline}
+    # An unrelated branch on the destination, a second LOCAL branch and
+    # push.default=matching: only the configured upstream branch may move.
+    _git(bare, "branch", "unrelated-branch", baseline)
+    _git(root, "branch", "local-only", baseline)
+    _git(root, "config", "push.default", "matching")
+    # An unrelated annotated tag plus tag-following configured: tag refs are
+    # never part of a branch publication.
+    _git(root, "tag", "-a", "unrelated-synthetic", "-m",
+         "synthetic annotated tag", baseline)
+    _git(root, "config", "push.followTags", "true")
+    _write_roster(root, ROSTER)
+    _make_dirty(root)
+    dirty_before = _dirty_snapshot(root)
+    status_before = _status(root)
+
+    published = _run(root, sys.executable, env, cwd, extra=("--push",))
+    assert published.returncode == 0, published.stderr
+    assert published.stdout == "", published.stdout
+    candidate = _head(root)
+    assert candidate != baseline
+    assert _parents(root) == [baseline]
+    assert _commit_paths(root) == list(ARTIFACTS)
+    assert f"pushed {candidate}" in published.stderr, published.stderr
+    assert "read that exact ref back" in published.stderr, published.stderr
+    assert "no Pages deployment" in published.stderr, published.stderr
+
+    # The destination carries exactly the verified local candidate, and only
+    # the intended branch moved.
+    assert _remote_refs(bare) == {
+        "refs/heads/main": candidate,
+        "refs/heads/unrelated-branch": baseline,
+    }, _remote_refs(bare)
+    remote_catalog = _blob(bare, candidate, "site/catalog.json")
+    remote_index = _blob(bare, candidate, "site/index.html")
+    assert remote_catalog == _blob(root, "HEAD", "site/catalog.json")
+    assert remote_index == _blob(root, "HEAD", "site/index.html")
+    assert remote_catalog == (root / CATALOG).read_bytes()
+    assert remote_index == (root / INDEX).read_bytes()
+    validate_artifact_pair(remote_catalog.decode("utf-8"),
+                           remote_index.decode("utf-8"))
+    assert "refs/heads/local-only" not in _remote_refs(bare), _remote_refs(bare)
+    assert not any(ref.startswith("refs/tags/") for ref in _remote_refs(bare)), (
+        "an annotated tag must never ride along with a branch publication")
+    assert _dirty_snapshot(root) == dirty_before
+    assert _status(root) == status_before
+
+    # --- a default invocation on the same root never contacts the remote ---
+    _write_roster(root, ROSTER2)
+    no_push_shim, no_push_log = _git_shim(tmp_path, "no-push git")
+    interpreter, log, no_push_env = _harness(tmp_path, mode="pass")
+    local_only = _run(root, interpreter, _with_path(no_push_env, no_push_shim), cwd)
+    assert local_only.returncode == 0, local_only.stderr
+    assert local_only.stdout == ""
+    assert "committed locally" in local_only.stderr, local_only.stderr
+    second_candidate = _head(root)
+    assert second_candidate != candidate
+    assert _remote_head(bare) == candidate, "the default run must not push"
+    remote_calls = [call for call in _shim_calls(no_push_log)
+                    if " push " in call or " ls-remote " in call or " get-url " in call]
+    assert remote_calls == [], remote_calls
+    assert _dirty_snapshot(root) == dirty_before
+    assert _status(root) == status_before
+
+    # --- (B) a real rejecting receive hook, then the SAME bytes retried ---
+    retry_root = tmp_path / "retry root"
+    _plant_tracked(retry_root)
+    retry_baseline = _init_repo(retry_root, tracked=sorted(TRACKED_FILES))
+    retry_bare = _bare(tmp_path, "retry bare.git")
+    _configure_upstream(retry_root, retry_bare)
+    _git(retry_root, "push", "-q", str(retry_bare), "HEAD:refs/heads/main")
+    _write_roster(retry_root, ROSTER)
+    _make_dirty(retry_root)
+    retry_dirty = _dirty_snapshot(retry_root)
+    retry_status = _status(retry_root)
+    rejector = _receive_hook(retry_bare, "pre-receive", [
+        "echo 'synthetic pre-receive rejection' >&2\n",
+        "exit 1\n",
+    ])
+    rejected = _run(retry_root, sys.executable, env, cwd, extra=("--push",))
+    assert rejected.returncode == 2, (rejected.returncode, rejected.stderr)
+    _assert_not_success(rejected, "rejected push")
+    assert "stage=push/send" in rejected.stderr, rejected.stderr
+    assert "retained for a later retry" in rejected.stderr, rejected.stderr
+    assert str(retry_bare) not in rejected.stderr, (
+        "the endpoint path must never be echoed into diagnostics", rejected.stderr)
+    pending = _head(retry_root)
+    assert _parents(retry_root) == [retry_baseline]
+    assert _commit_paths(retry_root) == list(ARTIFACTS)
+    assert _remote_refs(retry_bare) == {"refs/heads/main": retry_baseline}
+    assert _dirty_snapshot(retry_root) == retry_dirty
+    assert _status(retry_root) == retry_status
+
+    # Remove the owned rejector and retry the SAME roster/artifact bytes: no new
+    # local commit is made, and the previously committed candidate is pushed.
+    rejector.unlink()
+    commits_before = _commit_count(retry_root)
+    retried_shim, retried_log = _git_shim(tmp_path, "retried push git")
+    retried = _run(retry_root, sys.executable, _with_path(_env(), retried_shim),
+                   cwd, extra=("--push",))
+    assert retried.returncode == 0, retried.stderr
+    assert retried.stdout == ""
+    assert _commit_count(retry_root) == commits_before, (
+        "a retry must not create another artifact commit")
+    assert _head(retry_root) == pending
+    assert f"pushed {pending}" in retried.stderr, retried.stderr
+    push_calls = [call for call in _shim_calls(retried_log) if " push " in call]
+    assert len(push_calls) == 1, push_calls
+    assert _remote_refs(retry_bare) == {"refs/heads/main": pending}
+    assert _blob(retry_bare, pending, "site/catalog.json") == (retry_root / CATALOG).read_bytes()
+    assert _blob(retry_bare, pending, "site/index.html") == (retry_root / INDEX).read_bytes()
+    assert _dirty_snapshot(retry_root) == retry_dirty
+
+    # A further identical run is already current: it inspects the remote, then
+    # pushes nothing and commits nothing.
+    current_shim, current_log = _git_shim(tmp_path, "already-current git")
+    already = _run(retry_root, sys.executable, _with_path(_env(), current_shim),
+                   cwd, extra=("--push",))
+    assert already.returncode == 0, already.stderr
+    assert already.stdout == ""
+    assert "is current" in already.stderr, already.stderr
+    assert _commit_count(retry_root) == commits_before
+    assert _head(retry_root) == pending
+    assert _remote_refs(retry_bare) == {"refs/heads/main": pending}
+    current_calls = _shim_calls(current_log)
+    assert any(" ls-remote " in call for call in current_calls), current_calls
+    assert not any(" push " in call for call in current_calls), current_calls
+    assert _dirty_snapshot(retry_root) == retry_dirty
+
+    # --- (C) two never-pushed artifact commits publish in order -----------
+    order_root = tmp_path / "order root"
+    _plant_tracked(order_root)
+    order_baseline = _init_repo(order_root, tracked=sorted(TRACKED_FILES))
+    order_bare = _bare(tmp_path, "order bare.git")
+    _configure_upstream(order_root, order_bare)
+    _git(order_root, "push", "-q", str(order_bare), "HEAD:refs/heads/main")
+    _write_roster(order_root, ROSTER)
+    local_first = _run(order_root, sys.executable, env, cwd)
+    assert local_first.returncode == 0, local_first.stderr
+    first_commit = _head(order_root)
+    assert _parents(order_root) == [order_baseline]
+    _write_roster(order_root, ROSTER2)
+    local_second = _run(order_root, sys.executable, env, cwd)
+    assert local_second.returncode == 0, local_second.stderr
+    second_commit = _head(order_root)
+    assert _parents(order_root) == [first_commit]
+    assert _commit_paths(order_root) == list(ARTIFACTS)
+    assert _remote_refs(order_bare) == {"refs/heads/main": order_baseline}
+    order_commits = _commit_count(order_root)
+    ordered = _run(order_root, sys.executable, env, cwd, extra=("--push",))
+    assert ordered.returncode == 0, ordered.stderr
+    assert ordered.stdout == ""
+    assert _commit_count(order_root) == order_commits
+    assert _remote_refs(order_bare) == {"refs/heads/main": second_commit}
+    assert _git(order_bare, "merge-base", "--is-ancestor", order_baseline,
+                first_commit, check=False).returncode == 0
+    assert _git(order_bare, "merge-base", "--is-ancestor", first_commit,
+                second_commit, check=False).returncode == 0
+    assert _blob(order_bare, first_commit, "site/catalog.json") == _blob(
+        order_root, first_commit, "site/catalog.json")
+    assert _blob(order_bare, second_commit, "site/index.html") == (
+        order_root / INDEX).read_bytes()
+    assert f"pushed {second_commit}" in ordered.stderr, ordered.stderr
+
+    # --- (D) failed build, pair, commit or identity never reaches a push ---
+    gate_root = tmp_path / "gate root"
+    _plant_tracked(gate_root)
+    _init_repo(gate_root, tracked=sorted(TRACKED_FILES))
+    gate_bare = _bare(tmp_path, "gate bare.git")
+    _configure_upstream(gate_root, gate_bare)
+    _git(gate_root, "push", "-q", str(gate_bare), "HEAD:refs/heads/main")
+    _write_roster(gate_root, ROSTER)
+    gate_seed = _run(gate_root, sys.executable, env, cwd, extra=("--push",))
+    assert gate_seed.returncode == 0, gate_seed.stderr
+    approved_head = _head(gate_root)
+    approved_catalog = _blob(gate_root, "HEAD", "site/catalog.json")
+    approved_index = _blob(gate_root, "HEAD", "site/index.html")
+    assert _remote_refs(gate_bare) == {"refs/heads/main": approved_head}
+    _make_dirty(gate_root)
+    gate_dirty = _dirty_snapshot(gate_root)
+    gate_shim, gate_log = _git_shim(tmp_path, "gate git")
+
+    _write_raw_roster(gate_root, "THIS IS NOT JSON{{")
+    interpreter, log, build_env = _harness(tmp_path, mode="pass")
+    broken = _run(gate_root, interpreter, _with_path(build_env, gate_shim), cwd,
+                  extra=("--push",))
+    assert broken.returncode == 2, broken.stderr
+    assert "stage=builder" in broken.stderr, broken.stderr
+
+    _write_roster(gate_root, ROSTER2)
+    interpreter, log, pair_env = _harness(tmp_path, mode="mismatch")
+    bad_pair = _run(gate_root, interpreter, _with_path(pair_env, gate_shim), cwd,
+                    extra=("--push",))
+    assert bad_pair.returncode == 2, bad_pair.stderr
+    assert "stage=validate" in bad_pair.stderr, bad_pair.stderr
+
+    commit_marker = tmp_path / "gate commit hook ran"
+    rejecting = _install_hook(gate_root, "pre-commit", [
+        f"printf 'ran' > {str(commit_marker)!r}\n",
+        "echo 'synthetic hook rejecting the commit' >&2\n",
+        "exit 1\n",
+    ])
+    rejected_commit = _run(gate_root, sys.executable,
+                           _with_path(_env(), gate_shim), cwd, extra=("--push",))
+    assert rejected_commit.returncode == 2, rejected_commit.stderr
+    _assert_not_success(rejected_commit, "rejected local commit")
+    assert "stage=git/commit" in rejected_commit.stderr, rejected_commit.stderr
+    assert commit_marker.exists(), "the repository's own hook never ran"
+    rejecting.unlink()
+    assert _head(gate_root) == approved_head
+    assert _remote_refs(gate_bare) == {"refs/heads/main": approved_head}
+    assert _dirty_snapshot(gate_root) == gate_dirty
+    assert not any(" push " in call or " ls-remote " in call
+                   for call in _shim_calls(gate_log)), _shim_calls(gate_log)
+
+    # Re-sync the approved pair locally (no publication is needed: the remote
+    # already holds it), then make Git itself report NO artifact change while
+    # the committed candidate blob is not the frozen identity.
+    _write_roster(gate_root, ROSTER)
+    resync = _run(gate_root, sys.executable, env, cwd, extra=("--push",))
+    assert resync.returncode == 0, resync.stderr
+    assert "is current" in resync.stderr, resync.stderr
+    (gate_root / CATALOG).write_bytes(approved_catalog + b"\n")
+    _git(gate_root, "add", "--", str(CATALOG))
+    _git(gate_root, "commit", "-q", "--only", "-m",
+         "synthetic baseline: catalog newline", "--", str(CATALOG))
+    assert _commit_paths(gate_root) == [str(CATALOG)]
+    (gate_root / CATALOG).write_bytes(approved_catalog)
+    # The real Git DOES see the difference; the owned launcher reports none, so
+    # only the frozen candidate read-back can refuse this run.
+    assert _git(gate_root, "diff", "--quiet", "--no-ext-diff", "HEAD",
+                "--", str(CATALOG), check=False).returncode == 1
+    nodiff_shim, nodiff_log = _git_branch_shim(tmp_path, "no-diff git", "diff",
+                                               ["exit 0"])
+    hidden = _run(gate_root, sys.executable, _with_path(_env(), nodiff_shim), cwd,
+                  extra=("--push",))
+    assert hidden.returncode == 2, hidden.stderr
+    _assert_not_success(hidden, "hidden candidate blob difference")
+    assert "stage=git/verify" in hidden.stderr, hidden.stderr
+    assert "does not match the validated bytes" in hidden.stderr, hidden.stderr
+    assert not any(" push " in call for call in _shim_calls(nodiff_log)), (
+        _shim_calls(nodiff_log))
+    assert _remote_refs(gate_bare) == {"refs/heads/main": approved_head}
+
+    # Restore the approved catalogue, then let an OWNED post-build step replace
+    # the freshly written page with a symlink holding exactly the approved
+    # bytes (the real build rewrites the pair atomically, so this cannot be
+    # pre-arranged in the tree). The reviewed pre-Git type guard refuses this
+    # before the diff, the commit or any remote contact; Git is told "no change"
+    # as well, so the run still cannot push or claim already-current.
+    (gate_root / CATALOG).write_bytes(approved_catalog)
+    _git(gate_root, "add", "--", str(CATALOG))
+    _git(gate_root, "commit", "-q", "--only", "-m",
+         "synthetic baseline: restore catalog", "--", str(CATALOG))
+    assert _blob(gate_root, "HEAD", "site/catalog.json") == approved_catalog
+    interpreter, log, linked_env = _harness(tmp_path, mode="postbuild_symlink")
+    linked = _run(gate_root, interpreter, _with_path(linked_env, nodiff_shim), cwd,
+                  extra=("--push",))
+    assert linked.returncode == 2, linked.stderr
+    _assert_not_success(linked, "working artifact type")
+    assert "stage=git" in linked.stderr, linked.stderr
+    assert "not a regular file" in linked.stderr, linked.stderr
+    assert "is current" not in linked.stderr, linked.stderr
+    assert not any(" push " in call for call in _shim_calls(nodiff_log))
+    assert _remote_refs(gate_bare) == {"refs/heads/main": approved_head}
+    assert (gate_root / INDEX).is_symlink(), (
+        "the owned post-build step must really install the link")
+    assert (gate_root / INDEX).read_bytes() == approved_index
+    (gate_root / INDEX).unlink()
+    (gate_root / INDEX).write_bytes(approved_index)
+    assert _dirty_snapshot(gate_root) == gate_dirty
+
+    # --- (E) one unambiguous destination, or a visible refusal ------------
+    refuse_root = tmp_path / "refuse root"
+    _plant_tracked(refuse_root)
+    _init_repo(refuse_root, tracked=sorted(TRACKED_FILES))
+    refuse_bare = _bare(tmp_path, "refuse bare.git")
+    empty_bare = _bare(tmp_path, "empty bare.git")
+    _configure_upstream(refuse_root, refuse_bare)
+    _git(refuse_root, "push", "-q", str(refuse_bare), "HEAD:refs/heads/main")
+    _write_roster(refuse_root, ROSTER)
+    refuse_seed = _run(refuse_root, sys.executable, env, cwd, extra=("--push",))
+    assert refuse_seed.returncode == 0, refuse_seed.stderr
+    refuse_head = _head(refuse_root)
+    refuse_shim, refuse_log = _git_shim(tmp_path, "refusal git")
+
+    def refused(label, expected, stage="push/config"):
+        proc = _run(refuse_root, sys.executable, _with_path(_env(), refuse_shim),
+                    cwd, extra=("--push",))
+        assert proc.returncode == 2, (label, proc.returncode, proc.stderr)
+        _assert_not_success(proc, label)
+        assert f"stage={stage}" in proc.stderr, (label, proc.stderr)
+        assert expected in proc.stderr, (label, proc.stderr)
+        assert "is current" not in proc.stderr, (label, proc.stderr)
+        assert _remote_refs(refuse_bare) == {"refs/heads/main": refuse_head}, label
+        assert _remote_refs(empty_bare) == {}, label
+
+    _git(refuse_root, "config", "--unset", "branch.main.remote")
+    refused("no upstream remote", "no configured upstream remote")
+    _git(refuse_root, "config", "branch.main.remote", "origin")
+    _git(refuse_root, "config", "--add", "branch.main.merge", "refs/heads/second")
+    refused("two upstream branch refs", "configured more than once")
+    _git(refuse_root, "config", "--unset-all", "branch.main.merge")
+    _git(refuse_root, "config", "branch.main.merge", "refs/heads/main")
+    _git(refuse_root, "config", "branch.main.remote", ".")
+    refused("upstream is the local repository", "local repository")
+    _git(refuse_root, "config", "branch.main.remote", "origin")
+    _git(refuse_root, "remote", "set-url", "--push", "origin", str(empty_bare))
+    _git(refuse_root, "remote", "set-url", "--push", "--add", "origin",
+         str(refuse_bare))
+    refused("two push URLs", "push URLs")
+    _git(refuse_root, "config", "remote.origin.mirror", "true")
+    refused("mirror remote", "mirror remote")
+    _git(refuse_root, "config", "--unset", "remote.origin.mirror")
+    # A single push URL again, now pointing at a destination with no branch.
+    _git(refuse_root, "config", "--unset-all", "remote.origin.pushurl")
+    _git(refuse_root, "remote", "set-url", "--push", "origin", str(empty_bare))
+    refused("missing destination branch", "does not exist", stage="push/inspect")
+    assert _head(refuse_root) == refuse_head
+    assert not any(" push " in call for call in _shim_calls(refuse_log)), (
+        _shim_calls(refuse_log))
+
+    # --- (F) the ACTUAL push URL is the endpoint for discovery/read-back ---
+    fetch_bare = _bare(tmp_path, "fetch endpoint.git")
+    push_bare = _bare(tmp_path, "push endpoint.git")
+    stranger = tmp_path / "stranger source"
+    _plant_tracked(stranger)
+    stranger_head = _init_repo(stranger, tracked=sorted(TRACKED_FILES))
+    _git(stranger, "push", "-q", str(fetch_bare), "HEAD:refs/heads/main")
+    assert _remote_refs(fetch_bare) == {"refs/heads/main": stranger_head}
+    endpoint_root = tmp_path / "endpoint root"
+    _plant_tracked(endpoint_root)
+    _init_repo(endpoint_root, tracked=sorted(TRACKED_FILES))
+    _git(endpoint_root, "push", "-q", str(push_bare), "HEAD:refs/heads/main")
+    _git(endpoint_root, "remote", "add", "origin", str(fetch_bare))
+    _git(endpoint_root, "remote", "set-url", "--push", "origin", str(push_bare))
+    _git(endpoint_root, "config", "branch.main.remote", "origin")
+    _git(endpoint_root, "config", "branch.main.merge", "refs/heads/main")
+    assert _git(endpoint_root, "remote", "get-url", "--push", "--all",
+                "origin").stdout.strip() == str(push_bare)
+    assert _git(endpoint_root, "remote", "get-url", "--all",
+                "origin").stdout.strip() == str(fetch_bare)
+    _write_roster(endpoint_root, ROSTER)
+    at_push_endpoint = _run(endpoint_root, sys.executable, env, cwd,
+                            extra=("--push",))
+    assert at_push_endpoint.returncode == 0, at_push_endpoint.stderr
+    endpoint_candidate = _head(endpoint_root)
+    assert _remote_refs(push_bare) == {"refs/heads/main": endpoint_candidate}
+    assert _remote_refs(fetch_bare) == {"refs/heads/main": stranger_head}, (
+        "the fetch URL must never be used as the publication endpoint")
+
+    # --- (G) the history boundary fails closed ----------------------------
+    # (G1) a divergent destination tip that IS a known local commit object.
+    diverge_root = tmp_path / "diverge root"
+    _plant_tracked(diverge_root)
+    _init_repo(diverge_root, tracked=sorted(TRACKED_FILES))
+    diverge_bare = _bare(tmp_path, "diverge bare.git")
+    _configure_upstream(diverge_root, diverge_bare)
+    _git(diverge_root, "push", "-q", str(diverge_bare), "HEAD:refs/heads/main")
+    _write_roster(diverge_root, ROSTER)
+    diverge_seed = _run(diverge_root, sys.executable, env, cwd, extra=("--push",))
+    assert diverge_seed.returncode == 0, diverge_seed.stderr
+    diverge_published = _head(diverge_root)
+    other_work = tmp_path / "out of band source"
+    _plant_tracked(other_work)
+    _init_repo(other_work, tracked=sorted(TRACKED_FILES))
+    (other_work / "out of band.txt").write_text("out of band\n", encoding="utf-8")
+    _git(other_work, "add", "--", "out of band.txt")
+    _git(other_work, "commit", "-q", "-m", "synthetic out-of-band commit")
+    out_of_band = _head(other_work)
+    _git(other_work, "push", "-q", "--force", str(diverge_bare),
+         "HEAD:refs/heads/main")
+    assert _remote_refs(diverge_bare) == {"refs/heads/main": out_of_band}
+    # The operator already has that object locally (it is NOT a branch here).
+    _git(diverge_root, "fetch", "-q", str(diverge_bare), "refs/heads/main")
+    _make_dirty(diverge_root)
+    diverge_dirty = _dirty_snapshot(diverge_root)
+    _write_roster(diverge_root, ROSTER2)
+    diverged = _run(diverge_root, sys.executable, env, cwd, extra=("--push",))
+    assert diverged.returncode == 2, diverged.stderr
+    _assert_not_success(diverged, "diverged destination")
+    assert "stage=push/inspect" in diverged.stderr, diverged.stderr
+    assert "not an ancestor" in diverged.stderr, diverged.stderr
+    assert _remote_refs(diverge_bare) == {"refs/heads/main": out_of_band}
+    assert _dirty_snapshot(diverge_root) == diverge_dirty
+    assert _parents(diverge_root) == [diverge_published]
+
+    # (G2) an ahead range carrying an unrelated private path.
+    foreign_root = tmp_path / "foreign root"
+    _plant_tracked(foreign_root)
+    _init_repo(foreign_root, tracked=sorted(TRACKED_FILES))
+    foreign_bare = _bare(tmp_path, "foreign bare.git")
+    _configure_upstream(foreign_root, foreign_bare)
+    _git(foreign_root, "push", "-q", str(foreign_bare), "HEAD:refs/heads/main")
+    foreign_baseline = _remote_head(foreign_bare)
+    _write_roster(foreign_root, ROSTER)
+    foreign_local = _run(foreign_root, sys.executable, env, cwd)
+    assert foreign_local.returncode == 0, foreign_local.stderr
+    (foreign_root / "private").mkdir()
+    (foreign_root / "private" / "source.py").write_text(
+        "PRIVATE = 'not for publication'\n", encoding="utf-8")
+    _git(foreign_root, "add", "--", "private/source.py")
+    _git(foreign_root, "commit", "-q", "-m", "synthetic private commit")
+    private_commit = _head(foreign_root)
+    assert _commit_paths(foreign_root) == ["private/source.py"]
+    foreign = _run(foreign_root, sys.executable, env, cwd, extra=("--push",))
+    assert foreign.returncode == 2, foreign.stderr
+    _assert_not_success(foreign, "unrelated path in the unpublished range")
+    assert "stage=push/history" in foreign.stderr, foreign.stderr
+    assert "outside the public artifact pair" in foreign.stderr, foreign.stderr
+    assert "private/source.py" in foreign.stderr, foreign.stderr
+    assert _remote_refs(foreign_bare) == {"refs/heads/main": foreign_baseline}, (
+        "a foreign unpushed commit must never be carried along")
+    assert _head(foreign_root) == private_commit
+
+    # (G3) an artifact-only range whose intermediate pair is invalid.
+    middle_root = tmp_path / "middle root"
+    _plant_tracked(middle_root)
+    _init_repo(middle_root, tracked=sorted(TRACKED_FILES))
+    middle_bare = _bare(tmp_path, "middle bare.git")
+    _configure_upstream(middle_root, middle_bare)
+    _git(middle_root, "push", "-q", str(middle_bare), "HEAD:refs/heads/main")
+    middle_baseline = _remote_head(middle_bare)
+    _write_roster(middle_root, ROSTER)
+    middle_local = _run(middle_root, sys.executable, env, cwd)
+    assert middle_local.returncode == 0, middle_local.stderr
+    _, other_index = _build_pair(OTHER_ROSTER, tmp_path / "other pair root")
+    (middle_root / INDEX).write_bytes(other_index)
+    _git(middle_root, "add", "--", str(INDEX))
+    _git(middle_root, "commit", "-q", "--only", "-m",
+         "synthetic baseline: mismatching index", "--", str(INDEX))
+    assert _commit_paths(middle_root) == [str(INDEX)]
+    middle_restored = _run(middle_root, sys.executable, env, cwd)
+    assert middle_restored.returncode == 0, middle_restored.stderr
+    assert "committed locally" in middle_restored.stderr, middle_restored.stderr
+    final_commit = _head(middle_root)
+    invalid_range = _run(middle_root, sys.executable, env, cwd, extra=("--push",))
+    assert invalid_range.returncode == 2, invalid_range.stderr
+    _assert_not_success(invalid_range, "invalid intermediate pair")
+    assert "stage=push/history" in invalid_range.stderr, invalid_range.stderr
+    assert "does not hold a pair the real validator accepts" in invalid_range.stderr, (
+        invalid_range.stderr)
+    assert _remote_refs(middle_bare) == {"refs/heads/main": middle_baseline}
+    assert _head(middle_root) == final_commit
+
+    # --- (H) a zero-exit push and a stale read-back are both rejected ------
+    lie_root = tmp_path / "lie root"
+    _plant_tracked(lie_root)
+    lie_baseline = _init_repo(lie_root, tracked=sorted(TRACKED_FILES))
+    lie_bare = _bare(tmp_path, "lie bare.git")
+    _configure_upstream(lie_root, lie_bare)
+    _git(lie_root, "push", "-q", str(lie_bare), "HEAD:refs/heads/main")
+    _write_roster(lie_root, ROSTER)
+    lie_shim, lie_log = _git_shim(tmp_path, "lying push git", swallow="push")
+    lying = _run(lie_root, sys.executable, _with_path(_env(), lie_shim), cwd,
+                 extra=("--push",))
+    assert lying.returncode == 2, lying.stderr
+    _assert_not_success(lying, "lying push")
+    assert "stage=push/verify" in lying.stderr, lying.stderr
+    assert "may already have occurred" in lying.stderr, lying.stderr
+    lie_candidate = _head(lie_root)
+    assert _parents(lie_root) == [lie_baseline]
+    assert _remote_refs(lie_bare) == {"refs/heads/main": lie_baseline}, (
+        "a zero-exit push that pushed nothing must never be believed")
+    assert any(" push " in call for call in _shim_calls(lie_log)), _shim_calls(lie_log)
+
+    stale_root = tmp_path / "stale root"
+    _plant_tracked(stale_root)
+    stale_baseline = _init_repo(stale_root, tracked=sorted(TRACKED_FILES))
+    stale_bare = _bare(tmp_path, "stale bare.git")
+    _configure_upstream(stale_root, stale_bare)
+    _git(stale_root, "push", "-q", str(stale_bare), "HEAD:refs/heads/main")
+    _write_roster(stale_root, ROSTER)
+    # The owned launcher performs a REAL push and then rewinds the destination:
+    # a remote write really happened, and the read-back must say so.
+    stale_shim, stale_log = _git_branch_shim(
+        tmp_path, "rewinding push git", "push", [
+            f'{real_git} "$@"',
+            f"{real_git} -C {str(stale_bare)!r} update-ref refs/heads/main "
+            f"{stale_baseline}",
+            "exit 0",
+        ])
+    stale = _run(stale_root, sys.executable, _with_path(_env(), stale_shim), cwd,
+                 extra=("--push",))
+    assert stale.returncode == 2, stale.stderr
+    _assert_not_success(stale, "stale read-back")
+    assert "stage=push/verify" in stale.stderr, stale.stderr
+    assert "reads back as" in stale.stderr, stale.stderr
+    assert "may already have occurred" in stale.stderr, stale.stderr
+    stale_candidate = _head(stale_root)
+    assert stale_baseline in stale.stderr, stale.stderr
+    assert stale_candidate in stale.stderr, stale.stderr
+    assert _remote_refs(stale_bare) == {"refs/heads/main": stale_baseline}
+    assert _head(stale_root) == stale_candidate, (
+        "the local artifact commit is left for operator handling")
+
+    # The push really lands but the endpoint can no longer be read: the run must
+    # refuse to claim a publication it cannot see, and say that a remote write
+    # may already have happened (which here it really did).
+    unseen_root = tmp_path / "unseen root"
+    _plant_tracked(unseen_root)
+    _init_repo(unseen_root, tracked=sorted(TRACKED_FILES))
+    unseen_bare = _bare(tmp_path, "unseen bare.git")
+    _configure_upstream(unseen_root, unseen_bare)
+    _git(unseen_root, "push", "-q", str(unseen_bare), "HEAD:refs/heads/main")
+    _write_roster(unseen_root, ROSTER)
+    pushed_marker = tmp_path / "unseen pushed"
+    unseen_shim, unseen_log = _git_branch_shim(
+        tmp_path, "unreadable readback git", None, [],
+        extra_handlers={
+            "push": [f'{real_git} "$@"', f": > {str(pushed_marker)!r}", "exit 0"],
+            "ls-remote": [f"if [ -e {str(pushed_marker)!r} ]; then exit 1; fi"],
+        })
+    unseen = _run(unseen_root, sys.executable, _with_path(_env(), unseen_shim),
+                  cwd, extra=("--push",))
+    assert unseen.returncode == 2, unseen.stderr
+    _assert_not_success(unseen, "unreadable read-back")
+    assert "stage=push/verify" in unseen.stderr, unseen.stderr
+    assert "cannot be read back" in unseen.stderr, unseen.stderr
+    assert "may already have occurred" in unseen.stderr, unseen.stderr
+    assert pushed_marker.exists(), "the owned launcher must really create the marker"
+    assert any(" push " in call for call in _shim_calls(unseen_log)), (
+        _shim_calls(unseen_log))
+    unseen_candidate = _head(unseen_root)
+    assert _remote_refs(unseen_bare) == {"refs/heads/main": unseen_candidate}, (
+        "the push really landed: the honest diagnostic is the only alternative to "
+        "a false success claim")
+    assert _head(unseen_root) == unseen_candidate
+
+    # --- (I) the lock covers publication AND the read-back ----------------
+    conc_root = tmp_path / "concurrent root"
+    _plant_tracked(conc_root)
+    _init_repo(conc_root, tracked=sorted(TRACKED_FILES))
+    conc_bare = _bare(tmp_path, "concurrent bare.git")
+    _configure_upstream(conc_root, conc_bare)
+    _git(conc_root, "push", "-q", str(conc_bare), "HEAD:refs/heads/main")
+    _write_roster(conc_root, ROSTER)
+    deeds = tmp_path / "publication deeds"
+    deeds.mkdir()
+    _receive_hook(conc_bare, "pre-receive", [
+        f": > {str(deeds / 'push.started')!r}\n",
+        "deadline=$((SECONDS + 30))\n",
+        f"while [ ! -e {str(deeds / 'push.go')!r} ]; do\n",
+        "    if [ \"$SECONDS\" -ge \"$deadline\" ]; then\n",
+        "        echo 'synthetic receive hook timed out' >&2\n",
+        "        exit 1\n",
+        "    fi\n",
+        "    sleep 0.01\n",
+        "done\n",
+        "exit 0\n",
+    ])
+    readback_shim, readback_log = _git_branch_shim(
+        tmp_path, "blocking readback git", "ls-remote", [
+            f"if [ -e {str(deeds / 'push.go')!r} ] && "
+            f"[ ! -e {str(deeds / 'readback.done')!r} ]; then",
+            f"    : > {str(deeds / 'readback.started')!r}",
+            "    deadline=$((SECONDS + 30))",
+            f"    while [ ! -e {str(deeds / 'readback.go')!r} ]; do",
+            "        if [ \"$SECONDS\" -ge \"$deadline\" ]; then exit 1; fi",
+            "        sleep 0.01",
+            "    done",
+            "fi",
+        ])
+    conc_lock = conc_root / PUBLISH_LOCK
+    interpreter_a, log_a, env_a = _harness(tmp_path, mode="pass")
+    env_a = _with_path(env_a, readback_shim)
+    a = _Helper(conc_root, interpreter_a, env_a, cwd, "pushA", extra=("--push",))
+    b = None
+    try:
+        _wait_path(deeds / "push.started")
+        # The receive hook runs INSIDE the push: the publish lock is held there.
+        assert _probe(conc_lock) is False, (
+            "the publish lock was not held during publication")
+        interpreter_b, log_b, env_b = _harness(tmp_path, mode="pass")
+        b = _Helper(conc_root, interpreter_b, env_b, cwd, "pushB", extra=("--push",))
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            assert b.poll() is None, b.output()
+            assert not log_b.with_name(log_b.name + ".builder").exists(), (
+                "the second helper entered its builder while the first was "
+                "publishing")
+            time.sleep(0.01)
+        (deeds / "push.go").write_text("go", encoding="utf-8")
+        _wait_path(deeds / "readback.started")
+        assert _probe(conc_lock) is False, (
+            "the publish lock was not held during the post-push read-back")
+        (deeds / "readback.go").write_text("go", encoding="utf-8")
+        (deeds / "readback.done").write_text("go", encoding="utf-8")
+        release_stamp = time.time_ns()
+        a.wait(timeout=WAIT_S)
+        a_stdout, a_stderr = a.output()
+        assert a.returncode == 0, a_stderr
+        assert a_stdout == b"", a_stdout
+        b.wait(timeout=WAIT_S)
+        b_stdout, b_stderr = b.output()
+        assert b.returncode == 0, b_stderr
+        assert b_stdout == b"", b_stdout
+        assert _stamps(log_b)["builder"] > release_stamp, (
+            "the second builder started before the first publication released "
+            "the lock")
+        assert _remote_refs(conc_bare) == {"refs/heads/main": _head(conc_root)}
+        assert "is current" in b_stderr, b_stderr
+        assert any(" ls-remote " in call for call in _shim_calls(readback_log)), (
+            _shim_calls(readback_log))
+    finally:
+        (deeds / "push.go").write_text("go", encoding="utf-8")
+        (deeds / "readback.go").write_text("go", encoding="utf-8")
+        (deeds / "readback.done").write_text("go", encoding="utf-8")
+        for helper_proc in (a, b):
+            if helper_proc is not None and helper_proc.poll() is None:
+                helper_proc.reap(kill_group=True)
+    assert _probe_until(conc_lock, True, timeout=10.0) is True, (
+        "the publish lock was not released after publication")

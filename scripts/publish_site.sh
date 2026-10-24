@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# publish_site.sh — LOCAL publication gate and restricted artifact commit.
+# publish_site.sh — publication gate: locked build, validated pair, restricted
+# artifact commit and -- ONLY with the explicit --push opt-in -- one scoped Git
+# push with an exact remote read-back.
 #
-# Sequence (unit 9c; remote push, Pages validation and the production wrapper
-# cutover are LATER units and are deliberately absent here):
+# Sequence (units 9c-9d; Pages validation, hosted CI, the production wrapper
+# cutover and any public read-back are LATER units and are deliberately absent
+# here):
 #
 #   1. take ONE exclusive blocking advisory flock on <root>/site/.publish.lock
 #      -- a lock inode DISTINCT from the builder's own site/.build.lock -- and
 #      hold it continuously through the build, the read-back, the final
-#      validation AND the local artifact commit;
+#      validation, the local artifact commit AND (in --push mode) the push and
+#      the read-back of the destination ref that follows it;
 #   2. run the REAL build_site.py (the copy in THIS helper's checkout) against
 #      --root with the selected interpreter, so the builder alone writes the
 #      site/catalog.json + site/index.html pair;
@@ -69,20 +73,49 @@
 # policy. Nothing outside site/index.html and site/catalog.json is staged or
 # committed, and a run whose artifacts are unchanged commits nothing at all.
 #
-# This script does NOT push, deploy or contact the network, and it must never
-# be run concurrently with another git publisher against a live checkout. Exit
-# 0 means ONLY that the local artifact pair passed this gate and that its local
-# commit was handled -- never that GitHub or the public site was updated. A
-# no-change run therefore succeeds without claiming anything about a remote:
-# retrying a committed-but-unpushed artifact belongs to unit 9d.
+# TWO MODES, exactly one of them per run:
 #
-# All operational output, including child builder progress and every Git
-# command's chatter, goes to STDERR; a successful run is stdout-silent.
+#   * LOCAL-ONLY (the default): no remote is contacted and no remote command
+#     runs. Exit 0 means ONLY that the local artifact pair passed this gate and
+#     that its local commit was handled -- never that GitHub or the public site
+#     was updated. A no-change run succeeds without saying anything about a
+#     remote.
+#   * PUBLICATION (--push, opt-in): after the same lock-covered build, the SAME
+#     verified candidate is pushed to the selected root's ONE configured
+#     upstream branch at that remote's ONE resolved PUSH URL, and the exact
+#     destination ref is read back before any success is claimed. The candidate
+#     is the new local artifact commit when this run made one, and the existing
+#     HEAD when the artifacts did not change: a previously committed or
+#     previously rejected artifact commit is therefore retried on a later run
+#     instead of being forgotten, and an already-current destination is reported
+#     without a redundant push or an empty commit. The candidate's committed
+#     blobs AND both ordinary working artifacts must match this run's frozen
+#     identities before any push or remote-success claim, and every unpublished
+#     commit in the range from the observed destination tip to the candidate
+#     must be an ordinary single-parent, nonempty, artifact-only commit whose
+#     pair the real validator accepts -- so unrelated history is never carried
+#     along. A divergent/unknown destination tip, a missing destination branch,
+#     an ambiguous upstream, a mirror remote or an unreachable endpoint fails
+#     closed. Nothing is ever forced, rebased, merged, reset, stashed, fetched,
+#     bootstrapped, unshallowed or configured, a zero-exit push is never
+#     believed without the exact read-back, and a remote write is never rolled
+#     back. Ref equality is a Git-ref publication ONLY: no Pages deployment,
+#     hosted CI run or public read-back follows from it.
+#
+# This helper must never be run concurrently with another git publisher against
+# a live checkout.
+#
+# All operational output, including child builder progress and this script's
+# own Git diagnostics, goes to STDERR; a successful run is stdout-silent.
+# Remote commands are noninteractive and hard-bounded, and their raw output --
+# which can carry the endpoint URL -- is never echoed: diagnostics name the
+# stage and the destination ref, never the configured URL value.
 # Failures exit 2 with a "publish_site: stage=<stage>: ..." diagnostic on
 # stderr, where <stage> is args, root, lock, builder, validate, git,
-# git/add, git/commit or git/verify.
+# git/add, git/commit, git/verify, push/config, push/inspect, push/history,
+# push/send or push/verify.
 #
-# Usage: scripts/publish_site.sh [--root DIR] [--python PATH]
+# Usage: scripts/publish_site.sh [--root DIR] [--python PATH] [--push]
 
 set -u
 set -o pipefail
@@ -106,6 +139,12 @@ readonly READBACK_IDENTITY_FIELD='sha256'
 # committed blobs AND the working artifacts match the frozen identities.
 readonly IDENTITY_RECEIPT='publish_site: artifact identities match'
 
+# The ONE fixed private success marker of the unpublished-range inspection that
+# runs before an opted-in push. Like the read-back receipt it is an internal
+# handshake and its stdout is never forwarded; it is emitted only after every
+# unpublished commit really passed the checks below, followed by the count.
+readonly RANGE_RECEIPT='publish_site: unpublished range verified commits'
+
 # The ONLY paths the local commit may touch (stage 4), and the fixed
 # noninteractive message it carries. Both are literal, repo-relative and used
 # with an explicit "--" so no pathspec magic or ambient glob can widen them.
@@ -115,10 +154,10 @@ readonly COMMIT_MESSAGE='chore(site): publish dashboard artifacts'
 
 usage() {
     cat <<'USAGE'
-usage: publish_site.sh [--root DIR] [--python PATH]
+usage: publish_site.sh [--root DIR] [--python PATH] [--push]
 
-Run the LOCAL publication gate for the static dashboard: acquire the dedicated
-publish lock, run the real build_site.py against --root, validate the published
+Run the publication gate for the static dashboard: acquire the dedicated publish
+lock, run the real build_site.py against --root, validate the published
 site/catalog.json and site/index.html pair by exact read-back, then commit the
 artifact paths that changed -- site/index.html and site/catalog.json, either one
 alone or both -- in --root's own Git repository.
@@ -141,16 +180,33 @@ success. Both working artifacts must still be ordinary regular files there: a
 symbolic link, a directory or any other non-regular file is rejected even when
 following it would yield the validated bytes.
 
-This helper performs NO remote push, deploy or network publication. Exit 0
-means only that the local artifact pair passed the gate, its local commit was
-handled and the committed and working bytes still matched the validated
-identities -- never that the public site was updated.
+Without --push this is a LOCAL-ONLY gate: no remote command runs and no network
+activity happens. Exit 0 means only that the local artifact pair passed the
+gate, its local commit was handled and the committed and working bytes still
+matched the validated identities -- never that the public site was updated.
+
+With --push the SAME lock-covered run then publishes that verified candidate --
+the new local artifact commit, or the existing HEAD when the artifacts did not
+change, so an earlier committed-but-unpushed artifact is retried -- to the
+attached branch's single configured upstream branch ref, at that remote's single
+resolved PUSH URL, and reads that exact ref back before claiming success. It
+never guesses a remote, destination or push.default, never creates tracking
+configuration, never bootstraps or fetches a missing branch, never force-pushes,
+deletes, mirrors or publishes tags, and fails closed on an absent/ambiguous
+upstream, a mirror remote, a divergent or unknown destination tip, an unpublished
+commit range that is not artifact-only with a valid pair, and a read-back that
+does not equal the candidate. A push failure leaves the local commit for a later
+retry; a remote that may already have changed is reported honestly and never
+rolled back. Ref equality is a Git ref publication ONLY: no Pages deployment,
+hosted CI run or public read-back is claimed.
 
 options:
   --root DIR     project root holding state/ and receiving site/ (default: the
                  repository this script lives in)
   --python PATH  interpreter for the builder and the read-back validation,
                  taken as ONE executable path (default: python3 from PATH)
+  --push         publish the verified candidate to the configured upstream
+                 branch ref (opt-in; without it nothing contacts a remote)
   -h, --help     show this help and exit
 USAGE
 }
@@ -163,6 +219,7 @@ stage_err() {
 # --- argument parsing (no side effects before --help is honoured) ------------
 root=""
 python_bin="python3"
+push_enabled=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -200,6 +257,10 @@ while [ "$#" -gt 0 ]; do
                 usage >&2
                 exit 2
             fi
+            shift
+            ;;
+        --push)
+            push_enabled=1
             shift
             ;;
         -h|--help)
@@ -518,89 +579,117 @@ for artifact_rel in "$ARTIFACT_INDEX" "$ARTIFACT_CATALOG"; do
     esac
 done
 
+# --- local artifact commit: only when the validated pair changed ------------
+# Kept as one function so the commit path and the no-change path can rejoin
+# ONE publication path further down. It stages exactly the two literals,
+# commits with --only, and reads the target commit, its parent, its complete
+# changed-path set and its stored path list back before returning; on success
+# it sets ``candidate`` to the commit that publication must carry.
+commit_artifact_pair() {
+    # --- stage ONLY the two literal allowlisted paths ---------------------------
+    # This add makes new artifacts known to git (a path-limited commit refuses a
+    # path it has never seen); it never widens to -A, -u or a directory.
+    if ! git_root add -- "$ARTIFACT_INDEX" "$ARTIFACT_CATALOG" 1>&2; then
+        stage_err git/add "cannot stage the artifact pair for the local commit (index locked or paths ignored): $root_phys"
+        exit 2
+    fi
+
+    # --- commit ONLY those paths, with documented path-limited semantics --------
+    # ``--only`` takes the updated working-tree contents of exactly these paths and
+    # DISREGARDS whatever is staged for other paths, so unrelated staged work
+    # cannot ride along. The root's hooks run: a rejecting hook must fail the
+    # commit, so hooks are never bypassed here, and a hook that instead MUTATES or
+    # re-stages the artifacts is caught by the frozen-identity check below.
+    head_before=$(git_root rev-parse --verify --quiet HEAD 2>/dev/null) || head_before=''
+    if [ -z "$head_before" ]; then
+        stage_err git/commit "cannot resolve HEAD before committing: $root_phys"
+        exit 2
+    fi
+    if ! git_root commit --quiet --only -m "$COMMIT_MESSAGE" \
+            -- "$ARTIFACT_INDEX" "$ARTIFACT_CATALOG" 1>&2; then
+        stage_err git/commit "artifact commit failed; no local success is claimed and nothing was pushed: $root_phys"
+        exit 2
+    fi
+
+    # --- read the EXACT target back instead of trusting the return status ------
+    # A commit is only a success once HEAD really advanced onto the previous HEAD,
+    # changed a nonempty subset of the allowlist, and both committed blobs AND both
+    # working artifacts still hash to the identities frozen at validation.
+    head_after=$(git_root rev-parse --verify --quiet HEAD 2>/dev/null) || head_after=''
+    if [ -z "$head_after" ] || [ "$head_after" = "$head_before" ]; then
+        stage_err git/verify "the commit command reported success but HEAD did not advance: $root_phys"
+        exit 2
+    fi
+    actual_parent=$(git_root rev-parse --verify --quiet 'HEAD^' 2>/dev/null) || actual_parent=''
+    if [ "$actual_parent" != "$head_before" ]; then
+        stage_err git/verify "the new commit is not a child of the previously validated HEAD: $root_phys"
+        exit 2
+    fi
+
+    # --- read the WHOLE commit's changed-path set back --------------------------
+    # The allowed set is a NONEMPTY SUBSET of the two literals, not an exact
+    # two-path list: a build that restores only the one artifact an outside change
+    # touched is a legitimate artifact commit, and so is one that restores both.
+    # The inspection is deliberately UNFILTERED -- no trailing pathspec -- because
+    # a path-filtered diff would report just the allowlisted paths and hide a third
+    # path that a hook or a widened commit smuggled into the same commit.
+    paths_rc=0
+    committed_paths=$(git_root diff-tree --no-commit-id --name-only -r --no-renames HEAD 2>/dev/null) \
+        || paths_rc=$?
+    if [ "$paths_rc" -ne 0 ]; then
+        stage_err git/verify "cannot read the artifact commit's changed paths back (git diff-tree exit $paths_rc); a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
+        exit 2
+    fi
+    if [ -z "$committed_paths" ]; then
+        stage_err git/verify "the commit advanced HEAD but reports no changed path; no artifact commit is claimed, a commit may already exist at $head_after and is left for operator handling: $root_phys"
+        exit 2
+    fi
+    outside_paths=''
+    while IFS= read -r committed_rel; do
+        case $committed_rel in
+            "$ARTIFACT_INDEX"|"$ARTIFACT_CATALOG") : ;;
+            *)
+                if [ -n "$outside_paths" ]; then
+                    outside_paths="$outside_paths, $committed_rel"
+                else
+                    outside_paths=$committed_rel
+                fi
+                ;;
+        esac
+    done <<< "$committed_paths"
+    if [ -n "$outside_paths" ]; then
+        stage_err git/verify "the artifact commit changes paths outside the allowlist ($ARTIFACT_INDEX, $ARTIFACT_CATALOG): outside [$outside_paths]; the whole commit changes [${committed_paths//$'\n'/, }]; a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
+        exit 2
+    fi
+
+    # The verified commit that publication must carry: assigned here so the
+    # commit path and the no-change path converge on ONE candidate value.
+    candidate=$head_after
+}
+
+# --- rejoin the commit and no-change paths before publication ---------------
+# A no-change run in local-only mode keeps the reviewed behaviour exactly: no
+# empty commit, no touching of unrelated staged work, and nothing claimed about
+# any remote. In opted-in publication mode it must NOT exit here -- an earlier
+# run may have committed (or already tried to publish) an artifact commit that
+# these identical bytes cannot re-create, so both paths continue to ONE
+# identity-checked candidate and then to ONE publication path.
+candidate=''
 if [ "$artifact_changed" -eq 0 ]; then
-    # No empty commit, and no touching of unrelated staged work. This says
-    # NOTHING about any remote: unit 9d starts its unpushed-commit retry from
-    # exactly this state.
-    printf '%s: local gate passed: %s (artifact pair validated; no artifact change, nothing committed, nothing pushed or published)\n' \
-        "$PROG" "$site_dir" >&2
-    exit 0
-fi
-
-# --- stage ONLY the two literal allowlisted paths ---------------------------
-# This add makes new artifacts known to git (a path-limited commit refuses a
-# path it has never seen); it never widens to -A, -u or a directory.
-if ! git_root add -- "$ARTIFACT_INDEX" "$ARTIFACT_CATALOG" 1>&2; then
-    stage_err git/add "cannot stage the artifact pair for the local commit (index locked or paths ignored): $root_phys"
-    exit 2
-fi
-
-# --- commit ONLY those paths, with documented path-limited semantics --------
-# ``--only`` takes the updated working-tree contents of exactly these paths and
-# DISREGARDS whatever is staged for other paths, so unrelated staged work
-# cannot ride along. The root's hooks run: a rejecting hook must fail the
-# commit, so hooks are never bypassed here, and a hook that instead MUTATES or
-# re-stages the artifacts is caught by the frozen-identity check below.
-head_before=$(git_root rev-parse --verify --quiet HEAD 2>/dev/null) || head_before=''
-if [ -z "$head_before" ]; then
-    stage_err git/commit "cannot resolve HEAD before committing: $root_phys"
-    exit 2
-fi
-if ! git_root commit --quiet --only -m "$COMMIT_MESSAGE" \
-        -- "$ARTIFACT_INDEX" "$ARTIFACT_CATALOG" 1>&2; then
-    stage_err git/commit "artifact commit failed; no local success is claimed and nothing was pushed: $root_phys"
-    exit 2
-fi
-
-# --- read the EXACT target back instead of trusting the return status ------
-# A commit is only a success once HEAD really advanced onto the previous HEAD,
-# changed a nonempty subset of the allowlist, and both committed blobs AND both
-# working artifacts still hash to the identities frozen at validation.
-head_after=$(git_root rev-parse --verify --quiet HEAD 2>/dev/null) || head_after=''
-if [ -z "$head_after" ] || [ "$head_after" = "$head_before" ]; then
-    stage_err git/verify "the commit command reported success but HEAD did not advance: $root_phys"
-    exit 2
-fi
-actual_parent=$(git_root rev-parse --verify --quiet 'HEAD^' 2>/dev/null) || actual_parent=''
-if [ "$actual_parent" != "$head_before" ]; then
-    stage_err git/verify "the new commit is not a child of the previously validated HEAD: $root_phys"
-    exit 2
-fi
-
-# --- read the WHOLE commit's changed-path set back --------------------------
-# The allowed set is a NONEMPTY SUBSET of the two literals, not an exact
-# two-path list: a build that restores only the one artifact an outside change
-# touched is a legitimate artifact commit, and so is one that restores both.
-# The inspection is deliberately UNFILTERED -- no trailing pathspec -- because
-# a path-filtered diff would report just the allowlisted paths and hide a third
-# path that a hook or a widened commit smuggled into the same commit.
-paths_rc=0
-committed_paths=$(git_root diff-tree --no-commit-id --name-only -r --no-renames HEAD 2>/dev/null) \
-    || paths_rc=$?
-if [ "$paths_rc" -ne 0 ]; then
-    stage_err git/verify "cannot read the artifact commit's changed paths back (git diff-tree exit $paths_rc); a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
-    exit 2
-fi
-if [ -z "$committed_paths" ]; then
-    stage_err git/verify "the commit advanced HEAD but reports no changed path; no artifact commit is claimed, a commit may already exist at $head_after and is left for operator handling: $root_phys"
-    exit 2
-fi
-outside_paths=''
-while IFS= read -r committed_rel; do
-    case $committed_rel in
-        "$ARTIFACT_INDEX"|"$ARTIFACT_CATALOG") : ;;
-        *)
-            if [ -n "$outside_paths" ]; then
-                outside_paths="$outside_paths, $committed_rel"
-            else
-                outside_paths=$committed_rel
-            fi
-            ;;
-    esac
-done <<< "$committed_paths"
-if [ -n "$outside_paths" ]; then
-    stage_err git/verify "the artifact commit changes paths outside the allowlist ($ARTIFACT_INDEX, $ARTIFACT_CATALOG): outside [$outside_paths]; the whole commit changes [${committed_paths//$'\n'/, }]; a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
-    exit 2
+    if [ "$push_enabled" -eq 0 ]; then
+        printf '%s: local gate passed: %s (artifact pair validated; no artifact change, nothing committed, nothing pushed or published)\n' \
+            "$PROG" "$site_dir" >&2
+        exit 0
+    fi
+    candidate=$(git_root rev-parse --verify --quiet HEAD 2>/dev/null) || candidate=''
+    if [ -z "$candidate" ]; then
+        stage_err git "cannot resolve HEAD for an unchanged publication run: $root_phys"
+        exit 2
+    fi
+    printf '%s: no artifact change: the publication candidate is the existing commit %s\n' \
+        "$PROG" "$candidate" >&2
+else
+    commit_artifact_pair
 fi
 
 # --- compare the COMMITTED and the WORKING bytes to the FROZEN identities --
@@ -626,7 +715,7 @@ fi
 # reported and that commit is left for operator handling: nothing is reset,
 # repaired, retried, rewritten or pushed.
 identity_rc=0
-identity_out=$("$python_bin" - identity "$root_phys" "$head_after" \
+identity_out=$("$python_bin" - identity "$root_phys" "$candidate" \
     "$catalog_digest" "$index_digest" <<'PY'
 import hashlib
 import os
@@ -740,7 +829,7 @@ print("publish_site: artifact identities match")
 PY
 ) || identity_rc=$?
 if [ "$identity_rc" -ne 0 ]; then
-    stage_err git/verify "the artifact bytes or working artifact types at the target commit do not match the frozen validated identities; a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
+    stage_err git/verify "the artifact bytes or working artifact types at the target commit do not match the frozen validated identities; a commit may already exist at $candidate and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
     exit 2
 fi
 if [ "$identity_out" != "$IDENTITY_RECEIPT" ]; then
@@ -748,6 +837,355 @@ if [ "$identity_out" != "$IDENTITY_RECEIPT" ]; then
     exit 2
 fi
 
-printf '%s: local gate passed: %s (artifact pair validated and committed locally as %s; nothing pushed, deployed or published)\n' \
-    "$PROG" "$site_dir" "$head_after" >&2
+# --- local-only success: unchanged wording, no remote command --------------
+if [ "$push_enabled" -eq 0 ]; then
+    printf '%s: local gate passed: %s (artifact pair validated and committed locally as %s; nothing pushed, deployed or published)\n' \
+        "$PROG" "$site_dir" "$candidate" >&2
+    exit 0
+fi
+
+# --- publication (opt-in): ONE unambiguous Git destination ------------------
+# Everything below runs ONLY when the caller explicitly asked for publication,
+# so the default mode above returned without a single remote command. ONE
+# observation, ONE destination: the attached branch's existing upstream remote
+# and branch ref, at that remote's single resolved PUSH URL. Nothing is guessed
+# -- not a remote, not a branch name, not push.default, not a pushRemote, not
+# the remote's default refspec -- and no configuration is written, so an absent
+# or ambiguous upstream fails visibly instead of publishing somewhere else.
+if ! command -v timeout >/dev/null 2>&1; then
+    stage_err push/config "bounded remote operations require the timeout command; refusing to contact the remote without one: $root_phys"
+    exit 2
+fi
+
+# A dead endpoint must not be able to hang the gate: every remote command is
+# noninteractive (no credential prompt can wait on a terminal) and hard-bounded.
+# The environment override exists for a slow operator link, never to make a run
+# unbounded, and it cannot influence which destination is chosen.
+remote_timeout_s=${PUBLISH_SITE_REMOTE_TIMEOUT_S:-120}
+case $remote_timeout_s in
+    ''|*[!0-9]*) remote_timeout_s=120 ;;
+esac
+if [ "$remote_timeout_s" -lt 1 ]; then
+    remote_timeout_s=120
+fi
+
+remote_git() {
+    GIT_TERMINAL_PROMPT=0 timeout -k 5 "$remote_timeout_s" \
+        git -C "$root_phys" "$@"
+}
+
+# one_config_value <key>: the single configured value, or a distinct status.
+# ``git config --get-all`` is used deliberately: ``--get`` silently picks one of
+# several values, which is exactly the ambiguity that must be refused here.
+one_config_value() {
+    local values count
+    values=$(git_root config --get-all "$1" 2>/dev/null) || values=''
+    if [ -z "$values" ]; then
+        return 1
+    fi
+    count=$(printf '%s\n' "$values" | grep -c '')
+    if [ "$count" -ne 1 ]; then
+        return 3
+    fi
+    printf '%s' "$values"
+    return 0
+}
+
+remote_name=$(one_config_value "branch.$current_branch.remote")
+resolution_rc=$?
+case $resolution_rc in
+    0) : ;;
+    1)
+        stage_err push/config "the attached branch '$current_branch' has no configured upstream remote (branch.$current_branch.remote); refusing to guess a remote, a pushRemote or a destination: $root_phys"
+        exit 2
+        ;;
+    *)
+        stage_err push/config "the upstream remote of the attached branch '$current_branch' is configured more than once (branch.$current_branch.remote); exactly one upstream remote is required: $root_phys"
+        exit 2
+        ;;
+esac
+if [ "$remote_name" = "." ]; then
+    stage_err push/config "the configured upstream is the local repository ('.'); a named remote with exactly one resolved PUSH URL is required: $root_phys"
+    exit 2
+fi
+case $remote_name in
+    *[[:space:]]*)
+        stage_err push/config "the configured upstream remote name contains whitespace; exactly one named remote is required: $root_phys"
+        exit 2
+        ;;
+esac
+
+destination_ref=$(one_config_value "branch.$current_branch.merge")
+resolution_rc=$?
+case $resolution_rc in
+    0) : ;;
+    1)
+        stage_err push/config "the attached branch '$current_branch' has no configured upstream branch ref (branch.$current_branch.merge); refusing to derive one from push.default or from the local branch name: $root_phys"
+        exit 2
+        ;;
+    *)
+        stage_err push/config "the upstream branch ref of the attached branch '$current_branch' is configured more than once (branch.$current_branch.merge); exactly one branch destination is required: $root_phys"
+        exit 2
+        ;;
+esac
+case $destination_ref in
+    refs/heads/?*) : ;;
+    *)
+        stage_err push/config "the configured upstream ref is not a single branch under refs/heads/; only one branch destination is publishable: $root_phys"
+        exit 2
+        ;;
+esac
+case $destination_ref in
+    *[[:space:]]*|*'*'*|*'?'*|*'['*|*..*|*/|*//*)
+        stage_err push/config "the configured upstream ref '$destination_ref' carries characters a single branch destination cannot: $root_phys"
+        exit 2
+        ;;
+esac
+if ! git_root check-ref-format "$destination_ref" >/dev/null 2>&1; then
+    stage_err push/config "the configured upstream ref '$destination_ref' is not a valid Git ref: $root_phys"
+    exit 2
+fi
+
+# A mirror remote pushes EVERY ref by its own definition, so it is not a
+# single-branch publication destination.
+mirror_value=$(git_root config --bool --get "remote.$remote_name.mirror" 2>/dev/null) \
+    || mirror_value=false
+if [ "$mirror_value" = true ]; then
+    stage_err push/config "the upstream remote '$remote_name' is configured as a mirror remote (remote.$remote_name.mirror); a mirror is not a single-branch publication destination: $root_phys"
+    exit 2
+fi
+
+# EXACTLY ONE resolved push URL -- and it, NOT the fetch URL that may differ, is
+# the endpoint every inspection and read-back below addresses.
+url_rc=0
+push_urls=$(git_root remote get-url --push --all "$remote_name" 2>/dev/null) \
+    || url_rc=$?
+if [ "$url_rc" -ne 0 ]; then
+    stage_err push/config "cannot resolve the push URL of the upstream remote '$remote_name' (git remote get-url --push --all exited $url_rc): $root_phys"
+    exit 2
+fi
+url_count=$(printf '%s\n' "$push_urls" | grep -c '')
+if [ "$url_count" -ne 1 ]; then
+    stage_err push/config "the upstream remote '$remote_name' resolves $url_count push URLs; exactly one is required (no URL value is printed): $root_phys"
+    exit 2
+fi
+push_url=$push_urls
+
+# observe_remote_tip: the object id of ONLY the exact destination ref, as the
+# PUSH endpoint really reports it. The raw remote output is never forwarded (it
+# can carry the endpoint URL), and every malformed, duplicated, foreign or
+# unreadable observation is a failure rather than a guess.
+remote_problem=''
+remote_tip=''
+observe_remote_tip() {
+    local probe_rc out line ref oid
+    remote_problem=''
+    remote_tip=''
+    probe_rc=0
+    out=$(remote_git ls-remote --refs --exit-code "$push_url" "$destination_ref" 2>/dev/null) \
+        || probe_rc=$?
+    case $probe_rc in
+        0) : ;;
+        2)
+            remote_problem="the destination branch $destination_ref does not exist on the push endpoint (a missing destination branch is not bootstrapped, fetched or repaired automatically)"
+            return 1
+            ;;
+        *)
+            remote_problem="the push endpoint could not be queried (git ls-remote exited $probe_rc; the endpoint URL is withheld from diagnostics)"
+            return 1
+            ;;
+    esac
+    oid=''
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case $line in
+            *$'\t'*) : ;;
+            *)
+                remote_problem="the push endpoint returned a malformed ref observation"
+                return 1
+                ;;
+        esac
+        ref=${line#*$'\t'}
+        if [ "$ref" != "$destination_ref" ]; then
+            remote_problem="the push endpoint returned a ref other than the requested destination"
+            return 1
+        fi
+        if [ -n "$oid" ]; then
+            remote_problem="the push endpoint returned the destination ref more than once"
+            return 1
+        fi
+        oid=${line%%$'\t'*}
+    done <<< "$out"
+    if [ -z "$oid" ]; then
+        remote_problem="the push endpoint returned no observation for the destination ref"
+        return 1
+    fi
+    case $oid in
+        *[!0-9a-f]*)
+            remote_problem="the observed destination object id is malformed"
+            return 1
+            ;;
+    esac
+    case ${#oid} in
+        40|64) : ;;
+        *)
+            remote_problem="the observed destination object id has an unexpected length"
+            return 1
+            ;;
+    esac
+    remote_tip=$oid
+    return 0
+}
+
+# --- the real destination tip decides: current, ahead or unreconcilable ----
+# A tracking ref may be stale, so only the endpoint itself is authoritative.
+if ! observe_remote_tip; then
+    stage_err push/inspect "$remote_problem (nothing was pushed, reset, fetched or repaired): $root_phys"
+    exit 2
+fi
+if [ "$remote_tip" = "$candidate" ]; then
+    printf '%s: publish complete: %s (Git destination %s %s at %s is current: the verified artifact commit is already on the remote, so no push and no commit were made; this is a Git ref only -- no Pages deployment, hosted CI or public read-back)\n' \
+        "$PROG" "$site_dir" "$remote_name" "$destination_ref" "$candidate" >&2
+    exit 0
+fi
+if ! git_root cat-file -e "$remote_tip^{commit}" 2>/dev/null; then
+    stage_err push/inspect "the destination tip $remote_tip is not a known commit in this repository; an unknown remote-tip object fails closed (no fetch, branch bootstrap or repair is attempted): $root_phys"
+    exit 2
+fi
+if ! git_root merge-base --is-ancestor "$remote_tip" "$candidate" 2>/dev/null; then
+    stage_err push/inspect "the destination $destination_ref at $remote_tip is not an ancestor of the candidate $candidate (the remote is behind or has diverged); refusing to force, rebase, merge or reset: $root_phys"
+    exit 2
+fi
+
+# --- every UNPUBLISHED commit must be a valid artifact-only commit ---------
+# The candidate may sit on top of artifact commits an earlier run made but never
+# published. That range is inspected as a whole: an ordinary single-parent,
+# nonempty, artifact-only commit whose pair the REAL validator accepts is the
+# only thing this publisher may carry, so unrelated source/private history can
+# never be swept along and a previously failed verification cannot authorize a
+# malformed intermediate artifact commit.
+# Its stdout is captured, never forwarded: like the read-back gate it proves it
+# really executed through ONE fixed private receipt.
+range_rc=0
+range_out=$("$python_bin" - range "$root_phys" "$repo_root" "$remote_tip" "$candidate" <<'PY'
+import subprocess
+import sys
+
+MARKER = "publish_site: unpublished range verified commits"
+ARTIFACTS = ("site/catalog.json", "site/index.html")
+
+if sys.argv[1] != "range":
+    print("publish_site: unexpected range-check invocation", file=sys.stderr)
+    raise SystemExit(2)
+
+target = sys.argv[2]
+checkout = sys.argv[3]
+remote_tip = sys.argv[4]
+candidate = sys.argv[5]
+
+sys.path[:] = [entry for entry in sys.path if entry not in ("", ".", target)]
+sys.path.insert(0, checkout)
+
+
+def fail(message):
+    print(f"publish_site: unpublished range rejected: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def git(*args):
+    proc = subprocess.run(["git", "-C", target, *args],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        fail("git " + " ".join(args[:1]) + f" exited {proc.returncode}")
+    return proc.stdout
+
+
+try:
+    from build_site import validate_artifact_pair
+except Exception as exc:  # noqa: BLE001 - every import failure is a gate failure
+    fail(f"cannot import the real validator: {type(exc).__name__}: {exc}")
+
+raw = git("rev-list", "--reverse", "--topo-order", f"{remote_tip}..{candidate}")
+commits = [line for line in raw.decode("utf-8", "strict").splitlines() if line]
+if not commits:
+    fail("the unpublished range is empty although the destination tip differs "
+         "from the candidate")
+
+for commit in commits:
+    parents = git("rev-list", "--parents", "-n", "1", commit).decode().split()
+    if len(parents) != 2:
+        fail(f"unpublished commit {commit} is not an ordinary single-parent "
+             "commit")
+    raw_paths = git("diff-tree", "--no-commit-id", "--name-only", "-r",
+                    "--no-renames", commit)
+    paths = [line for line in raw_paths.decode("utf-8", "strict").splitlines()
+             if line]
+    if not paths:
+        fail(f"unpublished commit {commit} changes no path")
+    outside = sorted(set(paths) - set(ARTIFACTS))
+    if outside:
+        fail(f"unpublished commit {commit} changes paths outside the public "
+             "artifact pair: " + ", ".join(outside))
+    blobs = {rel: git("cat-file", "blob", f"{commit}:{rel}") for rel in ARTIFACTS}
+    try:
+        catalog_text = blobs[ARTIFACTS[0]].decode("utf-8", "strict")
+        html_text = blobs[ARTIFACTS[1]].decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        fail(f"unpublished commit {commit} holds artifacts that are not valid "
+             "UTF-8")
+    try:
+        validate_artifact_pair(catalog_text, html_text)
+    except Exception as exc:  # noqa: BLE001 - the real validator decides
+        fail(f"unpublished commit {commit} does not hold a pair the real "
+             f"validator accepts: {type(exc).__name__}: {exc}")
+
+print(f"{MARKER} {len(commits)}")
+PY
+) || range_rc=$?
+if [ "$range_rc" -ne 0 ]; then
+    stage_err push/history "the unpublished commit range from the observed destination tip $remote_tip to the candidate $candidate was rejected (exit $range_rc); nothing was pushed: $root_phys"
+    exit 2
+fi
+range_count=''
+range_pattern="^${RANGE_RECEIPT} ([1-9][0-9]*)\$"
+if [[ $range_out =~ $range_pattern ]]; then
+    range_count=${BASH_REMATCH[1]}
+fi
+if [ -z "$range_count" ]; then
+    stage_err push/history "the unpublished-range check did not confirm execution (expected its private receipt with a positive commit count): $root_phys"
+    exit 2
+fi
+
+# --- ONE ordinary, explicitly scoped push of the fixed candidate object ----
+# An explicit ``<candidate>:<refs/heads/...>`` refspec means the remote's own
+# default refspec, push.default, matching/all-branch behaviour and the
+# pushRemote cannot widen it; --no-follow-tags overrides push.followTags so no
+# tag is ever published with the branch. Nothing is forced, deleted, mirrored or
+# verified around: the root's hooks, signing and authentication policy stay in
+# force and there is no hook-bypass flag anywhere in this script. Both streams
+# are withheld (the endpoint URL appears in ordinary push chatter, and a
+# rejected push must not become a success claim): only the exit status counts.
+push_rc=0
+remote_git push --quiet --no-follow-tags --recurse-submodules=no \
+    "$push_url" "$candidate:$destination_ref" >/dev/null 2>&1 || push_rc=$?
+if [ "$push_rc" -ne 0 ]; then
+    stage_err push/send "the push of $candidate to $destination_ref was rejected or failed (git push exited $push_rc); no remote success is claimed and the local artifact commit is retained for a later retry (the endpoint URL and the remote's own output are withheld): $root_phys"
+    exit 2
+fi
+
+# --- read the EXACT destination ref back before claiming anything ----------
+# A zero-exit push is not a publication: the ref at the endpoint must equal the
+# candidate object. When it does not, the remote may already have changed, which
+# is reported honestly -- nothing is rolled back, re-pushed or repaired here.
+if ! observe_remote_tip; then
+    stage_err push/verify "the push command reported success but the destination ref cannot be read back ($remote_problem); a remote write may already have occurred and is not rolled back, retried or repaired automatically: $root_phys"
+    exit 2
+fi
+if [ "$remote_tip" != "$candidate" ]; then
+    stage_err push/verify "the push command reported success but the destination $destination_ref reads back as $remote_tip instead of $candidate; a remote write may already have occurred and is not rolled back, retried or repaired automatically: $root_phys"
+    exit 2
+fi
+
+printf '%s: publish complete: %s (pushed %s to Git destination %s %s and read that exact ref back; this is a Git ref publication only -- no Pages deployment, hosted CI or public read-back follows)\n' \
+    "$PROG" "$site_dir" "$candidate" "$remote_name" "$destination_ref" >&2
 exit 0
