@@ -40,7 +40,9 @@ live roster):
   and success, failure and a SIGKILLed helper all release it;
 * the local Git phase commits ONLY ``site/index.html`` and ``site/catalog.json``
   with ``--only`` path-limited semantics in the selected root's own repository:
-  unrelated tracked/staged/untracked work keeps its bytes, mode, blob and stage
+  a commit may change EITHER artifact alone or both, its COMPLETE changed-path
+  set must be a nonempty subset of those two literals, unrelated
+  tracked/staged/untracked work keeps its bytes, mode, blob and stage
   identity and never enters the commit, an unchanged pair commits nothing and
   leaves HEAD alone, a rejecting hook or a failing ``git add`` fails at exit 2
   without advancing HEAD, a failed build or read-back never invokes Git at all,
@@ -146,7 +148,8 @@ ROSTER2 = {
     "stale_providers": [],
 }
 
-# The ONLY paths the local commit may touch, in git's sorted order.
+# The ONLY paths the local commit may touch (in git's sorted order): one commit
+# may change either of them alone or both, but never any third path.
 ARTIFACTS = ("site/catalog.json", "site/index.html")
 
 # The root's .gitignore policy: the two public artifacts are the only tracked
@@ -719,12 +722,15 @@ def _build_pair(roster, root):
     return ((root / CATALOG).read_bytes(), (root / INDEX).read_bytes())
 
 
-def _git_shim(tmp_path, name, fail_on=None, swallow=None):
-    """Owned ``git`` launcher: records every invocation, can fail or fake one.
+def _git_shim(tmp_path, name, fail_on=None, swallow=None, widen=None):
+    """Owned ``git`` launcher: records every invocation, can fail, fake or widen one.
 
     ``fail_on`` makes the named subcommand fail; ``swallow`` makes it exit zero
-    without doing anything at all (a safe-looking mutation that never happened).
-    The real git still performs every other command.
+    without doing anything at all (a safe-looking mutation that never happened);
+    ``widen`` replaces the helper's PATH-LIMITED commit with a REAL full-index
+    commit that also carries one named outside path, so a test can inspect an
+    actual stored path list containing a third path. The real git still performs
+    every other command, including the post-commit read-back.
     """
     real = shutil.which("git")
     assert real, "the git-phase tests require the git executable"
@@ -742,6 +748,14 @@ def _git_shim(tmp_path, name, fail_on=None, swallow=None):
             f'echo "owned git shim: simulating {fail_on} failure" >&2; exit 99;; esac')
     if swallow is not None:
         lines.append(f'case " $* " in *" {swallow} "*) exit 0;; esac')
+    if widen is not None:
+        # The REAL git is invoked by absolute path: calling plain ``git`` here
+        # would re-enter this launcher recursively.
+        lines.append(
+            'if [ "${1:-}" = "-C" ] && [ "${3:-}" = "commit" ]; then '
+            f'{real} -C "$2" add -- {widen!r} && '
+            f'{real} -C "$2" commit -q -m "synthetic widened artifact commit"; '
+            'exit $?; fi')
     lines.append(f'exec {real} "$@"')
     shim = shim_dir / "git"
     shim.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1451,17 +1465,28 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     and non-repository / nested-root / detached-HEAD targets are refused
     without touching an ancestor repository or this helper's source checkout.
 
-    The last group freezes the validated identity across the repository's OWN
-    hooks with real commits: a non-mutating hook publishes normally with the
-    committed and working bytes equal to the hook-time witness, while a hook
-    that stages an invalid catalogue, a hook that substitutes a different but
-    individually coherent builder-made pair (which the real validator accepts),
-    a post-commit hook that rewrites only the working bytes and a post-commit
-    hook that leaves a same-bytes SYMLINK in place of either working artifact
-    are all rejected at ``stage=git/verify`` -- even though the original
-    post-hook comparison would have accepted the substituted pair. An exact
-    private record followed by trailing newlines is the positive control: it
-    still publishes and commits.
+    One group covers a LEGITIMATE one-artifact commit: a synthetic baseline
+    commit changes only ``site/index.html`` (an HTML comment) or only
+    ``site/catalog.json`` (a trailing newline), the next genuine build restores
+    just that artifact, and the helper must commit it and pass -- the complete
+    changed-path set is a nonempty subset of the allowlist -- while both
+    committed blobs and both working files still equal the approved pair. The
+    same group proves an ACTUAL commit carrying an outside path is rejected
+    even when both artifacts match their frozen bytes, and that a
+    ``post-commit`` hook mutating the artifact the commit did NOT change fails
+    the run instead of being masked by the single-path success.
+
+    The identity group freezes the validated identity across the repository's
+    OWN hooks with real commits: a non-mutating hook publishes normally with
+    the committed and working bytes equal to the hook-time witness, while a
+    hook that stages an invalid catalogue, a hook that substitutes a different
+    but individually coherent builder-made pair (which the real validator
+    accepts), a post-commit hook that rewrites only the working bytes and a
+    post-commit hook that leaves a same-bytes SYMLINK in place of either
+    working artifact are all rejected at ``stage=git/verify`` -- even though the
+    original post-hook comparison would have accepted the substituted pair. An
+    exact private record followed by trailing newlines is the positive control:
+    it still publishes and commits.
     """
     from catalog_export import validate_artifact_pair
 
@@ -1818,6 +1843,180 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     assert _blob(hook_root, "HEAD", "site/catalog.json") == (hook_root / CATALOG).read_bytes()
     assert _blob(hook_root, "HEAD", "site/index.html") == (hook_root / INDEX).read_bytes()
     assert _dirty_snapshot(hook_root) == hook_dirty
+
+    # --- EITHER artifact alone is a legitimate artifact commit -------------
+    # The reproduced defect: a normal publication is followed by an unrelated
+    # baseline change committed INTO one artifact only (an HTML comment in the
+    # page, or a trailing newline in the catalogue). Both baseline pairs pass
+    # the real validator, and the next genuine build restores just that one
+    # artifact. The allowed changed-path set is therefore a NONEMPTY SUBSET of
+    # the two literals -- either alone or both -- while the approved PAIR (both
+    # frozen identities, committed AND in the working tree) is still required.
+    single_root = tmp_path / "single artifact root"
+    _plant_tracked(single_root)
+    _init_repo(single_root, tracked=sorted(TRACKED_FILES))
+    _write_roster(single_root, ROSTER)
+    single_env = _env()
+    single_seed = _run(single_root, sys.executable, single_env, cwd)
+    assert single_seed.returncode == 0, single_seed.stderr
+    approved_catalog = _blob(single_root, "HEAD", "site/catalog.json")
+    approved_index = _blob(single_root, "HEAD", "site/index.html")
+    assert (approved_catalog, approved_index) == (
+        (single_root / CATALOG).read_bytes(), (single_root / INDEX).read_bytes())
+    validate_artifact_pair(approved_catalog.decode("utf-8"),
+                           approved_index.decode("utf-8"))
+    _make_dirty(single_root)
+    single_dirty = _dirty_snapshot(single_root)
+    single_unrelated = [entry for entry in _status(single_root)
+                        if "site/" not in entry]
+    assert len(single_unrelated) == len(DIRTY_PATHS), single_unrelated
+
+    one_artifact_cases = (
+        # (label, the single artifact the BASELINE commit changes, its bytes)
+        ("index.html only", INDEX,
+         approved_index + b"<!-- synthetic baseline comment -->\n"),
+        ("catalog.json only", CATALOG, approved_catalog + b"\n"),
+    )
+    for label, rel, baseline_bytes in one_artifact_cases:
+        # An explicit synthetic baseline commit changes exactly this artifact,
+        # and the resulting baseline PAIR still passes the real validator.
+        (single_root / rel).write_bytes(baseline_bytes)
+        _git(single_root, "add", "--", str(rel))
+        # Path-limited, like the helper: the staged unrelated work must stay out.
+        _git(single_root, "commit", "-q", "--only", "-m",
+             f"synthetic baseline: {label}", "--", str(rel))
+        baseline_head = _head(single_root)
+        assert _commit_paths(single_root) == [str(rel)], label
+        validate_artifact_pair((single_root / CATALOG).read_bytes().decode("utf-8"),
+                               (single_root / INDEX).read_bytes().decode("utf-8"))
+        # The genuine builder now restores just that one artifact.
+        one = _run(single_root, sys.executable, single_env, cwd)
+        assert one.returncode == 0, (label, one.stderr)
+        assert one.stdout == "", (label, one.stdout)
+        assert "committed locally" in one.stderr, (label, one.stderr)
+        one_head = _head(single_root)
+        assert one_head != baseline_head, (label, "no commit was made")
+        assert _parents(single_root) == [baseline_head], label
+        # The actual stored commit changes EXACTLY the intended single path.
+        assert _commit_paths(single_root) == [str(rel)], (label,
+                                                          _commit_paths(single_root))
+        # BOTH committed blobs AND BOTH ordinary working artifacts still equal
+        # the approved pair: the unchanged artifact is part of the contract.
+        assert _blob(single_root, "HEAD", "site/catalog.json") == approved_catalog, label
+        assert _blob(single_root, "HEAD", "site/index.html") == approved_index, label
+        assert (single_root / CATALOG).read_bytes() == approved_catalog, label
+        assert (single_root / INDEX).read_bytes() == approved_index, label
+        validate_artifact_pair(
+            _blob(single_root, "HEAD", "site/catalog.json").decode("utf-8"),
+            _blob(single_root, "HEAD", "site/index.html").decode("utf-8"))
+        assert _git(single_root, "diff", "--quiet", "--no-ext-diff", "HEAD",
+                    "--", *ARTIFACTS, check=False).returncode == 0, label
+        # All six unrelated dirty/index shapes survived untouched.
+        assert _dirty_snapshot(single_root) == single_dirty, label
+        assert [entry for entry in _status(single_root)
+                if "site/" not in entry] == single_unrelated, label
+
+    # A second identical run takes the no-change path: no commit, HEAD stable,
+    # unrelated entries untouched and stdout silent.
+    single_commits = _commit_count(single_root)
+    single_head_now = _head(single_root)
+    repeat = _run(single_root, sys.executable, single_env, cwd)
+    assert repeat.returncode == 0, repeat.stderr
+    assert repeat.stdout == ""
+    assert "no artifact change" in repeat.stderr, repeat.stderr
+    assert "committed locally" not in repeat.stderr, repeat.stderr
+    assert _head(single_root) == single_head_now, "a no-change run must not commit"
+    assert _commit_count(single_root) == single_commits
+    assert _dirty_snapshot(single_root) == single_dirty
+
+    # A one-path commit still depends on BOTH frozen identities: a real
+    # ``post-commit`` hook mutates the artifact this commit does NOT change, so
+    # checking only the changed file would pass. The commit itself is exactly
+    # the single catalogue path and holds the approved pair.
+    (single_root / CATALOG).write_bytes(approved_catalog + b"\n")
+    _git(single_root, "add", "--", str(CATALOG))
+    _git(single_root, "commit", "-q", "--only", "-m",
+         "synthetic baseline: catalog newline", "--", str(CATALOG))
+    guarded_head = _head(single_root)
+    assert _commit_paths(single_root) == [str(CATALOG)]
+    witness_unchanged = tmp_path / "witness unchanged artifact"
+    _install_hook(single_root, "post-commit",
+                  _witness_lines(witness_unchanged, single_root) + [
+        "printf '%s' '<!-- hook mutated the unchanged artifact -->' >> "
+        f"{str(single_root / INDEX)!r}\n",
+    ])
+    guarded = _run(single_root, sys.executable, single_env, cwd)
+    assert guarded.returncode == 2, guarded.stderr
+    _assert_not_success(guarded, "post-commit mutation of the unchanged artifact")
+    assert "stage=git/verify" in guarded.stderr, guarded.stderr
+    assert "working artifact does not match the validated bytes" in guarded.stderr, (
+        guarded.stderr)
+    assert "site/index.html" in guarded.stderr, guarded.stderr
+    assert "may already exist" in guarded.stderr, guarded.stderr
+    assert _head(single_root) != guarded_head
+    assert _parents(single_root) == [guarded_head]
+    assert _commit_paths(single_root) == [str(CATALOG)], _commit_paths(single_root)
+    assert _blob(single_root, "HEAD", "site/catalog.json") == approved_catalog
+    assert _blob(single_root, "HEAD", "site/index.html") == approved_index
+    guarded_catalog, guarded_index = _witness_pair(witness_unchanged)
+    assert (guarded_catalog, guarded_index) == (approved_catalog, approved_index)
+    assert (single_root / INDEX).read_bytes() != approved_index
+    assert _sha256((single_root / INDEX).read_bytes()) in guarded.stderr, guarded.stderr
+    # Restore the approved working bytes from the hook's own witness copy (no
+    # byte is invented here), so the later assertions see the approved pair.
+    (single_root / INDEX).write_bytes(guarded_index)
+    assert _dirty_snapshot(single_root) == single_dirty
+    (single_root / ".git" / "hooks" / "post-commit").unlink()
+
+    # --- an OUTSIDE path in a real commit is rejected even when BOTH
+    #     artifacts still match their frozen bytes ---------------------------
+    # The fault is created by an owned Git launcher that turns the helper's
+    # PATH-LIMITED commit into a genuine full-index commit carrying one named
+    # outside path, so the stored commit object itself is what gets inspected.
+    wide_root = tmp_path / "outside path root"
+    _plant_tracked(wide_root)
+    _init_repo(wide_root, tracked=sorted(TRACKED_FILES))
+    _write_roster(wide_root, ROSTER)
+    wide_env = _env()
+    wide_seed = _run(wide_root, sys.executable, wide_env, cwd)
+    assert wide_seed.returncode == 0, wide_seed.stderr
+    wide_catalog = _blob(wide_root, "HEAD", "site/catalog.json")
+    wide_index = _blob(wide_root, "HEAD", "site/index.html")
+    _make_dirty(wide_root)
+    # A one-artifact baseline, so the outside path is the ONLY fault: without
+    # it this run would be a legitimate single-artifact commit.
+    (wide_root / INDEX).write_bytes(wide_index + b"<!-- synthetic baseline comment -->\n")
+    _git(wide_root, "add", "--", str(INDEX))
+    _git(wide_root, "commit", "-q", "--only", "-m",
+         "synthetic baseline: index only", "--", str(INDEX))
+    wide_baseline = _head(wide_root)
+    widen_dir, widen_log = _git_shim(tmp_path, "widening git", widen="notes.md")
+    interpreter, log, widen_env = _harness(tmp_path, mode="pass")
+    widened = _run(wide_root, interpreter, _with_path(widen_env, widen_dir), cwd)
+    assert widened.returncode == 2, widened.stderr
+    _assert_not_success(widened, "outside path in the artifact commit")
+    assert "stage=git/verify" in widened.stderr, widened.stderr
+    assert "outside" in widened.stderr, widened.stderr
+    assert "notes.md" in widened.stderr, widened.stderr
+    assert "may already exist" in widened.stderr, widened.stderr
+    assert any(" commit " in call for call in _shim_calls(widen_log)), (
+        _shim_calls(widen_log))
+    # The fault-repository really made that commit: its STORED path list has a
+    # third path, while both allowlisted artifacts still hold approved bytes.
+    wide_head = _head(wide_root)
+    assert wide_head != wide_baseline
+    assert _parents(wide_root) == [wide_baseline]
+    stored_paths = _commit_paths(wide_root)
+    assert "notes.md" in stored_paths, stored_paths
+    assert set(stored_paths) - set(ARTIFACTS), stored_paths
+    assert _blob(wide_root, "HEAD", "site/catalog.json") == wide_catalog
+    assert _blob(wide_root, "HEAD", "site/index.html") == wide_index
+    # A PATH-FILTERED inspection would have accepted that commit -- exactly the
+    # bounded weakening the whole-commit assertion above exists to catch.
+    filtered_paths = _git(wide_root, "diff-tree", "--no-commit-id", "--name-only",
+                          "-r", "--no-renames", "HEAD", "--", *ARTIFACTS
+                          ).stdout.split()
+    assert sorted(filtered_paths) == [str(INDEX)], filtered_paths
 
     # --- earlier failures never reach the Git phase at all ----------------
     log_shim_dir, git_log = _git_shim(tmp_path, "logging git")

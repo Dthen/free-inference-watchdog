@@ -31,10 +31,15 @@
 #      never redefine what was approved, and a Git-normalised hash is not a
 #      substitute for exact-byte identity. An empty, wrong, extra, digest-less,
 #      re-spaced or otherwise damaged receipt is a validation failure;
-#   4. commit those two paths -- and ONLY those two paths -- in the selected
-#      root's own Git repository: one path-limited commit with a fixed
-#      noninteractive message, after which the committed blobs AND the ordinary
-#      working artifacts are compared against those frozen identities. A hook
+#   4. commit the artifact paths that changed -- site/index.html and
+#      site/catalog.json, EITHER ONE ALONE OR BOTH and NEVER a third path -- in
+#      the selected root's own Git repository: one path-limited commit with a
+#      fixed noninteractive message, after which the committed blobs AND the
+#      ordinary working artifacts are compared against those frozen identities.
+#      A one-artifact commit is legitimate (a build may restore only the
+#      artifact an outside change touched), so the commit's COMPLETE
+#      changed-path set must be a NONEMPTY SUBSET of the two literals, read from
+#      the whole commit rather than from a path-filtered diff. A hook
 #      may legitimately run (hooks are never bypassed) but it cannot substitute
 #      the approved bytes: a replaced or re-staged pair fails even when the new
 #      pair is itself coherent and passes the validator. Each current working
@@ -42,8 +47,9 @@
 #      without following a final-component symlink BEFORE its bytes are read,
 #      so a post-commit hook that swaps the file for a same-bytes symlink, a
 #      directory or any other non-regular type fails too. Before any local
-#      success is claimed the exact target commit, its parent, its path list
-#      and both of those byte identities are read back.
+#      success is claimed the exact target commit, its parent, its changed-path
+#      set (a nonempty subset of the allowlist) and both of those byte
+#      identities are read back.
 #
 # A nonzero builder exit stops the gate BEFORE validation, even when a valid
 # last-good pair is already on disk. A rejected pair stops it BEFORE any Git
@@ -113,15 +119,17 @@ usage: publish_site.sh [--root DIR] [--python PATH]
 
 Run the LOCAL publication gate for the static dashboard: acquire the dedicated
 publish lock, run the real build_site.py against --root, validate the published
-site/catalog.json and site/index.html pair by exact read-back, then commit that
-pair -- and only that pair -- in --root's own Git repository.
+site/catalog.json and site/index.html pair by exact read-back, then commit the
+artifact paths that changed -- site/index.html and site/catalog.json, either one
+alone or both -- in --root's own Git repository.
 
-The commit is path-limited: site/index.html and site/catalog.json are staged
-and committed with a fixed message, while every other tracked, staged or
-untracked file is left exactly as it was. --root must already be the top level
-of an ordinary non-bare Git working tree with an existing commit on an attached
-branch; this helper never initialises, repairs, rebases or reconfigures a
-repository. A run whose artifacts are unchanged commits nothing.
+The commit is path-limited to those two literal paths: they are staged and
+committed with a fixed message, while every other tracked, staged or untracked
+file is left exactly as it was, and a commit that changes any third path is
+rejected. --root must already be the top level of an ordinary non-bare Git
+working tree with an existing commit on an attached branch; this helper never
+initialises, repairs, rebases or reconfigures a repository. A run whose
+artifacts are unchanged commits nothing.
 
 The identity of the pair is frozen when the real validator accepts it -- raw
 SHA-256 of those exact bytes -- and, after the commit, both the committed blobs
@@ -546,8 +554,8 @@ fi
 
 # --- read the EXACT target back instead of trusting the return status ------
 # A commit is only a success once HEAD really advanced onto the previous HEAD,
-# carries exactly the allowlist, and both committed blobs AND both working
-# artifacts still hash to the identities frozen at validation.
+# changed a nonempty subset of the allowlist, and both committed blobs AND both
+# working artifacts still hash to the identities frozen at validation.
 head_after=$(git_root rev-parse --verify --quiet HEAD 2>/dev/null) || head_after=''
 if [ -z "$head_after" ] || [ "$head_after" = "$head_before" ]; then
     stage_err git/verify "the commit command reported success but HEAD did not advance: $root_phys"
@@ -559,12 +567,39 @@ if [ "$actual_parent" != "$head_before" ]; then
     exit 2
 fi
 
+# --- read the WHOLE commit's changed-path set back --------------------------
+# The allowed set is a NONEMPTY SUBSET of the two literals, not an exact
+# two-path list: a build that restores only the one artifact an outside change
+# touched is a legitimate artifact commit, and so is one that restores both.
+# The inspection is deliberately UNFILTERED -- no trailing pathspec -- because
+# a path-filtered diff would report just the allowlisted paths and hide a third
+# path that a hook or a widened commit smuggled into the same commit.
+paths_rc=0
 committed_paths=$(git_root diff-tree --no-commit-id --name-only -r --no-renames HEAD 2>/dev/null) \
-    || committed_paths=''
-expected_paths="$ARTIFACT_CATALOG
-$ARTIFACT_INDEX"
-if [ "$committed_paths" != "$expected_paths" ]; then
-    stage_err git/verify "the artifact commit does not contain exactly the allowlist ($ARTIFACT_INDEX, $ARTIFACT_CATALOG); found [${committed_paths//$'\n'/, }]: $root_phys"
+    || paths_rc=$?
+if [ "$paths_rc" -ne 0 ]; then
+    stage_err git/verify "cannot read the artifact commit's changed paths back (git diff-tree exit $paths_rc); a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
+    exit 2
+fi
+if [ -z "$committed_paths" ]; then
+    stage_err git/verify "the commit advanced HEAD but reports no changed path; no artifact commit is claimed, a commit may already exist at $head_after and is left for operator handling: $root_phys"
+    exit 2
+fi
+outside_paths=''
+while IFS= read -r committed_rel; do
+    case $committed_rel in
+        "$ARTIFACT_INDEX"|"$ARTIFACT_CATALOG") : ;;
+        *)
+            if [ -n "$outside_paths" ]; then
+                outside_paths="$outside_paths, $committed_rel"
+            else
+                outside_paths=$committed_rel
+            fi
+            ;;
+    esac
+done <<< "$committed_paths"
+if [ -n "$outside_paths" ]; then
+    stage_err git/verify "the artifact commit changes paths outside the allowlist ($ARTIFACT_INDEX, $ARTIFACT_CATALOG): outside [$outside_paths]; the whole commit changes [${committed_paths//$'\n'/, }]; a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
     exit 2
 fi
 
