@@ -1,11 +1,14 @@
-"""Unit 9b: publisher lock and validated-build gate (scripts/publish_site.sh).
+"""Units 9b-9c: publisher lock, validated-build gate and restricted local commit.
 
-The helper is a LOCAL gate only: it takes ONE dedicated publish lock, runs the
-real ``build_site.py`` against an explicit ``--root``, then reads the EXACT
-final ``site/catalog.json`` + ``site/index.html`` bytes back and hands them to
-the builder's own ``validate_artifact_pair``. It stages nothing, commits
-nothing, pushes nothing and never touches the network; exit 0 means only that
-the local artifact pair passed this gate.
+The helper is a LOCAL gate: it takes ONE dedicated publish lock, runs the real
+``build_site.py`` against an explicit ``--root``, reads the EXACT final
+``site/catalog.json`` + ``site/index.html`` bytes back and hands them to the
+builder's own ``validate_artifact_pair``, and -- only after that pair is
+accepted -- commits exactly those two allowlisted paths in the selected root's
+own Git repository, inside the SAME lock lifetime. It pushes nothing, deploys
+nothing and never touches the network: exit 0 means only that the local
+artifact pair was validated and its local commit handled, never that GitHub or
+the public site changed.
 
 Pinned here, through real Bash subprocess execution against owned synthetic
 roots (no provider call, credential, installed Hermes state, public remote or
@@ -34,10 +37,23 @@ live roster):
 * one exclusive publish lock covers build, read-back and validation: two helper
   processes cannot overlap their critical sections, a nonblocking acquisition
   during the final validation fails, the lock inode is retained across runs,
-  and success, failure and a SIGKILLed helper all release it.
+  and success, failure and a SIGKILLed helper all release it;
+* the local Git phase commits ONLY ``site/index.html`` and ``site/catalog.json``
+  with ``--only`` path-limited semantics in the selected root's own repository:
+  unrelated tracked/staged/untracked work keeps its bytes, mode, blob and stage
+  identity and never enters the commit, an unchanged pair commits nothing and
+  leaves HEAD alone, a rejecting hook or a failing ``git add`` fails at exit 2
+  without advancing HEAD, a failed build or read-back never invokes Git at all,
+  and non-repository / nested-root / detached-HEAD targets are refused without
+  touching an ancestor or this helper's own checkout;
+* the publication lock is still held INSIDE a real commit hook: a second
+  helper cannot enter its builder while the hook runs, and an independent
+  nonblocking acquisition of the same inode only succeeds afterwards.
 
 Fault injection and coordination live ONLY in this test module: the production
-helper exposes no test switch, callback or fake-success mode.
+helper exposes no test switch, callback or fake-success mode. Artifact commits
+are created only in owned temporary repositories; nothing here pushes, and no
+remote exists.
 """
 
 from __future__ import annotations
@@ -48,6 +64,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -82,6 +99,49 @@ OTHER_ROSTER = {
     "providers": {"nous": ["vendor-q/other-model:free"]},
     "stale_providers": [],
 }
+
+# A second roster the real builder accepts and renders DIFFERENT content for:
+# the Git phase must see genuinely changed artifacts (never a synthetic edit).
+ROSTER2 = {
+    "tick_epoch": 1787729999,
+    "providers": {
+        "nous": ["vendor-x/synthetic-alpha:free", "vendor-y/synthetic-beta-free",
+                 "vendor-z/synthetic-gamma:free"],
+        "kilo": ["vendor-x/synthetic-alpha:free"],
+    },
+    "stale_providers": [],
+}
+
+# The ONLY paths the local commit may touch, in git's sorted order.
+ARTIFACTS = ("site/catalog.json", "site/index.html")
+
+# The root's .gitignore policy: the two public artifacts are the only tracked
+# entries under site/, and state/ (synthetic private state) stays local-only.
+# Build and publish locks fall under site/*.
+SITE_IGNORE = (
+    "state/\n"
+    "site/*\n"
+    "!site/index.html\n"
+    "!site/catalog.json\n"
+)
+
+# Synthetic tracked fixtures of the Git-phase repository, and the unrelated
+# dirt the helper must preserve: unstaged, staged, distinct staged+unstaged,
+# a staged new file, a staged deletion and an untracked sentinel.
+TRACKED_FILES = {
+    "notes.md": "line one\nline two\n",
+    "plain.txt": "plain v1\n",
+    "twin.txt": "twin v0\n",
+    "obsolete.md": "removed later\n",
+}
+DIRTY_PATHS = (
+    "notes.md",
+    "plain.txt",
+    "twin.txt",
+    "added later — ünïcode.txt",
+    "obsolete.md",
+    "sentinel ☂ note.txt",
+)
 
 BOOT_S = 90.0  # upper bound for one helper invocation
 HOLD_S = 30.0  # upper bound for a coordinated hold inside the helper
@@ -215,6 +275,23 @@ raise SystemExit(0)
 '''
 
 
+def _env():
+    """Hermetic base environment for helpers, builders and owned Git launchers.
+
+    No ``PYTHONPATH`` (a synthetic root must never become importable) and no
+    ambient Git configuration: every synthetic repository carries its own
+    disposable local identity, and nothing here depends on the operator's
+    global hooks or signing policy.
+    """
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env.update(
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_SYSTEM=os.devnull,
+        GIT_TERMINAL_PROMPT="0",
+    )
+    return env
+
+
 def _harness(tmp_path, mode="pass", hold=None, pidfile=None):
     """Create the owned interpreter and the environment that configures it."""
     harness_dir = tmp_path / "harness dir"
@@ -228,9 +305,7 @@ def _harness(tmp_path, mode="pass", hold=None, pidfile=None):
         encoding="utf-8")
     interpreter.chmod(0o755)
 
-    env = {
-        key: value for key, value in os.environ.items() if key != "PYTHONPATH"
-    }
+    env = _env()
     env.update(
         PUBLISH_TEST_LOG=str(log),
         PUBLISH_TEST_MODE=mode,
@@ -413,6 +488,189 @@ def _inode(path):
 
 
 # --------------------------------------------------------------------------
+# owned Git scaffolding for the local-commit phase
+# --------------------------------------------------------------------------
+
+def _git(root, *args, check=True):
+    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                          text=True, env=_env(), timeout=BOOT_S)
+    if check:
+        assert proc.returncode == 0, (
+            root, args, proc.returncode, proc.stdout, proc.stderr)
+    return proc
+
+
+def _git_bytes(root, *args):
+    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                          env=_env(), timeout=BOOT_S)
+    assert proc.returncode == 0, (root, args, proc.returncode, proc.stderr)
+    return proc.stdout
+
+
+def _head(root, rev="HEAD"):
+    return _git(root, "rev-parse", "--verify", rev).stdout.strip()
+
+
+def _parents(root, rev="HEAD"):
+    fields = _git(root, "rev-list", "--parents", "-n", "1", rev).stdout.split()
+    return fields[1:]
+
+
+def _commit_count(root):
+    return int(_git(root, "rev-list", "--count", "HEAD").stdout.strip())
+
+
+def _commit_paths(root, rev="HEAD"):
+    """Every path the commit changed (sorted, renames not collapsed)."""
+    out = _git(root, "diff-tree", "--no-commit-id", "--name-only", "-r",
+               "--no-renames", rev).stdout
+    return sorted(line for line in out.splitlines() if line.strip())
+
+
+def _blob(root, rev, rel):
+    """Exact committed bytes of one path at one revision."""
+    return _git_bytes(root, "cat-file", "blob", f"{rev}:{rel}")
+
+
+def _status(root):
+    """Porcelain worktree/index state, one entry per path (sorted)."""
+    raw = _git_bytes(root, "status", "--porcelain", "-z", "--untracked-files=all")
+    return sorted(record.decode("utf-8") for record in raw.split(b"\0") if record)
+
+
+def _index_snapshot(root):
+    """Every index entry as (mode, blob, stage), keyed by path."""
+    entries = {}
+    for record in _git_bytes(root, "ls-files", "-s", "-z").split(b"\0"):
+        if not record:
+            continue
+        meta, _, path = record.partition(b"\t")
+        mode, sha, stage = meta.split()
+        entries[path.decode("utf-8")] = (mode.decode(), sha.decode(), int(stage))
+    return entries
+
+
+def _worktree(root, rel):
+    """Exact working bytes of a path, or None when it does not exist."""
+    path = root / rel
+    return path.read_bytes() if path.exists() else None
+
+
+def _plant_tracked(root):
+    """Write the baseline tracked fixtures of the synthetic repository."""
+    root.mkdir(parents=True, exist_ok=True)
+    for name, text in TRACKED_FILES.items():
+        (root / name).write_text(text, encoding="utf-8")
+
+
+def _init_repo(root, tracked=()):
+    """A tiny INDEPENDENT repository: disposable local identity, one commit."""
+    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "--initial-branch=main")
+    _git(root, "config", "user.name", "Synthetic Publisher")
+    _git(root, "config", "user.email", "publisher@example.invalid")
+    _git(root, "config", "commit.gpgsign", "false")
+    (root / ".gitignore").write_text(SITE_IGNORE, encoding="utf-8")
+    _git(root, "add", "--", ".gitignore", *tracked)
+    _git(root, "commit", "-q", "-m", "synthetic initial commit")
+    return _head(root)
+
+
+def _make_dirty(root):
+    """Unrelated work of every shape the artifact commit must leave alone."""
+    (root / "notes.md").write_text("line one changed\nline two\n", encoding="utf-8")
+    (root / "plain.txt").write_text("plain v2 staged\n", encoding="utf-8")
+    _git(root, "add", "--", "plain.txt")
+    (root / "twin.txt").write_text("twin staged\n", encoding="utf-8")
+    _git(root, "add", "--", "twin.txt")
+    (root / "twin.txt").write_text("twin worktree after staging\n", encoding="utf-8")
+    (root / "added later — ünïcode.txt").write_text("staged new file\n", encoding="utf-8")
+    _git(root, "add", "--", "added later — ünïcode.txt")
+    _git(root, "rm", "-q", "--", "obsolete.md")
+    (root / "sentinel ☂ note.txt").write_text("untracked sentinel\n", encoding="utf-8")
+
+
+def _dirty_snapshot(root):
+    """Working bytes plus index identity of every unrelated dirty path."""
+    index = _index_snapshot(root)
+    return {rel: (_worktree(root, rel), index.get(rel)) for rel in DIRTY_PATHS}
+
+
+def _git_shim(tmp_path, name, fail_on=None, swallow=None):
+    """Owned ``git`` launcher: records every invocation, can fail or fake one.
+
+    ``fail_on`` makes the named subcommand fail; ``swallow`` makes it exit zero
+    without doing anything at all (a safe-looking mutation that never happened).
+    The real git still performs every other command.
+    """
+    real = shutil.which("git")
+    assert real, "the git-phase tests require the git executable"
+    shim_dir = tmp_path / name
+    shim_dir.mkdir()
+    log = tmp_path / f"{name}.log"
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -u",
+        f"printf '%s\\n' \"$*\" >> {str(log)!r}",
+    ]
+    if fail_on is not None:
+        lines.append(
+            f'case " $* " in *" {fail_on} "*) '
+            f'echo "owned git shim: simulating {fail_on} failure" >&2; exit 99;; esac')
+    if swallow is not None:
+        lines.append(f'case " $* " in *" {swallow} "*) exit 0;; esac')
+    lines.append(f'exec {real} "$@"')
+    shim = shim_dir / "git"
+    shim.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    shim.chmod(0o755)
+    return shim_dir, log
+
+
+def _with_path(env, shim_dir):
+    """Prepend an owned launcher directory to a helper's PATH."""
+    env = dict(env)
+    env["PATH"] = f"{shim_dir}:{env.get('PATH', os.defpath)}"
+    return env
+
+
+def _shim_calls(log):
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def _wait_path(path, timeout=HOLD_S):
+    """Wait for an owned handshake file, with a strict deadline."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.005)
+    raise AssertionError(f"timed out after {timeout}s waiting for {path}")
+
+
+def _non_repo_base():
+    """A directory whose ancestry really holds no git repository.
+
+    pytest's tmp base can itself live inside an operator-managed repository (a
+    git-tracked home directory), where a "not a repository" control would
+    silently exercise the NESTED-root refusal instead. The candidate is probed
+    for real, and the control fails loudly rather than degrade if the host
+    offers no git-free scratch area.
+    """
+    for candidate in ("/tmp", "/var/tmp", "/dev/shm", tempfile.gettempdir()):
+        base = Path(candidate)
+        if not base.is_dir():
+            continue
+        probe = subprocess.run(
+            ["git", "-C", str(base), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, env=_env(), timeout=BOOT_S)
+        if probe.returncode != 0:
+            return base
+    raise AssertionError(
+        "no git-free scratch directory is available for the non-repository "
+        "control; refusing to weaken it into a nested-root check")
+
+
+# --------------------------------------------------------------------------
 # 1. the success path
 # --------------------------------------------------------------------------
 
@@ -432,14 +690,15 @@ def test_gate_passes_a_genuine_build_with_empty_stdout(tmp_path):
     cwd.mkdir()
 
     plain_root = tmp_path / "plain root"
+    _init_repo(plain_root)
     _write_roster(plain_root, ROSTER)
-    plain_env = {key: value for key, value in os.environ.items()
-                 if key != "PYTHONPATH"}
+    plain_env = _env()
     plain = _run(plain_root, sys.executable, plain_env, cwd)
     assert plain.returncode == 0, plain.stderr
     assert plain.stdout == "", f"successful gate must be stdout-silent: {plain.stdout!r}"
 
     root = tmp_path / "root with spaces"
+    _init_repo(root)
     _write_roster(root, ROSTER)
     interpreter, log, env = _harness(tmp_path, mode="pass")
     assert " " in str(interpreter)
@@ -497,7 +756,7 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
 
     cwd = tmp_path / "cwd"
     cwd.mkdir()
-    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env = _env()
 
     # --- bad arguments: nonzero, usage on stderr, no build ----------------
     for bad in (["--root"], ["--python"], ["--root", ""], ["--bogus"],
@@ -597,6 +856,7 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
 
     # --- failed builder: valid last-good pair cannot rescue it ------------
     stale_root = tmp_path / "stale root"
+    _init_repo(stale_root)
     _write_roster(stale_root, ROSTER)
     interpreter, log, stale_env = _harness(tmp_path, mode="pass")
     first = _run(stale_root, interpreter, stale_env, cwd)
@@ -650,6 +910,7 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
     # The same zero-exit no-op against a VALID last-good pair: mere file
     # existence must not substitute for positive execution either.
     pair_root = tmp_path / "last good root"
+    _init_repo(pair_root)
     _write_roster(pair_root, ROSTER)
     interpreter, _, good_env = _harness(tmp_path, mode="pass")
     built = _run(pair_root, interpreter, good_env, cwd)
@@ -763,6 +1024,7 @@ def test_publish_lock_is_exclusive_through_validation_and_always_released(tmp_pa
 
     # --- baseline: a first real invocation retains a stable lock inode ----
     root = tmp_path / "lock root"
+    _init_repo(root)
     _write_roster(root, ROSTER)
     interpreter, _, env = _harness(tmp_path, mode="pass")
     first = _run(root, interpreter, env, cwd)
@@ -849,8 +1111,94 @@ def test_publish_lock_is_exclusive_through_validation_and_always_released(tmp_pa
     assert again.returncode == 0, again.stderr
     assert _inode(lock_path) == baseline
 
+    # --- the lock is still held INSIDE a real commit hook ----------------
+    # The critical section now ends after the artifact commit, not at the end
+    # of validation: the hook blocks while git holds the repository, and the
+    # publication lock must still be held there -- otherwise a second
+    # publisher could start building on top of an in-flight commit.
+    hook_root = tmp_path / "hook lock root"
+    _plant_tracked(hook_root)
+    _init_repo(hook_root, tracked=sorted(TRACKED_FILES))
+    _write_roster(hook_root, ROSTER)
+    interpreter_s, _, seed_env = _harness(tmp_path, mode="pass")
+    seed = _run(hook_root, interpreter_s, seed_env, cwd)
+    assert seed.returncode == 0, seed.stderr
+
+    deeds = tmp_path / "hook handshake"
+    deeds.mkdir()
+    hook = hook_root / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -u\n"
+        f"deeds={str(deeds)!r}\n"
+        "printf '%s' \"$$\" > \"$deeds/hook.pid\"\n"
+        ": > \"$deeds/hook.started\"\n"
+        "deadline=$((SECONDS + 30))\n"
+        "while [ ! -e \"$deeds/hook.go\" ]; do\n"
+        "    if [ \"$SECONDS\" -ge \"$deadline\" ]; then\n"
+        "        echo 'synthetic commit hook timed out' >&2\n"
+        "        exit 1\n"
+        "    fi\n"
+        "    sleep 0.01\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8")
+    hook.chmod(0o755)
+
+    # A genuinely different roster, so this run really commits.
+    _write_roster(hook_root, ROSTER2)
+    hook_lock = hook_root / PUBLISH_LOCK
+    hook_inode = _inode(hook_lock)
+    interpreter_ha, log_ha, env_ha = _harness(tmp_path, mode="pass")
+    a_hook = _Helper(hook_root, interpreter_ha, env_ha, cwd, "hookA")
+    b_hook = None
+    try:
+        _wait_path(deeds / "hook.started")
+        assert _probe(hook_lock) is False, (
+            "the publish lock was not held inside the commit hook")
+
+        interpreter_hb, log_hb, env_hb = _harness(tmp_path, mode="pass")
+        b_hook = _Helper(hook_root, interpreter_hb, env_hb, cwd, "hookB")
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            assert b_hook.poll() is None, b_hook.output()
+            assert not log_hb.with_name(log_hb.name + ".builder").exists(), (
+                "the second helper entered its builder while the commit hook "
+                "held the publish lock")
+            time.sleep(0.01)
+
+        (deeds / "hook.go").write_text("go", encoding="utf-8")
+        release_stamp = time.time_ns()
+        a_hook.wait(timeout=WAIT_S)
+        a_hook_stdout, a_hook_stderr = a_hook.output()
+        assert a_hook.returncode == 0, a_hook_stderr
+        assert a_hook_stdout == b""
+
+        b_hook.wait(timeout=WAIT_S)
+        b_hook_stdout, b_hook_stderr = b_hook.output()
+        assert b_hook.returncode == 0, b_hook_stderr
+        assert b_hook_stdout == b""
+
+        assert _kinds(log_hb) == ["builder", "validate"], _kinds(log_hb)
+        assert _stamps(log_hb)["builder"] > release_stamp, (
+            "the second builder started before the commit hook released the lock")
+
+        # The first helper really committed the artifact pair inside that hook.
+        assert _commit_paths(hook_root) == list(ARTIFACTS)
+    finally:
+        (deeds / "hook.go").write_text("go", encoding="utf-8")
+        for helper_proc in (a_hook, b_hook):
+            if helper_proc is not None and helper_proc.poll() is None:
+                helper_proc.reap(kill_group=True)
+
+    assert _probe_until(hook_lock, True, timeout=10.0) is True, (
+        "the publish lock was not released after the commit hook finished")
+    assert _inode(hook_lock) == hook_inode
+
     # --- a SIGKILLed helper after it acquired the lock -------------------
     killed_root = tmp_path / "killed root"
+    _init_repo(killed_root)
     _write_roster(killed_root, ROSTER)
     killed_lock = killed_root / PUBLISH_LOCK
     hold_c = tmp_path / "C.go"
@@ -899,3 +1247,260 @@ def test_publish_lock_is_exclusive_through_validation_and_always_released(tmp_pa
     after_kill = _run(killed_root, interpreter_k, env_k, cwd)
     assert after_kill.returncode == 0, after_kill.stderr
     assert after_kill.stdout == ""
+
+
+# --------------------------------------------------------------------------
+# 4. the local Git phase: restricted staging and a path-limited commit
+# --------------------------------------------------------------------------
+
+def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
+    """Only the two validated artifacts are ever committed, in the right root.
+
+    Grouped so the whole Git contract is read in one place: the first
+    publication commits both previously untracked artifacts, a second changed
+    roster commits a second exact artifact-only commit, unrelated work of every
+    shape (unstaged, staged, distinct staged+unstaged, staged new file, staged
+    deletion, untracked sentinel with spaces and non-ASCII) keeps its bytes and
+    its mode/blob/stage identity and never enters either commit, an unchanged
+    pair commits nothing at all, a rejecting hook and a failing ``git add``
+    fail at exit 2 without advancing HEAD, earlier failures never invoke Git,
+    and non-repository / nested-root / detached-HEAD targets are refused
+    without touching an ancestor repository or this helper's source checkout.
+    """
+    from catalog_export import validate_artifact_pair
+
+    cwd = tmp_path / "git cwd"
+    cwd.mkdir()
+    env = _env()
+    helper_source_head = _head(REPO)
+
+    # --- a tiny independent repository with an explicit initial commit ----
+    root = tmp_path / "git root"
+    _plant_tracked(root)
+    initial = _init_repo(root, tracked=sorted(TRACKED_FILES))
+    _write_roster(root, ROSTER)
+    assert _commit_count(root) == 1
+    assert _status(root) == []
+
+    # --- first publication: both previously untracked artifacts committed -
+    first_run = _run(root, sys.executable, env, cwd)
+    assert first_run.returncode == 0, first_run.stderr
+    assert first_run.stdout == "", first_run.stdout
+    first = _head(root)
+    assert first != initial
+    assert _parents(root) == [initial]
+    assert _commit_paths(root) == list(ARTIFACTS)
+    committed_catalog = _blob(root, "HEAD", "site/catalog.json")
+    committed_index = _blob(root, "HEAD", "site/index.html")
+    assert committed_catalog == (root / CATALOG).read_bytes()
+    assert committed_index == (root / INDEX).read_bytes()
+    snapshot = validate_artifact_pair(
+        committed_catalog.decode("utf-8"), committed_index.decode("utf-8"))
+    assert snapshot["providers"]["nous"]["model_ids"] == [
+        "vendor-x/synthetic-alpha:free", "vendor-y/synthetic-beta-free"]
+    # Locks and synthetic private state stay out of the commit and the index.
+    assert (root / PUBLISH_LOCK).is_file() and (root / BUILD_LOCK).is_file()
+    assert (root / "state" / "roster.json").is_file()
+    assert _status(root) == []
+    assert _index_snapshot(root).keys() == {
+        ".gitignore", "notes.md", "obsolete.md", "plain.txt", "twin.txt",
+        "site/catalog.json", "site/index.html"}
+    assert "committed locally" in first_run.stderr
+
+    # --- unrelated work of every shape, then a second changed roster ------
+    _make_dirty(root)
+    before_dirty = _dirty_snapshot(root)
+    before_status = _status(root)
+    assert before_status, "the synthetic repository must really be dirty"
+    _write_roster(root, ROSTER2)
+    interpreter, log, harness_env = _harness(tmp_path, mode="pass")
+    second_run = _run(root, interpreter, harness_env, cwd)
+    assert second_run.returncode == 0, second_run.stderr
+    assert second_run.stdout == ""
+    second = _head(root)
+    assert second != first
+    assert _parents(root) == [first]
+    assert _commit_paths(root) == list(ARTIFACTS)
+    catalog_bytes = (root / CATALOG).read_bytes()
+    index_bytes = (root / INDEX).read_bytes()
+    assert catalog_bytes != committed_catalog, "the roster change must reach the artifacts"
+    assert _blob(root, "HEAD", "site/catalog.json") == catalog_bytes
+    assert _blob(root, "HEAD", "site/index.html") == index_bytes
+    validate_artifact_pair(catalog_bytes.decode("utf-8"),
+                           index_bytes.decode("utf-8"))
+    # Nothing unrelated entered the commit, and nothing unrelated moved.
+    for rel in DIRTY_PATHS:
+        assert rel not in _commit_paths(root), (rel, _commit_paths(root))
+    assert _dirty_snapshot(root) == before_dirty
+    assert _status(root) == before_status
+
+    # --- unchanged artifacts commit nothing, even with staged work --------
+    commits_before = _commit_count(root)
+    no_change = _run(root, sys.executable, env, cwd)
+    assert no_change.returncode == 0, no_change.stderr
+    assert no_change.stdout == ""
+    assert _head(root) == second, "a no-change run must not create a commit"
+    assert _commit_count(root) == commits_before
+    assert _dirty_snapshot(root) == before_dirty
+    assert _status(root) == before_status
+    assert "no artifact change" in no_change.stderr
+    assert "committed locally" not in no_change.stderr
+
+    # --- a real rejecting commit hook: exit 2, HEAD unchanged -------------
+    hook_marker = tmp_path / "commit hook ran"
+    rejecting = root / ".git" / "hooks" / "pre-commit"
+    rejecting.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf 'ran' > {str(hook_marker)!r}\n"
+        "echo 'synthetic hook rejecting the commit' >&2\n"
+        "exit 1\n",
+        encoding="utf-8")
+    rejecting.chmod(0o755)
+    _write_roster(root, ROSTER)  # artifacts differ from HEAD again
+    interpreter, log, hook_env = _harness(tmp_path, mode="pass")
+    failed_commit = _run(root, interpreter, hook_env, cwd)
+    assert failed_commit.returncode == 2, failed_commit.stderr
+    _assert_not_success(failed_commit, "rejecting commit hook")
+    assert "stage=git/commit" in failed_commit.stderr, failed_commit.stderr
+    assert hook_marker.exists(), "the repository's own pre-commit hook never ran"
+    assert _head(root) == second, "a failed commit must not move HEAD"
+    assert _commit_count(root) == commits_before
+    assert _dirty_snapshot(root) == before_dirty
+    rejecting.unlink()
+
+    # --- a failing git add: exit 2 before any commit ----------------------
+    add_shim_dir, add_log = _git_shim(tmp_path, "add failure git", fail_on="add")
+    interpreter, log, add_env = _harness(tmp_path, mode="pass")
+    add_env = _with_path(add_env, add_shim_dir)
+    failed_add = _run(root, interpreter, add_env, cwd)
+    assert failed_add.returncode == 2, failed_add.stderr
+    _assert_not_success(failed_add, "git add failure")
+    assert "stage=git/add" in failed_add.stderr, failed_add.stderr
+    assert "simulating add failure" in failed_add.stderr, failed_add.stderr
+    assert _head(root) == second
+    assert _commit_count(root) == commits_before
+    calls = _shim_calls(add_log)
+    assert any(" add " in call for call in calls), calls
+    assert not any(" commit " in call for call in calls), calls
+
+    # --- a commit that exits 0 without committing is caught by read-back ---
+    # Exit status alone never proves the commit happened: the helper must read
+    # the target HEAD, its parent and the committed blobs back before claiming
+    # local success.
+    lying_dir, lying_log = _git_shim(tmp_path, "lying commit git", swallow="commit")
+    interpreter, log, lying_env = _harness(tmp_path, mode="pass")
+    lying_env = _with_path(lying_env, lying_dir)
+    head_before_lie = _head(root)
+    lying = _run(root, interpreter, lying_env, cwd)
+    assert lying.returncode == 2, lying.stderr
+    _assert_not_success(lying, "lying commit")
+    assert "stage=git/verify" in lying.stderr, lying.stderr
+    assert _head(root) == head_before_lie, "no commit can result from a faked commit"
+    assert any(" commit " in call for call in _shim_calls(lying_log)), _shim_calls(lying_log)
+
+    # --- earlier failures never reach the Git phase at all ----------------
+    log_shim_dir, git_log = _git_shim(tmp_path, "logging git")
+    head_now = _head(root)
+    index_now = _dirty_snapshot(root)
+
+    _write_raw_roster(root, "THIS IS NOT JSON{{")
+    interpreter, log, build_env = _harness(tmp_path, mode="pass")
+    build_env = _with_path(build_env, log_shim_dir)
+    broken_build = _run(root, interpreter, build_env, cwd)
+    assert broken_build.returncode == 2, broken_build.stderr
+    assert "stage=builder" in broken_build.stderr, broken_build.stderr
+    assert _head(root) == head_now
+    assert _dirty_snapshot(root) == index_now
+    assert _shim_calls(git_log) == [], _shim_calls(git_log)
+
+    _write_roster(root, ROSTER)
+    interpreter, log, validate_env = _harness(tmp_path, mode="mismatch")
+    validate_env = _with_path(validate_env, log_shim_dir)
+    broken_pair = _run(root, interpreter, validate_env, cwd)
+    assert broken_pair.returncode == 2, broken_pair.stderr
+    assert "stage=validate" in broken_pair.stderr, broken_pair.stderr
+    assert _head(root) == head_now
+    assert _dirty_snapshot(root) == index_now
+    assert _shim_calls(git_log) == [], _shim_calls(git_log)
+
+    # --- refused Git targets: no repository, nested root, detached HEAD ---
+    plain_root = Path(tempfile.mkdtemp(prefix="publish-site-no-repo-",
+                                       dir=str(_non_repo_base())))
+    try:
+        _write_roster(plain_root, ROSTER)
+        proc = _run(plain_root, sys.executable, env, cwd)
+        assert proc.returncode == 2, proc.stderr
+        _assert_not_success(proc, "non-repository root")
+        assert "stage=git" in proc.stderr, proc.stderr
+        assert "not a git repository" in proc.stderr, proc.stderr
+        assert not (plain_root / ".git").exists(), "the helper must never git-init a root"
+        assert (plain_root / CATALOG).is_file(), "the build still ran before the refusal"
+    finally:
+        shutil.rmtree(plain_root, ignore_errors=True)
+
+    parent = tmp_path / "ancestor repo"
+    _plant_tracked(parent)
+    parent_head = _init_repo(parent, tracked=sorted(TRACKED_FILES))
+    nested = parent / "nested root"
+    _write_roster(nested, ROSTER)
+    proc = _run(nested, sys.executable, env, cwd)
+    assert proc.returncode == 2, proc.stderr
+    _assert_not_success(proc, "nested root")
+    assert "stage=git" in proc.stderr, proc.stderr
+    assert "top level" in proc.stderr and str(parent) in proc.stderr, proc.stderr
+    assert not (nested / ".git").exists()
+    assert _head(parent) == parent_head
+    assert _commit_count(parent) == 1
+    assert _git(parent, "diff", "--quiet", "--no-ext-diff", "HEAD",
+                check=False).returncode == 0
+    assert _git(parent, "diff", "--cached", "--quiet",
+                check=False).returncode == 0
+
+    detached = tmp_path / "detached root"
+    _plant_tracked(detached)
+    detached_head = _init_repo(detached, tracked=sorted(TRACKED_FILES))
+    _write_roster(detached, ROSTER)
+    _git(detached, "checkout", "-q", "--detach", "HEAD")
+    proc = _run(detached, sys.executable, env, cwd)
+    assert proc.returncode == 2, proc.stderr
+    _assert_not_success(proc, "detached HEAD")
+    assert "stage=git" in proc.stderr, proc.stderr
+    assert "detached" in proc.stderr.lower(), proc.stderr
+    assert _head(detached) == detached_head
+    assert _commit_count(detached) == 1
+
+    # --- missing git is reported explicitly, after a genuine build --------
+    sparse_bin = tmp_path / "no git bin"
+    sparse_bin.mkdir()
+    for tool in ("bash", "dirname", "readlink", "mkdir", "flock"):
+        resolved = shutil.which(tool)
+        assert resolved, f"{tool} is required for this control"
+        (sparse_bin / tool).symlink_to(resolved)
+    nogit_root = tmp_path / "no git root"
+    _plant_tracked(nogit_root)
+    _init_repo(nogit_root, tracked=sorted(TRACKED_FILES))
+    _write_roster(nogit_root, ROSTER)
+    proc = _run(nogit_root, sys.executable, dict(env, PATH=str(sparse_bin)), cwd)
+    assert proc.returncode == 2, proc.stderr
+    _assert_not_success(proc, "missing git")
+    assert "stage=git" in proc.stderr, proc.stderr
+    assert "not found" in proc.stderr, proc.stderr
+    assert _commit_count(nogit_root) == 1
+
+    # --- the remaining state guards are straightforward and structural ----
+    source = HELPER.read_text(encoding="utf-8")
+    for token in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge",
+                  "rebase-apply", "--unmerged", "--is-bare-repository",
+                  "--show-toplevel", "symbolic-ref", "--absolute-git-dir",
+                  "--only"):
+        assert token in source, token
+    # The allowlist is literal: no glob, no directory, no computed path.
+    assert "readonly ARTIFACT_INDEX='site/index.html'" in source
+    assert "readonly ARTIFACT_CATALOG='site/catalog.json'" in source
+    assert "no-verify" not in source, "the helper must never bypass commit hooks"
+    assert "git_root init" not in source, "the helper must never initialise a repository"
+    assert not any("git_root" in line and "push" in line
+                   for line in source.splitlines()), "no push in this unit"
+
+    # --- this helper's own checkout was never a commit target -------------
+    assert _head(REPO) == helper_source_head
