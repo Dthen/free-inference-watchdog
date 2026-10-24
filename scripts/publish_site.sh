@@ -20,17 +20,28 @@
 #      CAPTURES it (never forwards it) and requires exit 0 AND the exact
 #      receipt, whose fixed marker is followed by the TWO raw SHA-256
 #      identities of the very byte strings that were decoded and validated.
+#      The record is accepted in ONE exact format only -- fixed marker, literal
+#      " sha256 ", lowercase 64-hex catalogue digest, exactly ONE ASCII space,
+#      lowercase 64-hex index digest, and no other non-newline output -- and it
+#      is matched as a whole, never word-split, so an extra space, tab or any
+#      other byte cannot be normalised away. The single deliberate
+#      normalisation is that trailing NEWLINE(s) of the child's stdout are
+#      dropped by command substitution.
 #      Those identities are FROZEN there: a later re-read of the files can
 #      never redefine what was approved, and a Git-normalised hash is not a
-#      substitute for exact-byte identity. An empty, wrong, extra or
-#      digest-less receipt is a validation failure;
+#      substitute for exact-byte identity. An empty, wrong, extra, digest-less,
+#      re-spaced or otherwise damaged receipt is a validation failure;
 #   4. commit those two paths -- and ONLY those two paths -- in the selected
 #      root's own Git repository: one path-limited commit with a fixed
 #      noninteractive message, after which the committed blobs AND the ordinary
 #      working artifacts are compared against those frozen identities. A hook
 #      may legitimately run (hooks are never bypassed) but it cannot substitute
 #      the approved bytes: a replaced or re-staged pair fails even when the new
-#      pair is itself coherent and passes the validator. Before any local
+#      pair is itself coherent and passes the validator. Each current working
+#      artifact must also still BE an ordinary regular file, established
+#      without following a final-component symlink BEFORE its bytes are read,
+#      so a post-commit hook that swaps the file for a same-bytes symlink, a
+#      directory or any other non-regular type fails too. Before any local
 #      success is claimed the exact target commit, its parent, its path list
 #      and both of those byte identities are read back.
 #
@@ -118,7 +129,9 @@ and the ordinary working files must still match it. Repository hooks run as
 usual and are never bypassed, but a hook that substitutes the artifacts (even
 with a different, individually valid pair) or that leaves changed working files
 behind makes the run fail at the Git verification stage instead of claiming
-success.
+success. Both working artifacts must still be ordinary regular files there: a
+symbolic link, a directory or any other non-regular file is rejected even when
+following it would yield the validated bytes.
 
 This helper performs NO remote push, deploy or network publication. Exit 0
 means only that the local artifact pair passed the gate, its local commit was
@@ -286,9 +299,12 @@ fi
 # so the gate requires BOTH a zero exit AND that exact record.
 #
 # Bash command substitution deletes every trailing newline, so the compared
-# value deliberately has none. The record is ONE line -- a second line is
-# rejected outright rather than silently truncated by a line-oriented parse --
-# and its shape is checked field by field below.
+# value deliberately has none: that is the ONLY normalisation of the record, and
+# it is why a record followed by blank line(s) still counts as exact. Everything
+# else is compared byte for byte against ONE anchored expression below -- never
+# through a word-splitting ``read``, which would collapse runs of space and tab
+# and ignore leading/trailing whitespace, silently turning a corrupted record
+# back into the exact one.
 validate_rc=0
 validate_out=$("$python_bin" - "$root" "$repo_root" <<'PY'
 import hashlib
@@ -348,26 +364,34 @@ if [ "$validate_rc" -ne 0 ]; then
 fi
 
 # --- strict acceptance of the extended receipt RECORD ----------------------
-# Exactly: the fixed marker, the literal field name, one space, two lowercase
-# SHA-256 identities separated by one space, and nothing else. A missing,
-# corrupted, repeated, multi-line or digest-less record is a validation
-# failure, so an extended format can only ever fail CLOSED.
+# Exactly: the fixed marker, the literal field name, ONE ASCII space, the
+# lowercase 64-hex catalogue identity, ONE ASCII space, the lowercase 64-hex
+# index identity -- and no other non-newline output. The WHOLE captured value
+# is matched against ONE anchored POSIX extended regular expression, so every
+# byte distinction survives the check; a missing, corrupted, repeated,
+# multi-line, digest-less or extra-byte record is a validation failure, and an
+# extended format can only ever fail CLOSED.
+#
+# Word splitting is deliberately NOT used here. ``read`` with the default IFS
+# collapses runs of space, tab and newline and ignores leading and trailing
+# whitespace (see the shell's Word Splitting and ``read`` documentation), so an
+# appended space, an appended tab, a doubled space after the field name or a
+# tab between the two identities would all have been silently NORMALISED into
+# the exact record and accepted.
+#
+# The single deliberate normalisation has already happened: command
+# substitution removes every trailing NEWLINE of the child's stdout, so an
+# otherwise exact record followed by trailing newline(s) is still accepted. Any
+# other non-newline byte, and a newline anywhere but the end, cannot match --
+# the expression is anchored at both ends and neither hex field can span one.
 catalog_digest=''
 index_digest=''
-receipt_extra=''
-receipt_multiline=0
-case $validate_out in
-    *$'\n'*) receipt_multiline=1 ;;
-esac
-readback_prefix="$READBACK_RECEIPT $READBACK_IDENTITY_FIELD "
-if [ "$receipt_multiline" -eq 0 ] && [[ $validate_out == "$readback_prefix"* ]]; then
-    receipt_rest=${validate_out#"$readback_prefix"}
-    read -r catalog_digest index_digest receipt_extra <<< "$receipt_rest"
+readback_pattern="^${READBACK_RECEIPT} ${READBACK_IDENTITY_FIELD} ([0-9a-f]{64}) ([0-9a-f]{64})\$"
+if [[ $validate_out =~ $readback_pattern ]]; then
+    catalog_digest=${BASH_REMATCH[1]}
+    index_digest=${BASH_REMATCH[2]}
 fi
-if [ "$receipt_multiline" -ne 0 ] \
-        || ! [[ $catalog_digest =~ ^[0-9a-f]{64}$ ]] \
-        || ! [[ $index_digest =~ ^[0-9a-f]{64}$ ]] \
-        || [ -n "$receipt_extra" ]; then
+if [ -z "$catalog_digest" ] || [ -z "$index_digest" ]; then
     stage_err validate "read-back validator did not confirm execution (${#validate_out} chars of stdout, expected the private success receipt with two exact artifact identities): $site_dir"
     exit 2
 fi
@@ -553,13 +577,25 @@ fi
 # identities. A hook may therefore NOT substitute the approved bytes: a
 # different but individually coherent pair -- which the validator would accept
 # again -- fails here, and so does a hook that changed only the working files
-# without staging them. When the commit (or a hook) already produced a
-# substituted commit, this is reported and that commit is left for operator
-# handling: nothing is reset, repaired, retried, rewritten or pushed.
+# without staging them.
+#
+# The working comparison additionally requires each artifact to STILL BE an
+# ordinary regular file, established with ``lstat`` and a symlink-refusing open
+# BEFORE its bytes are read: a ``post-commit`` hook can replace the validated
+# file with a link to a copy holding identical bytes, and following that link
+# would compare the right bytes at the wrong path. A symlink, a directory or any
+# other non-regular type is a verification failure even when the bytes behind it
+# are the validated ones.
+#
+# When the commit (or a hook) already produced a substituted commit, this is
+# reported and that commit is left for operator handling: nothing is reset,
+# repaired, retried, rewritten or pushed.
 identity_rc=0
 identity_out=$("$python_bin" - identity "$root_phys" "$head_after" \
     "$catalog_digest" "$index_digest" <<'PY'
 import hashlib
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -579,6 +615,55 @@ expected = (
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def working_bytes(target, rel):
+    """Exact bytes of a WORKING artifact that must be an ordinary regular file.
+
+    ``Path.read_bytes`` (and a plain ``open``) FOLLOW a final-component symbolic
+    link, so a completed ``post-commit`` hook could replace the validated
+    artifact with a link to a copy holding identical bytes and a byte-only
+    comparison of the working path would still pass. The file type is therefore
+    established WITHOUT following that link -- ``lstat`` first, then an open
+    that refuses a symlink -- and the OPENED descriptor is confirmed to be a
+    regular file before any byte is read. This inspects the artifacts the
+    synchronous hook already left behind; it is not a general hostile
+    filesystem race-hardening layer.
+    """
+    path = Path(target) / rel
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        print("publish_site: cannot read the working artifact back: "
+              f"{rel}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if stat.S_ISLNK(info.st_mode):
+        detail = ("a symbolic link is rejected, even when its target holds "
+                  "the validated bytes")
+    elif stat.S_ISDIR(info.st_mode):
+        detail = "a directory is not a working artifact"
+    elif not stat.S_ISREG(info.st_mode):
+        detail = "only an ordinary regular file is accepted"
+    else:
+        detail = ""
+    if detail:
+        print("publish_site: the working artifact is not an ordinary regular "
+              f"file ({detail}): {rel}", file=sys.stderr)
+        raise SystemExit(2)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        handle = os.fdopen(os.open(str(path), flags), "rb")
+    except OSError as exc:
+        print("publish_site: cannot read the working artifact back: "
+              f"{rel}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    with handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            print("publish_site: the working artifact is not an ordinary "
+                  f"regular file (it was not one when opened): {rel}",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        return handle.read()
 
 
 # The committed bytes are checked first: when a hook substituted the pair, the
@@ -606,12 +691,7 @@ for rel, frozen in expected:
         raise SystemExit(2)
 
 for rel, frozen in expected:
-    try:
-        working = (Path(target) / rel).read_bytes()
-    except OSError as exc:
-        print(f"publish_site: cannot read the working artifact back: "
-              f"{rel}: {exc}", file=sys.stderr)
-        raise SystemExit(2)
+    working = working_bytes(target, rel)
     actual = sha256(working)
     if actual != frozen:
         print("publish_site: the working artifact does not match the "
@@ -625,7 +705,7 @@ print("publish_site: artifact identities match")
 PY
 ) || identity_rc=$?
 if [ "$identity_rc" -ne 0 ]; then
-    stage_err git/verify "the artifact bytes at the target commit do not match the frozen validated identities; a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
+    stage_err git/verify "the artifact bytes or working artifact types at the target commit do not match the frozen validated identities; a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
     exit 2
 fi
 if [ "$identity_out" != "$IDENTITY_RECEIPT" ]; then

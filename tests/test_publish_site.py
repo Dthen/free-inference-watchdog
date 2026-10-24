@@ -52,10 +52,18 @@ live roster):
   are compared against those frozen identities after the real commit, so a real
   ``pre-commit`` hook that stages an invalid catalogue, a hook that substitutes
   a different but individually COHERENT builder-made pair (which the real
-  validator still accepts), and a ``post-commit`` hook that rewrites only the
-  working bytes are all rejected at ``stage=git/verify``; a non-mutating hook
-  still publishes normally with the committed and working bytes equal to the
-  hook-time witness of the validated pair;
+  validator still accepts), a ``post-commit`` hook that rewrites only the
+  working bytes and a ``post-commit`` hook that leaves a same-bytes SYMLINK in
+  place of either working artifact are all rejected at ``stage=git/verify``; a
+  non-mutating hook still publishes normally with the committed and working
+  bytes equal to the hook-time witness of the validated pair;
+* the private record is accepted only in its EXACT format -- fixed marker,
+  literal ``sha256``, one space, lowercase 64-hex catalogue digest, one space,
+  lowercase 64-hex index digest, nothing else -- so an appended space or tab, a
+  doubled space after ``sha256`` or a tab between the digests is rejected at
+  ``stage=validate`` before any Git command runs, while an otherwise exact
+  record followed by trailing newline(s) is still accepted (the one deliberate
+  normalisation, performed by Bash command substitution);
 * the publication lock is still held INSIDE a real commit hook: a second
   helper cannot enter its builder while the hook runs, and an independent
   nonblocking acquisition of the same inode only succeeds afterwards.
@@ -68,6 +76,7 @@ remote exists.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -91,6 +100,20 @@ BUILD_LOCK = SITE / ".build.lock"
 # The helper's ONE fixed private success receipt. It is an internal handshake:
 # it must never appear in an artifact or any public output field.
 READBACK_RECEIPT = "publish_site: read-back validation passed"
+
+# The reproduced whitespace family: an otherwise EXACT private record with one
+# non-newline byte added or substituted. Each is emitted by an owned wrapper
+# that first ran the REAL validator on the REAL pair and kept its zero exit, so
+# the record must be compared without losing distinctions -- Bash ``read`` with
+# the default IFS collapses runs of space/tab/newline and ignores leading and
+# trailing whitespace, which silently normalises every one of them back into
+# the exact record.
+WHITESPACE_RECEIPT_FAULTS = (
+    "receipt_trailing_space",
+    "receipt_trailing_tab",
+    "receipt_double_space",
+    "receipt_tab_separator",
+)
 
 # Synthetic roster of the two registry gateways used by these fixtures. No live
 # roster, provider config or credential is read.
@@ -192,9 +215,16 @@ HOLD_FILE = os.environ.get("PUBLISH_TEST_HOLD")
 PIDFILE = os.environ.get("PUBLISH_TEST_PIDFILE")
 
 # Modes that let the REAL validator run on the REAL pair and then damage only
-# its success receipt, so the child process still exits zero.
+# its success receipt, so the child process still exits zero with a pair the
+# real validator accepts. The last four are the reproduced whitespace family:
+# each one is an otherwise EXACT record with one non-newline byte added or
+# substituted, which a word-splitting parse silently normalises back into the
+# exact record.
 RECEIPT_FAULTS = ("receipt_missing", "receipt_wrong", "receipt_extra",
-                  "receipt_stderr_only", "receipt_no_digests")
+                  "receipt_stderr_only", "receipt_no_digests",
+                  "receipt_trailing_space", "receipt_trailing_tab",
+                  "receipt_double_space", "receipt_tab_separator",
+                  "receipt_trailing_newlines")
 
 if PIDFILE:
     Path(PIDFILE).write_text(str(os.getpid()), encoding="utf-8")
@@ -248,22 +278,44 @@ if args and args[0] == "-":
         hold()
     if MODE in RECEIPT_FAULTS:
         # The genuine validator runs unchanged against the genuine pair; only
-        # its stdout receipt is then dropped or corrupted.
+        # the stdout record it emits is then dropped, corrupted, duplicated,
+        # misrouted, respaced or followed by blank lines. Every variant still
+        # exits zero on a pair the real validator accepts, so only an exact,
+        # distinction-preserving parse in the helper can reject the bad ones.
+        NL = chr(10)
+        TAB = chr(9)
         proc = subprocess.run([REAL] + args, stdout=subprocess.PIPE)
-        out = proc.stdout.decode("utf-8", "replace")
-        mark("validator", f"{proc.returncode} {out!r}")
+        raw = proc.stdout.decode("utf-8", "replace")
+        mark("validator", f"{proc.returncode} {raw!r}")
+        # The exact record the real program emitted, without its own newline.
+        record_text = raw[:-1] if raw.endswith(NL) else raw
+        emitted = record_text + NL
         if MODE == "receipt_missing":
-            pass
+            emitted = ""
         elif MODE == "receipt_wrong":
-            sys.stdout.write("publish_site: validation skipped\\n")
+            emitted = "publish_site: validation skipped" + NL
         elif MODE == "receipt_no_digests":
             # The marker alone, without the two frozen identities: the record
             # the shell accepts must carry BOTH digests exactly.
-            sys.stdout.write("publish_site: read-back validation passed\\n")
+            emitted = "publish_site: read-back validation passed" + NL
         elif MODE == "receipt_extra":
-            sys.stdout.write(out + "and one more line\\n")
+            emitted = record_text + "and one more line" + NL
         elif MODE == "receipt_stderr_only":
-            sys.stderr.write(out)
+            sys.stderr.write(emitted)
+            emitted = ""
+        elif MODE == "receipt_trailing_space":
+            emitted = record_text + " " + NL
+        elif MODE == "receipt_trailing_tab":
+            emitted = record_text + TAB + NL
+        elif MODE == "receipt_double_space":
+            emitted = record_text.replace(" sha256 ", " sha256  ", 1) + NL
+        elif MODE == "receipt_tab_separator":
+            head, _, last = record_text.rpartition(" ")
+            emitted = head + TAB + last + NL
+        elif MODE == "receipt_trailing_newlines":
+            emitted = record_text + NL * 3
+        mark("validate_stdout", repr(emitted))
+        sys.stdout.write(emitted)
         raise SystemExit(proc.returncode)
     os.execv(REAL, [REAL] + args)
 
@@ -1032,6 +1084,65 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
         # Both artifacts exist and the EXISTING validator accepts the pair.
         validate_artifact_pair(*_read_pair(root))
 
+    # --- the reproduced whitespace family of that same receipt --------------
+    # Each of these is an otherwise EXACT private record with ONE non-newline
+    # byte added or substituted -- an appended space, an appended tab, a doubled
+    # space after ``sha256``, a tab between the two digests -- emitted after the
+    # real validator really accepted the real pair (child exit 0). Bash ``read``
+    # with the default IFS throws those distinctions away: it collapses runs of
+    # space/tab/newline and ignores leading and trailing whitespace, so every
+    # one of them used to be accepted as the exact record. The root is a REAL
+    # repository, so the pre-fix helper not only accepted the record but went on
+    # to commit and claim local success; the owned git launcher proves that the
+    # corrected helper instead rejects each one at ``stage=validate`` before a
+    # single git command runs.
+    receipt_shim_dir, receipt_git_log = _git_shim(tmp_path, "receipt git")
+    for mode in WHITESPACE_RECEIPT_FAULTS:
+        root = tmp_path / f"receipt {mode}"
+        _plant_tracked(root)
+        _init_repo(root, tracked=sorted(TRACKED_FILES))
+        _write_roster(root, ROSTER)
+        interpreter, log, fault_env = _harness(tmp_path, mode=mode)
+        fault_env = _with_path(fault_env, receipt_shim_dir)
+        proc = _run(root, interpreter, fault_env, cwd)
+        assert proc.returncode == 2, (mode, proc.returncode, proc.stdout,
+                                      proc.stderr)
+        _assert_not_success(proc, mode)
+        assert "stage=validate" in proc.stderr, (mode, proc.stderr)
+        assert "stage=builder" not in proc.stderr, (mode, proc.stderr)
+        assert "stage=git" not in proc.stderr, (mode, proc.stderr)
+        assert "did not confirm execution" in proc.stderr, (mode, proc.stderr)
+        assert _kinds(log) == ["builder", "validate"], (mode, _kinds(log))
+        assert _marker(log, "validator").startswith("0 "), (
+            mode, _marker(log, "validator"))
+        # The fault really was emitted, and the ONLY difference from the exact
+        # record the real validator printed is whitespace: no schema, digest or
+        # validator detail could have caught it.
+        emitted = ast.literal_eval(_marker(log, "validate_stdout"))
+        mutated = emitted[:-1]
+        real_record = ast.literal_eval(
+            _marker(log, "validator").split(" ", 1)[1])[:-1]
+        if mode == "receipt_trailing_space":
+            expected = real_record + " "
+        elif mode == "receipt_trailing_tab":
+            expected = real_record + "\t"
+        elif mode == "receipt_double_space":
+            expected = real_record.replace(" sha256 ", " sha256  ", 1)
+        else:
+            head, _, last = real_record.rpartition(" ")
+            expected = head + "\t" + last
+        assert mutated == expected, (mode, emitted, real_record)
+        assert mutated != real_record, (mode, "the fault was a no-op")
+        # Both artifacts exist and the EXISTING validator still accepts them:
+        # the pair was never the problem, only the record's exact bytes.
+        validate_artifact_pair(*_read_pair(root))
+        # Rejected at validation: no git command ran and no commit was made.
+        assert _shim_calls(receipt_git_log) == [], (
+            mode, _shim_calls(receipt_git_log))
+        assert _commit_count(root) == 1, (
+            mode, "a malformed record must never reach a commit")
+    assert _shim_calls(receipt_git_log) == [], _shim_calls(receipt_git_log)
+
     # --- builder exits 0 but leaves a pair the read-back gate rejects -----
     for mode, expect in (
         ("mismatch", "Catalogue artifacts do not match"),
@@ -1344,10 +1455,13 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     hooks with real commits: a non-mutating hook publishes normally with the
     committed and working bytes equal to the hook-time witness, while a hook
     that stages an invalid catalogue, a hook that substitutes a different but
-    individually coherent builder-made pair (which the real validator accepts)
-    and a post-commit hook that rewrites only the working bytes are all
-    rejected at ``stage=git/verify`` -- even though the original post-hook
-    comparison would have accepted the substituted pair.
+    individually coherent builder-made pair (which the real validator accepts),
+    a post-commit hook that rewrites only the working bytes and a post-commit
+    hook that leaves a same-bytes SYMLINK in place of either working artifact
+    are all rejected at ``stage=git/verify`` -- even though the original
+    post-hook comparison would have accepted the substituted pair. An exact
+    private record followed by trailing newlines is the positive control: it
+    still publishes and commits.
     """
     from catalog_export import validate_artifact_pair
 
@@ -1627,6 +1741,83 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     assert _sha256((hook_root / INDEX).read_bytes()) in post_run.stderr, post_run.stderr
     validate_artifact_pair(post_catalog.decode("utf-8"), post_index.decode("utf-8"))
     assert _dirty_snapshot(hook_root) == hook_dirty
+    (hook_root / ".git" / "hooks" / "post-commit").unlink()
+
+    # (e) the second reproduced defect: a post-commit hook REPLACES a working
+    #     artifact with a SYMLINK whose target holds exactly the same bytes.
+    #     The commit was already made, so the committed blob is the validated
+    #     one, and following the link yields identical bytes -- a byte-only
+    #     comparison of the working path cannot tell this from a real artifact.
+    #     Each current working artifact must therefore be established as an
+    #     ORDINARY REGULAR FILE, without following its final symlink, BEFORE its
+    #     bytes are read. Checked for both allowlisted paths.
+    for case, (rel, roster) in enumerate(((INDEX, ROSTER2), (CATALOG, ROSTER)), 1):
+        saved_rel = rel.with_name(rel.name + ".saved")
+        witness_link = tmp_path / f"witness symlink {case}"
+        _install_hook(hook_root, "post-commit",
+                      _witness_lines(witness_link, hook_root) + [
+            f"cd {str(hook_root)!r}\n",
+            f"mv -- {str(rel)!r} {str(saved_rel)!r}\n",
+            f"ln -s -- {saved_rel.name!r} {str(rel)!r}\n",
+        ])
+        _write_roster(hook_root, roster)
+        head_before_link = _head(hook_root)
+        link_run = _run(hook_root, sys.executable, env, cwd)
+        assert link_run.returncode == 2, (rel, link_run.stderr)
+        _assert_not_success(link_run, f"post-commit symlink {rel}")
+        assert "stage=git/verify" in link_run.stderr, (rel, link_run.stderr)
+        assert "not an ordinary regular file" in link_run.stderr, (rel, link_run.stderr)
+        assert str(rel) in link_run.stderr, (rel, link_run.stderr)
+        # The honest diagnostic: the commit may already exist and is the
+        # operator's to handle.
+        assert "may already exist" in link_run.stderr, (rel, link_run.stderr)
+        linked_catalog, linked_index = _witness_pair(witness_link)
+        frozen = linked_catalog if rel == CATALOG else linked_index
+        # The commit really happened and holds exactly the validated bytes,
+        # so only the working-artifact TYPE distinguishes this run.
+        assert _head(hook_root) != head_before_link, (
+            rel, "the hook's commit must really exist")
+        assert _blob(hook_root, "HEAD", str(rel)) == frozen
+        assert _commit_paths(hook_root) == list(ARTIFACTS)
+        # Both COMMITTED blobs are the witness pair (a blob read never consults
+        # the working tree, which is now a symlink).
+        assert _blob(hook_root, "HEAD", "site/catalog.json") == linked_catalog
+        assert _blob(hook_root, "HEAD", "site/index.html") == linked_index
+        # The working path is a symlink and STILL yields the identical bytes.
+        assert (hook_root / rel).is_symlink(), (
+            rel, "the fault hook must install a symlink")
+        assert (hook_root / rel).read_bytes() == frozen
+        assert _sha256((hook_root / rel).read_bytes()) == _sha256(frozen)
+        assert _dirty_snapshot(hook_root) == hook_dirty
+        # Restore an ordinary file for the next step (the fault hook moved the
+        # original aside, so no byte is invented here).
+        (hook_root / rel).unlink()
+        (hook_root / saved_rel).replace(hook_root / rel)
+        assert not (hook_root / rel).is_symlink()
+        assert (hook_root / rel).read_bytes() == frozen
+        (hook_root / ".git" / "hooks" / "post-commit").unlink()
+
+    # (f) positive control: an EXACT record followed by trailing NEWLINES is
+    #     still the exact record. Only trailing newlines are normalised (Bash
+    #     command substitution strips them); everything else stays byte-exact,
+    #     so a genuine publication through this wrapper really commits.
+    _write_roster(hook_root, ROSTER2)
+    interpreter, log, newline_env = _harness(tmp_path, mode="receipt_trailing_newlines")
+    head_before_newlines = _head(hook_root)
+    newline_run = _run(hook_root, interpreter, newline_env, cwd)
+    assert newline_run.returncode == 0, newline_run.stderr
+    assert newline_run.stdout == ""
+    assert "committed locally" in newline_run.stderr, newline_run.stderr
+    emitted_newlines = ast.literal_eval(_marker(log, "validate_stdout"))
+    assert emitted_newlines.endswith("\n\n\n"), emitted_newlines
+    assert _marker(log, "validator").startswith("0 "), (
+        _marker(log, "validator"))
+    assert _kinds(log) == ["builder", "validate", "verify"], _kinds(log)
+    assert _head(hook_root) != head_before_newlines
+    assert _commit_paths(hook_root) == list(ARTIFACTS)
+    assert _blob(hook_root, "HEAD", "site/catalog.json") == (hook_root / CATALOG).read_bytes()
+    assert _blob(hook_root, "HEAD", "site/index.html") == (hook_root / INDEX).read_bytes()
+    assert _dirty_snapshot(hook_root) == hook_dirty
 
     # --- earlier failures never reach the Git phase at all ----------------
     log_shim_dir, git_log = _git_shim(tmp_path, "logging git")
@@ -1722,7 +1913,7 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     for token in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge",
                   "rebase-apply", "--unmerged", "--is-bare-repository",
                   "--show-toplevel", "symbolic-ref", "--absolute-git-dir",
-                  "--only"):
+                  "--only", "O_NOFOLLOW", "lstat", "S_ISREG"):
         assert token in source, token
     # The allowlist is literal: no glob, no directory, no computed path.
     assert "readonly ARTIFACT_INDEX='site/index.html'" in source
