@@ -46,6 +46,16 @@ live roster):
   without advancing HEAD, a failed build or read-back never invokes Git at all,
   and non-repository / nested-root / detached-HEAD targets are refused without
   touching an ancestor or this helper's own checkout;
+* the identity of the validated pair is FROZEN at the read-back observation --
+  raw SHA-256 of the exact bytes the real validator accepted, carried in the
+  private receipt -- and the committed blobs AND the ordinary working artifacts
+  are compared against those frozen identities after the real commit, so a real
+  ``pre-commit`` hook that stages an invalid catalogue, a hook that substitutes
+  a different but individually COHERENT builder-made pair (which the real
+  validator still accepts), and a ``post-commit`` hook that rewrites only the
+  working bytes are all rejected at ``stage=git/verify``; a non-mutating hook
+  still publishes normally with the committed and working bytes equal to the
+  hook-time witness of the validated pair;
 * the publication lock is still held INSIDE a real commit hook: a second
   helper cannot enter its builder while the hook runs, and an independent
   nonblocking acquisition of the same inode only succeeds afterwards.
@@ -58,6 +68,7 @@ remote exists.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -183,7 +194,7 @@ PIDFILE = os.environ.get("PUBLISH_TEST_PIDFILE")
 # Modes that let the REAL validator run on the REAL pair and then damage only
 # its success receipt, so the child process still exits zero.
 RECEIPT_FAULTS = ("receipt_missing", "receipt_wrong", "receipt_extra",
-                  "receipt_stderr_only")
+                  "receipt_stderr_only", "receipt_no_digests")
 
 if PIDFILE:
     Path(PIDFILE).write_text(str(os.getpid()), encoding="utf-8")
@@ -217,8 +228,18 @@ if MODE == "ignore_program":
     # A selected executable that ignores its arguments AND the Python program
     # on stdin: it performs no work whatsoever and returns zero. Exit status
     # alone must never be able to prove that the validator executed.
-    record("validate" if args and args[0] == "-" else "builder")
+    if not args or args[0] != "-":
+        record("builder")
+    else:
+        record("verify" if len(args) > 1 and args[1] == "identity" else "validate")
     raise SystemExit(0)
+
+if args and args[0] == "-" and len(args) > 1 and args[1] == "identity":
+    # The post-commit identity check is a DIFFERENT program
+    # (``python - identity <root> <commit> <catalog> <index>``); it is recorded
+    # separately so a test can tell it apart from the read-back validation.
+    record("verify")
+    os.execv(REAL, [REAL] + args)
 
 if args and args[0] == "-":
     # The read-back validation invocation (``python - <root> <checkout>``).
@@ -235,6 +256,10 @@ if args and args[0] == "-":
             pass
         elif MODE == "receipt_wrong":
             sys.stdout.write("publish_site: validation skipped\\n")
+        elif MODE == "receipt_no_digests":
+            # The marker alone, without the two frozen identities: the record
+            # the shell accepts must carry BOTH digests exactly.
+            sys.stdout.write("publish_site: read-back validation passed\\n")
         elif MODE == "receipt_extra":
             sys.stdout.write(out + "and one more line\\n")
         elif MODE == "receipt_stderr_only":
@@ -596,6 +621,52 @@ def _dirty_snapshot(root):
     return {rel: (_worktree(root, rel), index.get(rel)) for rel in DIRTY_PATHS}
 
 
+def _sha256(data):
+    """Raw byte identity: stdlib SHA-256, never a git-normalised hash."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _install_hook(root, name, lines):
+    """Owned fault-injection hook inside a synthetic repository's .git."""
+    hook = root / ".git" / "hooks" / name
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/usr/bin/env bash\nset -u\n" + "".join(lines),
+                    encoding="utf-8")
+    hook.chmod(0o755)
+    return hook
+
+
+def _witness_lines(witness, root):
+    """Hook lines copying the pair git is about to commit into owned scratch.
+
+    The copy is taken INSIDE the hook, i.e. after the helper's read-back
+    validation and before the commit exists, so it is the exact pre-hook pair
+    whose identity the helper froze.
+    """
+    witness.mkdir(parents=True, exist_ok=True)
+    return [
+        f"cp -f -- {str(root / CATALOG)!r} {str(witness / 'catalog.json')!r}\n",
+        f"cp -f -- {str(root / INDEX)!r} {str(witness / 'index.html')!r}\n",
+    ]
+
+
+def _witness_pair(witness):
+    """(catalog bytes, index bytes) as the hook observed them."""
+    return ((witness / "catalog.json").read_bytes(),
+            (witness / "index.html").read_bytes())
+
+
+def _build_pair(roster, root):
+    """A coherent pair produced by the REAL builder from another roster."""
+    root.mkdir(parents=True, exist_ok=True)
+    _write_roster(root, roster)
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "build_site.py"), "--root", str(root)],
+        capture_output=True, text=True, env=_env(), timeout=BOOT_S)
+    assert proc.returncode == 0, proc.stderr
+    return ((root / CATALOG).read_bytes(), (root / INDEX).read_bytes())
+
+
 def _git_shim(tmp_path, name, fail_on=None, swallow=None):
     """Owned ``git`` launcher: records every invocation, can fail or fake one.
 
@@ -714,8 +785,9 @@ def test_gate_passes_a_genuine_build_with_empty_stdout(tmp_path):
         "vendor-x/synthetic-alpha:free", "vendor-y/synthetic-beta-free"]
     assert "vendor-x/synthetic-alpha" in html_text
 
-    # The independent read-back gate really ran, and only after the builder.
-    assert _kinds(log) == ["builder", "validate"], _kinds(log)
+    # The independent read-back gate really ran, and only after the builder;
+    # the post-commit identity check then ran against the frozen identities.
+    assert _kinds(log) == ["builder", "validate", "verify"], _kinds(log)
 
     # The dedicated publish lock is its own inode, retained (never unlinked)
     # and distinct from the builder's own build lock.
@@ -748,7 +820,8 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
     proof that the read-back validator ran (``/bin/true`` and any executable
     that ignores its arguments and stdin return 0 without building or
     validating), so the gate also requires the validator's ONE fixed private
-    stdout receipt. A removed, wrong, duplicated or misrouted receipt fails at
+    stdout receipt, which now carries the two frozen artifact identities. A
+    removed, wrong, duplicated, misrouted or digest-less receipt fails at
     ``stage=validate`` even though the child exited zero with a genuinely valid
     pair.
     """
@@ -940,7 +1013,7 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
     # only the stdout receipt, so the child still exits zero with accepted
     # artifacts. Only the receipt handshake can reject these.
     for mode in ("receipt_missing", "receipt_wrong", "receipt_extra",
-                 "receipt_stderr_only"):
+                 "receipt_stderr_only", "receipt_no_digests"):
         root = tmp_path / f"receipt {mode}"
         _write_roster(root, ROSTER)
         interpreter, log, fault_env = _harness(tmp_path, mode=mode)
@@ -1266,6 +1339,15 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     fail at exit 2 without advancing HEAD, earlier failures never invoke Git,
     and non-repository / nested-root / detached-HEAD targets are refused
     without touching an ancestor repository or this helper's source checkout.
+
+    The last group freezes the validated identity across the repository's OWN
+    hooks with real commits: a non-mutating hook publishes normally with the
+    committed and working bytes equal to the hook-time witness, while a hook
+    that stages an invalid catalogue, a hook that substitutes a different but
+    individually coherent builder-made pair (which the real validator accepts)
+    and a post-commit hook that rewrites only the working bytes are all
+    rejected at ``stage=git/verify`` -- even though the original post-hook
+    comparison would have accepted the substituted pair.
     """
     from catalog_export import validate_artifact_pair
 
@@ -1397,6 +1479,154 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     assert "stage=git/verify" in lying.stderr, lying.stderr
     assert _head(root) == head_before_lie, "no commit can result from a faked commit"
     assert any(" commit " in call for call in _shim_calls(lying_log)), _shim_calls(lying_log)
+
+    # --- the validated identity is frozen ACROSS the repository's hooks ---
+    # Validation happens before Git runs, so the repository's OWN hooks can
+    # still move the bytes afterwards. The approved pair is the raw byte
+    # identity of exactly what the real validator accepted; re-reading the
+    # working tree or committing whatever the hook left must never redefine it.
+    # Every case below is a REAL commit in an owned repository, and each hook
+    # copies the pair it saw into owned scratch (the "witness"), so the claim
+    # is compared byte for byte instead of being re-checked by schema alone.
+    hook_root = tmp_path / "identity hook root"
+    _plant_tracked(hook_root)
+    _init_repo(hook_root, tracked=sorted(TRACKED_FILES))
+    _write_roster(hook_root, ROSTER)
+    seed_run = _run(hook_root, sys.executable, env, cwd)
+    assert seed_run.returncode == 0, seed_run.stderr
+    _make_dirty(hook_root)
+    hook_dirty = _dirty_snapshot(hook_root)
+    hook_status = _status(hook_root)
+
+    # (a) a non-mutating hook still publishes normally: the committed AND
+    #     working bytes are exactly the hook-time witness of the validated
+    #     pair, and every unrelated index/worktree entry is untouched.
+    witness_ok = tmp_path / "witness non-mutating"
+    _install_hook(hook_root, "pre-commit", _witness_lines(witness_ok, hook_root))
+    _write_roster(hook_root, ROSTER2)
+    clean_hook = _run(hook_root, sys.executable, env, cwd)
+    assert clean_hook.returncode == 0, clean_hook.stderr
+    assert clean_hook.stdout == ""
+    assert "committed locally" in clean_hook.stderr, clean_hook.stderr
+    witness_catalog, witness_index = _witness_pair(witness_ok)
+    assert _blob(hook_root, "HEAD", "site/catalog.json") == witness_catalog
+    assert _blob(hook_root, "HEAD", "site/index.html") == witness_index
+    assert (hook_root / CATALOG).read_bytes() == witness_catalog
+    assert (hook_root / INDEX).read_bytes() == witness_index
+    assert _commit_paths(hook_root) == list(ARTIFACTS)
+    validate_artifact_pair(witness_catalog.decode("utf-8"),
+                           witness_index.decode("utf-8"))
+    assert _dirty_snapshot(hook_root) == hook_dirty
+    assert _status(hook_root) == hook_status
+    (hook_root / ".git" / "hooks" / "pre-commit").unlink()
+
+    # (b) a hook substitutes BOTH artifacts with a different, individually
+    #     COHERENT pair produced by the REAL builder from another synthetic
+    #     roster. The committed pair passes the real validator, so a second
+    #     schema check cannot reject it: only the frozen identity can.
+    other_pair_root = tmp_path / "other coherent pair"
+    substituted_catalog, substituted_index = _build_pair(OTHER_ROSTER,
+                                                         other_pair_root)
+    validate_artifact_pair(substituted_catalog.decode("utf-8"),
+                           substituted_index.decode("utf-8"))
+    assert substituted_catalog != witness_catalog
+    witness_coherent = tmp_path / "witness coherent"
+    _install_hook(hook_root, "pre-commit", _witness_lines(witness_coherent, hook_root) + [
+        f"cp -f -- {str(other_pair_root / CATALOG)!r} {str(hook_root / CATALOG)!r}\n",
+        f"cp -f -- {str(other_pair_root / INDEX)!r} {str(hook_root / INDEX)!r}\n",
+        f"cd {str(hook_root)!r} && git add -- site/catalog.json site/index.html\n",
+    ])
+    _write_roster(hook_root, ROSTER)
+    coherent = _run(hook_root, sys.executable, env, cwd)
+    assert coherent.returncode == 2, coherent.stderr
+    _assert_not_success(coherent, "coherent pair substitution")
+    assert "stage=git/verify" in coherent.stderr, coherent.stderr
+    assert "committed artifact does not match the validated bytes" in coherent.stderr, coherent.stderr
+    assert "may already exist" in coherent.stderr, coherent.stderr
+    frozen_catalog, frozen_index = _witness_pair(witness_coherent)
+    committed_catalog_now = _blob(hook_root, "HEAD", "site/catalog.json")
+    committed_index_now = _blob(hook_root, "HEAD", "site/index.html")
+    assert (committed_catalog_now, committed_index_now) == (substituted_catalog,
+                                                            substituted_index)
+    validate_artifact_pair(committed_catalog_now.decode("utf-8"),
+                           committed_index_now.decode("utf-8"))
+    assert committed_catalog_now != frozen_catalog
+    assert _sha256(committed_catalog_now) != _sha256(frozen_catalog)
+    # The diagnostic names BOTH digests, so the comparison is against the
+    # frozen identity and not against a fresh read of the same hook bytes.
+    assert _sha256(committed_catalog_now) in coherent.stderr, coherent.stderr
+    assert _sha256(frozen_catalog) in coherent.stderr, coherent.stderr
+    # Negative control, metadata-free: the ORIGINAL comparison (committed blob
+    # against the re-read POST-HOOK working file) accepts this pair, and so
+    # would any revalidation of the committed pair on its own. That is exactly
+    # why the frozen identity is required.
+    assert committed_catalog_now == (hook_root / CATALOG).read_bytes()
+    assert committed_index_now == (hook_root / INDEX).read_bytes()
+    assert _git(hook_root, "diff", "--quiet", "--no-ext-diff", "HEAD", "--",
+                *ARTIFACTS, check=False).returncode == 0
+    assert _dirty_snapshot(hook_root) == hook_dirty
+    (hook_root / ".git" / "hooks" / "pre-commit").unlink()
+
+    # (c) the reproduced defect: a pre-commit hook writes an INVALID catalogue
+    #     and stages it after a successful validation. The commit really
+    #     happens with those bytes, so the run must report the mismatch
+    #     honestly (the bad commit is left for the operator) and claim nothing.
+    witness_invalid = tmp_path / "witness invalid"
+    _install_hook(hook_root, "pre-commit", _witness_lines(witness_invalid, hook_root) + [
+        "printf '%s' '{\"not\":\"a validated catalogue\"}' > "
+        f"{str(hook_root / CATALOG)!r}\n",
+        f"cd {str(hook_root)!r} && git add -- site/catalog.json\n",
+    ])
+    _write_roster(hook_root, ROSTER2)
+    head_before_invalid = _head(hook_root)
+    invalid_hook = _run(hook_root, sys.executable, env, cwd)
+    assert invalid_hook.returncode == 2, invalid_hook.stderr
+    _assert_not_success(invalid_hook, "invalid catalogue hook")
+    assert "stage=git/verify" in invalid_hook.stderr, invalid_hook.stderr
+    assert "committed artifact does not match the validated bytes" in invalid_hook.stderr, invalid_hook.stderr
+    assert "may already exist" in invalid_hook.stderr, invalid_hook.stderr
+    frozen_invalid_catalog, _ = _witness_pair(witness_invalid)
+    committed_invalid = _blob(hook_root, "HEAD", "site/catalog.json")
+    committed_invalid_index = _blob(hook_root, "HEAD", "site/index.html")
+    assert committed_invalid == b'{"not":"a validated catalogue"}'
+    assert committed_invalid != frozen_invalid_catalog
+    assert _sha256(committed_invalid) != _sha256(frozen_invalid_catalog)
+    assert _sha256(committed_invalid) in invalid_hook.stderr, invalid_hook.stderr
+    assert _head(hook_root) != head_before_invalid, (
+        "the hook's substituted commit really exists")
+    rejected = False
+    try:
+        validate_artifact_pair(committed_invalid.decode("utf-8"),
+                               committed_invalid_index.decode("utf-8"))
+    except Exception:  # noqa: BLE001 - the real validator must reject it
+        rejected = True
+    assert rejected, "the real validator accepted the hook's invalid pair"
+    assert _dirty_snapshot(hook_root) == hook_dirty
+    (hook_root / ".git" / "hooks" / "pre-commit").unlink()
+
+    # (d) a post-commit hook rewrites only the WORKING bytes: the committed
+    #     pair is untouched, so comparing the commit alone would succeed. The
+    #     working artifacts must still match the frozen identity.
+    witness_post = tmp_path / "witness post-commit"
+    _install_hook(hook_root, "post-commit", _witness_lines(witness_post, hook_root) + [
+        "printf '%s\\n' '<html>hook substituted the working bytes</html>' > "
+        f"{str(hook_root / INDEX)!r}\n",
+    ])
+    _write_roster(hook_root, ROSTER)
+    post_run = _run(hook_root, sys.executable, env, cwd)
+    assert post_run.returncode == 2, post_run.stderr
+    _assert_not_success(post_run, "post-commit working mutation")
+    assert "stage=git/verify" in post_run.stderr, post_run.stderr
+    assert "working artifact does not match the validated bytes" in post_run.stderr, post_run.stderr
+    assert "site/index.html" in post_run.stderr, post_run.stderr
+    post_catalog, post_index = _witness_pair(witness_post)
+    assert _blob(hook_root, "HEAD", "site/catalog.json") == post_catalog
+    assert _blob(hook_root, "HEAD", "site/index.html") == post_index
+    assert (hook_root / CATALOG).read_bytes() == post_catalog
+    assert (hook_root / INDEX).read_bytes() != post_index
+    assert _sha256((hook_root / INDEX).read_bytes()) in post_run.stderr, post_run.stderr
+    validate_artifact_pair(post_catalog.decode("utf-8"), post_index.decode("utf-8"))
+    assert _dirty_snapshot(hook_root) == hook_dirty
 
     # --- earlier failures never reach the Git phase at all ----------------
     log_shim_dir, git_log = _git_shim(tmp_path, "logging git")

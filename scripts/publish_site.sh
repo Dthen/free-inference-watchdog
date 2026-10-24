@@ -18,19 +18,31 @@
 #      return zero, that program emits ONE fixed private success receipt on its
 #      stdout ONLY after the real validator returned normally; the shell
 #      CAPTURES it (never forwards it) and requires exit 0 AND the exact
-#      receipt. An empty, wrong or extra receipt is a validation failure;
+#      receipt, whose fixed marker is followed by the TWO raw SHA-256
+#      identities of the very byte strings that were decoded and validated.
+#      Those identities are FROZEN there: a later re-read of the files can
+#      never redefine what was approved, and a Git-normalised hash is not a
+#      substitute for exact-byte identity. An empty, wrong, extra or
+#      digest-less receipt is a validation failure;
 #   4. commit those two paths -- and ONLY those two paths -- in the selected
 #      root's own Git repository: one path-limited commit with a fixed
-#      noninteractive message, whose committed entries are read back and
-#      compared against the validated files before any local success is
-#      claimed.
+#      noninteractive message, after which the committed blobs AND the ordinary
+#      working artifacts are compared against those frozen identities. A hook
+#      may legitimately run (hooks are never bypassed) but it cannot substitute
+#      the approved bytes: a replaced or re-staged pair fails even when the new
+#      pair is itself coherent and passes the validator. Before any local
+#      success is claimed the exact target commit, its parent, its path list
+#      and both of those byte identities are read back.
 #
 # A nonzero builder exit stops the gate BEFORE validation, even when a valid
 # last-good pair is already on disk. A rejected pair stops it BEFORE any Git
 # command runs, even when a valid last-good artifact commit and unrelated
 # staged work already exist. Neither is ever reported as a successful
 # publication, and no failure path stashes, resets, cleans, rebases or
-# otherwise repairs the operator's working tree.
+# otherwise repairs the operator's working tree. Verification runs AFTER the
+# commit, so a hook that substituted the bytes may already have left a commit
+# behind: that is reported honestly with an identifiable Git stage, the commit
+# is left for operator handling, and nothing is reset, repaired or pushed.
 #
 # The root must already BE the top level of an ordinary non-bare Git working
 # tree with an existing HEAD on an attached branch and no in-progress
@@ -67,6 +79,16 @@ readonly PROG="publish_site"
 # gate never accepts a missing receipt), never open.
 readonly READBACK_RECEIPT='publish_site: read-back validation passed'
 
+# The receipt is extended into a strictly checked internal RECORD: the fixed
+# marker, this field name, and the two raw SHA-256 identities of the exact
+# byte strings the validator was given (catalogue first, index second). It is
+# never written to disk, added to site/ or exposed in a public payload field.
+readonly READBACK_IDENTITY_FIELD='sha256'
+
+# The ONE fixed private success receipt of the post-commit identity check: the
+# committed blobs AND the working artifacts match the frozen identities.
+readonly IDENTITY_RECEIPT='publish_site: artifact identities match'
+
 # The ONLY paths the local commit may touch (stage 4), and the fixed
 # noninteractive message it carries. Both are literal, repo-relative and used
 # with an explicit "--" so no pathspec magic or ambient glob can widen them.
@@ -90,9 +112,18 @@ of an ordinary non-bare Git working tree with an existing commit on an attached
 branch; this helper never initialises, repairs, rebases or reconfigures a
 repository. A run whose artifacts are unchanged commits nothing.
 
+The identity of the pair is frozen when the real validator accepts it -- raw
+SHA-256 of those exact bytes -- and, after the commit, both the committed blobs
+and the ordinary working files must still match it. Repository hooks run as
+usual and are never bypassed, but a hook that substitutes the artifacts (even
+with a different, individually valid pair) or that leaves changed working files
+behind makes the run fail at the Git verification stage instead of claiming
+success.
+
 This helper performs NO remote push, deploy or network publication. Exit 0
-means only that the local artifact pair passed the gate and its local commit was
-handled, never that the public site was updated.
+means only that the local artifact pair passed the gate, its local commit was
+handled and the committed and working bytes still matched the validated
+identities -- never that the public site was updated.
 
 options:
   --root DIR     project root holding state/ and receiving site/ (default: the
@@ -243,19 +274,24 @@ fi
 # build_site or watchdog_catalog. It performs no JSON identity check of its own
 # -- the existing validator decides.
 #
+# It reads each artifact ONCE, hashes those very bytes with stdlib SHA-256 and
+# validates the strings decoded FROM THOSE BYTES: the identities it reports are
+# therefore the identity of exactly what the real validator accepted, not of a
+# second open of a file a hook may since have changed.
+#
 # Its stdout is CAPTURED, never forwarded: the only thing it ever writes there
-# is the private success receipt, emitted after the validator returned
+# is the private success record, emitted after the validator returned
 # normally. Exit status alone cannot prove the program ran (a selected
 # executable may ignore its arguments and stdin, do nothing and return zero),
-# so the gate requires BOTH a zero exit AND that exact receipt. Diagnostics go
-# to stderr and pass straight through.
+# so the gate requires BOTH a zero exit AND that exact record.
 #
 # Bash command substitution deletes every trailing newline, so the compared
-# value deliberately has none: the receipt is one line and the expected string
-# is stored without its terminator. Any other difference -- no output, wrong
-# text, a second line, a repeated receipt -- fails this gate.
+# value deliberately has none. The record is ONE line -- a second line is
+# rejected outright rather than silently truncated by a line-oriented parse --
+# and its shape is checked field by field below.
 validate_rc=0
 validate_out=$("$python_bin" - "$root" "$repo_root" <<'PY'
+import hashlib
 import sys
 from pathlib import Path
 
@@ -273,11 +309,15 @@ catalog_path = site / "catalog.json"
 html_path = site / "index.html"
 
 try:
-    catalog_text = catalog_path.read_bytes().decode("utf-8", "strict")
-    html_text = html_path.read_bytes().decode("utf-8", "strict")
+    catalog_bytes = catalog_path.read_bytes()
+    html_bytes = html_path.read_bytes()
 except OSError as exc:
     print(f"publish_site: cannot read back artifacts: {exc}", file=sys.stderr)
     raise SystemExit(2)
+
+try:
+    catalog_text = catalog_bytes.decode("utf-8", "strict")
+    html_text = html_bytes.decode("utf-8", "strict")
 except UnicodeDecodeError as exc:
     print("publish_site: read-back artifacts are not valid UTF-8 "
           f"({type(exc).__name__})", file=sys.stderr)
@@ -292,18 +332,43 @@ except Exception as exc:  # noqa: BLE001 - every rejection is a gate failure
           f"{type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(2)
 
-# Success receipt: printed ONLY after the validator returned normally above,
-# and the only thing this program ever writes to stdout. The text must stay
-# byte-identical to READBACK_RECEIPT in the shell; a drift fails closed.
-print("publish_site: read-back validation passed")
+# Success record: printed ONLY after the validator returned normally above, and
+# the only thing this program ever writes to stdout. The marker must stay
+# byte-identical to READBACK_RECEIPT in the shell; the two identities are the
+# raw SHA-256 of the bytes decoded and validated above, in catalogue,index
+# order, and are frozen for the whole Git phase.
+print("publish_site: read-back validation passed "
+      f"sha256 {hashlib.sha256(catalog_bytes).hexdigest()} "
+      f"{hashlib.sha256(html_bytes).hexdigest()}")
 PY
 ) || validate_rc=$?
 if [ "$validate_rc" -ne 0 ]; then
     stage_err validate "read-back validation failed (exit $validate_rc): $site_dir"
     exit 2
 fi
-if [ "$validate_out" != "$READBACK_RECEIPT" ]; then
-    stage_err validate "read-back validator did not confirm execution (${#validate_out} chars of stdout, expected the private success receipt): $site_dir"
+
+# --- strict acceptance of the extended receipt RECORD ----------------------
+# Exactly: the fixed marker, the literal field name, one space, two lowercase
+# SHA-256 identities separated by one space, and nothing else. A missing,
+# corrupted, repeated, multi-line or digest-less record is a validation
+# failure, so an extended format can only ever fail CLOSED.
+catalog_digest=''
+index_digest=''
+receipt_extra=''
+receipt_multiline=0
+case $validate_out in
+    *$'\n'*) receipt_multiline=1 ;;
+esac
+readback_prefix="$READBACK_RECEIPT $READBACK_IDENTITY_FIELD "
+if [ "$receipt_multiline" -eq 0 ] && [[ $validate_out == "$readback_prefix"* ]]; then
+    receipt_rest=${validate_out#"$readback_prefix"}
+    read -r catalog_digest index_digest receipt_extra <<< "$receipt_rest"
+fi
+if [ "$receipt_multiline" -ne 0 ] \
+        || ! [[ $catalog_digest =~ ^[0-9a-f]{64}$ ]] \
+        || ! [[ $index_digest =~ ^[0-9a-f]{64}$ ]] \
+        || [ -n "$receipt_extra" ]; then
+    stage_err validate "read-back validator did not confirm execution (${#validate_out} chars of stdout, expected the private success receipt with two exact artifact identities): $site_dir"
     exit 2
 fi
 
@@ -442,7 +507,8 @@ fi
 # ``--only`` takes the updated working-tree contents of exactly these paths and
 # DISREGARDS whatever is staged for other paths, so unrelated staged work
 # cannot ride along. The root's hooks run: a rejecting hook must fail the
-# commit, so hooks are never bypassed here.
+# commit, so hooks are never bypassed here, and a hook that instead MUTATES or
+# re-stages the artifacts is caught by the frozen-identity check below.
 head_before=$(git_root rev-parse --verify --quiet HEAD 2>/dev/null) || head_before=''
 if [ -z "$head_before" ]; then
     stage_err git/commit "cannot resolve HEAD before committing: $root_phys"
@@ -455,8 +521,9 @@ if ! git_root commit --quiet --only -m "$COMMIT_MESSAGE" \
 fi
 
 # --- read the EXACT target back instead of trusting the return status ------
-# A commit is only a success once HEAD really advanced onto the previous HEAD
-# and the committed blobs are the validated files.
+# A commit is only a success once HEAD really advanced onto the previous HEAD,
+# carries exactly the allowlist, and both committed blobs AND both working
+# artifacts still hash to the identities frozen at validation.
 head_after=$(git_root rev-parse --verify --quiet HEAD 2>/dev/null) || head_after=''
 if [ -z "$head_after" ] || [ "$head_after" = "$head_before" ]; then
     stage_err git/verify "the commit command reported success but HEAD did not advance: $root_phys"
@@ -477,15 +544,94 @@ if [ "$committed_paths" != "$expected_paths" ]; then
     exit 2
 fi
 
-for artifact_rel in "$ARTIFACT_INDEX" "$ARTIFACT_CATALOG"; do
-    committed_blob=$(git_root rev-parse --verify --quiet "HEAD:$artifact_rel" 2>/dev/null) \
-        || committed_blob=''
-    working_blob=$(git_root hash-object -- "$artifact_rel" 2>/dev/null) || working_blob=''
-    if [ -z "$committed_blob" ] || [ "$committed_blob" != "$working_blob" ]; then
-        stage_err git/verify "the committed artifact blob does not match the validated file: $artifact_rel"
-        exit 2
-    fi
-done
+# --- compare the COMMITTED and the WORKING bytes to the FROZEN identities --
+# The approved pair is the raw byte identity captured at the validation
+# observation and carried privately through the receipt. Re-reading the files
+# here cannot redefine it, and a Git-normalised blob hash is not a substitute
+# for exact-byte identity, so both committed blobs AND both ordinary working
+# artifacts are hashed with stdlib SHA-256 and compared against those two
+# identities. A hook may therefore NOT substitute the approved bytes: a
+# different but individually coherent pair -- which the validator would accept
+# again -- fails here, and so does a hook that changed only the working files
+# without staging them. When the commit (or a hook) already produced a
+# substituted commit, this is reported and that commit is left for operator
+# handling: nothing is reset, repaired, retried, rewritten or pushed.
+identity_rc=0
+identity_out=$("$python_bin" - identity "$root_phys" "$head_after" \
+    "$catalog_digest" "$index_digest" <<'PY'
+import hashlib
+import subprocess
+import sys
+from pathlib import Path
+
+if sys.argv[1] != "identity":
+    print("publish_site: unexpected identity-check invocation",
+          file=sys.stderr)
+    raise SystemExit(2)
+
+target = sys.argv[2]
+commit = sys.argv[3]
+expected = (
+    ("site/catalog.json", sys.argv[4]),
+    ("site/index.html", sys.argv[5]),
+)
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+# The committed bytes are checked first: when a hook substituted the pair, the
+# commit is what an operator has to deal with, and the diagnostic should say
+# so rather than blame the working tree.
+for rel, frozen in expected:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", target, "cat-file", "blob", f"{commit}:{rel}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        print("publish_site: cannot run git to read the committed artifact "
+              f"back: {rel}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        print(f"publish_site: cannot read the committed artifact back: "
+              f"{rel}: {detail}", file=sys.stderr)
+        raise SystemExit(2)
+    committed = sha256(proc.stdout)
+    if committed != frozen:
+        print("publish_site: the committed artifact does not match the "
+              f"validated bytes: {rel} (validated sha256 {frozen}, "
+              f"committed sha256 {committed})", file=sys.stderr)
+        raise SystemExit(2)
+
+for rel, frozen in expected:
+    try:
+        working = (Path(target) / rel).read_bytes()
+    except OSError as exc:
+        print(f"publish_site: cannot read the working artifact back: "
+              f"{rel}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    actual = sha256(working)
+    if actual != frozen:
+        print("publish_site: the working artifact does not match the "
+              f"validated bytes: {rel} (validated sha256 {frozen}, "
+              f"working sha256 {actual})", file=sys.stderr)
+        raise SystemExit(2)
+
+# Success receipt: the only thing this program ever writes to stdout, and it
+# must stay byte-identical to IDENTITY_RECEIPT in the shell.
+print("publish_site: artifact identities match")
+PY
+) || identity_rc=$?
+if [ "$identity_rc" -ne 0 ]; then
+    stage_err git/verify "the artifact bytes at the target commit do not match the frozen validated identities; a commit may already exist at $head_after and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
+    exit 2
+fi
+if [ "$identity_out" != "$IDENTITY_RECEIPT" ]; then
+    stage_err git/verify "the post-commit identity check did not confirm execution (expected its private receipt): $root_phys"
+    exit 2
+fi
 
 printf '%s: local gate passed: %s (artifact pair validated and committed locally as %s; nothing pushed, deployed or published)\n' \
     "$PROG" "$site_dir" "$head_after" >&2
