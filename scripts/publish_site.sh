@@ -14,6 +14,11 @@
 #   3. read the EXACT final artifact bytes back, decode them as strict UTF-8
 #      and hand them to the builder's own validate_artifact_pair. This second
 #      gate is required independently of the builder's internal validation.
+#      Because a selected executable may simply ignore the Python program and
+#      return zero, that program emits ONE fixed private success receipt on its
+#      stdout ONLY after the real validator returned normally; the shell
+#      CAPTURES it (never forwards it) and requires exit 0 AND the exact
+#      receipt. An empty, wrong or extra receipt is a validation failure.
 #
 # A nonzero builder exit stops the gate BEFORE validation, even when a valid
 # last-good pair is already on disk. A failed build or a rejected pair is never
@@ -35,6 +40,13 @@ set -u
 set -o pipefail
 
 readonly PROG="publish_site"
+
+# The ONE fixed private success receipt of the read-back validator (see stage 3
+# below). It is an internal handshake, never operational or public output, and
+# it MUST stay byte-identical to the single print() in the read-back program:
+# if the two ever drift apart every run fails CLOSED at stage=validate (the
+# gate never accepts a missing receipt), never open.
+readonly READBACK_RECEIPT='publish_site: read-back validation passed'
 
 usage() {
     cat <<'USAGE'
@@ -196,8 +208,20 @@ fi
 # target root are dropped before the import, so a synthetic root cannot shadow
 # build_site or watchdog_catalog. It performs no JSON identity check of its own
 # -- the existing validator decides.
+#
+# Its stdout is CAPTURED, never forwarded: the only thing it ever writes there
+# is the private success receipt, emitted after the validator returned
+# normally. Exit status alone cannot prove the program ran (a selected
+# executable may ignore its arguments and stdin, do nothing and return zero),
+# so the gate requires BOTH a zero exit AND that exact receipt. Diagnostics go
+# to stderr and pass straight through.
+#
+# Bash command substitution deletes every trailing newline, so the compared
+# value deliberately has none: the receipt is one line and the expected string
+# is stored without its terminator. Any other difference -- no output, wrong
+# text, a second line, a repeated receipt -- fails this gate.
 validate_rc=0
-"$python_bin" - "$root" "$repo_root" >&2 <<'PY' || validate_rc=$?
+validate_out=$("$python_bin" - "$root" "$repo_root" <<'PY'
 import sys
 from pathlib import Path
 
@@ -233,9 +257,19 @@ except Exception as exc:  # noqa: BLE001 - every rejection is a gate failure
     print("publish_site: artifact pair rejected: "
           f"{type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(2)
+
+# Success receipt: printed ONLY after the validator returned normally above,
+# and the only thing this program ever writes to stdout. The text must stay
+# byte-identical to READBACK_RECEIPT in the shell; a drift fails closed.
+print("publish_site: read-back validation passed")
 PY
+) || validate_rc=$?
 if [ "$validate_rc" -ne 0 ]; then
     stage_err validate "read-back validation failed (exit $validate_rc): $site_dir"
+    exit 2
+fi
+if [ "$validate_out" != "$READBACK_RECEIPT" ]; then
+    stage_err validate "read-back validator did not confirm execution (${#validate_out} chars of stdout, expected the private success receipt): $site_dir"
     exit 2
 fi
 

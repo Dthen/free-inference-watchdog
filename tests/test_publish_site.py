@@ -21,6 +21,12 @@ live roster):
   (``stage=validate``), with the real validator untouched, and a target root
   carrying its own permissive ``build_site`` / ``watchdog_catalog`` cannot
   shadow it;
+* exit 0 alone never proves the read-back validator executed: ``/bin/true``
+  and any executable that ignores its arguments and stdin (also over a valid
+  last-good pair) fail at ``stage=validate`` because the validator's ONE fixed
+  private stdout receipt is missing, while a real successful validation whose
+  owned wrapper drops, corrupts, duplicates or misroutes that receipt fails
+  there too -- even though its child exited zero on a genuinely valid pair;
 * bad arguments, an unusable root, ``--help``, an unopenable lock path and a
   host without the ``flock`` command all fail (or, for ``--help``, succeed)
   before the builder starts, and the default root plus the builder path follow
@@ -53,6 +59,10 @@ CATALOG = SITE / "catalog.json"
 INDEX = SITE / "index.html"
 PUBLISH_LOCK = SITE / ".publish.lock"
 BUILD_LOCK = SITE / ".build.lock"
+
+# The helper's ONE fixed private success receipt. It is an internal handshake:
+# it must never appear in an artifact or any public output field.
+READBACK_RECEIPT = "publish_site: read-back validation passed"
 
 # Synthetic roster of the two registry gateways used by these fixtures. No live
 # roster, provider config or credential is read.
@@ -89,8 +99,10 @@ The helper receives this file as ONE executable --python path (it lives under a
 directory whose name contains spaces). Build/validation calls are forwarded
 verbatim to the real interpreter, so the real builder and the real
 validate_artifact_pair run untouched; the only additions are an append-only
-call record, an optional coordinated pause, and optional corruption of the
-builder's OWN outputs after a successful build.
+call record, an optional coordinated pause, optional corruption of the
+builder's OWN outputs after a successful build, and optional removal or
+corruption of the read-back program's stdout receipt AFTER it really validated
+the pair.
 """
 
 import json
@@ -108,6 +120,11 @@ MODE = os.environ.get("PUBLISH_TEST_MODE", "pass")
 HOLD_FILE = os.environ.get("PUBLISH_TEST_HOLD")
 PIDFILE = os.environ.get("PUBLISH_TEST_PIDFILE")
 
+# Modes that let the REAL validator run on the REAL pair and then damage only
+# its success receipt, so the child process still exits zero.
+RECEIPT_FAULTS = ("receipt_missing", "receipt_wrong", "receipt_extra",
+                  "receipt_stderr_only")
+
 if PIDFILE:
     Path(PIDFILE).write_text(str(os.getpid()), encoding="utf-8")
 
@@ -117,6 +134,11 @@ def record(kind):
     with LOG.open("a", encoding="utf-8") as handle:
         handle.write(line)
     LOG.with_name(LOG.name + "." + kind).write_text(line, encoding="utf-8")
+
+
+def mark(kind, text):
+    """Owned side channel for facts about a call (never appended to the log)."""
+    LOG.with_name(LOG.name + "." + kind).write_text(text, encoding="utf-8")
 
 
 def hold():
@@ -130,11 +152,34 @@ def hold():
 
 
 args = sys.argv[1:]
+
+if MODE == "ignore_program":
+    # A selected executable that ignores its arguments AND the Python program
+    # on stdin: it performs no work whatsoever and returns zero. Exit status
+    # alone must never be able to prove that the validator executed.
+    record("validate" if args and args[0] == "-" else "builder")
+    raise SystemExit(0)
+
 if args and args[0] == "-":
     # The read-back validation invocation (``python - <root> <checkout>``).
     record("validate")
     if MODE == "hold_validate":
         hold()
+    if MODE in RECEIPT_FAULTS:
+        # The genuine validator runs unchanged against the genuine pair; only
+        # its stdout receipt is then dropped or corrupted.
+        proc = subprocess.run([REAL] + args, stdout=subprocess.PIPE)
+        out = proc.stdout.decode("utf-8", "replace")
+        mark("validator", f"{proc.returncode} {out!r}")
+        if MODE == "receipt_missing":
+            pass
+        elif MODE == "receipt_wrong":
+            sys.stdout.write("publish_site: validation skipped\\n")
+        elif MODE == "receipt_extra":
+            sys.stdout.write(out + "and one more line\\n")
+        elif MODE == "receipt_stderr_only":
+            sys.stderr.write(out)
+        raise SystemExit(proc.returncode)
     os.execv(REAL, [REAL] + args)
 
 record("builder")
@@ -320,6 +365,19 @@ def _stamps(log):
             for line in log.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
+def _marker(log, kind):
+    """Read one owned side-channel marker written by the wrapper (or '')."""
+    path = log.with_name(log.name + "." + kind)
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _assert_not_success(proc, label):
+    """No success claim, no success output: the gate must look like a failure."""
+    assert proc.stdout == "", (label, f"gate stdout must stay empty: {proc.stdout!r}")
+    assert "local gate passed" not in proc.stderr, (label, proc.stderr)
+    assert "artifact pair validated" not in proc.stderr, (label, proc.stderr)
+
+
 def _probe(lock_path):
     """Independent nonblocking acquisition of the SAME lock path.
 
@@ -426,7 +484,17 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
     validation, while a builder that returns 0 but leaves a missing,
     mismatching, invalid-JSON or non-UTF-8 pair is caught by the independent
     read-back gate, which a target root cannot shadow.
+
+    The last group is the positive-execution receipt: exit status 0 is not
+    proof that the read-back validator ran (``/bin/true`` and any executable
+    that ignores its arguments and stdin return 0 without building or
+    validating), so the gate also requires the validator's ONE fixed private
+    stdout receipt. A removed, wrong, duplicated or misrouted receipt fails at
+    ``stage=validate`` even though the child exited zero with a genuinely valid
+    pair.
     """
+    from catalog_export import validate_artifact_pair
+
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
@@ -563,6 +631,72 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
     proc = _run(normal_root, "/bin/false", env, cwd)
     assert proc.returncode == 2, (proc.returncode, proc.stderr)
     assert "stage=builder" in proc.stderr, proc.stderr
+
+    # --- exit 0 while NOTHING ran is not a validated pair -----------------
+    # ``/bin/true`` ignores its arguments and the Python program on stdin, does
+    # no work and returns zero. Exit status alone used to be read as
+    # "artifact pair validated" although neither artifact existed; the required
+    # positive receipt must turn that into a validation-stage failure.
+    true_root = tmp_path / "ignored program root"
+    _write_roster(true_root, ROSTER)
+    proc = _run(true_root, "/bin/true", env, cwd)
+    assert proc.returncode == 2, (proc.returncode, proc.stderr)
+    _assert_not_success(proc, "/bin/true")
+    assert "stage=validate" in proc.stderr, proc.stderr
+    assert "did not confirm execution" in proc.stderr, proc.stderr
+    assert not (true_root / CATALOG).exists()
+    assert not (true_root / INDEX).exists()
+
+    # The same zero-exit no-op against a VALID last-good pair: mere file
+    # existence must not substitute for positive execution either.
+    pair_root = tmp_path / "last good root"
+    _write_roster(pair_root, ROSTER)
+    interpreter, _, good_env = _harness(tmp_path, mode="pass")
+    built = _run(pair_root, interpreter, good_env, cwd)
+    assert built.returncode == 0, built.stderr
+    last_good = ((pair_root / CATALOG).read_bytes(),
+                 (pair_root / INDEX).read_bytes())
+    # The receipt stays internal: it is not an artifact or public output field.
+    assert READBACK_RECEIPT.encode("utf-8") not in last_good[0]
+    assert READBACK_RECEIPT.encode("utf-8") not in last_good[1]
+
+    interpreter, log, ignore_env = _harness(tmp_path, mode="ignore_program")
+    proc = _run(pair_root, interpreter, ignore_env, cwd)
+    assert proc.returncode == 2, (proc.returncode, proc.stderr)
+    _assert_not_success(proc, "ignore_program")
+    assert "stage=validate" in proc.stderr, proc.stderr
+    assert "did not confirm execution" in proc.stderr, proc.stderr
+    # It was invoked for both stages and did nothing in either.
+    assert _kinds(log) == ["builder", "validate"], _kinds(log)
+    # The pair on disk is unchanged and still validates: the ONLY difference
+    # from success is that no validator proved it by executing.
+    assert ((pair_root / CATALOG).read_bytes(),
+            (pair_root / INDEX).read_bytes()) == last_good
+    validate_artifact_pair(*_read_pair(pair_root))
+
+    # --- a real, successful validation whose receipt is removed/corrupted --
+    # Each wrapper runs the REAL validator on the REAL pair and then damages
+    # only the stdout receipt, so the child still exits zero with accepted
+    # artifacts. Only the receipt handshake can reject these.
+    for mode in ("receipt_missing", "receipt_wrong", "receipt_extra",
+                 "receipt_stderr_only"):
+        root = tmp_path / f"receipt {mode}"
+        _write_roster(root, ROSTER)
+        interpreter, log, fault_env = _harness(tmp_path, mode=mode)
+        proc = _run(root, interpreter, fault_env, cwd)
+        assert proc.returncode == 2, (mode, proc.returncode, proc.stderr)
+        _assert_not_success(proc, mode)
+        assert "stage=validate" in proc.stderr, (mode, proc.stderr)
+        assert "stage=builder" not in proc.stderr, (mode, proc.stderr)
+        assert "did not confirm execution" in proc.stderr, (mode, proc.stderr)
+        assert _kinds(log) == ["builder", "validate"], (mode, _kinds(log))
+        # The child really validated: exit 0 and the expected receipt text.
+        assert _marker(log, "validator").startswith("0 "), (
+            mode, _marker(log, "validator"))
+        assert READBACK_RECEIPT in _marker(log, "validator"), (
+            mode, _marker(log, "validator"))
+        # Both artifacts exist and the EXISTING validator accepts the pair.
+        validate_artifact_pair(*_read_pair(root))
 
     # --- builder exits 0 but leaves a pair the read-back gate rejects -----
     for mode, expect in (
