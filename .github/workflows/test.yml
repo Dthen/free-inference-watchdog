@@ -1,0 +1,227 @@
+name: test
+
+# Unit 9a3: the Linux floor/current portion of standalone CI.
+#
+# One Ubuntu job, two Python selections: the declared floor (3.11) and current
+# stable (3.x). Both run the COMPLETE existing POSIX suite -- package,
+# protocol, wheel-only integration, source/cache and the synthetic
+# operator-selection gate. The two deployed-wrapper read-backs stay opt-in and
+# report their actionable skip; nothing here supplies a fixture to fake them.
+#
+# Read-only by design: no publishing, deployment, provider, secret or write
+# permission exists in this workflow. Windows package/core smoke is a separate
+# slice and is deliberately absent rather than stubbed.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux:
+    name: linux / python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Quoted on purpose: unquoted 3.10-style values are YAML floats.
+        python-version: ["3.11", "3.x"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The floor must be a GENUINE CPython 3.11 in every matrix leg, including
+      # the 3.x leg. It is installed first so its documented `python-path`
+      # output is captured before any later setup-python step rewrites PATH.
+      - name: Set up the exact CPython 3.11 floor interpreter
+        id: floor_python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.11"
+          check-latest: true
+          allow-prereleases: false
+
+      - name: Preserve the floor interpreter path
+        env:
+          FLOOR_PYTHON: ${{ steps.floor_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          floor="$FLOOR_PYTHON"
+          test -n "$floor"
+          test -x "$floor"
+          {
+            echo "FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON=$floor"
+          } >> "$GITHUB_ENV"
+          printf 'floor interpreter (setup-python python-path): %s\n' "$floor"
+
+      # Current stable. `allow-prereleases: false` keeps a pre-release out of
+      # the 3.x range even if no GA build satisfied it; `check-latest: true`
+      # asks for the newest matching GA release instead of a stale cached one.
+      - name: Set up the selected matrix interpreter
+        id: matrix_python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          check-latest: true
+          allow-prereleases: false
+
+      - name: Report interpreter identities and prove the floor
+        env:
+          MATRIX_PYTHON: ${{ steps.matrix_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          floor="$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+          printf 'matrix interpreter: %s\n' "$MATRIX_PYTHON"
+          "$MATRIX_PYTHON" -VV
+          printf 'matrix interpreter identity: %s\n' \
+            "$("$MATRIX_PYTHON" -c 'import sys; print(sys.executable)')"
+          printf 'floor interpreter: %s\n' "$floor"
+          "$floor" -VV
+          printf 'python resolved on PATH: %s\n' "$(command -v python)"
+          printf 'pytest interpreter on PATH will be: %s\n' \
+            "$("$MATRIX_PYTHON" -c 'import sys; print(sys.executable)')"
+
+          "$floor" -I -c 'import sys
+          assert sys.implementation.name == "cpython", sys.implementation.name
+          assert sys.version_info[:2] == (3, 11), sys.version_info
+          assert sys.version_info.releaselevel == "final", sys.version_info
+          print("floor is genuine CPython 3.11:", sys.version)'
+
+          "$MATRIX_PYTHON" -I -c 'import sys
+          assert sys.implementation.name == "cpython", sys.implementation.name
+          assert sys.version_info[:2] >= (3, 11), sys.version_info
+          assert sys.version_info.releaselevel == "final", sys.version_info
+          print("selected interpreter is final CPython:", sys.version)'
+
+      # Reviewed prerequisites are provisioned OUTSIDE pytest, pinned to the
+      # reviewed versions. No dependency caching: the wheelhouse below is the
+      # only dependency source the tests are allowed to use.
+      - name: Provision reviewed test and build prerequisites
+        env:
+          MATRIX_PYTHON: ${{ steps.matrix_python.outputs.python-path }}
+          PIP_CONFIG_FILE: /dev/null
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_INPUT: "1"
+        run: |
+          set -euo pipefail
+          "$MATRIX_PYTHON" -m pip install \
+            "pytest==9.1.1" \
+            "setuptools==84.2.1" \
+            "uv==0.13.5" \
+            "mcp==2.3.0" \
+            "pydantic==2.14.1" \
+            "anyio==4.15.1"
+          "$MATRIX_PYTHON" -m pytest --version
+          "$MATRIX_PYTHON" -c 'import setuptools, mcp, pydantic, anyio; print("setuptools", setuptools.__version__)'
+
+      # The floor interpreter is only used to RESOLVE cp311 wheels; pip itself
+      # is a provisioning detail of that one interpreter, never a test import.
+      - name: Provision pip for the floor interpreter
+        run: |
+          set -euo pipefail
+          floor="$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+          if ! "$floor" -m pip --version >/dev/null 2>&1; then
+            "$floor" -m ensurepip --upgrade
+          fi
+          "$floor" -m pip --version
+
+      - name: Download the CPython 3.11 dependency wheel closure
+        env:
+          WHEELHOUSE: ${{ runner.temp }}/wheelhouse
+          PIP_CONFIG_FILE: /dev/null
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_INPUT: "1"
+        run: |
+          set -euo pipefail
+          floor="$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+          mkdir -p "$WHEELHOUSE"
+          "$floor" -m pip download --only-binary=:all: --dest "$WHEELHOUSE" \
+            --index-url https://pypi.org/simple \
+            "mcp==2.3.0" "pydantic==2.14.1" "anyio==4.15.1"
+          "$floor" - "$WHEELHOUSE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          house = Path(sys.argv[1])
+          wheels = sorted(path.name for path in house.glob("*.whl"))
+          pins = {"mcp": "2.3.0", "pydantic": "2.14.1", "anyio": "4.15.1"}
+          present = {}
+          for name in wheels:
+              distribution, version = name.split("-")[:2]
+              present.setdefault(distribution.lower(), set()).add(version)
+          missing = {name: version for name, version in pins.items()
+                     if version not in present.get(name, set())}
+          if missing:
+              raise SystemExit(f"missing reviewed pins {missing} in {wheels}")
+          foreign = [name for name in wheels
+                     if "py3-none-any" not in name and "cp311" not in name]
+          if foreign:
+              raise SystemExit(f"non-cp311 binary wheels: {foreign}")
+          print(f"{len(wheels)} dependency wheels; every binary wheel targets cp311")
+          PY
+          {
+            echo "FREE_INFERENCE_WATCHDOG_WHEELHOUSE=$WHEELHOUSE"
+          } >> "$GITHUB_ENV"
+          ls -1 "$WHEELHOUSE"
+
+      # Runner-owned HOME/TMPDIR and absolute interpreter/tool paths are bound
+      # by value here so a later PATH change cannot silently substitute an
+      # account, a Hermes virtualenv or a different uv.
+      - name: Bind the runner-owned test environment
+        env:
+          MATRIX_PYTHON: ${{ steps.matrix_python.outputs.python-path }}
+          TEST_HOME: ${{ runner.temp }}/test-home
+          TEST_TMPDIR: ${{ runner.temp }}/test-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TEST_HOME" "$TEST_TMPDIR"
+          scripts_dir="$("$MATRIX_PYTHON" -c 'import sysconfig; print(sysconfig.get_path("scripts"))')"
+          uv="$scripts_dir/uv"
+          test -x "$uv"
+          uv_version="$("$uv" --version)"
+          printf 'uv: %s -> %s\n' "$uv" "$uv_version"
+          case "$uv_version" in
+            "uv 0.13.5 "*) ;;
+            *) echo "unexpected uv version: $uv_version" >&2; exit 1 ;;
+          esac
+          {
+            echo "FREE_INFERENCE_WATCHDOG_BUILD_PYTHON=$MATRIX_PYTHON"
+            echo "FREE_INFERENCE_WATCHDOG_SMOKE_PYTHON=$MATRIX_PYTHON"
+            echo "FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON=$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+            echo "FREE_INFERENCE_WATCHDOG_UV=$uv"
+            echo "HOME=$TEST_HOME"
+            echo "TMPDIR=$TEST_TMPDIR"
+            echo "XDG_CACHE_HOME=$TEST_HOME/.cache"
+            echo "UV_CACHE_DIR=$TEST_HOME/uv-cache"
+          } >> "$GITHUB_ENV"
+
+      - name: Show the bound test environment
+        run: |
+          set -euo pipefail
+          env | LC_ALL=C sort | grep -E \
+            '^(FREE_INFERENCE_WATCHDOG_(FLOOR|INSTALLED|BUILD|SMOKE)_PYTHON|FREE_INFERENCE_WATCHDOG_(UV|WHEELHOUSE)|HOME|TMPDIR|XDG_CACHE_HOME|UV_CACHE_DIR)='
+
+      # Prepares nothing: both interpreters, uv and the wheelhouse are already
+      # in place, so the suite performs no provider, network or credential
+      # discovery. Strict markers plus -rs keep the two intended operator skips
+      # visible with their reason.
+      - name: Run the complete POSIX suite
+        env:
+          MATRIX_PYTHON: ${{ steps.matrix_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "$MATRIX_PYTHON" -m pytest tests -q --strict-markers -rs
