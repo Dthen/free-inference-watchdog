@@ -2866,9 +2866,16 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
     Tick validation stays a SEPARATE contract: the raw roster epoch is strict
     and unknown/future means not fresh, with an inclusive cadence boundary and
     the exact core warning union/order.
+
+    Root normalization stays a REAL operation and is observed SEPARATELY from
+    state I/O: the failure payload's ``state_root`` is the genuinely resolved
+    root (the fixture root is reached through a symlink alias), while every
+    status/state/site/pending observation remains visible and forbidden until
+    the clock is accepted.
     """
     import inspect
     import os
+    import pathlib
 
     import watchdog_catalog.query as real_query
 
@@ -2912,8 +2919,27 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
     os.utime(site_path, (1000.5, 1000.5))
     pending_path.write_text(json.dumps([{"payload": {"a": 1}}]))
 
-    clock_reads, loads, calls, pending_reads, stats = [], [], [], [], []
+    # The selected root is a REAL symlink alias of the fixture tree, so the
+    # payload's ``state_root`` can only be right if the tool genuinely resolved
+    # it -- a lexical/absolute rewrite would keep the alias name.
+    root_arg = tmp_path / "alias"
+    root_arg.symlink_to(tmp_path, target_is_directory=True)
+    resolved_root = os.fspath(pathlib.Path(root_arg).resolve())
+    assert resolved_root != os.fspath(root_arg)      # genuinely non-lexical
+
+    clock_reads, loads, calls, pending_reads = [], [], [], []
+    # Filesystem calls are attributed to the operation that made them. The
+    # REAL delegated root normalization owns ``root_norm_stats``: non-strict
+    # ``Path.resolve()`` also stats the resolved path for symlink-loop
+    # detection on CPython 3.11 and makes no such call on 3.14, so its size is
+    # interpreter-specific and is never asserted. ``other_stats`` is every
+    # status/state/site/pending observation and must stay EMPTY for a rejected
+    # clock -- that, not a total call count, is the boundary under test.
+    root_norm_stats, other_stats = [], []
+    root_norm_calls, root_norm_results = [], []
+    _root_norm_depth = [0]
     real_stat = os.stat
+    real_resolve = pathlib.Path.resolve
 
     def _fake_time():
         clock_reads.append(True)
@@ -2933,8 +2959,27 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
         return out
 
     def _spy_stat(path, *args, **kwargs):
-        stats.append(str(path))
+        record = root_norm_stats if _root_norm_depth[0] else other_stats
+        record.append(os.fspath(path))
         return real_stat(path, *args, **kwargs)
+
+    def _spy_resolve(self, *args, **kwargs):
+        """Delegate to the REAL ``Path.resolve``; observe only the root window.
+
+        Outside the selected root-normalization boundary this is a transparent
+        pass-through, so a resolve anywhere else is still observed as ordinary
+        status work rather than silently excused.
+        """
+        if _root_norm_depth[0] == 0 and os.fspath(self) == os.fspath(root_arg):
+            root_norm_calls.append(os.fspath(self))
+            _root_norm_depth[0] += 1
+            try:
+                resolved = real_resolve(self, *args, **kwargs)
+            finally:
+                _root_norm_depth[0] -= 1
+            root_norm_results.append(os.fspath(resolved))
+            return resolved
+        return real_resolve(self, *args, **kwargs)
 
     monkeypatch.setattr(mcp_server.time, "time", _fake_time)
     monkeypatch.setattr(mcp_server.state, "load_roster", _spy_load)
@@ -2946,20 +2991,33 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
         loads.clear()
         calls.clear()
         pending_reads.clear()
-        stats.clear()
+        root_norm_stats.clear()
+        other_stats.clear()
+        root_norm_calls.clear()
+        root_norm_results.clear()
+        _root_norm_depth[0] = 0
 
-    def _call_without_io(**kwargs):
-        """Call with os.stat spied: proves NO state/site/pending probe happened.
+    def _observed_call(**kwargs):
+        """Call with filesystem observations attributed at their source.
 
-        ``Path.resolve()`` never stats, so an empty record is a real assertion
-        that the rejection happened before every filesystem observation.
+        The tool's first act is a REAL ``Path(root).resolve()``, kept: the
+        resolved root is part of the preserved legacy ``state_root`` and is
+        separate from observing roster/site/pending/core state. Calls made
+        inside that one delegated root normalization are recorded as root
+        normalization -- narrowly, because non-strict ``Path.resolve()`` also
+        calls ``p.stat()`` on CPython 3.11 (symlink-loop detection) and does not
+        on 3.14. Every other ``os.stat`` stays visible here, so an empty
+        ``other_stats`` is a real assertion that a rejected clock failed BEFORE
+        any state, site or pending-queue observation. Both patches are restored
+        in ``finally`` even on failure.
         """
-        saved = os.stat
-        os.stat = _spy_stat
+        saved_stat, saved_resolve = os.stat, pathlib.Path.resolve
+        os.stat, pathlib.Path.resolve = _spy_stat, _spy_resolve
         try:
             return mcp_server.watchdog_status(**kwargs)
         finally:
-            os.stat = saved
+            os.stat, pathlib.Path.resolve = saved_stat, saved_resolve
+            _root_norm_depth[0] = 0
 
     def _assert_core_clock(value):
         now_seen = calls[-1]["now"]
@@ -2976,7 +3034,7 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
 
     # -- None: one clock read, one normalization, raw value kept for site age -
     _reset()
-    default = mcp_server.watchdog_status(root=tmp_path)
+    default = _observed_call(root=root_arg)
     assert default["ok"] is True
     assert clock_reads == [True]                 # read EXACTLY once
     assert len(calls) == 1 and len(loads) == 1
@@ -2984,6 +3042,22 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
     assert calls[0]["now"] == 1060               # int(1060.75)
     assert default["last_tick_age_s"] == 60
     assert default["site_publish_age_s"] == 60   # raw 1060.75 - 1000.5
+
+    # -- root normalization is real, and the observed channels are live ------
+    # The delegated resolve ran ONCE on the selected root and returned the real
+    # symlink target, which is what the payload reports; the site/roster
+    # observations of an ACCEPTED call are visible outside that boundary, so an
+    # empty ``other_stats`` on rejection cannot come from a blind spy.
+    assert default["state_root"] == resolved_root
+    assert root_norm_calls == [os.fspath(root_arg)]
+    assert root_norm_results == [resolved_root]
+    # Attributed, not discarded: whatever the interpreter's resolve stats are
+    # confined to the resolved root (their COUNT differs by version, so it is
+    # not asserted), while the accepted call's own observations are visible.
+    assert all(p == resolved_root or p.startswith(resolved_root + os.sep)
+               for p in root_norm_stats)
+    assert os.path.join(resolved_root, "site", "index.html") in other_stats
+    assert os.path.join(resolved_root, "state", "roster.json") in other_stats
 
     # -- explicit values never fall back; 0 is literal and stays 0 -----------
     rows = [
@@ -2996,7 +3070,7 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
     ]
     for value, core_now, age, site_age in rows:
         _reset()
-        row = mcp_server.watchdog_status(now=value, root=tmp_path)
+        row = mcp_server.watchdog_status(now=value, root=root_arg)
         assert row["ok"] is True, value
         assert clock_reads == [], value          # no fallback clock read
         _assert_core_clock(value)
@@ -3013,7 +3087,7 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
     # explicit safe boundaries: the max is accepted, one past it is not.
     for value in (9007199254740991, 9007199254740991.0):
         _reset()
-        boundary = mcp_server.watchdog_status(now=value, root=tmp_path)
+        boundary = mcp_server.watchdog_status(now=value, root=root_arg)
         assert boundary["ok"] is True
         _assert_core_clock(value)
         assert calls[0]["now"] == 9007199254740991
@@ -3027,14 +3101,19 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
                 10**400, [0], {}, object()]
     for bad in rejected:
         _reset()
-        bad_res = _call_without_io(now=bad, root=tmp_path)
+        bad_res = _observed_call(now=bad, root=root_arg)
         assert bad_res["ok"] is False, repr(bad)
         assert bad_res["error"] == (
             "now must be a finite non-negative safe number"), repr(bad)
         assert set(bad_res) == {"tool", "state_root", "ok", "error"}
         assert repr(bad) not in bad_res["error"]
         assert loads == [] and calls == [] and pending_reads == []
-        assert clock_reads == [] and stats == [], repr(bad)
+        assert clock_reads == [] and other_stats == [], repr(bad)
+        # Root normalization still ran, really, and its resolved root is what
+        # the failure payload reports -- only its OWN calls are exempt above.
+        assert bad_res["state_root"] == resolved_root, repr(bad)
+        assert root_norm_calls == [os.fspath(root_arg)], repr(bad)
+        assert root_norm_results == [resolved_root], repr(bad)
 
     # -- the DEFAULT clock return is validated by the same boundary ----------
     def _bad_clock(value):
@@ -3047,14 +3126,17 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
                         9007199254740992, 10**400):
         monkeypatch.setattr(mcp_server.time, "time", _bad_clock(bad_default))
         _reset()
-        bad_default_res = _call_without_io(root=tmp_path)
+        bad_default_res = _observed_call(root=root_arg)
         assert bad_default_res["ok"] is False, repr(bad_default)
         assert bad_default_res["error"] == (
             "now must be a finite non-negative safe number")
         assert set(bad_default_res) == {"tool", "state_root", "ok", "error"}
         assert len(clock_reads) == 1              # captured once, then rejected
         assert loads == [] and calls == [] and pending_reads == []
-        assert stats == [], repr(bad_default)
+        assert other_stats == [], repr(bad_default)
+        assert bad_default_res["state_root"] == resolved_root
+        assert root_norm_calls == [os.fspath(root_arg)], repr(bad_default)
+        assert root_norm_results == [resolved_root], repr(bad_default)
     monkeypatch.setattr(mcp_server.time, "time", _fake_time)
 
     # -- tick validation is a SEPARATE contract -------------------------------
