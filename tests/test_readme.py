@@ -25,10 +25,11 @@ would make them collide), `min_context_length` is exercised at its inclusive
 boundary and against unknown metadata, the three freshness shapes are bound to
 the fixture clock, and a real last-known-good replay must NOT be documented as
 an identical `source` block (the 10a cache finding). Count scopes, the operator
-fields a published snapshot cannot observe and the documented marker-strip
-examples are pinned the same way: the caveat sentence is bound to the tools that
-actually return `caveats`, and the strip/no-strip ids are run through the
-shipped stripper rather than trusted as prose.
+fields a published snapshot cannot observe and the documented marker claims
+are pinned the same way: the caveat sentence is bound to the tools that
+actually return `caveats`, and the documented strip/no-strip ids, the "one
+label" result and the both-ends clause are read out of the guidance and
+checked against the shipped stripper's real output.
 
 Operator route (F-R2-4): delivery topology (operator decision, 2026-08-26) is
 unchanged — the webhook in ~/.hermes/.env is the ONLY alert path and the cron job
@@ -848,11 +849,11 @@ def test_unknown_metadata_is_documented_as_distinct_from_known_zero_and_empty():
 def test_documented_marker_examples_match_the_real_stripper():
     """The documented strip examples are stated results, so they are executed.
 
-    QUALITY 10b1 finding 3: inverting the documented examples left the suite
-    green. ``strip_free_marker`` IS the shipped rule, so the documented ids are
-    exercised here — end marker, start marker, mid-string non-marker, both ends
-    and the empty-result guard — and the one-label claim is computed the same
-    way ``counts.marker_group_labels`` computes it.
+    SPEC 10b1 R3: running the shipped stripper is not the same as pinning what
+    the README says it does. The documented ids, the ``contribute one label``
+    result and the retained ``both ends strip`` clause are read out of the
+    guidance and checked against real ``strip_free_marker`` output, so
+    "contribute two labels" or "only the start strips" cannot stay green.
     """
     from watchdog_catalog import query
 
@@ -863,22 +864,70 @@ def test_documented_marker_examples_match_the_real_stripper():
     assert strip("free-vendor-model_free") == "vendor-model", "both ends strip"
     assert strip("free-") == "free-", "an emptied id must be returned unchanged"
 
-    # The documented one-label example: two differently marked ids, one label.
-    pair = ("vendor/model:free", "vendor/model-free")
-    assert len({strip(model_id) for model_id in pair}) == 1
-    rows = query.search_models(_snapshot(), {"query": "model", "limit": 200})
-    labels = {strip(row["model_id"]) for row in rows["endpoints"]}
-    assert {"vendor/model", "vendor/model-renamed"} <= labels
-    assert rows["counts"]["marker_group_labels"] == len(labels)
+    snapshot = _snapshot()
+    served = {model_id for provider in snapshot["provider_order"]
+              for model_id in snapshot["providers"][provider]["model_ids"]}
+
+    # The documented one-label example is a stated result, not just an
+    # executed one: read its ids and its count out of the metadata guidance and
+    # let the stripper that ``counts.marker_group_labels`` uses answer it.
+    label_bullets = [item for item in _bullets(METADATA_HEADING)
+                     if "marker_group_labels" in item]
+    assert len(label_bullets) == 1, label_bullets
+    label_claim = label_bullets[0]
+    documented_ids = re.findall(r"\b[\w.\-]+/[\w.\-:]+\b", label_claim)
+    assert len(documented_ids) == 2, \
+        f"the documented label example names {documented_ids}"
+    assert set(documented_ids) <= served, \
+        f"the documented ids are not fixture endpoints: {documented_ids}"
+    documented_result = re.search(r"contribute (\w+) labels? between them",
+                                  label_claim)
+    assert documented_result, "the documented one-label result is gone"
+    label_count = {"one": 1, "two": 2, "three": 3}.get(
+        documented_result.group(1).lower())
+    labels = {strip(model_id) for model_id in documented_ids}
+    assert label_count == len(labels) == 1, \
+        f"README says {documented_result.group(0)!r} for {documented_ids}, " \
+        f"which strip to {sorted(labels)}"
+
+    rows = query.search_models(snapshot, {"query": "model", "limit": 200})
+    page_labels = {strip(row["model_id"]) for row in rows["endpoints"]}
+    assert {"vendor/model", "vendor/model-renamed"} <= page_labels
+    assert rows["counts"]["marker_group_labels"] == len(page_labels)
+    assert set(documented_ids) <= {row["model_id"] for row in rows["endpoints"]}
 
     # The guidance must still name those ids and say which of them strip; the
     # short clause pin catches an inverted "does not", with no whole-sentence
     # wording pin.
-    bullet = [item for item in _bullets(CANNOT_HEADING) if "Marker lookups" in item]
-    assert len(bullet) == 1, bullet
-    examples = bullet[0].split("—", 1)[1]
+    marker_bullets = [item for item in _bullets(CANNOT_HEADING)
+                      if "Marker lookups" in item]
+    assert len(marker_bullets) == 1, marker_bullets
+    marker = marker_bullets[0]
+    examples = marker.split("\u2014", 1)[1]
     assert "vendor/model:free and free-vendor-model strip" in examples
     assert "vendor/freetier does not" in examples
+
+    # The retained "both ends strip" clause is a stated result too. Build its
+    # id from the two documented examples — the start-marked id plus the end
+    # marker the other one carries — and require the README's claim to agree
+    # with what ONE strip of that id actually does.
+    both = re.match(r"\s*(\S+) and (\S+) strip", examples)
+    assert both, "the documented strip examples are gone"
+    end_marked, start_marked = both.group(1), both.group(2)
+    end_marker = end_marked[len(strip(end_marked)):]
+    assert end_marker, end_marked
+    both_ends = start_marked + end_marker
+    both_stripped = strip(both_ends)
+    start_only = strip(start_marked) + end_marker
+    claims_both = "both ends strip" in marker.lower()
+    assert claims_both or "only the start" in marker.lower(), \
+        "the documented both-ends result is gone"
+    assert claims_both == (both_stripped != start_only), \
+        f"README claims both ends strip={claims_both}, but " \
+        f"{both_ends!r} strips to {both_stripped!r}"
+    assert both_stripped == strip(start_marked), \
+        f"{both_ends!r} must land in the same label group as " \
+        f"{start_marked!r}"
 
 
 def test_quick_start_anchor_keeps_the_baseline_deep_link():
