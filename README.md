@@ -27,9 +27,10 @@ answers from one validated catalogue snapshot.
 
 A consumer needs Python 3.11+ and an MCP client that can launch a local stdio
 server. A consumer does **not** need provider API keys, a Discord webhook, a
-cron job, `providers/`, `state/`, the watchdog tick, or this checkout: the
-installed package carries the query core, the reviewed tool contract and the
-stdio server, and nothing else.
+cron job, `providers/`, `state/`, the watchdog tick, this checkout, or the
+Hermes agent: the installed package carries the query core, the reviewed tool
+contract and the stdio server, and nothing else. It is a plain Python package
+installed with `uv` or `pip` — not a Hermes feature, and not an agent skill.
 
 **Querying the catalogue is not inference.** Reading it never calls a provider,
 never spends a credit and never grants access to a model. To actually run a
@@ -152,9 +153,12 @@ What to read out of it: the raw id `vendor/shared` is tracked by two gateways,
 so one search row per gateway is two endpoints but only one distinct raw id. The
 `source` block is provenance, not payload — and it says the observation is
 stale, because the fixture's `tick_epoch` is frozen at the test clock. A stale
-observation is still answered; it is just labelled. Only `ok: true` plus a
-`source` block means the acquisition succeeded, so check `source.warnings`
-before trusting freshness.
+observation is still answered; it is just labelled. `ok: true` plus a `source`
+block means a **validated snapshot was returned** — it does not mean this
+launch's refresh succeeded: a last-known-good replay returns the same `ok: true`
+and the same `source` block, with `refresh_failed` and `cache_fallback` added to
+`source.warnings` to mark a failed refresh served from memory. Read
+`source.warnings` before trusting freshness.
 
 `get_model` returns one row per `(provider, raw model_id)` pair, plus
 `exact_matches` for every provider in the snapshot, and always carries the
@@ -269,10 +273,11 @@ models are gated behind paid plans, and none of this is exposed via the API.
 A "free roster" is therefore undefinable for Ollama, so the provider was
 dropped entirely (2026-08-25).
 
-### Quick start (self-hosting)
+### Quick start
 
-Operator shell, inside a clone of this repo. Consumers who only want to query a
-catalogue can stop reading here and use the [MCP quick start](#query-the-catalogue-over-mcp).
+Self-hosting, operator shell — run these inside a clone of this repo. Consumers
+who only want to query a catalogue can stop reading here and use the
+[MCP quick start](#query-the-catalogue-over-mcp).
 
 ```bash
 cd ~/projects/free-inference-watchdog

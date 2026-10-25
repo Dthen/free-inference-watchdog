@@ -11,7 +11,10 @@ stable values are re-derived from the pinned synthetic fixture rather than
 trusted. The MCP route is pinned as catalogue QUERYING — no provider
 credentials, no cron, no local roster — and it must keep saying that the
 production JSON feed is not published yet and that WebMCP is planned, never a
-remotely connectable MCP HTTP URL.
+remotely connectable MCP HTTP URL. That hand-off must not cost existing readers
+anything: the baseline `#quick-start` anchor stays resolvable, and the `source`
+block is pinned as provenance — a last-known-good replay is `ok: true` too, so it
+never doubles as proof that the refresh succeeded.
 
 Operator route (F-R2-4): delivery topology (operator decision, 2026-08-26) is
 unchanged — the webhook in ~/.hermes/.env is the ONLY alert path and the cron job
@@ -177,8 +180,8 @@ def test_readme_opens_with_purpose_and_dashboard_before_operator_setup():
 
 def test_consumer_section_scopes_queries_away_from_inference():
     """The MCP route must read as catalogue QUERYING: no keys, no cron, no local
-    roster, no inference access and no hosted HTTP endpoint — and it must not
-    leak operator setup steps into the consumer path."""
+    roster, no Hermes agent, no inference access and no hosted HTTP endpoint —
+    and it must not leak operator setup steps into the consumer path."""
     section = _section(_readme(), CONSUMER_HEADING)
     lowered = _plain(section).lower()
 
@@ -187,6 +190,14 @@ def test_consumer_section_scopes_queries_away_from_inference():
         assert phrase in lowered, f"consumer scope omits {phrase!r}"
     assert "does not need" in lowered, \
         "consumer section never says what is NOT required"
+    # The package is a plain Python install: the no-need list must name Hermes
+    # itself, in the same sentence, not merely mention the word elsewhere
+    # (QUALITY 10a finding 2 — the list stopped short of the agent).
+    no_need = _paragraph_with(_plain(section), "does not need").lower()
+    assert "hermes agent" in no_need, \
+        "consumer no-need list must say the Hermes agent is not needed"
+    assert "provider api keys" in no_need and "cron job" in no_need, \
+        "the Hermes statement drifted out of the consumer no-need list"
     assert "is not inference" in lowered, \
         "consumer section must separate querying from inference"
     assert "remotely connectable" in lowered, \
@@ -371,6 +382,76 @@ def test_consumer_section_labels_the_feed_and_webmcp_as_unavailable():
     dashboard = _paragraph_with(section, "dashboard")
     assert "dashboard" in dashboard.lower() and "feed" in dashboard.lower(), \
         "the dashboard must be distinguished from the JSON feed"
+
+
+def test_cache_fallback_is_not_documented_as_acquisition_success(tmp_path):
+    """A last-known-good replay is `ok: true` WITH a `source` block, so neither
+    field may be documented as proof that the acquisition succeeded (QUALITY 10a
+    finding 3).
+
+    Behaviour first: a real ``CatalogSource`` is refreshed, its file then
+    vanishes, and the second refresh returns ``ok: true`` plus the taken-down
+    snapshot along with ``refresh_failed``/``cache_fallback`` — the same shape
+    the README's worked example prints. Then the prose is checked against that
+    behaviour, not against a paraphrase of it.
+    """
+    from watchdog_catalog import source
+
+    target = tmp_path / "lookup.json"
+    target.write_bytes(FIXTURE.read_bytes())
+    now = 1_700_000_000
+    origin = source.CatalogSource("file", str(target),
+                                  cache_dir=str(tmp_path / "cache"))
+    assert origin.refresh(now=now)["ok"] is True
+    target.unlink()
+
+    fallback = origin.refresh(now=now + 5)
+    assert fallback["ok"] is True, fallback
+    assert isinstance(fallback["source"], dict), fallback["source"]
+    assert {"refresh_failed", "cache_fallback"} <= \
+        set(fallback["source"]["warnings"]), fallback["source"]["warnings"]
+    assert fallback["source"]["cached"] is True, fallback["source"]
+
+    paragraph = _paragraph_with(_plain(_section(_readme(), CONSUMER_HEADING)),
+                                "source block")
+    lowered = paragraph.lower()
+    assert "ok: true" in lowered, \
+        "the worked example no longer explains the ok:true/source pair"
+    assert "validated snapshot was returned" in lowered, \
+        "cached success must be described as a returned snapshot, not a success"
+    for warning in ("refresh_failed", "cache_fallback"):
+        assert warning in paragraph, \
+            f"the cache-fallback caveat omits {warning!r}"
+    assert "failed refresh" in lowered and "memory" in lowered, \
+        "a last-known-good replay is not spelled out as a failed refresh"
+    # The removed verbatim claim: ok+source proves the acquisition succeeded.
+    assert "means the acquisition succeeded" not in lowered, \
+        "the false acquisition-succeeded claim is back"
+
+
+def test_quick_start_anchor_keeps_the_baseline_deep_link():
+    """The operator quick start may be re-routed under the consumer opening, but
+    its `#quick-start` anchor must survive (QUALITY 10a finding 1).
+
+    The baseline README exposed ``## Quick start``; the consumer-first rewrite
+    moved that material into the self-hosting section. External deep links into
+    ``#quick-start`` are outside this repo's control, so the slug is pinned and
+    the off-scope qualifier must live in prose rather than inside the heading,
+    where it would silently change the slug.
+    """
+    text = _readme()
+    assert "quick-start" in _heading_slugs(text), \
+        "the baseline #quick-start anchor no longer resolves"
+    assert "\n### Quick start\n" in text, \
+        "the operator quick start heading text is not exactly 'Quick start'"
+    assert "Quick start (self-hosting)" not in text, \
+        "the scope qualifier is back inside the heading, which breaks the slug"
+    # It still routes the operator, and it still sits below the consumer hand-off.
+    assert text.index("\n### Quick start\n") > text.index(OPERATOR_HEADING), \
+        "the quick start drifted out of the self-hosting section"
+    quick_start = _section(text, "\n### Quick start\n")
+    assert "self-hosting" in quick_start.lower(), \
+        "the self-hosting qualifier is missing from the quick start prose"
 
 
 def test_every_internal_readme_anchor_resolves():
