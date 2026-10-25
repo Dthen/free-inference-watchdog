@@ -1,9 +1,22 @@
 name: Deploy dashboard to Pages
 
+# This workflow publishes the checked-in `site` directory exactly as it is.
+# Before anything is uploaded it validates that `site/catalog.json` and
+# `site/index.html` describe ONE coherent public snapshot, so a stale,
+# truncated or mismatched pair can never be deployed. The gate is read-only and
+# self-contained: it installs nothing, reads no provider configuration, private
+# roster state or credential, contacts no watched-project remote and rebuilds
+# nothing. Browser/inline freshness stays a separate concern.
 on:
   push:
     branches: [master]
-    paths: ['site/**', '.github/workflows/deploy-dashboard.yml']
+    paths:
+      - 'site/**'
+      - 'scripts/validate_site.py'
+      - 'catalog_export.py'
+      - 'watchdog_catalog/**'
+      - 'build_site.py'
+      - '.github/workflows/deploy-dashboard.yml'
   workflow_dispatch:
 
 permissions:
@@ -23,11 +36,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Managed CPython 3.11 from the same reviewed pin the full test workflow
+      # uses. The interpreter is bound BY VALUE below, so a later PATH change
+      # cannot substitute an account, a cache or a different Python.
+      - name: Set up the exact CPython 3.11 floor interpreter
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.11"
+          check-latest: true
+          allow-prereleases: false
+
+      # Unconditional and fail-closed: this step validates THE SAME `site`
+      # directory the upload step packages. It is an executed command -- not an
+      # echo and not a best-effort probe: no `if:`, no `continue-on-error`, no
+      # swallowed exit. Under GitHub's own step semantics a rejection stops the
+      # job here, so neither the upload nor the deployment can run. The only
+      # interpolation used is setup-python's own output, bound through `env:`.
+      - name: Validate the site artifacts before upload
+        env:
+          VALIDATE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          site_dir='site'
+          test -x "$VALIDATE_PYTHON"
+          "$VALIDATE_PYTHON" -I -S scripts/validate_site.py --site-dir "$site_dir"
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: 'site'
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
