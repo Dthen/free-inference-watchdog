@@ -3182,4 +3182,3 @@ def test_watchdog_status_local_clock_contract(monkeypatch, tmp_path):
 
     _write_roster({"tick_epoch": 1000, "providers": {"p-one": ["m"]},
                    "provider_models": {"p-one": {"m": full_meta}}})
-
