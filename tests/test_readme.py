@@ -16,6 +16,17 @@ anything: the baseline `#quick-start` anchor stays resolvable, and the `source`
 block is pinned as provenance — a last-known-good replay is `ok: true` too, so it
 never doubles as proof that the refresh succeeded.
 
+Consumer metadata, freshness and identity guidance (unit 10b1) documents
+behaviour that already exists, so its examples are checked against that
+behaviour instead of against prose: the worked filter table and the paged
+response are re-derived from the immutable fixture, rows that differ only in
+filters must still answer differently (a wrong documented argument or result
+would make them collide), `min_context_length` is exercised at its inclusive
+boundary and against unknown metadata, the three freshness shapes are bound to
+the fixture clock, and a real last-known-good replay must NOT be documented as
+an identical `source` block (the 10a cache finding). Count scopes and the
+operator fields a published snapshot cannot observe are pinned the same way.
+
 Operator route (F-R2-4): delivery topology (operator decision, 2026-08-26) is
 unchanged — the webhook in ~/.hermes/.env is the ONLY alert path and the cron job
 is silent (`--deliver local`). The wrapper's job is diagnosability, not paging:
@@ -27,6 +38,7 @@ here once already, so their absence is pinned below.
 """
 
 import asyncio
+import itertools
 import json
 import os
 import re
@@ -161,6 +173,88 @@ def _documented_args():
 def _tool_names():
     contract = json.loads(TOOL_CONTRACT.read_text(encoding="utf-8"))
     return [entry["name"] for entry in contract]
+
+
+# -- consumer metadata, freshness and identity examples (unit 10b1) ----------
+#
+# That guidance documents EXISTING behaviour, so its examples are bound to the
+# real pure core over the immutable fixtures rather than restated as prose: the
+# filter table and the paged response are re-derived, and each documented row
+# must still discriminate between the filters it claims to distinguish.
+
+METADATA_HEADING = "### Metadata search semantics"
+CANNOT_HEADING = "### What the catalogue cannot tell you"
+FIXTURE_DIR = REPO / "tests" / "fixtures" / "catalog"
+
+
+def _snapshot(name="lookup.json"):
+    """One validated immutable fixture snapshot."""
+    from watchdog_catalog import catalog
+
+    return catalog.load_snapshot((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+
+
+def _matches(snapshot, arguments):
+    """``provider / raw id`` labels for every endpoint a search returns."""
+    from watchdog_catalog import query
+
+    result = query.search_models(snapshot, arguments)
+    assert result["ok"] is True, result
+    return [f"{row['provider']} / {row['model_id']}" for row in result["endpoints"]]
+
+
+def _filter_table():
+    """The worked filter table as ``[(arguments, documented match labels)]``.
+
+    A row's result cell is ``none`` or a list of ``provider / raw id`` labels;
+    anything that is neither would fail the equality check below, so only the
+    labels are extracted here.
+    """
+    text = _readme()
+    body = text[text.index(METADATA_HEADING):]
+    rows = []
+    in_table = False
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("| Arguments "):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not stripped.startswith("|"):
+            break
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) != 2 or set(cells[0]) <= set("-: "):
+            continue
+        labels = [label for label in re.findall(r"`([^`]+)`", cells[1])
+                  if " / " in label]
+        rows.append((json.loads(cells[0].strip("`")), labels))
+    return rows
+
+
+def _bullets(heading):
+    """The prose blocks of ONE ``###`` subsection, fenced examples excluded.
+
+    Splitting on a single blank line keeps a list written without blank lines
+    between items together, while dropping fenced blocks means an example can
+    never satisfy a claim that belongs to the guidance bullets.
+    """
+    text = _readme()
+    body = text[text.index(heading) + len(heading):]
+    for stop in ("\n### ", "\n## "):
+        end = body.find(stop)
+        if end != -1:
+            body = body[:end]
+    body = re.sub(r"```.*?```", "", body, flags=re.S)
+    return [block for block in _paragraphs(_plain(body)) if block]
+
+
+def _paged_example():
+    """The documented paged search response, parsed."""
+    for language, body in _fenced_languages(_readme()):
+        if language == "json" and '"next_offset"' in body:
+            return json.loads(body)
+    raise AssertionError("README has no paged search example")
 
 
 def test_readme_opens_with_purpose_and_dashboard_before_operator_setup():
@@ -427,6 +521,260 @@ def test_cache_fallback_is_not_documented_as_acquisition_success(tmp_path):
     # The removed verbatim claim: ok+source proves the acquisition succeeded.
     assert "means the acquisition succeeded" not in lowered, \
         "the false acquisition-succeeded claim is back"
+
+
+def test_metadata_filter_table_matches_real_query_results():
+    """Every documented filter row is real output, and still discriminating.
+
+    The table claims a progression — same text query, one filter added per row —
+    so each row must equal the core's answer for exactly its arguments, and rows
+    that differ only in filters must not collapse onto the same endpoints. That
+    is what makes a wrong documented argument (or a wrong documented result)
+    fail here instead of passing as prose.
+    """
+    snapshot = _snapshot()
+    rows = _filter_table()
+    assert len(rows) >= 4, f"the worked filter table lost its rows: {rows}"
+
+    observed = []
+    for arguments, documented in rows:
+        real = _matches(snapshot, arguments)
+        assert real == documented, (
+            f"documented result for {arguments} is not real output: "
+            f"{documented} != {real}")
+        observed.append((arguments.get("query"), tuple(real)))
+
+    for query in {query for query, _ in observed}:
+        sets = [result for result_query, result in observed if result_query == query]
+        assert len(set(sets)) == len(sets), (
+            f"the filter rows for {query!r} no longer tell the filters apart: {sets}")
+
+    # Sensitivity to the inclusive-threshold claim: the documented rows that
+    # differ by a single context token must answer differently.
+    boundaries = []
+    for (first, _), (second, _) in itertools.combinations(rows, 2):
+        if set(first) != set(second) or "min_context_length" not in first:
+            continue
+        if {k: v for k, v in first.items() if k != "min_context_length"} != \
+                {k: v for k, v in second.items() if k != "min_context_length"}:
+            continue
+        if abs(first["min_context_length"] - second["min_context_length"]) == 1:
+            boundaries.append((first, second))
+    assert boundaries, "the one-token inclusive-boundary row pair is gone"
+    for first, second in boundaries:
+        assert _matches(snapshot, first) != _matches(snapshot, second), (
+            "a one-token threshold change did not change the documented result")
+
+
+def test_paged_search_example_re_derives_with_page_scoped_counts():
+    """The paged example is real output, and paging narrows the page only.
+
+    ``total_matches`` is the unpaginated cardinality and ``counts`` describes
+    the page, so the same query without a limit must still match
+    ``total_matches`` endpoints while the page carries one row. The documented
+    beyond-end offset is exercised too: still a success, empty page.
+    """
+    from watchdog_catalog import query
+
+    snapshot = _snapshot()
+    example = _paged_example()
+    arguments = {"query": example["query"], "limit": example["limit"],
+                 "offset": example["offset"]}
+    real = query.search_models(snapshot, arguments)
+    for key in ("ok", "query", "limit", "offset", "total_matches",
+                "returned_count", "next_offset", "counts", "caveats"):
+        assert example[key] == real[key], f"example {key} is not real output"
+    assert example["returned_count"] == len(example["endpoints"]) == 1, example
+    for documented, actual in zip(example["endpoints"], real["endpoints"]):
+        for key, value in documented.items():
+            assert actual[key] == value, \
+                f"example endpoint {key} is not real output"
+
+    unpaged = query.search_models(snapshot, {"query": example["query"]})
+    assert unpaged["total_matches"] == example["total_matches"]
+    assert unpaged["returned_count"] == unpaged["total_matches"]
+    assert example["returned_count"] < unpaged["returned_count"]
+    assert example["counts"]["endpoints"] == example["returned_count"]
+    assert example["counts"]["endpoints"] < unpaged["counts"]["endpoints"]
+
+    section = _section(_readme(), METADATA_HEADING)
+    beyond_offset = re.search(r"`offset: (\d+)`", section)
+    assert beyond_offset, "the beyond-end page example is gone"
+    beyond = query.search_models(snapshot, {"query": example["query"],
+                                           "offset": int(beyond_offset.group(1))})
+    assert beyond["ok"] is True and beyond["endpoints"] == [], beyond
+    assert beyond["returned_count"] == 0 and beyond["next_offset"] is None
+    assert beyond["total_matches"] == example["total_matches"]
+    assert beyond["counts"] == {"gateways": 0, "endpoints": 0,
+                                "distinct_raw_ids": 0, "marker_group_labels": 0}
+
+
+def test_min_context_is_inclusive_and_rejects_unknown_metadata():
+    """Degrees of "no context": inclusive threshold, known zero, unknown.
+
+    ``0`` keeps a known zero context and still excludes a ``null`` one, while an
+    unfiltered search returns the unknown-context endpoint — unknown metadata
+    fails the filter that tests it, not every search.
+    """
+    edge = _snapshot("metadata-edge-cases.json")
+
+    assert _matches(edge, {"query": "reasoning", "min_context_length": 65536}) \
+        == ["synthetic-a / vendor/known-context"]
+    kept = _matches(edge, {"query": "reasoning", "min_context_length": 0})
+    assert kept == ["synthetic-a / vendor/known-context",
+                    "synthetic-a / vendor/zero-context"], kept
+    assert _matches(edge, {"query": "reasoning"}) != kept
+
+    bullet = [p for p in _bullets(METADATA_HEADING) if "min_context_length" in p]
+    assert bullet, "the minimum-context guidance is gone"
+    assert "inclusive" in bullet[0].lower(), \
+        "the threshold is not documented as inclusive"
+    assert "unknown" in bullet[0].lower(), \
+        "unknown context is not documented as failing the filter"
+
+
+def test_status_freshness_shapes_are_bound_to_the_fixture_clock():
+    """Observation age, the inclusive cadence boundary and the three shapes.
+
+    A fresh ``ok: true`` status is about the query, never about freshness; a
+    null or future tick is reported as unknown/future and is never dressed up
+    as a stale known observation.
+    """
+    from watchdog_catalog import query
+
+    snapshot = _snapshot()
+    tick, cadence = snapshot["tick_epoch"], snapshot["cadence_s"]
+
+    at_tick = query.watchdog_status(snapshot, {}, now=tick)
+    assert at_tick["last_tick_age_s"] == 0 and at_tick["tick_fresh"] is True
+    assert at_tick["warnings"] == []
+    boundary = query.watchdog_status(snapshot, {}, now=tick + cadence)
+    assert boundary["last_tick_age_s"] == cadence
+    assert boundary["tick_fresh"] is True, "age == cadence_s is still fresh"
+    stale = query.watchdog_status(snapshot, {}, now=tick + cadence + 1)
+    assert stale["tick_fresh"] is False and stale["warnings"] == ["tick_stale"]
+    future = query.watchdog_status(snapshot, {}, now=tick - 1)
+    assert future["last_tick_age_s"] is None and future["tick_fresh"] is False
+    assert future["warnings"] == ["tick_epoch_future"]
+
+    unknown = query.watchdog_status(_snapshot("status-unknown-time.json"), {},
+                                    now=1759200000)
+    assert unknown["tick_epoch"] is None and unknown["last_tick_age_s"] is None
+    assert unknown["tick_fresh"] is False
+    assert "tick_epoch_unknown" in unknown["warnings"]
+    assert "tick_stale" not in unknown["warnings"]
+
+    for status in (at_tick, stale, future, unknown):
+        assert status["ok"] is True
+
+
+def test_cached_replay_is_not_documented_as_an_identical_source_block(tmp_path):
+    """Behaviour first: a last-known-good replay keeps counting its ages.
+
+    The successful read and the replay share an ``ok``/``source`` shape but not
+    the block itself, so the prose must not claim the identical block that
+    induced the 10a cache finding. ``fetched_at`` and ``observation_age_s`` are
+    carried forward, which is exactly what distinguishes provenance from a
+    fresh acquisition.
+    """
+    from watchdog_catalog import source
+
+    target = tmp_path / "lookup.json"
+    target.write_bytes(FIXTURE.read_bytes())
+    now = 1759201000
+    origin = source.CatalogSource("file", str(target),
+                                  cache_dir=str(tmp_path / "cache"))
+    fresh = origin.refresh(now=now)
+    assert fresh["ok"] is True, fresh
+    assert fresh["source"]["cached"] is False
+    assert fresh["source"]["fetch_age_s"] == 0
+
+    target.unlink()
+    replay = origin.refresh(now=now + 900)
+    assert replay["ok"] is True, replay
+    assert replay["source"]["cached"] is True
+    assert replay["source"]["not_modified"] is False
+    assert {"refresh_failed", "cache_fallback"} <= set(replay["source"]["warnings"])
+    assert replay["source"] != fresh["source"], \
+        "a replay is not a byte-identical source block"
+    assert replay["source"]["fetched_at"] == fresh["source"]["fetched_at"]
+    assert replay["source"]["fetch_age_s"] == 900
+    assert replay["source"]["observation_age_s"] \
+        == fresh["source"]["observation_age_s"] + 900
+
+    paragraph = _paragraph_with(_plain(_section(_readme(), CONSUMER_HEADING)),
+                                "source block")
+    lowered = paragraph.lower()
+    assert "the same source block" not in lowered, \
+        "the identical-source-block claim is back"
+    assert "not the same block" in lowered, \
+        "the replay's differing source block is not spelled out"
+    assert "source.cached" in paragraph and "cache_fallback" in paragraph
+
+
+def test_published_operator_fields_are_documented_as_unobservable():
+    """Operator state a published snapshot cannot see stays documented as null."""
+    from watchdog_catalog import query
+
+    status = query.watchdog_status(_snapshot(), {}, now=1759200000)
+    for field in ("pending_alerts", "site_published", "site_publish_age_s"):
+        assert status[field] is None, field
+
+    bullet = [p for p in _bullets(CANNOT_HEADING) if "pending_alerts" in p]
+    assert bullet, "the unobservable-operator-fields caveat is gone"
+    for field in ("pending_alerts", "site_published", "site_publish_age_s"):
+        assert field in bullet[0], field
+    assert "null" in bullet[0].lower()
+
+
+def test_count_scopes_are_documented_as_distinct():
+    """A page count, a whole-catalogue count and a raw-ID count are not the same
+    number, and the guidance must not let a reader conflate them."""
+    from watchdog_catalog import query
+
+    snapshot = _snapshot()
+    page = query.search_models(snapshot, {"query": "model", "limit": 1})
+    whole = query.watchdog_status(snapshot, {}, now=1759200000)
+    endpoints = query.list_endpoints(snapshot, {})
+    exported = query.list_free_models(snapshot, {})
+
+    assert page["counts"]["endpoints"] == page["returned_count"] == 1
+    assert whole["counts"]["endpoints"] > page["counts"]["endpoints"]
+    assert whole["counts"]["gateways"] == 3, "the zero-ID gateway is excluded"
+    assert endpoints["counts"]["models"] == endpoints["counts"]["marker_group_labels"]
+    distinct_raw_ids = {raw for provider in snapshot["provider_order"]
+                        for raw in snapshot["providers"][provider]["model_ids"]}
+    assert exported["total_ids"] == len(distinct_raw_ids)
+    assert exported["total_ids"] < whole["counts"]["endpoints"], \
+        "raw ids and endpoint pairs must not be the same number here"
+
+    bullet = [p for p in _bullets(CANNOT_HEADING) if "total_ids" in p]
+    assert bullet, "the count-scope guidance is gone"
+    for token in ("page-scoped", "whole-catalogue", "total_ids"):
+        assert token in bullet[0], token
+
+
+def test_unknown_metadata_is_documented_as_distinct_from_known_zero_and_empty():
+    """A known ``0``/``[]`` is data; ``null`` is silence, and ``unknown_fields``
+    says which fields are silent."""
+    from watchdog_catalog import query
+
+    snapshot = _snapshot("capability-unknown.json")
+    rows = {row["model_id"]: row for row in
+            query.search_models(snapshot, {"limit": 200})["endpoints"]}
+    known = rows["vendor/known-empty-capabilities"]
+    unknown = rows["vendor/unknown-capabilities"]
+
+    assert known["context_length"] == 0 and known["input_modalities"] == []
+    assert known["unknown_fields"] == [], "a known zero/[] must not read as unknown"
+    assert unknown["context_length"] is None and unknown["input_modalities"] is None
+    assert unknown["unknown_fields"] == ["context_length", "input_modalities",
+                                         "output_modalities",
+                                         "supported_parameters"]
+
+    bullet = [p for p in _bullets(CANNOT_HEADING) if "unknown_fields" in p]
+    assert bullet, "the unknown-versus-zero guidance is gone"
+    assert "unknown is not zero" in bullet[0].lower()
 
 
 def test_quick_start_anchor_keeps_the_baseline_deep_link():

@@ -155,32 +155,116 @@ so one search row per gateway is two endpoints but only one distinct raw id. The
 stale, because the fixture's `tick_epoch` is frozen at the test clock. A stale
 observation is still answered; it is just labelled. `ok: true` plus a `source`
 block means a **validated snapshot was returned** — it does not mean this
-launch's refresh succeeded: a last-known-good replay returns the same `ok: true`
-and the same `source` block, with `refresh_failed` and `cache_fallback` added to
-`source.warnings` to mark a failed refresh served from memory. Read
-`source.warnings` before trusting freshness.
+launch's refresh succeeded. A last-known-good replay also returns `ok: true`
+and a `source` block, but **not the same block**: `source.cached` turns `true`,
+`source.not_modified` stays `false`, `source.fetch_age_s` and
+`source.observation_age_s` keep counting from the original fetch and the
+original observation instead of restarting, and `refresh_failed` plus `cache_fallback` join `source.warnings` to
+mark a failed refresh served from memory. Read `source.warnings` before
+trusting freshness.
 
-`get_model` returns one row per `(provider, raw model_id)` pair, plus
-`exact_matches` for every provider in the snapshot, and always carries the
-absence caveat: gateways rename models inconsistently, so a missing exact id
+`get_model` returns one row per `(provider, raw model_id)` pair. Two lookups run
+at once: `exact_matches` is **literal** raw-id membership — case, padding and
+delimiters all matter — while `endpoints` is the separate marker-insensitive
+lookup described in *What the catalogue cannot tell you*. Every payload carries
+the absence caveat: gateways rename models inconsistently, so a missing exact id
 does not prove the model is unavailable elsewhere.
 
 ### Metadata search semantics
 
-- `search_models` matches a **literal substring** of the raw id, name or
-  description, ASCII case-insensitive only. There is no regular expression, no
-  fuzzy or alias matching, and metadata arrays (modalities, supported
-  parameters) are never text-searched — filter those with their own arguments.
-- Queries and ids are never trimmed. `" REASONING "` is a different query from
-  `"REASONING"`, and a padded id is a different id.
-- Filters combine with AND, and each endpoint is judged on its own provider's
-  metadata — a context length from one gateway is never combined with a
-  capability from another.
-- `min_context_length` qualifies only a **known** context; an unknown (`null`)
-  context fails the filter rather than being treated as zero.
-- `limit` (1–200, default 50) and `offset` page the result; `total_matches` is
-  the count before paging. An empty or beyond-end page is a success with
-  `returned_count: 0`, not an error.
+`search_models` takes seven optional arguments; the active ones combine with
+**AND**, tested on each `(provider, raw model_id)` pair on its own, never on a
+merged view of two gateways.
+
+- `query` matches a **literal substring** of the raw id, name or description,
+  ASCII case-insensitive only (A–Z folds to a–z; every other code point stays
+  literal). There is no regular expression, fuzzy or alias matching, and
+  capability arrays, pricing, provider keys and object keys are never
+  text-searched — use the filters below for those. Omitted or `""` applies no
+  text constraint; a whitespace-only query is a literal one. Queries and ids
+  are never trimmed: `" REASONING "` is a different query from `"REASONING"`,
+  and a padded id is a different id.
+- `provider` takes **one exact key** from the snapshot's `provider_order`. A
+  registered gateway that tracks zero ids is valid and answers with an empty
+  page; an empty, padded, wrong-case or unknown key is the `unknown_provider`
+  argument error — keys are never repaired.
+- `min_context_length` compares **inclusively** (`>=`) against each pair's own
+  known context: a `65536` threshold keeps an endpoint whose context is exactly
+  65536, while a `65537` threshold drops that endpoint. An unknown (`null`) context fails the filter
+  rather than counting as zero; `0` keeps a known `0` and still rejects the
+  unknown one.
+- `input_modalities` and `supported_parameters` take arrays of non-empty
+  strings. **Every** requested entry must be present in that same endpoint's
+  validated array — AND, never OR — compared ASCII case-insensitively, with
+  order and duplicates irrelevant. A missing or malformed array is unknown and
+  fails a non-empty request; a known `[]` satisfies none; `[]` applies no
+  constraint.
+- Unknown metadata fails a filter that tests it, but never removes an endpoint
+  from a search that does not test that field.
+- `limit` is an integer 1–200 (default 50) and `offset` an integer `>= 0`
+  (default 0). Sorting happens first and the page is a slice of the sorted
+  matches, so paging narrows what is *returned*, never what is *matched*:
+  `total_matches` counts every match before the slice, `returned_count` is the
+  page you got, and `next_offset` is `offset + returned_count` while matches
+  remain, else `null`. A beyond-end page is a success with an empty
+  `endpoints` array.
+- `counts` describes the **returned page only** — all zeros on an empty page
+  even when `total_matches` is positive. `marker_group_labels` counts distinct
+  delimiter-stripped labels, so `vendor/model:free` and `vendor/model-free`
+  contribute one label between them; it is a labelling count, never a count of
+  verified underlying models.
+
+A worked filter example over the pinned synthetic fixture above
+(`lookup.json`), one filter added per row. `none` means no endpoint satisfied
+every argument in that row:
+
+| Arguments | Matched endpoints (`provider / raw id`) |
+|---|---|
+| `{"query": "shared"}` | `synthetic-a / vendor/shared`, `synthetic-b / vendor/shared` |
+| `{"query": "shared", "min_context_length": 65536}` | `synthetic-a / vendor/shared` |
+| `{"query": "shared", "input_modalities": ["image"]}` | `synthetic-b / vendor/shared` |
+| `{"query": "shared", "min_context_length": 65536, "input_modalities": ["image"]}` | `none` |
+| `{"query": "renamed", "min_context_length": 65536}` | `synthetic-a / vendor/model-renamed` |
+| `{"query": "renamed", "min_context_length": 65537}` | `none` |
+
+Row four is the whole point: synthetic-a serves `vendor/shared` with a
+131072-token context but text-only input, while synthetic-b serves the same raw
+id with image input and only 32768 tokens. Each filter matches a different
+gateway and both together match neither — a result that merged them would
+describe a model nobody serves. Rows five and six differ by a single token and
+show that the threshold is inclusive.
+
+The same fixture, one page into a three-match search (`endpoints` is trimmed to
+the fields this example is about; every value below is real output):
+
+```json
+{
+  "ok": true,
+  "query": "model",
+  "limit": 1,
+  "offset": 1,
+  "total_matches": 3,
+  "returned_count": 1,
+  "next_offset": 2,
+  "endpoints": [
+    {
+      "provider": "synthetic-a",
+      "model_id": "vendor/model:free",
+      "context_length": 131072,
+      "input_modalities": ["text", "image"],
+      "supported_parameters": ["temperature", "max_tokens"],
+      "unknown_fields": []
+    }
+  ],
+  "counts": {"gateways": 1, "endpoints": 1, "distinct_raw_ids": 1, "marker_group_labels": 1},
+  "caveats": ["Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."]
+}
+```
+
+Three endpoints match `model`, this page carries the second of them, and
+`next_offset: 2` is where the next page starts. Ask for `offset: 4` instead and
+the answer is still a success — `returned_count: 0`, empty `endpoints`,
+`next_offset: null`.
 
 The complete field-by-field rules — exact envelopes, ordering, warning
 vocabulary and error shapes — are frozen in *Published catalogue snapshot (v1)
@@ -188,22 +272,60 @@ vocabulary and error shapes — are frozen in *Published catalogue snapshot (v1)
 
 ### What the catalogue cannot tell you
 
-- **Observation age comes from the snapshot**, never from when you downloaded
-  it. A fresh download of an old `tick_epoch` is still stale.
+- **Observation age comes from the snapshot; retrieval age comes from your
+  process.** `watchdog_status()` derives `last_tick_age_s` and `tick_fresh`
+  from `tick_epoch` and the snapshot's own `cadence_s`, while `source.fetched_at`
+  and `source.fetch_age_s` only say how long ago this process fetched the bytes.
+  A fresh download of an old `tick_epoch` is still stale — the two ages are
+  reported separately and neither stands in for the other.
 - **Provider staleness is not tick age.** A provider can be stale during a
   fresh tick (its fetch failed and last-known-good ids were carried forward),
-  and every provider can be healthy during an old one.
-- **Unknown is not zero.** A `null` `context_length`, modality list or
-  description means the provider did not say — it is never rendered as `0` or
-  `[]`. A known empty `[]` is genuinely empty.
-- **Marker lookups are labels, not identity.** A marker-insensitive match on a
-  `:free`/`-free` style suffix is a labelling convenience and is not proof that
-  two gateways serve the same underlying model.
-- **Exact ids are literal.** Case, padding and delimiters matter; lookups are
-  never repaired into a near match.
-- **A cached answer says so.** `source.cached`, `source.not_modified` and the
-  `cache_fallback` / `refresh_failed` warnings distinguish a live read from a
-  last-known-good replay.
+  and every provider can be healthy during an old one. "Not fresh" itself has
+  three distinct shapes: a `null` `tick_epoch` gives `last_tick_age_s: null`
+  plus `tick_epoch_unknown`, a future one gives `tick_epoch_future`, and only a
+  known age beyond `cadence_s` gives `tick_stale`. `ok: true` from
+  `watchdog_status()` means the snapshot was queried, never that its
+  observations are fresh. Neither signal involves a provider probe.
+- **Unknown is not zero, and not empty.** A `null` `context_length`, modality
+  list or `supported_parameters` array means the provider did not say — it is
+  never rendered as `0` or `[]`. A known `0` and a known `[]` are real values,
+  and `unknown_fields` names exactly the capability fields that are unknown, so
+  `"unknown_fields": []` means all four were stated.
+- **Marker lookups are labels, not identity.** The marker-insensitive
+  `get_model` lookup strips a `free` segment only at the **start or end** of an
+  id, delimited by `-`, `:` or `_` (case-insensitive) — `vendor/model:free` and
+  `free-vendor-model` strip, `vendor/freetier` does not, and both ends strip
+  when an id carries both. Raw ids in the results stay unchanged, a strip that
+  would empty the id is ignored, and a marker match is not proof that two
+  gateways serve the same underlying model.
+- **Exact ids are literal.** `exact_matches` is raw-id membership: case,
+  padding and delimiters matter, and a lookup is never repaired into a near
+  match.
+- **Absence is weak evidence.** Gateways rename models inconsistently, so a
+  missing exact id does not prove the model is absent elsewhere; every payload
+  carries that caveat rather than implying a negative result is authoritative.
+- **A cached answer says so.** `source.cached` is `true` whenever the body came
+  from retained memory instead of a fresh download. `source.not_modified` marks
+  a successful 304 revalidation that re-used it, while
+  `refresh_failed` + `cache_fallback` mark a **failed** refresh served from the
+  last good copy, and `cache_write_failed` marks a snapshot that was served but
+  not persisted. A failed refresh with a valid last-good snapshot returns it
+  with its **real** age and those warnings; with nothing valid retained you get
+  the structured `source_unavailable` error instead. There is no implicit
+  fallback to another URL or to a local file, and a failure is never reported
+  as an empty catalogue.
+- **Counts answer different questions.** `search_models.counts` is page-scoped,
+  `list_endpoints.counts` covers the selected scope (its legacy `models`
+  member is the documented alias of `marker_group_labels`),
+  `watchdog_status.counts` is whole-catalogue including zero-id gateways, and
+  `list_free_models.total_ids` is the literal count of distinct raw ids. None
+  of them is a count of verified models.
+- **Operator state is not observable here.** `watchdog_status()` reports
+  `pending_alerts`, `site_published` and `site_publish_age_s` as `null`: a
+  published or browser source cannot see the operator's alert queue or site,
+  and the published payload never guesses. A local adapter may add explicitly
+  labelled local diagnostics outside this payload. `metadata_coverage` counts
+  stated metadata fields only, never provider health.
 
 ### Public JSON feed (not yet published)
 
@@ -218,8 +340,10 @@ adapter consume.
 deployed — `site/catalog.json` is absent from `master` today. Do not hard-code
 a production URL for it yet, and do not treat the dashboard as the feed: the
 dashboard is a rendered HTML page and has been live, the machine-readable JSON
-URL has not. The pinned synthetic fixture above is the only working `--catalog-url`
-target in this ref.
+URL has not. The pinned synthetic fixture above is this page's working
+`--catalog-url` example, not a restriction on the flag: any URL that serves a
+valid snapshot works, so point `--catalog-url` at your own served copy — or at
+the feed once it is published — and the server behaves the same.
 
 Field definitions, nullability and validation rules are in *Published catalogue
 snapshot (v1) — contract draft* below.
