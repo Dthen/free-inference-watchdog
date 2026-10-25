@@ -45,10 +45,14 @@ already — are still pinned absent.
 
 Agent guidance (unit 10c): `AGENTS.md` explains the architecture that already
 ships — the producer/consumer boundary, the `watchdog_catalog` module map, the
-SDK boundary and the artifact/publication gate. Its one executable claim is a
-pointer claim, so it is checked as a RESOURCE: every module or script AGENTS
-names must exist in this checkout, with a planted stale name proving the check
-is sensitive rather than vacuous.
+SDK boundary and the artifact/publication gate. Its one executable POINTER claim
+is checked as a RESOURCE: every module or script AGENTS names must exist in this
+checkout, with a planted stale name proving the check is sensitive rather than
+vacuous. The two guidance claims parent verification found wrong are bound the
+same way — observation time and the clock seams to `watchdog_status`'s injected
+`now`, the async source's own seams and a raising-clock construction probe; the
+packaged tool contract to the `inputSchema` objects `tools.json` actually ships
+— and the obsolete sentences are planted as mutations those predicates reject.
 """
 
 import asyncio
@@ -1480,3 +1484,118 @@ def test_agents_names_only_code_paths_that_exist():
         "the stale-name check is not sensitive to a planted absent module"
     )
 
+
+# ---------- AGENTS.md clock and tool-schema claims ----------
+#
+# The architecture note also makes CLAIMS about behaviour that already exists:
+# when observation time is taken, who may read a clock, and what the packaged
+# tool resource actually contains. Parent verification found the first draft
+# wrong in exactly those places, so each corrected claim is bound to the shipped
+# object it describes, and the obsolete sentence is reproduced below as a
+# mutation the same predicate must reject.
+
+_AGENTS_STALE_CLOCK_CLAIMS = (
+    "Observation time is the injected `now`",
+    "Only the transport's `wall_clock` seam and the producer's tick",
+)
+
+_AGENTS_STALE_RESOURCE_CLAIM = "never types, bounds, defaults or an `inputSchema`"
+
+
+def _agents_stale_clock_claims(text):
+    """The obsolete clock sentences ``text`` still asserts."""
+    return [claim for claim in _AGENTS_STALE_CLOCK_CLAIMS if claim in text]
+
+
+def _agents_denies_resource_schema(text):
+    """Whether ``text`` denies that the tool resource ships an ``inputSchema``."""
+    return _AGENTS_STALE_RESOURCE_CLAIM in text
+
+
+def test_agents_binds_observation_time_to_the_snapshot_tick():
+    """Observation time is the snapshot's `tick_epoch`; the injected `now` is the
+    query's evaluation time, and the async source owns wall/monotonic seams read
+    at operation time only.
+
+    The bindings are structural and behavioural rather than prose: `now` must
+    stay an injected keyword-only epoch (never a public tool argument), the
+    source must still expose both seams, and a clock that raises on any read
+    must survive construction -- which is what "never at construction" means in
+    code.
+    """
+    import inspect
+
+    from watchdog_catalog import query, source
+
+    text = AGENTS.read_text(encoding="utf-8")
+    stale = _agents_stale_clock_claims(text)
+    assert stale == [], f"AGENTS.md still asserts an obsolete clock claim: {stale}"
+
+    # The corrected wording must name the real observation stamp the payload
+    # carries and the async chapter that schedules retrieval.
+    assert "tick_epoch" in text, "AGENTS.md lost the snapshot observation stamp"
+    assert "AsyncCatalogSource" in text, "AGENTS.md lost the async source owner"
+
+    now = inspect.signature(query.watchdog_status).parameters["now"]
+    assert now.kind is inspect.Parameter.KEYWORD_ONLY, \
+        "`now` must stay injected, not a positional or public argument"
+    assert now.default is inspect.Parameter.empty, \
+        "`now` must stay defaultless so no query silently invents a clock"
+
+    init = inspect.signature(source.AsyncCatalogSource.__init__).parameters
+    for seam in ("wall_clock", "monotonic_clock"):
+        assert seam in init, f"AsyncCatalogSource lost its {seam} seam"
+
+    def exploding_clock():
+        raise AssertionError("a clock was read while constructing the source")
+
+    source.AsyncCatalogSource("file", str(FIXTURE_DIR / "lookup.json"),
+                              wall_clock=exploding_clock,
+                              monotonic_clock=exploding_clock)
+
+    # Sensitivity: the same predicate must catch the sentence the parent review
+    # found, so this is a wrong-claim check and not a vacuous pass.
+    planted = f"{text}\n- {_AGENTS_STALE_CLOCK_CLAIMS[0]}.\n"
+    assert _agents_stale_clock_claims(planted) == [_AGENTS_STALE_CLOCK_CLAIMS[0]], (
+        "the stale-clock-claim check is not sensitive to a planted wrong claim"
+    )
+
+
+def test_agents_describes_the_tool_schema_contract_it_ships():
+    """`tools.json` ships a full `inputSchema`; only the transport integration
+    must not install it as the generated SDK schema.
+
+    The resource is read as the contract it is -- every tool carries an object
+    schema with properties, a required list and closed additionalProperties --
+    and AGENTS.md must describe that rather than deny it. The obsolete
+    "descriptions only, never ... an `inputSchema`" sentence is reproduced as a
+    mutation the same predicate rejects.
+    """
+    text = AGENTS.read_text(encoding="utf-8")
+    tools = json.loads(TOOL_CONTRACT.read_text(encoding="utf-8"))
+
+    assert tools, "the packaged tool contract is empty"
+    for tool in tools:
+        schema = tool.get("inputSchema")
+        assert isinstance(schema, dict), f"{tool.get('name')} ships no inputSchema"
+        assert schema.get("type") == "object", \
+            f"{tool['name']} inputSchema is not an object schema"
+        assert isinstance(schema.get("properties"), dict), \
+            f"{tool['name']} inputSchema has no properties"
+        assert isinstance(schema.get("required"), list), \
+            f"{tool['name']} inputSchema has no required list"
+        assert schema.get("additionalProperties") is False, \
+            f"{tool['name']} inputSchema is not closed to unknown arguments"
+
+    assert not _agents_denies_resource_schema(text), (
+        "AGENTS.md still denies the schema this resource ships: "
+        f"{_AGENTS_STALE_RESOURCE_CLAIM!r}"
+    )
+    assert "inputSchema" in text, "AGENTS.md no longer describes the schema contract"
+    assert "watchdog_catalog/server.py" in text, \
+        "AGENTS.md lost the transport that scopes the rule"
+
+    planted = f"{text}\n- supplies descriptions only, {_AGENTS_STALE_RESOURCE_CLAIM}.\n"
+    assert _agents_denies_resource_schema(planted), (
+        "the stale-resource-claim check is not sensitive to a planted wrong claim"
+    )
