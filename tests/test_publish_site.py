@@ -80,11 +80,22 @@ live roster):
   helper cannot enter its builder while the hook runs, and an independent
   nonblocking acquisition of the same inode only succeeds afterwards;
 * the explicit ``--push`` opt-in publishes the verified candidate to the one
-  configured upstream branch at the one resolved PUSH URL, refuses to guess a
-  remote, branch, ``push.default`` or tag set, retries a previously committed but
-  unpushed candidate on a no-change run, refuses a divergent destination or an
-  unpublished range that carries a foreign path, and never claims success from a
-  zero-exit push or a stale ref read-back (see the publication test below).
+  configured upstream branch of the one configured upstream remote, refuses to
+  guess a remote, branch, ``push.default`` or tag set, retries a previously
+  committed but unpushed candidate on a no-change run, refuses a divergent
+  destination or an unpublished range that carries a foreign path, and never
+  claims success from a zero-exit push or a stale ref read-back (see the
+  publication test below);
+* that publication is an ordinary explicitly scoped NAMED-remote push, so the
+  remote's own ``pre-push`` hooks still receive the configured remote name (a
+  hook policy scoped to that alias keeps rejecting) and its remote-specific
+  transport settings -- ``remote.<name>.receivepack``, for instance -- stay in
+  force, while inspection and read-back still address the remote's actual
+  single PUSH URL rather than a possibly different fetch URL;
+* a URL-shaped invalid ``branch.<branch>.remote`` or destination ref is refused
+  at ``stage=push/config`` without echoing the value: such a value is never
+  normalised into an endpoint, never contacted, and its userinfo/token
+  fragments never reach stderr.
 
 Fault injection and coordination live ONLY in this test module: the production
 helper exposes no test switch, callback or fake-success mode. Artifact commits
@@ -2303,7 +2314,23 @@ def test_push_mode_publishes_retries_and_reads_the_exact_destination(tmp_path):
         rejected with an honest "a remote write may already have occurred";
     (I) the publish lock covers publication AND the post-push read-back: a
         blocking receive hook and a blocking read-back launcher both find the
-        same lock inode held, and a second helper cannot enter its builder.
+        same lock inode held, and a second helper cannot enter its builder;
+    (J) the SEND keeps the configured remote NAME: a real ``pre-push`` hook
+        that records both destination arguments and rejects only when the first
+        equals the selected configured alias stops the publication (exit 2 at
+        ``stage=push/send``, destination unchanged, local candidate retained),
+        and after the owned policy deliberately allows it the unchanged retry
+        publishes with no new commit -- the recorded arguments prove an
+        unrelated error cannot satisfy this;
+    (K) a documented remote-specific transport setting
+        (``remote.<name>.receivepack``) stays in force: an owned recording
+        wrapper that delegates to the real ``git-receive-pack`` is invoked by
+        an ordinary named-remote positive control AND by the helper's send;
+    (L) URL-shaped invalid configuration is refused at ``stage=push/config``
+        with empty stdout, no resolved or contacted remote, no push, and
+        neither the full value nor its synthetic userinfo/token fragments in
+        stderr (a credential-bearing ``branch.<branch>.remote`` and a raw
+        URL-shaped destination ref), while ordinary publication still works.
     """
     from catalog_export import validate_artifact_pair
 
@@ -2704,6 +2731,11 @@ def test_push_mode_publishes_retries_and_reads_the_exact_destination(tmp_path):
     _assert_not_success(diverged, "diverged destination")
     assert "stage=push/inspect" in diverged.stderr, diverged.stderr
     assert "not an ancestor" in diverged.stderr, diverged.stderr
+    # The diagnostic names the CANDIDATE as behind (or the histories as
+    # diverged), never the remote: the observed tip is the newer side here.
+    assert ("the candidate is behind the destination or the histories "
+            "have diverged") in diverged.stderr, diverged.stderr
+    assert "the remote is behind" not in diverged.stderr, diverged.stderr
     assert _remote_refs(diverge_bare) == {"refs/heads/main": out_of_band}
     assert _dirty_snapshot(diverge_root) == diverge_dirty
     assert _parents(diverge_root) == [diverge_published]
@@ -2934,3 +2966,210 @@ def test_push_mode_publishes_retries_and_reads_the_exact_destination(tmp_path):
                 helper_proc.reap(kill_group=True)
     assert _probe_until(conc_lock, True, timeout=10.0) is True, (
         "the publish lock was not released after publication")
+
+    # --- (J) the SEND names the configured remote, so hooks see it --------
+    # A pre-push hook receives the remote NAME as its first argument for a named
+    # push, and the URL only when the send is a raw URL. A policy scoped to the
+    # configured alias therefore has to keep working: this hook records both
+    # arguments and the destination line, and rejects ONLY the alias.
+    policy_root = tmp_path / "policy root"
+    _plant_tracked(policy_root)
+    _init_repo(policy_root, tracked=sorted(TRACKED_FILES))
+    policy_bare = _bare(tmp_path, "policy bare.git")
+    _configure_upstream(policy_root, policy_bare, remote="publish-alias")
+    _git(policy_root, "push", "-q", str(policy_bare), "HEAD:refs/heads/main")
+    policy_baseline = _remote_head(policy_bare)
+    _write_roster(policy_root, ROSTER)
+    policy_record = tmp_path / "pre-push record"
+    policy_allow = tmp_path / "pre-push allows the alias"
+    recorded = repr(str(policy_record))
+    allowed_marker = repr(str(policy_allow))
+    _install_hook(policy_root, "pre-push", [
+        'printf "arg %s\\n" "$1" >> ' + recorded + "\n",
+        'printf "arg %s\\n" "$2" >> ' + recorded + "\n",
+        "while read -r local_ref local_oid remote_ref remote_oid; do\n",
+        '    printf "ref %s %s %s %s\\n" "$local_ref" "$local_oid" '
+        '"$remote_ref" "$remote_oid" >> ' + recorded + "\n",
+        "done\n",
+        'if [ "${1:-}" = "publish-alias" ] && [ ! -e ' + allowed_marker
+        + " ]; then\n",
+        '    echo "owned policy: named-remote publication is not allowed yet"'
+        " >&2\n",
+        "    exit 1\n",
+        "fi\n",
+        "exit 0\n",
+    ])
+    rejected_by_alias = _run(policy_root, sys.executable, env, cwd,
+                            extra=("--push",))
+    assert rejected_by_alias.returncode == 2, rejected_by_alias.stderr
+    _assert_not_success(rejected_by_alias, "alias-scoped pre-push rejection")
+    assert "publish complete" not in rejected_by_alias.stderr, (
+        rejected_by_alias.stderr)
+    assert "stage=push/send" in rejected_by_alias.stderr, rejected_by_alias.stderr
+    assert "retained for a later retry" in rejected_by_alias.stderr, (
+        rejected_by_alias.stderr)
+    policy_candidate = _head(policy_root)
+    assert policy_candidate != policy_baseline
+    assert _parents(policy_root) == [policy_baseline]
+    assert _commit_paths(policy_root) == list(ARTIFACTS)
+    assert _remote_refs(policy_bare) == {"refs/heads/main": policy_baseline}, (
+        "an alias-scoped hook rejection must leave the destination unchanged")
+    # The hook really ran, really saw the CONFIGURED NAME as its first argument,
+    # and really saw this run's destination line: an unrelated failure cannot
+    # satisfy these assertions.
+    observed = policy_record.read_text(encoding="utf-8").splitlines()
+    assert observed[0] == "arg publish-alias", observed
+    assert observed[1] == f"arg {policy_bare}", observed
+    destination_lines = [line for line in observed if line.startswith("ref ")]
+    assert destination_lines, observed
+    assert any(line.split()[3] == "refs/heads/main"
+               and line.split()[4] == policy_baseline
+               for line in destination_lines), observed
+
+    # Deliberately ALLOW the owned policy, then rerun the unchanged helper
+    # input: a normal retry publishes the SAME candidate, with no new commit.
+    policy_allow.write_text("allowed\n", encoding="utf-8")
+    policy_commits = _commit_count(policy_root)
+    record_before = len(observed)
+    allowed = _run(policy_root, sys.executable, env, cwd, extra=("--push",))
+    assert allowed.returncode == 0, allowed.stderr
+    assert allowed.stdout == ""
+    assert f"pushed {policy_candidate}" in allowed.stderr, allowed.stderr
+    assert "read that exact ref back" in allowed.stderr, allowed.stderr
+    assert _commit_count(policy_root) == policy_commits, (
+        "the retry must not create another local commit")
+    assert _head(policy_root) == policy_candidate
+    assert _remote_refs(policy_bare) == {"refs/heads/main": policy_candidate}
+    assert _blob(policy_bare, policy_candidate, "site/catalog.json") == _blob(
+        policy_root, policy_candidate, "site/catalog.json")
+    assert _blob(policy_bare, policy_candidate, "site/index.html") == (
+        policy_root / INDEX).read_bytes()
+    retried_record = policy_record.read_text(encoding="utf-8").splitlines()
+    assert retried_record[record_before] == "arg publish-alias", retried_record
+
+    # --- (K) a remote-specific transport setting stays in force ------------
+    # ``remote.<name>.receivepack`` is documented remote-scoped transport
+    # policy. The owned wrapper only records its invocation and delegates to the
+    # real git-receive-pack, so the push still lands and nothing is bypassed.
+    transport_wrapper = tmp_path / "receive_pack_wrapper.sh"
+    transport_record = tmp_path / "receive-pack record"
+    transport_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -u\n"
+        'printf "receive-pack %s\\n" "$*" >> ' + repr(str(transport_record)) + "\n"
+        'exec git-receive-pack "$@"\n',
+        encoding="utf-8")
+    transport_wrapper.chmod(0o755)
+
+    control_root = tmp_path / "transport control root"
+    _plant_tracked(control_root)
+    _init_repo(control_root, tracked=sorted(TRACKED_FILES))
+    control_bare = _bare(tmp_path, "transport control bare.git")
+    _configure_upstream(control_root, control_bare, remote="policy-remote")
+    _git(control_root, "push", "-q", str(control_bare), "HEAD:refs/heads/main")
+    _git(control_root, "config", "remote.policy-remote.receivepack",
+         str(transport_wrapper))
+    (control_root / "control.txt").write_text("control\n", encoding="utf-8")
+    _git(control_root, "add", "--", "control.txt")
+    _git(control_root, "commit", "-q", "-m", "synthetic control commit")
+    control_head = _head(control_root)
+    # The POSITIVE CONTROL: an ordinary named-remote push uses the setting.
+    _git(control_root, "push", "-q", "policy-remote", "HEAD:refs/heads/main")
+    control_calls = [line for line in
+                     transport_record.read_text(encoding="utf-8").splitlines()
+                     if line.startswith("receive-pack ")]
+    assert control_calls == [f"receive-pack {control_bare}"], control_calls
+    assert _remote_head(control_bare) == control_head
+
+    transport_root = tmp_path / "transport root"
+    _plant_tracked(transport_root)
+    _init_repo(transport_root, tracked=sorted(TRACKED_FILES))
+    transport_bare = _bare(tmp_path, "transport bare.git")
+    _configure_upstream(transport_root, transport_bare, remote="policy-remote")
+    _git(transport_root, "push", "-q", str(transport_bare),
+         "HEAD:refs/heads/main")
+    _git(transport_root, "config", "remote.policy-remote.receivepack",
+         str(transport_wrapper))
+    _write_roster(transport_root, ROSTER)
+    transport_calls_before = len(
+        transport_record.read_text(encoding="utf-8").splitlines())
+    transported = _run(transport_root, sys.executable, env, cwd,
+                       extra=("--push",))
+    assert transported.returncode == 0, transported.stderr
+    assert transported.stdout == ""
+    transport_candidate = _head(transport_root)
+    assert _commit_paths(transport_root) == list(ARTIFACTS)
+    assert _remote_refs(transport_bare) == {"refs/heads/main": transport_candidate}
+    transport_calls = transport_record.read_text(
+        encoding="utf-8").splitlines()[transport_calls_before:]
+    assert transport_calls == [f"receive-pack {transport_bare}"], transport_calls
+    assert f"pushed {transport_candidate}" in transported.stderr, (
+        transported.stderr)
+
+    # --- (L) URL-shaped invalid configuration: refused, never echoed -------
+    # ``branch.<branch>.remote`` is operator configuration, but a misconfigured
+    # value can be a credential-bearing URL rather than an alias. It must be
+    # refused as a non-configured remote WITHOUT being echoed, normalised into a
+    # usable endpoint or contacted -- and the same holds for a raw, unvalidated
+    # URL-shaped destination ref.
+    sentinel_user = "synthetic-user"
+    sentinel_token = "synthetic-S3cr3t-5entinel"
+    url_shaped_remote = (
+        f"https://{sentinel_user}:{sentinel_token}"
+        "@invalid.example.invalid/synthetic/repo.git")
+    url_shaped_ref = (f"refs/heads//https://{sentinel_user}:{sentinel_token}"
+                      "@invalid.example.invalid/synthetic/branch")
+    leak_root = tmp_path / "leak root"
+    _plant_tracked(leak_root)
+    _init_repo(leak_root, tracked=sorted(TRACKED_FILES))
+    leak_bare = _bare(tmp_path, "leak bare.git")
+    _configure_upstream(leak_root, leak_bare)
+    _git(leak_root, "push", "-q", str(leak_bare), "HEAD:refs/heads/main")
+    _write_roster(leak_root, ROSTER)
+    leak_seed = _run(leak_root, sys.executable, env, cwd, extra=("--push",))
+    assert leak_seed.returncode == 0, leak_seed.stderr
+    leak_head = _head(leak_root)
+    assert _remote_refs(leak_bare) == {"refs/heads/main": leak_head}
+    leak_shim, leak_log = _git_shim(tmp_path, "leaking config git")
+
+    def refused_without_echo(label, expected):
+        calls_before = len(_shim_calls(leak_log))
+        proc = _run(leak_root, sys.executable, _with_path(_env(), leak_shim),
+                    cwd, extra=("--push",))
+        assert proc.returncode == 2, (label, proc.returncode, proc.stderr)
+        assert proc.stdout == "", (label, proc.stdout)
+        assert "publish complete" not in proc.stderr, (label, proc.stderr)
+        assert "local gate passed" not in proc.stderr, (label, proc.stderr)
+        assert "stage=push/config" in proc.stderr, (label, proc.stderr)
+        assert expected in proc.stderr, (label, proc.stderr)
+        for fragment in (url_shaped_remote, url_shaped_ref, sentinel_token,
+                         sentinel_user):
+            assert fragment not in proc.stderr, (label, fragment, proc.stderr)
+        new_calls = _shim_calls(leak_log)[calls_before:]
+        for call in new_calls:
+            assert sentinel_token not in call, (label, new_calls)
+            for verb in (" get-url ", " ls-remote ", " push "):
+                assert verb not in call, (label, verb, new_calls)
+        assert _remote_refs(leak_bare) == {"refs/heads/main": leak_head}, label
+
+    _git(leak_root, "config", "branch.main.remote", url_shaped_remote)
+    refused_without_echo("URL-shaped branch.main.remote",
+                         "is not the name of a configured remote")
+    _git(leak_root, "config", "branch.main.remote", "origin")
+    _git(leak_root, "config", "branch.main.merge", url_shaped_ref)
+    refused_without_echo("URL-shaped branch.main.merge",
+                         "carries characters a single branch destination cannot")
+    _git(leak_root, "config", "branch.main.merge", url_shaped_remote)
+    refused_without_echo("raw URL-shaped destination ref",
+                         "not a single branch under refs/heads/")
+    _git(leak_root, "config", "branch.main.merge", "refs/heads/main")
+
+    # Ordinary configured-alias publication still succeeds afterwards.
+    _write_roster(leak_root, ROSTER2)
+    healed = _run(leak_root, sys.executable, env, cwd, extra=("--push",))
+    assert healed.returncode == 0, healed.stderr
+    assert healed.stdout == ""
+    healed_head = _head(leak_root)
+    assert healed_head != leak_head
+    assert _remote_refs(leak_bare) == {"refs/heads/main": healed_head}
+    assert f"pushed {healed_head}" in healed.stderr, healed.stderr

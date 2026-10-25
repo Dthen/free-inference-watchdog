@@ -82,8 +82,11 @@
 #     remote.
 #   * PUBLICATION (--push, opt-in): after the same lock-covered build, the SAME
 #     verified candidate is pushed to the selected root's ONE configured
-#     upstream branch at that remote's ONE resolved PUSH URL, and the exact
-#     destination ref is read back before any success is claimed. The candidate
+#     upstream branch of its ONE configured upstream remote -- an ordinary
+#     explicitly scoped NAMED-remote push, so the remote's own pre-push hooks
+#     still receive that configured NAME and its remote-specific transport
+#     policy stays in force -- and the exact destination ref at the remote's ONE
+#     resolved PUSH URL is read back before any success is claimed. The candidate
 #     is the new local artifact commit when this run made one, and the existing
 #     HEAD when the artifacts did not change: a previously committed or
 #     previously rejected artifact commit is therefore retried on a later run
@@ -188,17 +191,22 @@ matched the validated identities -- never that the public site was updated.
 With --push the SAME lock-covered run then publishes that verified candidate --
 the new local artifact commit, or the existing HEAD when the artifacts did not
 change, so an earlier committed-but-unpushed artifact is retried -- to the
-attached branch's single configured upstream branch ref, at that remote's single
-resolved PUSH URL, and reads that exact ref back before claiming success. It
-never guesses a remote, destination or push.default, never creates tracking
-configuration, never bootstraps or fetches a missing branch, never force-pushes,
-deletes, mirrors or publishes tags, and fails closed on an absent/ambiguous
-upstream, a mirror remote, a divergent or unknown destination tip, an unpublished
-commit range that is not artifact-only with a valid pair, and a read-back that
-does not equal the candidate. A push failure leaves the local commit for a later
-retry; a remote that may already have changed is reported honestly and never
-rolled back. Ref equality is a Git ref publication ONLY: no Pages deployment,
-hosted CI run or public read-back is claimed.
+attached branch's single configured upstream branch ref on its single configured
+upstream remote, and reads that exact ref back (at that remote's actual push URL)
+before claiming success. The send is an ordinary, explicitly scoped NAMED-remote
+push, so the remote's own pre-push hooks still receive the configured remote name
+and its remote-specific transport settings stay in force. It never guesses a
+remote, destination or push.default, never creates tracking configuration, never
+bootstraps or fetches a missing branch, never force-pushes, deletes, mirrors or
+publishes tags, and fails closed on an absent/ambiguous upstream, a configured
+upstream value that is not the name of a configured remote, a mirror remote, a
+divergent or unknown destination tip, an unpublished commit range that is not
+artifact-only with a valid pair, and a read-back that does not equal the
+candidate. Values that could carry credentials (a URL-shaped upstream remote or
+destination ref) are never echoed into diagnostics. A push failure leaves the
+local commit for a later retry; a remote that may already have changed is
+reported honestly and never rolled back. Ref equality is a Git ref publication
+ONLY: no Pages deployment, hosted CI run or public read-back is claimed.
 
 options:
   --root DIR     project root holding state/ and receiving site/ (default: the
@@ -910,10 +918,32 @@ if [ "$remote_name" = "." ]; then
 fi
 case $remote_name in
     *[[:space:]]*)
-        stage_err push/config "the configured upstream remote name contains whitespace; exactly one named remote is required: $root_phys"
+        stage_err push/config "the configured upstream remote name contains whitespace; exactly one named remote is required (the value is withheld because it may be a credential-bearing URL): $root_phys"
+        exit 2
+        ;;
+    -*)
+        stage_err push/config "the configured upstream remote name starts with an option-like '-' and cannot name a remote here; the value is withheld because it may be a credential-bearing URL: $root_phys"
         exit 2
         ;;
 esac
+
+# A configured ALIAS -- not a URL -- is the only acceptable value. A
+# misconfigured branch.<branch>.remote can hold a credential-bearing URL, so a
+# value that is not the name of a configured remote is refused WITHOUT being
+# echoed, never normalised into an endpoint and never contacted. ``git remote``
+# is a purely local configuration listing: it contacts nothing.
+remote_is_configured=0
+configured_remotes=$(git_root remote 2>/dev/null) || configured_remotes=''
+while IFS= read -r listed_remote; do
+    [ -n "$listed_remote" ] || continue
+    if [ "$listed_remote" = "$remote_name" ]; then
+        remote_is_configured=1
+    fi
+done <<< "$configured_remotes"
+if [ "$remote_is_configured" -eq 0 ]; then
+    stage_err push/config "the configured upstream of the attached branch '$current_branch' (branch.$current_branch.remote) is not the name of a configured remote; the value is neither echoed nor resolved into an endpoint, and nothing is contacted: $root_phys"
+    exit 2
+fi
 
 destination_ref=$(one_config_value "branch.$current_branch.merge")
 resolution_rc=$?
@@ -937,12 +967,12 @@ case $destination_ref in
 esac
 case $destination_ref in
     *[[:space:]]*|*'*'*|*'?'*|*'['*|*..*|*/|*//*)
-        stage_err push/config "the configured upstream ref '$destination_ref' carries characters a single branch destination cannot: $root_phys"
+        stage_err push/config "the configured upstream ref of the attached branch '$current_branch' (branch.$current_branch.merge) carries characters a single branch destination cannot; the raw value is withheld because it may be a credential-bearing URL: $root_phys"
         exit 2
         ;;
 esac
 if ! git_root check-ref-format "$destination_ref" >/dev/null 2>&1; then
-    stage_err push/config "the configured upstream ref '$destination_ref' is not a valid Git ref: $root_phys"
+    stage_err push/config "the configured upstream ref of the attached branch '$current_branch' (branch.$current_branch.merge) is not a valid Git ref; the raw value is withheld because it may be a credential-bearing URL: $root_phys"
     exit 2
 fi
 
@@ -1053,7 +1083,7 @@ if ! git_root cat-file -e "$remote_tip^{commit}" 2>/dev/null; then
     exit 2
 fi
 if ! git_root merge-base --is-ancestor "$remote_tip" "$candidate" 2>/dev/null; then
-    stage_err push/inspect "the destination $destination_ref at $remote_tip is not an ancestor of the candidate $candidate (the remote is behind or has diverged); refusing to force, rebase, merge or reset: $root_phys"
+    stage_err push/inspect "the destination $destination_ref at $remote_tip is not an ancestor of the candidate $candidate (the candidate is behind the destination or the histories have diverged); refusing to force, rebase, merge or reset: $root_phys"
     exit 2
 fi
 
@@ -1156,18 +1186,26 @@ if [ -z "$range_count" ]; then
     exit 2
 fi
 
-# --- ONE ordinary, explicitly scoped push of the fixed candidate object ----
-# An explicit ``<candidate>:<refs/heads/...>`` refspec means the remote's own
-# default refspec, push.default, matching/all-branch behaviour and the
-# pushRemote cannot widen it; --no-follow-tags overrides push.followTags so no
-# tag is ever published with the branch. Nothing is forced, deleted, mirrored or
-# verified around: the root's hooks, signing and authentication policy stay in
-# force and there is no hook-bypass flag anywhere in this script. Both streams
-# are withheld (the endpoint URL appears in ordinary push chatter, and a
+# --- ONE ordinary, explicitly scoped named-remote push of the fixed object --
+# The destination is the CONFIGURED REMOTE NAME, not a flattened URL: git hands
+# that name to the remote's own hooks (pre-push receives the remote name as its
+# first argument for a named push) and applies that remote's own transport
+# policy -- remote.<name>.receivepack, for instance -- so an operator policy
+# scoped to the alias keeps rejecting and remote-specific settings stay in
+# force. The explicit ``<candidate>:<refs/heads/...>`` refspec still means the
+# remote's default refspec, push.default, matching/all-branch behaviour and the
+# pushRemote cannot widen it, and --no-follow-tags overrides push.followTags so
+# no tag is ever published with the branch. The actual single resolved PUSH URL
+# remains the endpoint every inspection and read-back above/below addresses, so
+# a fetch URL that differs is never used and a remote whose configuration
+# resolves to several push URLs was already refused. Nothing is forced,
+# deleted, mirrored or verified around: hooks, signing and authentication stay
+# in force and there is no hook-bypass flag anywhere in this script. Both
+# streams are withheld (the endpoint can appear in ordinary push chatter, and a
 # rejected push must not become a success claim): only the exit status counts.
 push_rc=0
 remote_git push --quiet --no-follow-tags --recurse-submodules=no \
-    "$push_url" "$candidate:$destination_ref" >/dev/null 2>&1 || push_rc=$?
+    "$remote_name" "$candidate:$destination_ref" >/dev/null 2>&1 || push_rc=$?
 if [ "$push_rc" -ne 0 ]; then
     stage_err push/send "the push of $candidate to $destination_ref was rejected or failed (git push exited $push_rc); no remote success is claimed and the local artifact commit is retained for a later retry (the endpoint URL and the remote's own output are withheld): $root_phys"
     exit 2
