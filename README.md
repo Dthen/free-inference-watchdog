@@ -166,9 +166,10 @@ trusting freshness.
 `get_model` returns one row per `(provider, raw model_id)` pair. Two lookups run
 at once: `exact_matches` is **literal** raw-id membership — case, padding and
 delimiters all matter — while `endpoints` is the separate marker-insensitive
-lookup described in *What the catalogue cannot tell you*. Every payload carries
-the absence caveat: gateways rename models inconsistently, so a missing exact id
-does not prove the model is unavailable elsewhere.
+lookup described in *What the catalogue cannot tell you*. Every `get_model`
+success payload carries the absence caveat: gateways rename models
+inconsistently, so a missing exact id does not prove the model is unavailable
+elsewhere.
 
 ### Metadata search semantics
 
@@ -302,8 +303,9 @@ vocabulary and error shapes — are frozen in *Published catalogue snapshot (v1)
   padding and delimiters matter, and a lookup is never repaired into a near
   match.
 - **Absence is weak evidence.** Gateways rename models inconsistently, so a
-  missing exact id does not prove the model is absent elsewhere; every payload
-  carries that caveat rather than implying a negative result is authoritative.
+  missing exact id does not prove the model is absent elsewhere; every
+  `get_model` and `search_models` success payload carries that caveat rather
+  than implying a negative result is authoritative.
 - **A cached answer says so.** `source.cached` is `true` whenever the body came
   from retained memory instead of a fresh download. `source.not_modified` marks
   a successful 304 revalidation that re-used it, while

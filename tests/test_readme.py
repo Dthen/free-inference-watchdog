@@ -24,8 +24,11 @@ filters must still answer differently (a wrong documented argument or result
 would make them collide), `min_context_length` is exercised at its inclusive
 boundary and against unknown metadata, the three freshness shapes are bound to
 the fixture clock, and a real last-known-good replay must NOT be documented as
-an identical `source` block (the 10a cache finding). Count scopes and the
-operator fields a published snapshot cannot observe are pinned the same way.
+an identical `source` block (the 10a cache finding). Count scopes, the operator
+fields a published snapshot cannot observe and the documented marker-strip
+examples are pinned the same way: the caveat sentence is bound to the tools that
+actually return `caveats`, and the strip/no-strip ids are run through the
+shipped stripper rather than trusted as prose.
 
 Operator route (F-R2-4): delivery topology (operator decision, 2026-08-26) is
 unchanged — the webhook in ~/.hermes/.env is the ONLY alert path and the cron job
@@ -233,11 +236,13 @@ def _filter_table():
 
 
 def _bullets(heading):
-    """The prose blocks of ONE ``###`` subsection, fenced examples excluded.
+    """The individual list items of ONE ``###`` subsection, as prose.
 
-    Splitting on a single blank line keeps a list written without blank lines
-    between items together, while dropping fenced blocks means an example can
-    never satisfy a claim that belongs to the guidance bullets.
+    Items are split apart even when the README writes the list without blank
+    lines between them, and fenced examples are dropped. Both matter: a whole
+    10-item block let an unrelated freshness bullet satisfy "the operator
+    fields say null" (QUALITY 10b1 finding 2), and an example must never
+    satisfy a claim that belongs to the guidance list.
     """
     text = _readme()
     body = text[text.index(heading) + len(heading):]
@@ -246,7 +251,25 @@ def _bullets(heading):
         if end != -1:
             body = body[:end]
     body = re.sub(r"```.*?```", "", body, flags=re.S)
-    return [block for block in _paragraphs(_plain(body)) if block]
+
+    items, current = [], []
+
+    def flush():
+        if current:
+            items.append(_plain(" ".join(" ".join(current).split())))
+            current.clear()
+
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            flush()
+        elif stripped.startswith("- "):
+            flush()
+            current.append(stripped[2:])
+        elif current:
+            current.append(stripped)
+    flush()
+    return [item for item in items if item]
 
 
 def _paged_example():
@@ -712,6 +735,49 @@ def test_cached_replay_is_not_documented_as_an_identical_source_block(tmp_path):
     assert "source.cached" in paragraph and "cache_fallback" in paragraph
 
 
+def test_absence_caveat_is_scoped_to_the_tools_that_carry_it():
+    """The caveat ships on ``get_model`` and ``search_models`` only.
+
+    QUALITY 10b1 finding 1: "every payload carries the absence caveat" was
+    false — ``list_endpoints``, ``list_free_models`` and ``watchdog_status``
+    return no ``caveats`` key. The claim is bound to the real payloads here, so
+    widening it back to a universal claim fails.
+    """
+    from watchdog_catalog import query
+
+    snapshot = _snapshot()
+    payloads = {
+        "get_model": query.get_model(snapshot, {"model_id": "vendor/shared"}),
+        "search_models": query.search_models(snapshot, {}),
+        "list_endpoints": query.list_endpoints(snapshot, {}),
+        "list_free_models": query.list_free_models(snapshot, {}),
+        "watchdog_status": query.watchdog_status(snapshot, {}, now=1759200000),
+    }
+    carriers = {name for name, payload in payloads.items() if "caveats" in payload}
+    assert carriers == {"get_model", "search_models"}, carriers
+    caveat = payloads["get_model"]["caveats"]
+    assert caveat and caveat == payloads["search_models"]["caveats"]
+
+    consumer = _section(_readme(), CONSUMER_HEADING)
+    mentions = [p for p in _paragraphs(_plain(consumer))
+                if "absence caveat" in p.lower() and not p.startswith("- ")]
+    mentions += [item for item in _bullets(CANNOT_HEADING)
+                 if "caveat" in item.lower()]
+    assert len(mentions) >= 2, f"the absence-caveat guidance is gone: {mentions}"
+
+    named = set()
+    for paragraph in mentions:
+        lowered = paragraph.lower()
+        for universal in ("every payload", "every result"):
+            assert universal not in lowered, (
+                f"the false universal caveat claim is back: {paragraph}")
+        tools = {name for name in payloads if name in paragraph}
+        assert tools and tools <= carriers, (
+            f"a caveat claim names a tool that carries no caveats: {paragraph}")
+        named |= tools
+    assert named == carriers, "both caveat-carrying tools must be named explicitly"
+
+
 def test_published_operator_fields_are_documented_as_unobservable():
     """Operator state a published snapshot cannot see stays documented as null."""
     from watchdog_catalog import query
@@ -721,10 +787,12 @@ def test_published_operator_fields_are_documented_as_unobservable():
         assert status[field] is None, field
 
     bullet = [p for p in _bullets(CANNOT_HEADING) if "pending_alerts" in p]
-    assert bullet, "the unobservable-operator-fields caveat is gone"
+    assert len(bullet) == 1, f"operator fields ride other bullets: {bullet}"
     for field in ("pending_alerts", "site_published", "site_publish_age_s"):
         assert field in bullet[0], field
-    assert "null" in bullet[0].lower()
+    # One list item, so an unrelated freshness "null" cannot satisfy this.
+    assert "as null" in bullet[0].lower(), \
+        "the operator fields are no longer documented as null"
 
 
 def test_count_scopes_are_documented_as_distinct():
@@ -775,6 +843,42 @@ def test_unknown_metadata_is_documented_as_distinct_from_known_zero_and_empty():
     bullet = [p for p in _bullets(CANNOT_HEADING) if "unknown_fields" in p]
     assert bullet, "the unknown-versus-zero guidance is gone"
     assert "unknown is not zero" in bullet[0].lower()
+
+
+def test_documented_marker_examples_match_the_real_stripper():
+    """The documented strip examples are stated results, so they are executed.
+
+    QUALITY 10b1 finding 3: inverting the documented examples left the suite
+    green. ``strip_free_marker`` IS the shipped rule, so the documented ids are
+    exercised here — end marker, start marker, mid-string non-marker, both ends
+    and the empty-result guard — and the one-label claim is computed the same
+    way ``counts.marker_group_labels`` computes it.
+    """
+    from watchdog_catalog import query
+
+    strip = query.strip_free_marker
+    assert strip("vendor/model:free") == "vendor/model"
+    assert strip("free-vendor-model") == "vendor-model"
+    assert strip("vendor/freetier") == "vendor/freetier"
+    assert strip("free-vendor-model_free") == "vendor-model", "both ends strip"
+    assert strip("free-") == "free-", "an emptied id must be returned unchanged"
+
+    # The documented one-label example: two differently marked ids, one label.
+    pair = ("vendor/model:free", "vendor/model-free")
+    assert len({strip(model_id) for model_id in pair}) == 1
+    rows = query.search_models(_snapshot(), {"query": "model", "limit": 200})
+    labels = {strip(row["model_id"]) for row in rows["endpoints"]}
+    assert {"vendor/model", "vendor/model-renamed"} <= labels
+    assert rows["counts"]["marker_group_labels"] == len(labels)
+
+    # The guidance must still name those ids and say which of them strip; the
+    # short clause pin catches an inverted "does not", with no whole-sentence
+    # wording pin.
+    bullet = [item for item in _bullets(CANNOT_HEADING) if "Marker lookups" in item]
+    assert len(bullet) == 1, bullet
+    examples = bullet[0].split("—", 1)[1]
+    assert "vendor/model:free and free-vendor-model strip" in examples
+    assert "vendor/freetier does not" in examples
 
 
 def test_quick_start_anchor_keeps_the_baseline_deep_link():
