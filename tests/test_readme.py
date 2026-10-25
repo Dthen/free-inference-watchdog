@@ -42,6 +42,13 @@ never launches the monitor" is measured per stage. The registration vectors are
 run the same way against an argv-recording `hermes` stub, and `hermes cron
 register` / `discord-home` — both invalid forms that regressed here once
 already — are still pinned absent.
+
+Agent guidance (unit 10c): `AGENTS.md` explains the architecture that already
+ships — the producer/consumer boundary, the `watchdog_catalog` module map, the
+SDK boundary and the artifact/publication gate. Its one executable claim is a
+pointer claim, so it is checked as a RESOURCE: every module or script AGENTS
+names must exist in this checkout, with a planted stale name proving the check
+is sensitive rather than vacuous.
 """
 
 import asyncio
@@ -1417,3 +1424,59 @@ def test_readme_init_documents_bak_overwrite():
     text = _readme()
     assert "roster.json.bak" in text, "--init section lost the .bak mention"
     assert "overwrit" in text.lower(), ".bak overwrite behavior not documented"
+
+
+# ---------- AGENTS.md architecture guidance ----------
+#
+# AGENTS.md is the agent-facing architecture note for the code that already
+# ships. Its one executable claim is a POINTER claim: every module or script it
+# names must be a real file in this checkout. That is the exact failure mode the
+# standalone catalogue work produced (stale module comments and proposed
+# filenames surviving a rename), and it is checked as a resource, not as prose.
+
+AGENTS = REPO / "AGENTS.md"
+
+#: Code paths AGENTS names in backticks. Deliberately limited to `.py`/`.sh`:
+#: generated and runtime-only data paths (`site/catalog.json`, `state/...`) are
+#: covered by the builder/publication tests, not by existence in a clean tree.
+_NAMED_CODE_PATH = re.compile(r"`([A-Za-z0-9_./-]+\.(?:py|sh))`")
+
+
+def _missing_named_code_paths(text):
+    """The code paths ``text`` names that do not exist under ``REPO``."""
+    return sorted({name for name in _NAMED_CODE_PATH.findall(text)
+                   if not (REPO / name).is_file()})
+
+
+def test_agents_names_only_code_paths_that_exist():
+    """AGENTS.md may only name modules and scripts that really exist.
+
+    The architecture map is guidance an agent acts on, so a name that survived
+    a rename sends the next reader at a file that is not there. The sensitivity
+    proof below plants exactly such a name and requires the same predicate to
+    catch it, so this is not a test that would pass on unreadable input.
+    """
+    text = AGENTS.read_text(encoding="utf-8")
+    named = {name for name in _NAMED_CODE_PATH.findall(text)}
+
+    assert named, "AGENTS.md names no modules at all — the map was dropped"
+    assert _missing_named_code_paths(text) == [], (
+        "AGENTS.md names code paths that do not exist: "
+        f"{_missing_named_code_paths(text)}"
+    )
+
+    # The two publication-gate scripts and the standalone package root are the
+    # names a reader is most likely to act on, so require them explicitly.
+    for required in ("scripts/publish_site.sh", "scripts/validate_site.py",
+                     "watchdog_catalog/__init__.py", "watchdog_catalog/query.py",
+                     "watchdog_catalog/source.py", "watchdog_catalog/server.py",
+                     "watchdog_catalog/__main__.py", "catalog_export.py",
+                     "build_site.py", "mcp_server.py"):
+        assert required in named, f"AGENTS.md no longer names {required}"
+
+    planted = "watchdog_catalog/proposed_stale_module.py"
+    mutated = f"{text}\n- `{planted}`\n"
+    assert _missing_named_code_paths(mutated) == [planted], (
+        "the stale-name check is not sensitive to a planted absent module"
+    )
+
