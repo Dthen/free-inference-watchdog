@@ -401,29 +401,80 @@ dropped entirely (2026-08-25).
 
 ### Quick start
 
-Self-hosting, operator shell — run these inside a clone of this repo. Consumers
-who only want to query a catalogue can stop reading here and use the
+Self-hosting, operator shell — every command below runs with the repository
+clone as its working directory (`.env`, `providers/` and `state/` are resolved
+from there, never from wherever the shell happened to start). Consumers who
+only want to query a catalogue can stop reading here and use the
 [MCP quick start](#query-the-catalogue-over-mcp).
 
 ```bash
-cd ~/projects/free-inference-watchdog
+# EDIT ME: path to your clone. Quoted, so a path containing spaces works.
+WATCHDOG_HOME="$HOME/projects/free-inference-watchdog"
+cd "$WATCHDOG_HOME" || exit 1
 cp .env.example .env                    # then fill in your keys
 python3 inference_watchdog.py --dry-run          # see what would happen
 python3 inference_watchdog.py --init             # bootstrap roster.json
 python3 inference_watchdog.py                    # one tick (cron does this)
 ```
 
+Change that one quoted line for a different checkout — the same convention the
+cron wrappers below use. Keep the quotes: an unquoted path containing spaces
+splits into several arguments and the `cd` fails. `WATCHDOG_HOME` itself is a
+shell variable in these snippets, not a watchdog option: there is no path flag
+on the CLI, and `--state-dir` only relocates `state/`.
+
 ## Cron registration
 
-The monitor runs as a silent Hermes cron script-mode job (`--no-agent`: no LLM
+The monitor runs as a silent cron script-mode job (`--no-agent`: no LLM
 is woken — the wrapper script IS the job). It is **not** a delivery channel:
-the webhook in `.env` delivers alerts; cron stdout stays local.
+the webhook in `.env` delivers alerts; cron output stays local. In script mode
+a job's stdout is the delivered message, so the wrappers below write nothing to
+it — every diagnostic goes to stderr, which the scheduler logs rather than
+sends.
+
+Hermes cron is the advanced scheduler this deployment happens to use; it is not
+a prerequisite for consumers, and nothing above needs it. Both wrappers are
+plain bash, so any scheduler that can run a shell script on a clock drives the
+same two jobs.
+
+### Script location and wrapper-local settings
+
+Both wrappers live in the **active Hermes home's** scripts directory —
+`$HERMES_HOME/scripts/` (`~/.hermes/scripts/` on a default install) — and are
+registered by bare filename: `--script` takes a file name that must resolve
+inside that directory. It is never a command line and never a path relative to
+your shell's working directory, which is why the wrapper carries the checkout
+path itself.
+
+Each wrapper therefore holds its own configuration: the clone path and the
+interpreter are assigned at the top of the file, and those are the lines to
+edit. Do not export them from your interactive shell instead — the scheduler
+sanitizes the environment it hands a script, so an exported variable is not
+guaranteed to arrive.
 
 Create `~/.hermes/scripts/inference-watchdog-tick.sh`:
 
 ```bash
-cd /home/kimbo/projects/free-inference-watchdog || { echo "inference-watchdog FAILED (cannot cd)" >&2; exit 1; }
-python3 inference_watchdog.py || { c=$?; [ "$c" -eq 1 ] || { echo "inference-watchdog FAILED (exit $c)" >&2; exit "$c"; }; }
+#!/usr/bin/env bash
+# inference-watchdog-tick.sh — one hourly tick. Silent on success and on the
+# routine partial-outage status; diagnostics go to stderr, never stdout.
+set -u
+
+# EDIT ME: absolute path to your clone. Quoted, so a path with spaces works.
+WATCHDOG_HOME="$HOME/projects/free-inference-watchdog"
+# EDIT ME only if `python3` on the scheduler's PATH is not the one you want.
+PYTHON="python3"
+
+# Stage 1 — directory selection. Under bash a failed `cd` is ALREADY exit 1, so
+# folding it into stage 2's exit-1 exemption would report success for a moved or
+# renamed checkout, forever. Diagnose here and never start the monitor.
+cd "$WATCHDOG_HOME" || { echo "inference-watchdog FAILED (cannot cd to $WATCHDOG_HOME)" >&2; exit 1; }
+
+# Stage 2 — one tick. Exit 0 is success; the routine partial-outage exit 1 is
+# exempted and adds NO wrapper output (that tick's alert already names the
+# provider that flaked); any other status is re-raised unchanged, with a note on
+# stderr.
+"$PYTHON" inference_watchdog.py || { c=$?; [ "$c" -eq 1 ] || { echo "inference-watchdog FAILED (exit $c)" >&2; exit "$c"; }; }
 ```
 
 Then register it on the cadence (the schedule below is what sets the 1-hour
@@ -437,13 +488,22 @@ hermes cron create "17 */1 * * *" \
   --deliver local
 ```
 
-The wrapper's two stages exist to keep failure diagnosable without spamming
-Discord: under bash a failed `cd` IS exit 1, so chaining `cd && python3` into
-one exemption clause would hide a moved/renamed install dir forever — hence
-the split. A bare exit 1 from the monitor itself is a routine partial outage
-(the carried-forward "fetch failed" line in that tick's alert already says
-which provider flaked), so it stays silent; anything else exits non-zero and
-lands on stderr for the operator to find.
+`--deliver local` keeps job output in local files only — a wrapper that fails
+does not page anyone, so the `.env` webhook stays the single alert path. The
+15-minute removal resolver is the same wrapper with `--resolve` added to the
+monitor invocation: see [Removal resolver](#removal-resolver).
+
+### Why the wrapper has two failure stages
+
+The split keeps a failure diagnosable without spamming Discord. Bash reports a
+failed `cd` as exit 1 — the same status the monitor uses for a routine partial
+provider outage — so a single `cd … && python3 …` clause with one exit-1
+exemption cannot tell the two apart: a checkout that moved would look like a
+normal quiet tick forever, and the dead monitor would be indistinguishable from
+silence. Selecting the directory first makes the stages separable: stage 1
+always exits non-zero with a diagnostic and never launches the monitor, while
+stage 2 passes the monitor's own status through — 0 success, 1 tolerated
+silently, anything else re-raised with its original code and a stderr note.
 
 ## Environment variables
 
@@ -1517,8 +1577,33 @@ tick): a ghost provider's held entries are printed as dropped, then consumed.
 Un-flagged releases are silent on both paths — both end in the same consumed
 entry.
 
-Registration (uses the same wrapper pattern as the tick job above; the
-`*/15 * * * *` cadence matches the resolver's recheck rhythm):
+The resolver is the same two-stage wrapper as the tick, with `--resolve` added
+to the monitor invocation — that flag is the only difference. Create
+`~/.hermes/scripts/inference-watchdog-resolve.sh`:
+
+```bash
+#!/usr/bin/env bash
+# inference-watchdog-resolve.sh — drain the removal-hold queue every 15 minutes.
+set -u
+
+# EDIT ME: absolute path to your clone. Quoted, so a path with spaces works.
+WATCHDOG_HOME="$HOME/projects/free-inference-watchdog"
+# EDIT ME only if `python3` on the scheduler's PATH is not the one you want.
+PYTHON="python3"
+
+# Stage 1 — directory selection, exactly as in the tick wrapper: a failed `cd`
+# must diagnose on stderr and never launch the resolver.
+cd "$WATCHDOG_HOME" || { echo "inference-watchdog resolve FAILED (cannot cd to $WATCHDOG_HOME)" >&2; exit 1; }
+
+# Stage 2 — one resolver pass. `--resolve` itself returns 0 or 2, so the exit-1
+# exemption is inherited uniformity rather than a live path here; the stage
+# split still matters because a failed `cd` must never be read as a routine
+# status.
+"$PYTHON" inference_watchdog.py --resolve || { c=$?; [ "$c" -eq 1 ] || { echo "inference-watchdog resolve FAILED (exit $c)" >&2; exit "$c"; }; }
+```
+
+Register it on the quarter-hour (`*/15 * * * *` matches the resolver's recheck
+rhythm):
 
 ```bash
 hermes cron create --name inference-watchdog-resolve --no-agent \

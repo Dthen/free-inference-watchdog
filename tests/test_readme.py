@@ -31,14 +31,17 @@ actually return `caveats`, and the documented strip/no-strip ids, the "one
 label" result and the both-ends clause are read out of the guidance and
 checked against the shipped stripper's real output.
 
-Operator route (F-R2-4): delivery topology (operator decision, 2026-08-26) is
-unchanged — the webhook in ~/.hermes/.env is the ONLY alert path and the cron job
-is silent (`--deliver local`). The wrapper's job is diagnosability, not paging:
-exit 1 (routine partial outage) stays fully silent; anything else prints to
-STDERR and exits non-zero for the operator to find. The registration section is
-pinned to the real Hermes cron CLI surface: `hermes cron register` does not exist
-and `discord-home` is not a valid --deliver token — both invalid forms regressed
-here once already, so their absence is pinned below.
+Operator route (F-R2-4, unit 10b2): delivery topology (operator decision,
+2026-08-26) is unchanged — the Discord webhook in the project-local `.env` is
+the ONLY alert path and the cron job is silent (`--deliver local`). The
+wrappers' job is diagnosability, not paging, and their failure contract is
+EXECUTED below rather than read: the documented fenced bodies are run under
+real bash against a harmless monitor stub, so "routine exit 1 stays silent,
+anything else diagnoses on STDERR and keeps its own status, and a failed `cd`
+never launches the monitor" is measured per stage. The registration vectors are
+run the same way against an argv-recording `hermes` stub, and `hermes cron
+register` / `discord-home` — both invalid forms that regressed here once
+already — are still pinned absent.
 """
 
 import asyncio
@@ -82,11 +85,6 @@ SOURCE_FLAGS = {"--catalog-url": "url", "--catalog-file": "file"}
 
 def _readme():
     return README.read_text(encoding="utf-8")
-
-
-def _fenced_blocks(text):
-    """Return the contents of every ``` fenced code block in the README."""
-    return re.findall(r"```[a-z]*\n(.*?)```", text, re.S)
 
 
 def _fenced_languages(text):
@@ -990,44 +988,415 @@ def test_every_shell_example_parses():
             f"shell example is not valid bash:\n{body}\n{proc.stderr}")
 
 
-def test_cron_wrapper_exempts_routine_exit_1():
-    """The wrapper must stay SILENT on bare exit 1 (routine partial outage —
-    the stale line in the alert explains why) and route every other failure to
-    stderr with a non-zero exit. Cron stdout must NEVER become a page channel."""
+# -- operator wrappers and registration, EXECUTED (unit 10b2) ----------------
+#
+# The self-hosting wrappers document a failure contract, so the fenced bodies are
+# read out of the README and RUN under real bash against a harmless monitor stub:
+# missing checkout, success, routine exit 1, fatal exit 2 and one representative
+# other status, checking argv, return code and both streams each time. The only
+# edit applied is the documented one — the two `EDIT ME` assignment lines are
+# re-pointed at an owned checkout and the stub — and their presence is asserted
+# first, so a stale placeholder fails loudly instead of quietly exercising a
+# body nobody documented. Nothing real runs here: no monitor, no resolver, no
+# provider probe, no webhook, no lock, no Hermes job.
+
+WRAPPER_CHECKOUT_LINE = 'WATCHDOG_HOME="$HOME/projects/free-inference-watchdog"'
+WRAPPER_INTERPRETER_LINE = 'PYTHON="python3"'
+TICK_WRAPPER = "inference-watchdog-tick.sh"
+RESOLVE_WRAPPER = "inference-watchdog-resolve.sh"
+ROUTINE_STATUS = 1   # documented routine partial-outage status
+FATAL_STATUS = 2     # documented fatal status
+OTHER_STATUS = 7     # any other status must keep its own code
+
+POSIX_ONLY = pytest.mark.skipif(
+    os.name != "posix" or sys.platform.startswith("win"),
+    reason="the documented wrappers are POSIX bash; Windows is out of scope",
+)
+
+MONITOR_STUB = """#!/usr/bin/env bash
+# Harmless monitor stand-in. Records its argv and exits with the requested
+# status; it never reads the repository, state/, providers or the network.
+printf '%s\\n' "$@" >> "$STUB_WITNESS"
+exit "${STUB_STATUS:-0}"
+"""
+
+HERMES_STUB = """#!/usr/bin/env bash
+# Harmless `hermes` stand-in: records argv, creates and registers nothing.
+printf '%s\\n' "$@" > "$CRON_WITNESS"
+"""
+
+
+def _bash_blocks():
+    """Every fenced bash block in the README, in document order."""
+    return [body for language, body in _fenced_languages(_readme())
+            if language == "bash"]
+
+
+def _wrapper_body(script):
+    """The one documented wrapper body for ``script``.
+
+    The body names itself on its own comment line, so the registration block
+    that merely mentions the same filename cannot satisfy this.
+    """
+    matches = [body for body in _bash_blocks() if f"\n# {script}" in body]
+    assert len(matches) == 1, (
+        f"expected exactly one documented body for {script}, found {len(matches)}")
+    return matches[0]
+
+
+def _target_wrapper(body, checkout, interpreter):
+    """Apply ONLY the two documented `EDIT ME` edits to a wrapper body."""
+    for line in (WRAPPER_CHECKOUT_LINE, WRAPPER_INTERPRETER_LINE):
+        assert body.count(line) == 1, (
+            f"the documented wrapper assignment {line!r} changed shape; the "
+            "harness must not guess at a replacement")
+    return body.replace(
+        WRAPPER_CHECKOUT_LINE, f'WATCHDOG_HOME="{checkout}"').replace(
+        WRAPPER_INTERPRETER_LINE, f'PYTHON="{interpreter}"')
+
+
+def _execute_wrapper(body, workdir, checkout, status):
+    """Run a documented wrapper body against the stub monitor, isolated."""
+    workdir.mkdir(parents=True, exist_ok=True)
+    stub = workdir / "monitor-stub.sh"
+    stub.write_text(MONITOR_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    script = workdir / "wrapper.sh"
+    script.write_text(_target_wrapper(body, checkout, stub), encoding="utf-8")
+    witness = workdir / "monitor-argv.txt"
+    (workdir / "home").mkdir()
+    (workdir / "tmp").mkdir()
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": str(workdir / "home"),
+        "TMPDIR": str(workdir / "tmp"),
+        "STUB_WITNESS": str(witness),
+        "STUB_STATUS": str(status),
+    }
+    completed = subprocess.run(["bash", str(script)], env=environment,
+                               text=True, capture_output=True, timeout=60)
+    return completed, witness
+
+
+def _argv_of(witness):
+    return witness.read_text(encoding="utf-8").splitlines()
+
+
+def _assert_wrapper_contract(body, expected_args, workdir):
+    """The documented two-stage contract, measured on one wrapper body.
+
+    ``workdir`` is owned scratch; every scenario gets its own subdirectory, so a
+    witness file can only exist if that scenario really launched the monitor.
+    """
+    checkout = workdir / "checkout with spaces"
+    checkout.mkdir(parents=True)
+
+    completed, witness = _execute_wrapper(body, workdir / "success", checkout, 0)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "", f"wrapper wrote to stdout: {completed.stdout!r}"
+    assert completed.stderr == "", f"success must be silent: {completed.stderr!r}"
+    assert _argv_of(witness) == expected_args, (
+        f"monitor ran with {_argv_of(witness)}, documented {expected_args}")
+
+    completed, witness = _execute_wrapper(
+        body, workdir / "routine", checkout, ROUTINE_STATUS)
+    assert _argv_of(witness) == expected_args, (
+        f"routine tick ran with {_argv_of(witness)}, documented {expected_args}")
+    assert completed.returncode == 0, (
+        f"routine partial outage (exit {ROUTINE_STATUS}) must be exempted, got "
+        f"{completed.returncode}")
+    assert completed.stdout == "", (
+        f"routine exit 1 wrote to stdout: {completed.stdout!r}")
+    assert completed.stderr == "", (
+        f"routine exit 1 must add no wrapper output: {completed.stderr!r}")
+
+    for status in (FATAL_STATUS, OTHER_STATUS):
+        completed, witness = _execute_wrapper(
+            body, workdir / f"status-{status}", checkout, status)
+        assert _argv_of(witness) == expected_args, (
+            f"exit {status} ran with {_argv_of(witness)}, documented "
+            f"{expected_args}")
+        assert completed.returncode == status, (
+            f"wrapper changed the monitor status {status} to "
+            f"{completed.returncode}")
+        assert completed.stdout == "", (
+            f"exit {status} wrote to stdout: {completed.stdout!r}")
+        assert f"FAILED (exit {status})" in completed.stderr, (
+            f"exit {status} must diagnose on stderr: {completed.stderr!r}")
+
+    missing = workdir / "checkout-that-does-not-exist"
+    completed, witness = _execute_wrapper(body, workdir / "missing", missing, 0)
+    assert not witness.exists(), "the monitor ran from a nonexistent checkout"
+    assert completed.returncode != 0, (
+        f"a failed cd reported success (exit {completed.returncode}); a moved "
+        "checkout would stay silent forever")
+    assert completed.stdout == "", (
+        f"a failed cd wrote to stdout: {completed.stdout!r}")
+    assert "cannot cd" in completed.stderr, (
+        f"a failed cd must diagnose on stderr: {completed.stderr!r}")
+    assert str(missing) in completed.stderr, (
+        "the cd diagnostic does not name the directory that is missing")
+
+
+def _normalized_body(body):
+    """Executable lines only, with the resolver's documented difference folded.
+
+    Pins the README's claim that `--resolve` is the ONLY difference between the
+    two wrappers: comments drop out, and the flag plus its diagnostic label are
+    removed before the surviving lines are compared.
+    """
+    lines = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        stripped = stripped.replace("inference-watchdog resolve",
+                                    "inference-watchdog").replace(" --resolve", "")
+        lines.append(" ".join(stripped.split()))
+    return lines
+
+
+def _collapse_stages(body):
+    """The historical regression: ONE clause guarding `cd` AND the monitor.
+
+    Built out of the documented lines rather than authored separately, so the
+    mutation tracks whatever the README says instead of drifting from it.
+    """
+    lines = body.splitlines()
+    cd_index = next(i for i, line in enumerate(lines)
+                    if line.strip().startswith('cd "$WATCHDOG_HOME"'))
+    monitor_index = next(i for i, line in enumerate(lines)
+                         if '"$PYTHON" inference_watchdog.py' in line)
+    assert cd_index < monitor_index, "the cd guard does not precede the monitor"
+    collapsed = []
+    for index, line in enumerate(lines):
+        if index == cd_index:
+            collapsed.append(
+                'cd "$WATCHDOG_HOME" && ' + lines[monitor_index].strip())
+        elif index == monitor_index:
+            continue
+        else:
+            collapsed.append(line)
+    return "\n".join(collapsed) + "\n"
+
+
+@POSIX_ONLY
+def test_documented_tick_wrapper_enforces_both_failure_stages(tmp_path):
+    """The tick wrapper is EXECUTED: missing checkout never launches the
+    monitor; success and the routine exit 1 stay silent; 2 and a representative
+    other status keep their own code with a stderr note and no stdout."""
+    _assert_wrapper_contract(_wrapper_body(TICK_WRAPPER),
+                             ["inference_watchdog.py"], tmp_path)
+
+
+@POSIX_ONLY
+def test_documented_resolve_wrapper_is_the_tick_wrapper_plus_resolve(tmp_path):
+    """The resolver is documented as its own complete body, not as "same
+    pattern as above": it runs `inference_watchdog.py --resolve` under the same
+    two stages, and `--resolve` really is the only executable difference."""
+    _assert_wrapper_contract(_wrapper_body(RESOLVE_WRAPPER),
+                             ["inference_watchdog.py", "--resolve"], tmp_path)
+    assert _normalized_body(_wrapper_body(RESOLVE_WRAPPER)) \
+        == _normalized_body(_wrapper_body(TICK_WRAPPER)), \
+        "the resolver wrapper drifted from the tick wrapper by more than --resolve"
+
+
+@POSIX_ONLY
+def test_wrapper_contract_rejects_the_known_wrapper_regressions(tmp_path):
+    """Sensitivity proof: every mutation below must be caught by a BEHAVIOURAL
+    assertion, not by a wording guard on the README text."""
+    body = _wrapper_body(TICK_WRAPPER)
+    expected = ["inference_watchdog.py"]
+
+    collapsed = _collapse_stages(body)
+    assert collapsed != body, "the collapsed-stage mutation did not apply"
+    with pytest.raises(AssertionError, match="moved checkout would stay silent"):
+        _assert_wrapper_contract(collapsed, expected, tmp_path / "collapsed")
+
+    unguarded = body.replace(
+        ' || { echo "inference-watchdog FAILED (cannot cd to $WATCHDOG_HOME)"'
+        ' >&2; exit 1; }', "")
+    assert unguarded != body, "the unguarded-cd mutation did not apply"
+    with pytest.raises(AssertionError,
+                       match="ran from a nonexistent checkout"):
+        _assert_wrapper_contract(unguarded, expected, tmp_path / "unguarded")
+
+    noisy = body.replace('[ "$c" -eq 1 ] || ', "")
+    assert noisy != body, "the exit-1-exemption removal did not apply"
+    with pytest.raises(AssertionError, match="must be exempted"):
+        _assert_wrapper_contract(noisy, expected, tmp_path / "noisy")
+
+    swallowed = body.replace('exit "$c"', "exit 0")
+    assert swallowed != body, "the status-swallowing mutation did not apply"
+    with pytest.raises(AssertionError, match="changed the monitor status"):
+        _assert_wrapper_contract(swallowed, expected, tmp_path / "swallowed")
+
+    wrong_args = body.replace("inference_watchdog.py",
+                              "inference_watchdog.py --resolve")
+    assert wrong_args != body, "the wrong-argv mutation did not apply"
+    with pytest.raises(AssertionError, match="documented"):
+        _assert_wrapper_contract(wrong_args, expected, tmp_path / "wrong-args")
+
+
+@POSIX_ONLY
+def test_wrappers_keep_one_delivery_path_and_never_write_stdout():
+    """Both wrappers diagnose on stderr only and cannot page: the project-local
+    `.env` webhook stays the single alert path, and script-mode stdout — which
+    the scheduler would deliver verbatim — stays empty."""
+    for script in (TICK_WRAPPER, RESOLVE_WRAPPER):
+        body = _wrapper_body(script)
+        lowered = body.lower()
+        for banned in ("curl", "wget", "http", "webhook", "discord"):
+            assert banned not in lowered, \
+                f"{script}: a second delivery path appeared ({banned})"
+        diagnostics = [line.strip() for line in body.splitlines()
+                       if "echo" in line and not line.strip().startswith("#")]
+        assert diagnostics, f"{script}: no failure diagnostics documented"
+        for line in diagnostics:
+            assert ">&2" in line, \
+                f"{script}: a diagnostic can reach stdout: {line}"
+
+
+def _registration_block(script):
+    """The one `hermes cron create` block that registers ``script``."""
+    matches = [body for body in _bash_blocks()
+               if "hermes cron create" in body and script in body]
+    assert len(matches) == 1, (
+        f"expected exactly one registration block for {script}, found {len(matches)}")
+    return matches[0]
+
+
+def _run_registration(block, workdir):
+    """Run a registration block with an argv-recording `hermes` first on PATH."""
+    workdir.mkdir(parents=True, exist_ok=True)
+    bin_dir = workdir / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "hermes"
+    stub.write_text(HERMES_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    witness = workdir / "hermes-argv.txt"
+    (workdir / "home").mkdir()
+    (workdir / "tmp").mkdir()
+    environment = {
+        "PATH": os.pathsep.join(
+            [str(bin_dir),
+             os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")]),
+        "HOME": str(workdir / "home"),
+        "TMPDIR": str(workdir / "tmp"),
+        "CRON_WITNESS": str(witness),
+    }
+    completed = subprocess.run(["bash", "-c", block], env=environment,
+                               text=True, capture_output=True, timeout=60)
+    return completed, witness
+
+
+def _split_argv(argv):
+    """Split a recorded command line into ``(positionals, options)``."""
+    options, positionals, index = {}, [], 0
+    while index < len(argv):
+        token = argv[index]
+        if token.startswith("--"):
+            following = argv[index + 1] if index + 1 < len(argv) else None
+            if following is not None and not following.startswith("--"):
+                options[token] = following
+                index += 2
+                continue
+            options[token] = True
+            index += 1
+            continue
+        positionals.append(token)
+        index += 1
+    return positionals, options
+
+
+def _assert_registration_contract(block, script, schedule, workdir):
+    """One documented `hermes cron create` vector, executed and inspected."""
+    completed, witness = _run_registration(block, workdir)
+    assert completed.returncode == 0, completed.stderr
+    assert witness.exists(), "the registration block never invoked `hermes`"
+    positionals, options = _split_argv(_argv_of(witness))
+    assert positionals[:2] == ["cron", "create"], positionals
+    assert positionals[2:] == [schedule], (
+        f"documented schedule is {positionals[2:]!r}, expected [{schedule!r}]")
+    assert options.get("--name") == script.removesuffix(".sh"), options
+    assert options.get("--script") == script, (
+        "registration must pass the bare script file name, got "
+        f"{options.get('--script')!r}")
+    assert os.sep not in options["--script"], "the script path must be bare"
+    assert options.get("--no-agent") is True, "script mode must skip the LLM"
+    assert options.get("--deliver") == "local", (
+        f"cron delivery must stay local, got {options.get('--deliver')!r}")
+
+
+@POSIX_ONLY
+def test_documented_registration_vectors_are_silent_script_jobs(tmp_path):
+    """Both existing schedules are executed against an argv-recording stub: the
+    tick on `17 */1 * * *`, the resolver on `*/15 * * * *`, each registering the
+    documented bare script with `--no-agent --deliver local`."""
+    _assert_registration_contract(_registration_block(TICK_WRAPPER),
+                                  TICK_WRAPPER, "17 */1 * * *",
+                                  tmp_path / "tick")
+    _assert_registration_contract(_registration_block(RESOLVE_WRAPPER),
+                                  RESOLVE_WRAPPER, "*/15 * * * *",
+                                  tmp_path / "resolve")
+
+
+@POSIX_ONLY
+def test_registration_contract_rejects_the_known_registration_regressions(tmp_path):
+    """Sensitivity proof for the registration vector: schedule drift, waking the
+    LLM, an invalid delivery token and an absolute script path each reach a
+    behavioural argv assertion."""
+    block = _registration_block(TICK_WRAPPER)
+    regressions = {
+        "schedule drift": (block.replace('"17 */1 * * *"', '"0 * * * *"'),
+                           "documented schedule"),
+        "agent mode": (block.replace("  --no-agent \\\n", ""), "script mode"),
+        "invalid deliver token": (
+            block.replace("--deliver local", "--deliver discord-home"),
+            "cron delivery"),
+        "absolute script path": (
+            block.replace("--script inference-watchdog-tick.sh",
+                          "--script /opt/scripts/inference-watchdog-tick.sh"),
+            "bare script file name"),
+    }
+    for label, (mutated, message) in regressions.items():
+        assert mutated != block, f"{label}: the mutation did not apply"
+        with pytest.raises(AssertionError, match=message):
+            _assert_registration_contract(
+                mutated, TICK_WRAPPER, "17 */1 * * *",
+                tmp_path / label.replace(" ", "-"))
+
+
+def test_self_hosting_examples_are_portable_and_scheduler_optional():
+    """Operator examples must work off this one machine and must not read as a
+    consumer prerequisite: an editable quoted checkout path (spaces included) in
+    both the quick start and the wrappers, a script location under the active
+    Hermes home, and wrapper-local settings rather than scheduler-inherited
+    environment."""
     text = _readme()
-    assert "-eq 1 ] ||" in text, "README cron wrapper lost the exit-1 exemption"
-    assert "c=$?" in text, "wrapper must capture the real exit code into c"
-    assert '>&2' in text, "failure echoes must go to stderr, not stdout"
-    # delivery topology stated plainly: webhook delivers, cron is local-only
-    assert "--deliver local" in text, "cron registration must be silent (--deliver local)"
-    assert "exit 1" in text and "routine" in text.lower()
+    assert "/home/kimbo" not in text, \
+        "an operator example is still pinned to one machine's home directory"
 
+    quick_start = " ".join(_section(text, "\n### Quick start\n").split())
+    assert WRAPPER_CHECKOUT_LINE in quick_start, \
+        "the quick start lost its editable, quoted checkout assignment"
+    assert 'cd "$WATCHDOG_HOME" || exit 1' in quick_start, \
+        "the quick start no longer selects the checkout directory"
+    assert "spaces" in quick_start.lower(), "the spaces caveat is missing"
+    assert "not a watchdog option" in quick_start.lower(), \
+        "a shell path setting is presented as a watchdog CLI/API option"
 
-def test_cron_wrapper_guards_cd_before_python():
-    """Fix-round-4 #1: a failed `cd` must PAGE, never fall into the exit-1
-    exemption — under bash a failed `cd` IS exit 1, so chaining both stages
-    into one exemption clause went permanently silent the moment the project
-    dir moved/renamed (exactly the dead-monitor-indistinguishable-from-silence
-    scenario). The documented wrapper must keep a separate cd-guard stage that
-    runs BEFORE the python stage."""
-    blocks = _fenced_blocks(_readme())
-    wrapper = next(b for b in blocks if "cannot cd" in b)
-    lines = [l for l in wrapper.splitlines() if l.strip() and not l.lstrip().startswith("#")]
-    cd_idx = next(i for i, l in enumerate(lines) if "cannot cd" in l)
-    py_idx = next(i for i, l in enumerate(lines) if "python3 inference_watchdog.py" in l)
-    assert cd_idx < py_idx, "cd-guard must run BEFORE the python invocation"
-    assert "exit 1" in lines[cd_idx], "cd-guard must page (exit non-zero), not fall through"
-
-
-def test_readme_wrapper_block_is_wellformed_shell():
-    """The documented wrapper block must parse as valid shell under bash -n —
-    guards against quoting drift in the README example."""
-    blocks = _fenced_blocks(_readme())
-    wrapper = next(b for b in blocks if "cannot cd" in b)
-    proc = subprocess.run(["bash", "-n"], input=wrapper, text=True, capture_output=True)
-    assert proc.returncode == 0, f"wrapper block is not valid shell:\n{proc.stderr}"
-    assert "inference_watchdog.py" in wrapper
-    assert "FAILED" in wrapper
+    cron = " ".join(_section(text, "## Cron registration").split())
+    assert "$HERMES_HOME/scripts/" in cron, \
+        "the script location is not tied to the active Hermes home"
+    assert "~/.hermes/scripts/" in cron, "the default Hermes home is unnamed"
+    assert "sanitiz" in cron.lower(), \
+        "wrapper-local configuration is not justified against scheduler env"
+    assert "not a prerequisite" in cron.lower(), \
+        "Hermes cron is not marked optional for consumers"
+    for script in (TICK_WRAPPER, RESOLVE_WRAPPER):
+        assert f"~/.hermes/scripts/{script}" in text, \
+            f"{script} has no documented install location"
 
 
 def test_no_invalid_cron_tokens_in_readme():
@@ -1039,18 +1408,6 @@ def test_no_invalid_cron_tokens_in_readme():
         "invalid subcommand 'hermes cron register' back in README"
     assert "discord-home" not in text, \
         "invalid deliver token 'discord-home' back in README"
-
-
-def test_documented_create_command_is_silent_script_mode():
-    """The documented `hermes cron create` invocation must be script-mode
-    (--script + --no-agent) and SILENT (--deliver local) — the webhook in
-    ~/.hermes/.env is the only alert path, never cron delivery."""
-    blocks = _fenced_blocks(_readme())
-    cmd_block = next(b for b in blocks if "hermes cron create" in b)
-    joined = " ".join(cmd_block.split())
-    assert "--script" in joined, "create command must use script mode (--script)"
-    assert "--no-agent" in joined, "create command must skip the LLM (--no-agent)"
-    assert "--deliver local" in joined, "cron job must be silent (--deliver local)"
 
 
 def test_readme_init_documents_bak_overwrite():
