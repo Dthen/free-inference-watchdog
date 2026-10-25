@@ -1,14 +1,248 @@
 # free-inference-watchdog
 
-Zero-token cron watchdog for the free-tier LLM gateways in `providers/`.
-Alerts Discord when a free model appears or disappears. Stdlib-only Python,
-one tick per invocation, no LLM calls ever.
+A free-tier LLM model catalogue for MCP clients — plus the zero-token watchdog
+that keeps it honest. The catalogue is a credential-free snapshot of which
+models each gateway currently gives away; the watchdog is the cron monitor that
+tracks the changes and alerts on them.
 
-Providers are **config-driven**: each gateway is a JSON file under
+**Dashboard:** <https://models.dthen.xyz> — the catalogue, rendered, rebuilt
+each tick.
+
+Stdlib-only Python, one tick per invocation, no LLM calls ever. Providers are
+**config-driven**: each gateway is a JSON file under
 [`providers/`](providers/). Adding or removing a provider is a file drop, not a
 code change.
 
-## What it does
+| You want to… | Start at |
+|---|---|
+| query the free-model catalogue from an MCP client | [Query the catalogue over MCP](#query-the-catalogue-over-mcp) — no keys, no cron, no local roster, no alerting |
+| run the watchdog yourself, alert on changes, self-host | [Self-hosting the watchdog](#self-hosting-the-watchdog) — provider keys, Discord webhook, cron host |
+
+## Query the catalogue over MCP
+
+`free-inference-watchdog-mcp` is a read-only MCP server over the published
+catalogue, speaking MCP **stdio**. It exposes five tools — `search_models`,
+`get_model`, `list_endpoints`, `list_free_models` and `watchdog_status` — and
+answers from one validated catalogue snapshot.
+
+A consumer needs Python 3.11+ and an MCP client that can launch a local stdio
+server. A consumer does **not** need provider API keys, a Discord webhook, a
+cron job, `providers/`, `state/`, the watchdog tick, or this checkout: the
+installed package carries the query core, the reviewed tool contract and the
+stdio server, and nothing else.
+
+**Querying the catalogue is not inference.** Reading it never calls a provider,
+never spends a credit and never grants access to a model. To actually run a
+model you need your own credentials with that gateway, under that gateway's own
+rules and terms — nothing here supplies, proxies or bypasses them. Nor is this a
+hosted endpoint: the server is a LOCAL process that your MCP client launches
+over stdio. This ref exposes no remotely connectable MCP HTTP URL, and no
+browser MCP support (see [WebMCP](#webmcp-planned-not-available)).
+
+### Install the pinned commit
+
+Use the exact commit this page was verified against. A branch name is a moving
+target, so nothing below installs from `master`:
+
+```bash
+# install once, as a tool on your PATH (uv)
+uv tool install "git+https://github.com/Dthen/free-inference-watchdog.git@bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc"
+
+# or with pip into the environment of your choice
+python3 -m pip install "free-inference-watchdog-mcp @ git+https://github.com/Dthen/free-inference-watchdog.git@bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc"
+
+# or run it once without installing
+uvx --from "git+https://github.com/Dthen/free-inference-watchdog.git@bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc" free-inference-watchdog-mcp --help
+```
+
+All three install routes give the same two entry points: the console command
+`free-inference-watchdog-mcp`, and the equivalent module invocation
+`python3 -m watchdog_catalog`. `--help` needs no catalogue, no credentials and
+no network.
+
+### Choose the catalogue source
+
+Exactly one source is selected per launch, and the choice is a plain flag:
+
+| Selection | Meaning |
+|---|---|
+| `--catalog-url URL` | read the catalogue from this literal `http(s)` URL |
+| `--catalog-file PATH` | read the catalogue from this literal local JSON file |
+| neither | the published remote feed (still gated on rollout — see [Public JSON feed](#public-json-feed-not-yet-published)) |
+| `--cache-dir DIR` | optional; where the validated disk cache is kept |
+
+`--catalog-url` and `--catalog-file` are mutually exclusive, and the path or URL
+is used literally — no tilde expansion, no trimming, no substitution.
+
+The default feed URL is **not live yet**: `site/catalog.json` has not been
+published on `master` (rollout is pending), so a launch with no source flag
+starts cleanly and then answers every tool call with the fixed
+`source_unavailable` error. That is deliberate — a missing feed is never
+reported as an empty catalogue. Until rollout, point the server at the pinned
+synthetic preview below.
+
+### Generic stdio client configuration
+
+This is the portable part of every stdio client config — a named server with a
+`command` and an argument array. Client-specific spelling (the outer key, the
+config file location, JSON-versus-TOML) varies per client, so check that
+client's own documentation; only `command` and `args` are portable.
+
+```json
+{
+  "mcpServers": {
+    "free-inference-watchdog": {
+      "command": "free-inference-watchdog-mcp",
+      "args": [
+        "--catalog-url",
+        "https://raw.githubusercontent.com/Dthen/free-inference-watchdog/bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc/tests/fixtures/catalog/lookup.json"
+      ]
+    }
+  }
+}
+```
+
+Two notes that save a support round-trip:
+
+- If your client does not inherit your shell `PATH`, give `command` as the
+  absolute path to the installed console instead of the bare name.
+- To read a downloaded copy instead of the URL, swap `--catalog-url` and its
+  value for `--catalog-file` and a path. The two flags are mutually exclusive;
+  do not pass both.
+
+### A worked example (synthetic preview, not live data)
+
+The URL in the block above is the repository's pinned **synthetic** fixture: a
+small, hand-authored catalogue with fake gateways (`synthetic-a`, `synthetic-b`,
+`synthetic-c`). It is published so this walkthrough is executable today; it is
+not the live catalogue and it does not describe real models. Once the feed is
+rolled out, replace it with the default (drop the flag).
+
+The output below is from the installed server at the pinned commit, called
+through a real MCP stdio session. Values are trimmed to the fields that matter
+and are literal — no output is invented:
+
+```json
+{
+  "ok": true,
+  "query": "shared",
+  "returned_count": 2,
+  "total_matches": 2,
+  "counts": {
+    "gateways": 2,
+    "endpoints": 2,
+    "distinct_raw_ids": 1,
+    "marker_group_labels": 1
+  },
+  "provider_staleness": {
+    "synthetic-a": false,
+    "synthetic-b": false,
+    "synthetic-c": false
+  },
+  "source": {
+    "mode": "url",
+    "cached": false,
+    "observation_fresh": false,
+    "warnings": ["tick_stale"]
+  }
+}
+```
+
+What to read out of it: the raw id `vendor/shared` is tracked by two gateways,
+so one search row per gateway is two endpoints but only one distinct raw id. The
+`source` block is provenance, not payload — and it says the observation is
+stale, because the fixture's `tick_epoch` is frozen at the test clock. A stale
+observation is still answered; it is just labelled. Only `ok: true` plus a
+`source` block means the acquisition succeeded, so check `source.warnings`
+before trusting freshness.
+
+`get_model` returns one row per `(provider, raw model_id)` pair, plus
+`exact_matches` for every provider in the snapshot, and always carries the
+absence caveat: gateways rename models inconsistently, so a missing exact id
+does not prove the model is unavailable elsewhere.
+
+### Metadata search semantics
+
+- `search_models` matches a **literal substring** of the raw id, name or
+  description, ASCII case-insensitive only. There is no regular expression, no
+  fuzzy or alias matching, and metadata arrays (modalities, supported
+  parameters) are never text-searched — filter those with their own arguments.
+- Queries and ids are never trimmed. `" REASONING "` is a different query from
+  `"REASONING"`, and a padded id is a different id.
+- Filters combine with AND, and each endpoint is judged on its own provider's
+  metadata — a context length from one gateway is never combined with a
+  capability from another.
+- `min_context_length` qualifies only a **known** context; an unknown (`null`)
+  context fails the filter rather than being treated as zero.
+- `limit` (1–200, default 50) and `offset` page the result; `total_matches` is
+  the count before paging. An empty or beyond-end page is a success with
+  `returned_count: 0`, not an error.
+
+The complete field-by-field rules — exact envelopes, ordering, warning
+vocabulary and error shapes — are frozen in *Published catalogue snapshot (v1)
+— contract draft* below.
+
+### What the catalogue cannot tell you
+
+- **Observation age comes from the snapshot**, never from when you downloaded
+  it. A fresh download of an old `tick_epoch` is still stale.
+- **Provider staleness is not tick age.** A provider can be stale during a
+  fresh tick (its fetch failed and last-known-good ids were carried forward),
+  and every provider can be healthy during an old one.
+- **Unknown is not zero.** A `null` `context_length`, modality list or
+  description means the provider did not say — it is never rendered as `0` or
+  `[]`. A known empty `[]` is genuinely empty.
+- **Marker lookups are labels, not identity.** A marker-insensitive match on a
+  `:free`/`-free` style suffix is a labelling convenience and is not proof that
+  two gateways serve the same underlying model.
+- **Exact ids are literal.** Case, padding and delimiters matter; lookups are
+  never repaired into a near match.
+- **A cached answer says so.** `source.cached`, `source.not_modified` and the
+  `cache_fallback` / `refresh_failed` warnings distinguish a live read from a
+  last-known-good replay.
+
+### Public JSON feed (not yet published)
+
+The same catalogue ships as one public JSON document (`site/catalog.json`,
+`schema_version` 1): an integrity-hashed `snapshot_id`, the observation epoch
+`tick_epoch`, the cadence it was measured against, `provider_order`, a
+`providers` map of credential-free projected metadata, and a frozen `warnings`
+list. It is the credential-free contract the MCP server and any future browser
+adapter consume.
+
+**Status:** the document and its schema are frozen, but the feed has not been
+deployed — `site/catalog.json` is absent from `master` today. Do not hard-code
+a production URL for it yet, and do not treat the dashboard as the feed: the
+dashboard is a rendered HTML page and has been live, the machine-readable JSON
+URL has not. The pinned synthetic fixture above is the only working `--catalog-url`
+target in this ref.
+
+Field definitions, nullability and validation rules are in *Published catalogue
+snapshot (v1) — contract draft* below.
+
+### WebMCP (planned, not available)
+
+Browser support is **planned, not available** in this ref: there is no WebMCP
+registration, no in-page adapter and no JavaScript implementation here. When it
+lands it will run inside a page that has the catalogue embedded, which is a
+different thing from the stdio server described above.
+
+To be explicit about a common mix-up: WebMCP is an in-page browser API. It is
+**not** a remotely connectable MCP HTTP URL, and it will not turn this package
+into a hosted server you can point a remote client at. The only transport in
+this ref is local stdio.
+
+---
+
+## Self-hosting the watchdog
+
+Everything above is for consumers querying a published catalogue. Everything
+below is the operator path: run the monitor yourself, page a Discord channel on
+changes, and keep the schedule healthy. It needs provider credentials, a
+webhook and a cron host — a catalogue consumer needs none of them, and following
+these steps will not make the standalone MCP work any differently.
+
+### What it does
 
 Every hour (cadence comes from the cron schedule; `--recheck-delay` only
 sets the ~3-minute confirm nap before a diff is believed), the monitor:
@@ -26,7 +260,7 @@ sets the ~3-minute confirm nap before a diff is believed), the monitor:
    silent unless something goes catastrophically wrong (stderr).
 6. Writes an alive ping to silence the "is it dead?" question.
 
-## Why no Ollama?
+### Why no Ollama?
 
 Ollama Cloud has no free-model concept to track. Cloud usage is metered by
 GPU-time against account plans ($0 Free / $20 Pro / $100 Max) rather than
@@ -35,7 +269,10 @@ models are gated behind paid plans, and none of this is exposed via the API.
 A "free roster" is therefore undefinable for Ollama, so the provider was
 dropped entirely (2026-08-25).
 
-## Quick start
+### Quick start (self-hosting)
+
+Operator shell, inside a clone of this repo. Consumers who only want to query a
+catalogue can stop reading here and use the [MCP quick start](#query-the-catalogue-over-mcp).
 
 ```bash
 cd ~/projects/free-inference-watchdog
