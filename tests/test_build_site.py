@@ -478,7 +478,9 @@ def test_wrapper_build_stage_redirects_stderr_to_log(operator_tick_wrapper):
     assert re.search(r">>\s*state/site_build\.log\s+2>&1", line), (
         f"build stage lost its log: {line}"
     )
-    assert re.search(r"\|\|\s*true\b", line), (
+    # End-anchored: a trailing conjunction (`|| true && echo ...`) pages on
+    # every tick, because `A || true && B` parses as `(A || true) && B`.
+    assert re.search(r"\|\|\s*true\s*$", line), (
         f"never-page conjunction lost (|| true): {line}"
     )
     assert re.search(r"\}\s*2>/dev/null", line), (
