@@ -69,18 +69,34 @@ Exactly one source is selected per launch, and the choice is a plain flag:
 |---|---|
 | `--catalog-url URL` | read the catalogue from this literal `http(s)` URL |
 | `--catalog-file PATH` | read the catalogue from this literal local JSON file |
-| neither | the published remote feed (still gated on rollout — see [Public JSON feed](#public-json-feed-not-yet-published)) |
+| neither | the published remote feed — the default source, rebuilt each tick (see [Public JSON feed](#public-json-feed)) |
 | `--cache-dir DIR` | optional; where the validated disk cache is kept |
 
 `--catalog-url` and `--catalog-file` are mutually exclusive, and the path or URL
 is used literally — no tilde expansion, no trimming, no substitution.
 
-The default feed URL is **not live yet**: `site/catalog.json` has not been
-published on `master` (rollout is pending), so a launch with no source flag
-starts cleanly and then answers every tool call with the fixed
-`source_unavailable` error. That is deliberate — a missing feed is never
-reported as an empty catalogue. Until rollout, point the server at the pinned
-synthetic preview below.
+With no source flag the server reads the live public catalogue:
+
+- **Raw GitHub — the default:**
+  <https://raw.githubusercontent.com/Dthen/free-inference-watchdog/master/site/catalog.json>
+- **Pages mirror:** <https://models.dthen.xyz/catalog.json> — the same document,
+  served by the GitHub Pages site. Pass it to `--catalog-url` explicitly if you
+  prefer it; it is never an implicit failover, because the server does not fall
+  back to a second URL.
+
+"Live" names the default URL, it is not a promise that the URL always answers.
+The source contract is unchanged: a failed fetch with no validated snapshot
+cached yet answers every tool call with the fixed `source_unavailable` error —
+a missing feed is never reported as an empty catalogue — while a validated last
+snapshot that is still cached is served with its real age plus `refresh_failed`
+and `cache_fallback` warnings. The live document also carries the producer's own
+`warnings` list (for example `metadata_missing`), so read `source.warnings`
+before trusting freshness, and remember that a published snapshot says nothing
+about provider health at the moment you read it.
+
+The pinned synthetic preview below still works exactly as before; it is a
+reproducible example, not a substitute for the default. The first client block
+below passes no source flag and therefore reads the live catalogue.
 
 ### Generic stdio client configuration
 
@@ -88,6 +104,24 @@ This is the portable part of every stdio client config — a named server with a
 `command` and an argument array. Client-specific spelling (the outer key, the
 config file location, JSON-versus-TOML) varies per client, so check that
 client's own documentation; only `command` and `args` are portable.
+
+The live default needs no source flag, so the whole configuration is the
+command and an empty `args` array:
+
+```json
+{
+  "mcpServers": {
+    "free-inference-watchdog": {
+      "command": "free-inference-watchdog-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+To reproduce the synthetic walkthrough below against fixed bytes — useful when
+you want exactly the snapshot this page prints, or you are working offline —
+point the same server at the pinned fixture instead:
 
 ```json
 {
@@ -113,11 +147,14 @@ Two notes that save a support round-trip:
 
 ### A worked example (synthetic preview, not live data)
 
-The URL in the block above is the repository's pinned **synthetic** fixture: a
-small, hand-authored catalogue with fake gateways (`synthetic-a`, `synthetic-b`,
-`synthetic-c`). It is published so this walkthrough is executable today; it is
-not the live catalogue and it does not describe real models. Once the feed is
-rolled out, replace it with the default (drop the flag).
+The `--catalog-url` value in the second client block above is the repository's
+pinned **synthetic** fixture: a small, hand-authored catalogue with fake
+gateways (`synthetic-a`, `synthetic-b`, `synthetic-c`). It is published so this
+walkthrough is executable everywhere and prints the same values; it is not live
+catalogue data and it does not describe real models. The live default feed needs
+no flag at all — see *Choose the catalogue source* above — and its
+`snapshot_id`, `tick_epoch` and providers move with every publication, so this
+page cannot print them.
 
 The output below is from the installed server at the pinned commit, called
 through a real MCP stdio session. Values are trimmed to the fields that matter
@@ -329,7 +366,7 @@ vocabulary and error shapes — are frozen in *Published catalogue snapshot (v1)
   labelled local diagnostics outside this payload. `metadata_coverage` counts
   stated metadata fields only, never provider health.
 
-### Public JSON feed (not yet published)
+### Public JSON feed
 
 The same catalogue ships as one public JSON document (`site/catalog.json`,
 `schema_version` 1): an integrity-hashed `snapshot_id`, the observation epoch
@@ -338,17 +375,30 @@ The same catalogue ships as one public JSON document (`site/catalog.json`,
 list. It is the credential-free contract the MCP server and any future browser
 adapter consume.
 
-**Status:** the document and its schema are frozen, but the feed has not been
-deployed — `site/catalog.json` is absent from `master` today. Do not hard-code
-a production URL for it yet, and do not treat the dashboard as the feed: the
-dashboard is a rendered HTML page and has been live, the machine-readable JSON
-URL has not. The pinned synthetic fixture above is this page's working
-`--catalog-url` example, not a restriction on the flag: any URL that serves a
-valid snapshot works, so point `--catalog-url` at your own served copy — or at
-the feed once it is published — and the server behaves the same.
+**Where it lives.** Both routes serve the same document, rebuilt and published
+by the hourly tick:
 
-Field definitions, nullability and validation rules are in *Published catalogue
-snapshot (v1) — contract draft* below.
+| Route | URL | Role |
+|---|---|---|
+| raw GitHub | <https://raw.githubusercontent.com/Dthen/free-inference-watchdog/master/site/catalog.json> | the default: what a launch with no source flag reads |
+| Pages mirror | <https://models.dthen.xyz/catalog.json> | explicit `--catalog-url` alternative; never an automatic fallback |
+
+The dashboard at <https://models.dthen.xyz> is a rendered HTML page, not the
+feed — same catalogue, different artifact, and only one of them is JSON.
+`snapshot_id` and `tick_epoch` move with every publication, so read them from
+the document you fetched rather than copying values from this page.
+
+**Reachability is not guaranteed.** A published URL can be unreachable: with no
+validated snapshot cached the tool call answers the fixed `source_unavailable`
+error, and a validated last snapshot is served from cache with
+`refresh_failed`/`cache_fallback` warnings and its real age. No provider is
+contacted on any of those paths, and a readable snapshot is never a statement
+about current gateway health.
+
+`--catalog-url` is not limited to these two routes: any URL that serves a valid
+snapshot works, so your own served copy behaves the same. Field definitions,
+nullability and validation rules are in *Published catalogue snapshot (v1) —
+contract draft* below.
 
 ### WebMCP (planned, not available)
 
