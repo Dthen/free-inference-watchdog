@@ -12,7 +12,7 @@ boundary behaves:
 * explicit absent path -> nonzero run with the intended path diagnostic, no
                           skip and no fallback to any HOME-shaped location,
 * broken syntax         -> the real ``bash -n`` check rejects it,
-* missing log/never-page-> the real builder-stage assertion rejects it.
+* missing log/never-page-> the real publisher-stage assertion rejects it.
 
 The group drives real bounded pytest subprocesses over EXACTLY the two existing
 operator node IDs, so it never re-enters itself and never runs the watchdog.
@@ -36,10 +36,13 @@ NODE_IDS = (
 
 OPTION = "--operator-tick-wrapper"
 
-# The deployed wrapper's own build-stage contract, reproduced synthetically:
-# stderr appended to the log, never paged, and a failure absorbed by `|| true`.
-BUILDER_LINE = (
-    '    "$PYTHON" build_site.py --root "$ROOT" 2>> state/site_build.log || true\n'
+# The deployed wrapper's own site-stage contract, reproduced synthetically:
+# ONE reviewed publisher call for this checkout (explicit `--root`), the
+# explicit `--push` opt-in, both streams appended to the log, never paged, a
+# failure absorbed by `|| true`, and the redirect-failure message contained.
+PUBLISHER_LINE = (
+    '    { bash scripts/publish_site.sh --root "$PWD" --push'
+    ' >>state/site_build.log 2>&1; } 2>/dev/null || true\n'
 )
 
 POSIX_ONLY = pytest.mark.skipif(
@@ -51,7 +54,7 @@ POSIX_ONLY = pytest.mark.skipif(
 )
 
 
-def _wrapper_body(sentinel: Path, builder_line: str = BUILDER_LINE) -> str:
+def _wrapper_body(sentinel: Path, stage_line: str = PUBLISHER_LINE) -> str:
     """A shell-valid synthetic wrapper whose ``touch`` only fires if EXECUTED.
 
     ``bash -n`` parses it without running it, so a missing sentinel proves the
@@ -65,7 +68,7 @@ def _wrapper_body(sentinel: Path, builder_line: str = BUILDER_LINE) -> str:
         'ROOT="${ROOT:-$HOME/.hermes/inference-watchdog}"\n'
         f"touch {sentinel}\n"
         'cd "$ROOT" || exit 0\n'
-        + builder_line
+        + stage_line
     )
 
 
@@ -174,18 +177,18 @@ def test_operator_opt_in_boundary(tmp_path):
     assert "skipped" not in absent_run.stdout, absent_out
     assert not sentinel_absent.exists(), "absent-path run fell back to HOME"
 
-    # 4. Syntactically invalid wrapper that KEEPS the valid builder/log line:
+    # 4. Syntactically invalid wrapper that KEEPS the valid publisher/log line:
     #    the real `bash -n` check must be the thing that rejects it.
     home_syntax = tmp_path / "home-syntax"
     home_syntax.mkdir()
     bad_syntax = tmp_path / "synthetic-invalid-syntax.sh"
     bad_syntax.write_text(
         "#!/usr/bin/env bash\n"
-        "# Synthetic fixture: builder stage is correct, the syntax is broken.\n"
+        "# Synthetic fixture: publisher stage is correct, the syntax is broken.\n"
         "set -u\n"
         'PYTHON="${PYTHON:-python3}"\n'
         'ROOT="${ROOT:-$HOME/.hermes/inference-watchdog}"\n'
-        + BUILDER_LINE
+        + PUBLISHER_LINE
         + "done\n",
         encoding="utf-8",
     )
@@ -205,15 +208,19 @@ def test_operator_opt_in_boundary(tmp_path):
     assert "syntax error" in syntax_out, syntax_out
     assert "build stage lost its log" not in syntax_out, syntax_out
 
-    # 5. Shell-valid wrapper whose builder stage drops the stderr log append and
-    #    the `|| true` never-page tail: the real log assertion must reject it.
+    # 5. Shell-valid wrapper whose publisher stage keeps the delegation, the
+    #    root and the never-page tail but drops the stderr log append: the real
+    #    log assertion must reject it.
     home_log = tmp_path / "home-log"
     home_log.mkdir()
     no_log = tmp_path / "synthetic-no-log.sh"
     no_log.write_text(
         _wrapper_body(
             tmp_path / "sentinel-no-log",
-            builder_line='    "$PYTHON" build_site.py --root "$ROOT" > state/site_build.log\n',
+            stage_line=(
+                '    { bash scripts/publish_site.sh --root "$PWD" --push'
+                ' >/dev/null 2>&1; } 2>/dev/null || true\n'
+            ),
         ),
         encoding="utf-8",
     )

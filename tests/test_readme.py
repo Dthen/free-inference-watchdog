@@ -10,8 +10,11 @@ vector that is actually launched over MCP stdio below, and the worked example's
 stable values are re-derived from the pinned synthetic fixture rather than
 trusted. The MCP route is pinned as catalogue QUERYING — no provider
 credentials, no cron, no local roster — and it must keep saying that the
-production JSON feed is not published yet and that WebMCP is planned, never a
-remotely connectable MCP HTTP URL. That hand-off must not cost existing readers
+published JSON feed is the DEFAULT source (its raw GitHub URL, with the Pages
+copy documented as a mirror) and that WebMCP is planned, never a remotely
+connectable MCP HTTP URL. The obsolete "feed is not live yet" wording is
+reproduced as a mutation the same predicate rejects, so the correction cannot
+silently regress. That hand-off must not cost existing readers
 anything: the baseline `#quick-start` anchor stays resolvable, and the `source`
 block is pinned as provenance — a last-known-good replay is `ok: true` too, so it
 never doubles as proof that the refresh succeeded.
@@ -154,8 +157,9 @@ def _heading_slugs(text):
     return slugs
 
 
-def _client_config():
-    """The documented generic stdio client block, parsed."""
+def _client_configs():
+    """Every documented generic stdio client block, in document order."""
+    blocks = []
     for language, body in _fenced_languages(_readme()):
         if language != "json":
             continue
@@ -164,21 +168,37 @@ def _client_config():
         except json.JSONDecodeError:
             continue
         if isinstance(document, dict) and "mcpServers" in document:
-            return document
-    raise AssertionError("README has no fenced JSON stdio client block")
+            blocks.append(document)
+    return blocks
 
 
-def _documented_server():
-    """The one documented stdio server entry: ``command`` plus ``args``."""
-    servers = _client_config()["mcpServers"]
+def _server_entry(document):
+    """The one ``command``/``args`` server entry inside a client block."""
+    servers = document["mcpServers"]
     assert list(servers) == ["free-inference-watchdog"], servers
     entry = servers["free-inference-watchdog"]
     assert set(entry) == {"command", "args"}, entry
     return entry
 
 
+def _documented_default_server():
+    """The PRIMARY stdio block: the live default route, with no source flag."""
+    configs = _client_configs()
+    assert configs, "README has no fenced JSON stdio client block"
+    return _server_entry(configs[0])
+
+
+def _documented_preview_server():
+    """The explicitly pinned SYNTHETIC-preview stdio block, if documented."""
+    for document in _client_configs()[1:]:
+        entry = _server_entry(document)
+        if entry["args"][:1] == ["--catalog-url"]:
+            return entry
+    raise AssertionError("README has no pinned synthetic-preview stdio block")
+
+
 def _documented_args():
-    args = list(_documented_server()["args"])
+    args = list(_documented_preview_server()["args"])
     assert args and all(isinstance(arg, str) and arg for arg in args), args
     return args
 
@@ -351,32 +371,71 @@ def test_install_examples_use_the_pinned_immutable_commit():
         assert floating not in lowered, f"floating install ref {floating!r} is back"
 
 
-def test_documented_stdio_client_block_is_a_real_launchable_vector():
-    """The JSON block must carry the real console name and args, and the shipped
-    CLI must actually accept that vector (parsed, not merely spelled)."""
+#: The one documented Pages mirror of the catalogue JSON. It is a mirror only:
+#: no code falls back to it, so it is pinned here as a documentation claim.
+PAGES_MIRROR_URL = "https://models.dthen.xyz/catalog.json"
+
+#: Any GitHub-raw catalogue URL the README writes, whatever the ref segment.
+_RAW_CATALOG_URL = re.compile(
+    r"https://raw\.githubusercontent\.com/Dthen/free-inference-watchdog/"
+    r"[^/\s`)<>]+/site/catalog\.json")
+
+
+def _raw_catalog_urls(text):
+    """Every GitHub-raw catalogue URL in ``text``, de-duplicated and sorted."""
+    return sorted(set(_RAW_CATALOG_URL.findall(text)))
+
+
+def test_documented_default_stdio_block_is_the_live_published_feed():
+    """The PRIMARY client block must select the LIVE default with no source
+    flag, and the URL the README documents must be the shipped
+    ``DEFAULT_CATALOG_URL`` — bound to ``select_source()``, not restated.
+
+    Task 11: the feed is deployed, so an empty ``args`` array is the working
+    vector. A source flag there would pin every reader to a fixture, and a
+    second hand-written URL would drift from the constant the server uses.
+    """
+    from watchdog_catalog import source
     from watchdog_catalog.__main__ import PROGRAM, build_parser, select_source
 
-    entry = _documented_server()
+    entry = _documented_default_server()
     assert PROGRAM == CONSOLE
     assert entry["command"] == CONSOLE, entry["command"]
+    assert entry["args"] == [], (
+        "the documented live default must pass no source flag, got "
+        f"{entry['args']}")
 
-    args = _documented_args()
-    flags = [arg for arg in args if arg in SOURCE_FLAGS]
-    assert len(flags) == 1, f"exactly one source flag expected, got {flags}"
-    flag = flags[0]
-    value = args[args.index(flag) + 1]
-    assert not value.startswith("--"), f"flag {flag} has no value"
+    kind, location = select_source(build_parser().parse_args(entry["args"]))
+    assert (kind, location) == ("url", source.DEFAULT_CATALOG_URL), (kind, location)
 
-    arguments = build_parser().parse_args(args)
-    kind, location = select_source(arguments)
-    assert (kind, location) == (SOURCE_FLAGS[flag], value), (kind, location)
+    section = _section(_readme(), CONSUMER_HEADING)
+    assert source.DEFAULT_CATALOG_URL in section, (
+        "the consumer section never spells out the live default URL")
+    assert _raw_catalog_urls(section) == [source.DEFAULT_CATALOG_URL], (
+        "the documented raw catalogue URL drifted from DEFAULT_CATALOG_URL: "
+        f"{_raw_catalog_urls(section)}")
+    assert PAGES_MIRROR_URL in section, "the Pages mirror URL is undocumented"
 
-    # The block's working target is the pinned SYNTHETIC fixture, labelled as
-    # such — never an unavailable production feed presented as the live route.
-    assert flag == "--catalog-url", flag
-    assert value == PINNED_FIXTURE_URL, value
+
+def test_documented_synthetic_preview_block_is_pinned_and_labelled():
+    """The reproducible preview may stay — but only as an explicitly pinned,
+    explicitly synthetic alternative, never as the only working route."""
+    from watchdog_catalog.__main__ import build_parser, select_source
+
+    entry = _documented_preview_server()
+    args = list(entry["args"])
+    assert args == ["--catalog-url", PINNED_FIXTURE_URL], args
+
+    kind, location = select_source(build_parser().parse_args(args))
+    assert (kind, location) == ("url", PINNED_FIXTURE_URL), (kind, location)
+
     section = _section(_readme(), CONSUMER_HEADING)
     assert "synthetic" in section.lower(), "the fixture preview is not labelled"
+    assert "not live data" in section.lower(), (
+        "the preview is not distinguished from live catalogue data")
+    # The preview must be presented as an OPTION next to the default, not as a
+    # replacement for it: the default block comes first in the document.
+    assert _documented_default_server()["args"] == []
 
 
 def test_documented_cli_flags_exist_in_the_shipped_help():
@@ -482,9 +541,71 @@ def test_worked_example_values_re_derive_from_the_pinned_fixture():
     assert example["source"]["mode"] == "url"
 
 
-def test_consumer_section_labels_the_feed_and_webmcp_as_unavailable():
-    """The JSON feed is documented but explicitly NOT published, and WebMCP is
-    documented as planned — never as shipped, and never as a remote HTTP URL."""
+#: The obsolete "the feed does not exist yet" wording. The catalogue has been
+#: deployed since Task 11, so every one of these clauses is now false. They are
+#: checked in README.md AND AGENTS.md, and planted back as mutations below.
+_OBSOLETE_FEED_CLAIMS = (
+    "not live yet",
+    "not yet published",
+    "has not been published",
+    "not published yet",
+    "absent from master",
+    "stays dead",
+    "rollout is pending",
+    "still gated on rollout",
+)
+
+
+def _obsolete_feed_claims(text):
+    """The obsolete un-deployed-feed clauses ``text`` still asserts."""
+    lowered = _plain(text).lower()
+    return [claim for claim in _OBSOLETE_FEED_CLAIMS if claim in lowered]
+
+
+def test_consumer_section_documents_the_live_feed_as_the_default():
+    """The feed is published, so the consumer route must say so: the raw JSON is
+    the default source, the Pages copy is a MIRROR (never an implicit failover),
+    the dashboard is not the feed, and reachability is not promised forever."""
+    from watchdog_catalog import source
+
+    text = _readme()
+    section = _section(text, CONSUMER_HEADING)
+    lowered = _plain(section).lower()
+
+    assert _obsolete_feed_claims(text) == [], (
+        "the README still claims the feed is unpublished: "
+        f"{_obsolete_feed_claims(text)}")
+
+    assert "### Public JSON feed" in section, "public JSON feed section is gone"
+    assert source.DEFAULT_CATALOG_URL in section, "the live feed URL is missing"
+    assert PAGES_MIRROR_URL in section, "the Pages mirror URL is missing"
+    assert "mirror" in lowered, "the Pages copy is not described as a mirror"
+    assert "failover" in lowered, (
+        "the mirror must be distinguished from an implicit failover")
+
+    for phrase in ("schema_version", "snapshot_id", "tick_epoch",
+                   "provider_order", "providers"):
+        assert f"`{phrase}`" in section, f"feed schema omits {phrase}"
+
+    # "Live" is not a promise of perpetual reachability: the true failure
+    # contract stays documented, and the dashboard stays distinct from the feed.
+    assert "source_unavailable" in lowered, \
+        "the default-route failure mode must be documented"
+    assert "cache_fallback" in lowered, \
+        "the validated-last-snapshot fallback must stay documented"
+    dashboard = _paragraph_with(section, "dashboard")
+    assert "dashboard" in dashboard.lower() and "feed" in dashboard.lower(), \
+        "the dashboard must be distinguished from the JSON feed"
+
+    # Sensitivity: the removed draft wording is caught by the same predicate.
+    planted = f"{text}\nThe default feed URL is **not live yet**.\n"
+    assert _obsolete_feed_claims(planted) == ["not live yet"], (
+        "the obsolete-feed-claim check is not sensitive to a planted claim")
+
+
+def test_consumer_section_keeps_webmcp_planned_and_unavailable():
+    """WebMCP is still planned, not available, and not a remote MCP HTTP URL —
+    a deployed catalogue feed does not deploy a browser adapter."""
     section = _section(_readme(), CONSUMER_HEADING)
     lowered = _plain(section).lower()
 
@@ -495,20 +616,6 @@ def test_consumer_section_labels_the_feed_and_webmcp_as_unavailable():
         "WebMCP must be labelled not available"
     assert "not a remotely connectable mcp http url" in lowered, \
         "WebMCP must be distinguished from a remote MCP HTTP URL"
-
-    assert "## Public JSON feed" in _readme(), "public JSON feed section is gone"
-    assert "not yet published" in lowered, "feed status heading lost its gate"
-    for phrase in ("schema_version", "snapshot_id", "tick_epoch",
-                   "provider_order", "providers"):
-        assert f"`{phrase}`" in section, f"feed schema omits {phrase}"
-
-    assert "not live yet" in lowered, \
-        "the un-deployed default feed must be stated plainly"
-    assert "source_unavailable" in lowered, \
-        "the default-route failure mode must be documented"
-    dashboard = _paragraph_with(section, "dashboard")
-    assert "dashboard" in dashboard.lower() and "feed" in dashboard.lower(), \
-        "the dashboard must be distinguished from the JSON feed"
 
 
 def test_cache_fallback_is_not_documented_as_acquisition_success(tmp_path):
@@ -1599,3 +1706,39 @@ def test_agents_describes_the_tool_schema_contract_it_ships():
     assert _agents_denies_resource_schema(planted), (
         "the stale-resource-claim check is not sensitive to a planted wrong claim"
     )
+
+
+# ---------- AGENTS.md deployed-feed claims (unit 11d1) ----------
+#
+# AGENTS.md carried the same pre-deployment status as the README: the feed was
+# described as absent from master, so the default URL "stays dead". Task 11
+# deployed it. The corrected note is bound to the real default constant and the
+# real Pages mirror URL, and both obsolete sentences are reproduced as
+# mutations the same predicate must reject.
+
+
+def test_agents_documents_the_deployed_default_feed_and_its_mirror():
+    """AGENTS.md must describe the deployed feed: the raw GitHub copy as the
+    default source, the Pages copy as a mirror with no implicit fallback, and
+    no new production authority as a result of deployment."""
+    from watchdog_catalog import source
+
+    text = AGENTS.read_text(encoding="utf-8")
+    lowered = _plain(text).lower()
+
+    assert _obsolete_feed_claims(text) == [], (
+        f"AGENTS.md still claims the feed is unpublished: {_obsolete_feed_claims(text)}")
+    assert source.DEFAULT_CATALOG_URL in text, \
+        "AGENTS.md lost the shipped default feed URL"
+    assert PAGES_MIRROR_URL in text, "AGENTS.md lost the Pages mirror URL"
+    assert "mirror" in lowered and "fallback" in lowered, \
+        "AGENTS.md must call the Pages copy a mirror, not a fallback"
+    assert "never run the publisher" in lowered, \
+        "AGENTS.md lost the rule against running the publisher to check docs"
+
+    # Sensitivity: each removed pre-deployment sentence is caught when planted.
+    for claim in ("site/catalog.json is not published yet",
+                  "so the default feed URL stays dead"):
+        planted = f"{text}\n- {claim}.\n"
+        assert _obsolete_feed_claims(planted), (
+            f"the obsolete-feed-claim check misses {claim!r}")
