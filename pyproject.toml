@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "free-inference-watchdog-mcp"
+version = "0.1.0"
+description = "Read-only MCP server and pure query core over the published free-inference model catalogue."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "ISC"
+license-files = ["LICENSE"]
+dependencies = ["mcp>=2,<3"]
+
+[project.scripts]
+free-inference-watchdog-mcp = "watchdog_catalog.__main__:main"
+
+# The wheel carries exactly one package and its reviewed tool-contract
+# resource. Producer scripts, provider/state/cron/site/assets/tests and
+# credentials stay out: explicit selection, no flat-layout auto-discovery and
+# no include-package-data scan.
+[tool.setuptools]
+packages = ["watchdog_catalog"]
+py-modules = []
+include-package-data = false
+
+[tool.setuptools.package-data]
+watchdog_catalog = ["tools.json"]

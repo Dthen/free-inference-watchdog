@@ -1,0 +1,605 @@
+{
+  "description": "Labelled raw-JSON acceptance/rejection RULE TABLE for the published catalogue boundary (unit 1d-c2b1). Explicitly NOT a snapshot and NOT a query result: it is a RULE TABLE whose expected envelopes and decoded values are handwritten literals, never computed by an implementation. Every raw document is preserved as a STRING inside this valid table JSON, so malformed lexemes survive intact.",
+  "raw_json_rule": "Raw JSON validation runs BEFORE any structural schema check. An intended raw failure yields one literal envelope: exactly ok+error, ok strictly false, error exactly code+message = invalid_json / Invalid catalogue JSON. Every integer token is checked EXACTLY, before any precision-losing conversion, against [-9007199254740991, 9007199254740991]; floating/exponent tokens convert with normal binary64 semantics and reject nonfinite or integer-valued results outside that range, so unsafe integers reject in every notation. Duplicate member names reject at EVERY object nesting (including decoded escape-equivalent keys); a name repeated in two separate objects is fine and different case is distinct. MAX_JSON_DEPTH is 64 inclusive: a root container is depth 1, each nested array/object adds 1, both kinds count, a root scalar is depth 0, and quoted brackets never count. Strict JSON syntax is required with no BOM stripping, trimming or sanitizing.",
+  "invalid_cases": [
+    {
+      "id": "raw_invalid_empty_string",
+      "category": "syntax",
+      "json_text": "",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_whitespace_only",
+      "category": "syntax",
+      "json_text": "  \n\t ",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_truncated_object",
+      "category": "syntax",
+      "json_text": "{\"a\":",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_truncated_array",
+      "category": "syntax",
+      "json_text": "[1,2",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_comment",
+      "category": "syntax",
+      "json_text": "{\"a\": 1 /* comment */}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_trailing_data",
+      "category": "syntax",
+      "json_text": "{} {}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_trailing_comma_array",
+      "category": "syntax",
+      "json_text": "[1,2,]",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_trailing_comma_object",
+      "category": "syntax",
+      "json_text": "{\"a\":1,}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_unquoted_member",
+      "category": "syntax",
+      "json_text": "{a:1}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_single_quotes",
+      "category": "syntax",
+      "json_text": "{'a':1}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_leading_zero_integer",
+      "category": "syntax",
+      "json_text": "{\"a\":01}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_plus_prefixed_number",
+      "category": "syntax",
+      "json_text": "{\"a\":+1}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_malformed_escape",
+      "category": "syntax",
+      "json_text": "\"a\\x\"",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_raw_control_in_string",
+      "category": "syntax",
+      "json_text": "\"a\tb\"",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_bom_at_start",
+      "category": "syntax",
+      "json_text": "\ufeff{}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_nan_constant",
+      "category": "nonfinite_constant",
+      "json_text": "NaN",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_infinity_constant",
+      "category": "nonfinite_constant",
+      "json_text": "Infinity",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_negative_infinity_constant",
+      "category": "nonfinite_constant",
+      "json_text": "-Infinity",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_overflow_positive",
+      "category": "overflow",
+      "json_text": "1e400",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_overflow_negative",
+      "category": "overflow",
+      "json_text": "-1e400",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_unsafe_int_positive",
+      "category": "unsafe_integer",
+      "json_text": "9007199254740992",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_unsafe_int_negative",
+      "category": "unsafe_integer",
+      "json_text": "-9007199254740992",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_unsafe_decimal_positive",
+      "category": "unsafe_float",
+      "json_text": "9007199254740992.0",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_unsafe_decimal_negative",
+      "category": "unsafe_float",
+      "json_text": "-9007199254740992.0",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_unsafe_exponent_positive",
+      "category": "unsafe_float",
+      "json_text": "1e16",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_unsafe_exponent_negative",
+      "category": "unsafe_float",
+      "json_text": "-1e16",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_nested_unsafe_number",
+      "category": "nested_unsafe",
+      "json_text": "{\"a\": [{\"b\": 9007199254740993}]}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_duplicate_exact",
+      "category": "duplicate",
+      "json_text": "{\"a\":1,\"a\":2}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_duplicate_escaped_equivalent",
+      "category": "duplicate",
+      "json_text": "{\"a\":1,\"\\u0061\":2}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_duplicate_nested_object",
+      "category": "duplicate",
+      "json_text": "{\"x\":{\"b\":1,\"b\":2}}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_duplicate_array_contained",
+      "category": "duplicate",
+      "json_text": "[{\"c\":1,\"c\":1}]",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_duplicate_in_separate_inner_object",
+      "category": "duplicate",
+      "json_text": "{\"a\":1,\"b\":{\"c\":1,\"c\":2}}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_depth65_array",
+      "category": "depth",
+      "json_text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_depth65_object",
+      "category": "depth",
+      "json_text": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":0}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    },
+    {
+      "id": "raw_invalid_depth65_mixed",
+      "category": "depth",
+      "json_text": "[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[0]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]",
+      "expect": {
+        "ok": false,
+        "error": {
+          "code": "invalid_json",
+          "message": "Invalid catalogue JSON."
+        }
+      }
+    }
+  ],
+  "valid_controls": [
+    {
+      "id": "raw_valid_safe_int_max",
+      "category": "boundary",
+      "json_text": "9007199254740991",
+      "expect": 9007199254740991
+    },
+    {
+      "id": "raw_valid_safe_int_min",
+      "category": "boundary",
+      "json_text": "-9007199254740991",
+      "expect": -9007199254740991
+    },
+    {
+      "id": "raw_valid_fractional_float",
+      "category": "float",
+      "json_text": "0.5",
+      "expect": 0.5
+    },
+    {
+      "id": "raw_valid_integral_float_token",
+      "category": "float",
+      "json_text": "1.0",
+      "expect": 1.0
+    },
+    {
+      "id": "raw_valid_negative_float_zero",
+      "category": "float",
+      "json_text": "-0.0",
+      "expect": -0.0
+    },
+    {
+      "id": "raw_valid_rounded_down_fraction",
+      "category": "float",
+      "json_text": "1.0000000000000001",
+      "expect": 1.0
+    },
+    {
+      "id": "raw_valid_rounded_boundary_integral",
+      "category": "float",
+      "json_text": "9007199254740991.1",
+      "expect": 9007199254740991.0
+    },
+    {
+      "id": "raw_valid_underflow_to_zero",
+      "category": "float",
+      "json_text": "1e-400",
+      "expect": 0.0
+    },
+    {
+      "id": "raw_valid_subnormal_min",
+      "category": "float",
+      "json_text": "5e-324",
+      "expect": 5e-324
+    },
+    {
+      "id": "raw_valid_unsafe_digits_as_string",
+      "category": "string",
+      "json_text": "\"9007199254740992\"",
+      "expect": "9007199254740992"
+    },
+    {
+      "id": "raw_valid_nonfinite_name_as_string",
+      "category": "string",
+      "json_text": "\"NaN\"",
+      "expect": "NaN"
+    },
+    {
+      "id": "raw_valid_exponent_as_string",
+      "category": "string",
+      "json_text": "\"1e16\"",
+      "expect": "1e16"
+    },
+    {
+      "id": "raw_valid_case_distinct_keys",
+      "category": "duplicate_ok",
+      "json_text": "{\"A\": 1, \"a\": 2}",
+      "expect": {
+        "A": 1,
+        "a": 2
+      }
+    },
+    {
+      "id": "raw_valid_same_key_separate_objects",
+      "category": "duplicate_ok",
+      "json_text": "{\"x\": {\"a\": 1}, \"y\": {\"a\": 2}}",
+      "expect": {
+        "x": {
+          "a": 1
+        },
+        "y": {
+          "a": 2
+        }
+      }
+    },
+    {
+      "id": "raw_valid_escaped_key_decoded",
+      "category": "duplicate_ok",
+      "json_text": "{\"\\u0061\": 1}",
+      "expect": {
+        "a": 1
+      }
+    },
+    {
+      "id": "raw_valid_quoted_brackets_only",
+      "category": "string",
+      "json_text": "\"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"",
+      "expect": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    },
+    {
+      "id": "raw_valid_escaped_quote_and_backslash",
+      "category": "string",
+      "json_text": "\"a\\\"b\\\\\"",
+      "expect": "a\"b\\"
+    },
+    {
+      "id": "raw_valid_depth64_array",
+      "category": "depth",
+      "json_text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "expect_depth": 64,
+      "expect_kind": "array"
+    },
+    {
+      "id": "raw_valid_depth64_object",
+      "category": "depth",
+      "json_text": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":0}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+      "expect_depth": 64,
+      "expect_kind": "object"
+    },
+    {
+      "id": "raw_valid_depth64_mixed",
+      "category": "depth",
+      "json_text": "[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":[{\"a\":0}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]",
+      "expect_depth": 64,
+      "expect_kind": "mixed"
+    },
+    {
+      "id": "raw_valid_root_null",
+      "category": "root_primitive",
+      "json_text": "null",
+      "expect": null
+    },
+    {
+      "id": "raw_valid_root_true",
+      "category": "root_primitive",
+      "json_text": "true",
+      "expect": true
+    },
+    {
+      "id": "raw_valid_root_false",
+      "category": "root_primitive",
+      "json_text": "false",
+      "expect": false
+    },
+    {
+      "id": "raw_valid_root_number",
+      "category": "root_primitive",
+      "json_text": "42",
+      "expect": 42
+    },
+    {
+      "id": "raw_valid_root_string",
+      "category": "root_primitive",
+      "json_text": "\"hello\"",
+      "expect": "hello"
+    },
+    {
+      "id": "raw_valid_root_empty_array",
+      "category": "root_primitive",
+      "json_text": "[]",
+      "expect": []
+    },
+    {
+      "id": "raw_valid_root_empty_object",
+      "category": "root_primitive",
+      "json_text": "{}",
+      "expect": {}
+    }
+  ]
+}

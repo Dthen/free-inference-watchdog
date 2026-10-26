@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "4eafc72800506567368805dad7f6f354d87dc06049efd4d3902d8873198ea389",
+  "tick_epoch": 1759200000,
+  "cadence_s": 3600,
+  "provider_order": [
+    "synthetic-a",
+    "synthetic-b"
+  ],
+  "providers": {
+    "synthetic-a": {
+      "display_name": "Synthetic Alpha",
+      "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [
+        "alpha-1:free",
+        "alpha-2-free"
+      ],
+      "models": {
+        "alpha-1:free": {
+          "id": "alpha-1:free",
+          "name": "Alpha One",
+          "description": "Synthetic model one for the contract freeze.",
+          "context_length": 32768,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature",
+            "max_tokens"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        },
+        "alpha-2-free": {
+          "id": "alpha-2-free",
+          "name": "Alpha Two",
+          "description": null,
+          "context_length": 8192,
+          "architecture": {
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          },
+          "supported_parameters": [
+            "temperature"
+          ],
+          "pricing": {
+            "prompt": "0",
+            "completion": "0"
+          }
+        }
+      },
+      "stale": false
+    },
+    "synthetic-b": {
+      "display_name": "Synthetic Beta",
+      "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
+      "api_type": "openai",
+      "model_ids": [],
+      "models": {},
+      "stale": false
+    }
+  },
+  "warnings": []
+}

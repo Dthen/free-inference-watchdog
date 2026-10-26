@@ -1,0 +1,110 @@
+{
+  "description": "Ordering-rule vector table for the published catalogue contract (unit 1d-a). This document is NOT a snapshot and NOT a query result: it is a hand-authored, clearly-labelled table of adversarial raw model IDs and their literal expected natural order. Every 'expected' array is literal, never computed by an implementation. It exists so the provider-display-order + natural-raw-ID-order rule is pinned before any runtime extraction.",
+  "ordering_rule": "Provider precedence is the index in provider_order (never alphabetic key order); within a provider, raw IDs compare by the natural comparator: only maximal ASCII [0-9]+ runs are digit runs, compared by ORIGINAL digit count then lexical ASCII digits (no integer/float conversion, no leading-zero stripping); text segments compare case-sensitively by Unicode code point (no case folding, locale collation, Unicode normalization or UTF-16 code-unit comparison); digit-run tokens precede text tokens; on a strict prefix the shorter token sequence sorts first; literal raw IDs are never rewritten.",
+  "cases": [
+    {
+      "id": "ascii_natural_runs_and_leading_zeroes",
+      "why": "Natural order keeps the ORIGINAL digit count, then lexical ASCII digits: item1/item2 (1 digit) < item02/item10 (2 digits, 02 < 10) < item000 (3 digits). Numeric-value normalization would move item000 (== 0) to the front; leading zeroes are never stripped.",
+      "input": [
+        "vendor/item000",
+        "vendor/item10",
+        "vendor/item02",
+        "vendor/item2",
+        "vendor/item1"
+      ],
+      "expected": [
+        "vendor/item1",
+        "vendor/item2",
+        "vendor/item02",
+        "vendor/item10",
+        "vendor/item000"
+      ]
+    },
+    {
+      "id": "long_equal_length_runs_reverse_supplied",
+      "why": "Two 64-digit runs differing only in the final digit, supplied in REVERSE correct order: length is equal so the comparison is lexical on the ASCII digits and ...91 precedes ...92. Float conversion of both runs yields the SAME double, so a float-based key collides and leaves the reversed input untouched.",
+      "input": [
+        "vendor/long9999999999999999999999999999999999999999999999999999999999999992",
+        "vendor/long9999999999999999999999999999999999999999999999999999999999999991"
+      ],
+      "expected": [
+        "vendor/long9999999999999999999999999999999999999999999999999999999999999991",
+        "vendor/long9999999999999999999999999999999999999999999999999999999999999992"
+      ]
+    },
+    {
+      "id": "long_adjacent_run_length_shorter_first",
+      "why": "Adjacent run lengths: a 64-digit run precedes a 65-digit run whatever their numeric values, because the original digit count is compared first.",
+      "input": [
+        "vendor/long11111111111111111111111111111111111111111111111111111111111111111",
+        "vendor/long1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      "expected": [
+        "vendor/long1111111111111111111111111111111111111111111111111111111111111111",
+        "vendor/long11111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    },
+    {
+      "id": "mixed_ascii_arabic_indic_and_superscript",
+      "why": "Boundary strings '2', '10', 'a', superscript two and Arabic-Indic one: only maximal ASCII [0-9]+ runs are digit runs ('2' len 1, '10' len 2), digit runs precede text tokens, and the text tokens compare by code point (a U+0061 < superscript-two U+00B2 < Arabic-Indic-one U+0661). str.isdigit()/\\d/Number() classify the two non-ASCII characters as numeric and are NOT the contract.",
+      "input": [
+        "١",
+        "²",
+        "a",
+        "10",
+        "2"
+      ],
+      "expected": [
+        "2",
+        "10",
+        "a",
+        "²",
+        "١"
+      ]
+    },
+    {
+      "id": "bmp_astral_code_point_and_ascii_case",
+      "why": "Code-point order: 'vendor/B' < 'vendor/a' proves no case folding; 'vendor/Ａ' (U+FF21, BMP) precedes 'vendor/😀' (U+1F600, astral) even though native UTF-16 code-unit order reverses them (surrogate D83D < FF21).",
+      "input": [
+        "vendor/😀",
+        "vendor/a",
+        "vendor/Ａ",
+        "vendor/B"
+      ],
+      "expected": [
+        "vendor/B",
+        "vendor/a",
+        "vendor/Ａ",
+        "vendor/😀"
+      ]
+    },
+    {
+      "id": "prefix_and_trailing_text_empty_token",
+      "why": "Equal token prefix then trailing text: the empty boundary text token of 'vendor/item1' is preserved and the shorter sequence sorts first, then '-' (U+002D) < 'a' (U+0061).",
+      "input": [
+        "vendor/item1a",
+        "vendor/item1-suffix",
+        "vendor/item1"
+      ],
+      "expected": [
+        "vendor/item1",
+        "vendor/item1-suffix",
+        "vendor/item1a"
+      ]
+    },
+    {
+      "id": "equal_run_length_lexical_and_value_ties",
+      "why": "Leading-zero numeric-value ties: 1, 01 and 001 all have numeric value 1, but the runs are compared by original digit count (1 < 2 < 3) with the zeroes retained.",
+      "input": [
+        "vendor/x001",
+        "vendor/x01",
+        "vendor/x1"
+      ],
+      "expected": [
+        "vendor/x1",
+        "vendor/x01",
+        "vendor/x001"
+      ]
+    }
+  ]
+}

@@ -1,8 +1,11 @@
 state/
-# Dashboard publish: only the built index.html is tracked (CI uploads it to
-# GitHub Pages); every other file under site/ stays local-only.
+# Public artifact publish: only the two generated public artifacts are tracked
+# (CI uploads index.html to GitHub Pages; catalog.json is the public snapshot
+# contract). Build locks, temp files and every other file under site/ stay
+# local-only.
 site/*
 !site/index.html
+!site/catalog.json
 __pycache__/
 *.pyc
 .pytest_cache/

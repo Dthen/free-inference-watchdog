@@ -1,10 +1,50 @@
 # AGENTS.md — Free Inference Watchdog
 
 ## Hard rules
-- Python stdlib only (the guarded `mcp` SDK import in mcp_server.py is the sole exception).
+- Python stdlib only. Exactly two SHIPPED modules import the MCP SDK/Pydantic: the guarded `mcp` import in `mcp_server.py` (scoped to its legacy local route) and the standalone transport `watchdog_catalog/server.py`; `watchdog_catalog/__main__.py` imports that transport LAZILY, after argparse has finished. Test modules may import `mcp` to speak the protocol — no other shipped module may.
 - Zero LLM tokens: the cron job is script-mode `--no-agent`; no LLM is ever woken.
 - One tick per invocation: `python3 inference_watchdog.py` fetches, diffs, exits.
 - Empty stdout = healthy-silent; diagnostics go to stderr. Exit codes: 0 normal, 1 partial provider failure / bootstrap refused, 2 fatal.
+
+## Producer vs catalogue consumer
+- The PRODUCER is this checkout: `inference_watchdog.py`, `config_loader.py`, `providers/*.json`, `state/`, the cron wrappers, `catalog_export.py` and `build_site.py`. Monitoring, local provider configuration, credentials and the private roster are producer authority and stay here.
+- A CONSUMER is the installed `free-inference-watchdog-mcp` console command (or `python -m watchdog_catalog`). It answers from exactly ONE explicitly selected published snapshot — `--catalog-url URL`, `--catalog-file PATH`, or the default published feed when neither is given. It needs no Hermes, no provider credentials, no local roster, no cron job and no checkout, and it never performs provider inference or a probe. A consumer query can say a model is tracked and free; only the consumer's own credentials can run it.
+- Imports point ONE way. `catalog_export.py`, `mcp_server.py` and `build_site.py` import the stdlib core; `watchdog_catalog/catalog.py`, `watchdog_catalog/query.py` and `watchdog_catalog/source.py` import no producer module. Never add a producer import to the consumer package, and never add a local-state fallback to a consumer path.
+- README.md is the user-facing contract: `## Query the catalogue over MCP` for consumers, `## Self-hosting the watchdog` for operators, `## Published catalogue snapshot (v1)` for the frozen schema. Change code and README together.
+
+## `watchdog_catalog/` — what each module owes
+- `watchdog_catalog/__init__.py` — inert package root. No imports, no I/O, no configuration or credential read, no server or acquisition start. Importing the package must stay a no-op.
+- `watchdog_catalog/catalog.py` — stdlib raw-JSON acceptance, structural snapshot validation, the snapshot hash and the pure public model projection. No I/O, no clock, no SDK.
+- `watchdog_catalog/query.py` — the PURE query core: the marker stripper, ordering and the five tool payloads. Imports only `re`/`copy`/`math` plus catalog predicates; no source, clock, state or configuration access.
+- `watchdog_catalog/source.py` — the explicit acquisition/cache layer. Its loaders, `DiskCache`, `CatalogSource` and `AsyncCatalogSource` legitimately do file, HTTP and cache I/O, but only when called: construction validates configuration, the asynchronous owner takes caller-supplied clocks, and no module-level code reads a file or the network.
+- `watchdog_catalog/server.py` — the ONLY package module that imports the SDK and Pydantic: annotation-derived typed registrations, the reviewed `tools.json` descriptions copied into the generated schema, and `create_server`. It reimplements no query, matching, ordering, retry or cache logic.
+- `watchdog_catalog/__main__.py` — source selection (`--catalog-url` / `--catalog-file` mutually exclusive, `--cache-dir`) and the stdio launch. Parsing and `--help` complete before the transport is imported, so help works with no feed, no SDK and no cache.
+- `watchdog_catalog/tools.json` — the shared, transport-independent schema-and-prose CONTRACT for the five tools: the reviewed tool/parameter descriptions AND every tool's full `inputSchema` (`type`, `properties`, `required`, `additionalProperties`, parameter types, patterns and defaults). It is packaged as the one MCP resource and also rendered into the dashboard island. The narrower rule belongs to the transport integration, not to this file: `watchdog_catalog/server.py` derives the advertised schema from the Python signatures and their constrained aliases, proves the generated property-name set equals the reviewed one, and then copies only the reviewed DESCRIPTION text in — so no type, bound, default, requiredness, pattern, item or unknown-argument rule of the live registration is read from here, and the file is never installed as a replacement `inputSchema`. Do not edit either side to move the other's constraints.
+
+Producer-side counterparts: `catalog_export.py` builds and seals ONE snapshot from already-resolved registry records plus a captured roster (pure, no I/O); `build_site.py` derives both public artifacts from that one snapshot; `scripts/publish_site.sh` and `scripts/validate_site.py` gate publication; `mcp_server.py` is the local compatibility route over `state/`.
+
+Keep this map in step with the files. A proposed or renamed module name in this document is a defect.
+
+## Public projection vs the local adapter's raw metadata
+- Everything PUBLIC — the external JSON, the embedded page island, and any feed/installed/embedded consumer result — carries the PROJECTED public model object only: `id`, `name`, `description`, `context_length`, `architecture`, `supported_parameters`, `pricing`. Unknown optional members project to `null`; private and unknown upstream fields are never serialized. No public path may acquire arbitrary raw metadata.
+- The root `mcp_server.py` (local route) still returns the ORIGINAL raw metadata dictionaries for the tracked `(provider, raw id)` pairs it selected — unknown nested upstream fields included, `{}` when the roster carries none or the hierarchy is malformed. That restoration happens in LOCAL output only: it is an output adapter, not a second query engine. `list_free_models`, `get_model`, `list_endpoints` and `watchdog_status` all delegate selection, ordering and counts to the pure core.
+- Provider metadata is still the RAW API object under `roster.json` → `provider_models`. The public projector reads exactly `name`, `description`, `context_length`, `architecture.input_modalities`, `architecture.output_modalities`, `supported_parameters` and `pricing.prompt`/`pricing.completion`; the local adapter hands back the whole object. Any "only three metadata fields are read" claim is stale — keep the projection field set and README's frozen table in step instead, and never change provider detection rules to match either.
+
+## Identity, matching and observation time (accepted — do not relax)
+- Endpoint identity is the exact `(provider, raw model_id)` pair: case-sensitive, untrimmed, never normalised, never merged across providers.
+- A free marker is `free` as a bounded `-`/`:`/`_` segment at either end of an id. Stripping produces a LABEL, not a cross-provider identity, and never rewrites the raw id.
+- Metadata predicates are endpoint-specific. Unknown metadata is UNKNOWN: it never becomes an invented capability, a zero, or a "supported" answer.
+- Observation time is the SNAPSHOT's `tick_epoch`, stamped by the producer's tick. The injected `now` is the QUERY's evaluation/reference time: `watchdog_status` derives `last_tick_age_s = now - tick_epoch`, so retrieving the same snapshot later never re-stamps its observations. Retrieval time, retrieval age and provider staleness are separate statements from observation time.
+- The query core reads NO clock; a wrapper captures a reading and injects it. Clock seams that DO read one: the transport's closure `wall_clock` (default `time.time`, consumed only to supply `watchdog_status`'s `now`), `AsyncCatalogSource`'s `wall_clock` and `monotonic_clock` seams (defaults `time.time` / `time.monotonic`, read at OPERATION time for the captured fetch epoch and refresh scheduling — never at construction), the local adapter's `now=None` fallback, and the producer's tick plus `state.py`. Never claim only the transport and the tick may read a clock, and never move a clock read into the pure core.
+- The rules themselves are frozen in README's contract tables and pinned in `tests/test_catalog.py`, `tests/test_catalog_queries.py`, `tests/test_catalog_source.py` and `tests/test_mcp_protocol.py`. Do not restate or extend them here.
+- Browser-native WebMCP is PLANNED, not implemented: no in-page adapter, no JS parity, and no remotely connectable MCP HTTP URL. The local stdio process is the only transport this ref ships.
+
+## Artifacts and publication
+- `.gitignore` allows exactly two generated site payloads to be tracked: `site/index.html` and `site/catalog.json`. Every other file under `site/` — build locks, temp files, extra payloads — stays local-only. Do not widen that exception.
+- `build_site.py` reads the roster once, captures the resolved registry once, builds ONE validated snapshot, derives the external JSON and the embedded/rendered HTML from that same object, validates the pair in memory, then stages both under one advisory build lock. Two renames are not a transaction: an interrupted or mixed pair is reported as an error and rejected by the pair validator, never repaired or rolled back.
+- `catalog_export.validate_artifact_pair` (re-exported by `build_site`) is the single pair judgement: JSON body hash, embedded island and rendered page must describe the same snapshot. `scripts/validate_site.py` and the Pages workflow call it READ-ONLY before any upload, so a stale, truncated or mismatched pair stops the deploy rather than shipping.
+- `scripts/publish_site.sh` holds its OWN `site/.publish.lock` — a distinct lock from the builder's `site/.build.lock` — runs the real builder, re-validates the exact published bytes, and commits ONLY those two paths in one path-limited commit. An unchanged artifact pair commits NOTHING. A push requires the explicit `--push`, and the candidate is this run's new artifact commit when it made one, otherwise the EXISTING verified HEAD — so a previously committed or previously REJECTED artifact commit is retried on a later run instead of being silently forgotten, while an already-current destination is reported without a redundant push or an empty commit. Every unpublished commit between the observed destination tip and the candidate must be an ordinary single-parent, artifact-only commit whose pair the real validator accepts, so unrelated history is never carried along; a divergent or unknown destination tip fails CLOSED. A zero-exit push is never believed without an exact destination-ref read-back. Nothing is ever forced, rebased, merged, reset, stashed or rolled back — a failure is a report, never permission to repair history. A local-only exit 0 never means "published".
+- `site/catalog.json` is not published yet. Nothing here authorizes a production wrapper cutover, a feed deployment, a public read-back or a Checkpoint B claim. Never run the publisher to "check" documentation.
 
 ## Providers
 - The roster is the set of `providers/*.json` files; user-visible order is each config's `display` field, surfaced via `config_loader.PROVIDERS` (build_site's `DISPLAY_ORDER` and mcp_server's `PROVIDERS` derive from it — no duplicate list lives in module code).
@@ -16,12 +56,14 @@
 - The full field list lives in README.md's schema table. The traps below are what that table cannot say.
 - Optional fields are validated PER-FILE and the type is STRICT: present means valid, and valid means exactly that type. A bad value skips that one config with a `config: skipping ...` stderr warning — it never takes the roster with it. Follow the existing `display` / `removal_hold_seconds` guards.
 - bools must be real JSON booleans. `bool("false")` is `True` and `bool(0)` is `False`, so a quoted `"false"` or a bare `0` silently inverts the operator's intent with no error anywhere. If you add a boolean field, reject anything that is not `isinstance(x, bool)`.
-- Model metadata is stored as the RAW API object under `roster.json` → `provider_models`, nested per gateway. Only three of its fields are ever read: `name` (dashboard row labels), and `context_length` + `architecture.input_modalities` (hover tooltip).
+- Model metadata is stored as the RAW API object under `roster.json` → `provider_models`, nested per gateway. See "Public projection vs the local adapter's raw metadata" for which members the public projector reads and which the local adapter restores.
 
-## Tests & README
+## Tests & docs
 - `python3 -m pytest tests/ -q` fully green before ANY commit.
-- tests/test_readme.py PINS README wording (cron wrapper block, --init/.bak language, silent-cron `--deliver local`). Editing README.md is a code change.
-- One README, not two. providers/README.md was folded into the root README's schema section; the repo carries exactly README.md, AGENTS.md and LICENSE.md.
+- The suite is offline and hermetic. The wheel/install checks need `FREE_INFERENCE_WATCHDOG_WHEELHOUSE` plus `FREE_INFERENCE_WATCHDOG_UV` and the explicit floor/installed/build/smoke interpreter overrides; the two operator read-backs skip with an actionable reason unless `--operator-tick-wrapper=PATH` is passed. No test discovers a provider, a credential or the network.
+- `tests/test_readme.py` EXECUTES the documentation instead of pinning prose: it validates the fenced JSON, parses every shell block, launches the documented stdio vector for real, re-derives the worked results from `tests/fixtures/catalog/lookup.json`, runs both documented wrapper bodies against a stub monitor, and resolves every internal anchor. Editing README.md is a code change — re-run it.
+- The behaviour lives in `tests/test_catalog.py`, `tests/test_catalog_queries.py`, `tests/test_catalog_source.py`, `tests/test_mcp_protocol.py`, `tests/test_distribution.py`, `tests/test_build_site.py`, `tests/test_publish_site.py` and `tests/test_validate_site.py`. Extend THOSE rather than adding a parallel package, query or publication suite, and do not change behaviour just to match a sentence of documentation.
+- One README, not two. providers/README.md was folded into the root README's schema section; the repo carries exactly `README.md`, `AGENTS.md` and `LICENSE`.
 
 ## Deploy ritual
 - Behavior-changing roster edits require a manual `python3 inference_watchdog.py --init` rebaseline (archives roster.json to roster.json.bak), then verify the next tick is SILENT.
@@ -43,9 +85,9 @@
 - The Discord webhook `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in the project-local `.env` is the ONLY alert path.
 - The cron job is silent (`--deliver local`); wrapper failures go to stderr, never stdout.
 
-## Dashboard & MCP
-- site/index.html is rebuilt from state/roster.json by build_site.py each tick and COMMITTED+PUSHED by the cron wrapper — GitHub Pages deploys it to models.dthen.xyz via .github/workflows/deploy-dashboard.yml. Other files under site/ stay gitignored.
-- mcp_server.py exposes list_free_models / get_model / watchdog_status read-only over state/.
+## Dashboard & MCP surface
+- site/index.html is rebuilt from state/roster.json by build_site.py each tick and COMMITTED+PUSHED by the cron wrapper — GitHub Pages deploys it to models.dthen.xyz via .github/workflows/deploy-dashboard.yml, which validates the artifact pair fail-closed BEFORE any upload. Exactly two files under site/ are exempt from the ignore: site/index.html and site/catalog.json; every OTHER file there — build/publish locks, temp files, extra payloads — stays gitignored. The exemption is not a deployment: site/catalog.json is still absent from master, so the default feed URL stays dead and this procedure is unchanged.
+- mcp_server.py exposes list_free_models / get_model / list_endpoints / watchdog_status read-only over state/ (local route). The installed command exposes those four plus search_models over a selected published snapshot.
 
 ## Update cadence
 - Cron schedule `"17 */1 * * *"` and `--cadence-hours` (default 1) must stay in step — the flag drives the ⚠️ missed-tick warning.

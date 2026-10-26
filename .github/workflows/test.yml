@@ -1,0 +1,426 @@
+name: test
+
+# Unit 9a3: the Linux floor/current portion of standalone CI.
+#
+# One Ubuntu job, two Python selections: the declared floor (3.11) and current
+# stable (3.x). Both run the COMPLETE existing POSIX suite -- package,
+# protocol, wheel-only integration, source/cache and the synthetic
+# operator-selection gate. The two deployed-wrapper read-backs stay opt-in and
+# report their actionable skip; nothing here supplies a fixture to fake them.
+#
+# Read-only by design: no publishing, deployment, provider, secret or write
+# permission exists in this workflow. The separate Windows job below runs only
+# the narrow installed-consumer smoke; the POSIX suite stays Linux-only.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux:
+    name: linux / python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Quoted on purpose: unquoted 3.10-style values are YAML floats.
+        python-version: ["3.11", "3.x"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The floor must be a GENUINE CPython 3.11 in every matrix leg, including
+      # the 3.x leg. It is installed first so its documented `python-path`
+      # output is captured before any later setup-python step rewrites PATH.
+      - name: Set up the exact CPython 3.11 floor interpreter
+        id: floor_python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.11"
+          check-latest: true
+          allow-prereleases: false
+
+      - name: Preserve the floor interpreter path
+        env:
+          FLOOR_PYTHON: ${{ steps.floor_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          floor="$FLOOR_PYTHON"
+          test -n "$floor"
+          test -x "$floor"
+          {
+            echo "FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON=$floor"
+          } >> "$GITHUB_ENV"
+          printf 'floor interpreter (setup-python python-path): %s\n' "$floor"
+
+      # Current stable. `allow-prereleases: false` keeps a pre-release out of
+      # the 3.x range even if no GA build satisfied it; `check-latest: true`
+      # asks for the newest matching GA release instead of a stale cached one.
+      - name: Set up the selected matrix interpreter
+        id: matrix_python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          check-latest: true
+          allow-prereleases: false
+
+      - name: Report interpreter identities and prove the floor
+        env:
+          MATRIX_PYTHON: ${{ steps.matrix_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          floor="$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+          printf 'matrix interpreter: %s\n' "$MATRIX_PYTHON"
+          "$MATRIX_PYTHON" -VV
+          printf 'matrix interpreter identity: %s\n' \
+            "$("$MATRIX_PYTHON" -c 'import sys; print(sys.executable)')"
+          printf 'floor interpreter: %s\n' "$floor"
+          "$floor" -VV
+          printf 'python resolved on PATH: %s\n' "$(command -v python)"
+          printf 'pytest interpreter on PATH will be: %s\n' \
+            "$("$MATRIX_PYTHON" -c 'import sys; print(sys.executable)')"
+
+          "$floor" -I -c 'import sys
+          assert sys.implementation.name == "cpython", sys.implementation.name
+          assert sys.version_info[:2] == (3, 11), sys.version_info
+          assert sys.version_info.releaselevel == "final", sys.version_info
+          print("floor is genuine CPython 3.11:", sys.version)'
+
+          "$MATRIX_PYTHON" -I -c 'import sys
+          assert sys.implementation.name == "cpython", sys.implementation.name
+          assert sys.version_info[:2] >= (3, 11), sys.version_info
+          assert sys.version_info.releaselevel == "final", sys.version_info
+          print("selected interpreter is final CPython:", sys.version)'
+
+      # Reviewed prerequisites are provisioned OUTSIDE pytest, pinned to the
+      # reviewed versions. No dependency caching: the wheelhouse below is the
+      # only dependency source the tests are allowed to use.
+      - name: Provision reviewed test and build prerequisites
+        env:
+          MATRIX_PYTHON: ${{ steps.matrix_python.outputs.python-path }}
+          PIP_CONFIG_FILE: /dev/null
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_INPUT: "1"
+        run: |
+          set -euo pipefail
+          "$MATRIX_PYTHON" -m pip install \
+            "pytest==9.1.1" \
+            "setuptools==84.2.1" \
+            "uv==0.13.5" \
+            "mcp==2.3.0" \
+            "pydantic==2.14.1" \
+            "anyio==4.15.1"
+          "$MATRIX_PYTHON" -m pytest --version
+          "$MATRIX_PYTHON" -c 'import setuptools, mcp, pydantic, anyio; print("setuptools", setuptools.__version__)'
+
+      # The floor interpreter is only used to RESOLVE cp311 wheels; pip itself
+      # is a provisioning detail of that one interpreter, never a test import.
+      - name: Provision pip for the floor interpreter
+        run: |
+          set -euo pipefail
+          floor="$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+          if ! "$floor" -m pip --version >/dev/null 2>&1; then
+            "$floor" -m ensurepip --upgrade
+          fi
+          "$floor" -m pip --version
+
+      - name: Download the CPython 3.11 dependency wheel closure
+        env:
+          WHEELHOUSE: ${{ runner.temp }}/wheelhouse
+          PIP_CONFIG_FILE: /dev/null
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_INPUT: "1"
+        run: |
+          set -euo pipefail
+          floor="$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+          mkdir -p "$WHEELHOUSE"
+          "$floor" -m pip download --only-binary=:all: --dest "$WHEELHOUSE" \
+            --index-url https://pypi.org/simple \
+            "mcp==2.3.0" "pydantic==2.14.1" "anyio==4.15.1"
+          "$floor" - "$WHEELHOUSE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          house = Path(sys.argv[1])
+          wheels = sorted(path.name for path in house.glob("*.whl"))
+          pins = {"mcp": "2.3.0", "pydantic": "2.14.1", "anyio": "4.15.1"}
+          present = {}
+          for name in wheels:
+              distribution, version = name.split("-")[:2]
+              present.setdefault(distribution.lower(), set()).add(version)
+          missing = {name: version for name, version in pins.items()
+                     if version not in present.get(name, set())}
+          if missing:
+              raise SystemExit(f"missing reviewed pins {missing} in {wheels}")
+          foreign = [name for name in wheels
+                     if "py3-none-any" not in name and "cp311" not in name]
+          if foreign:
+              raise SystemExit(f"non-cp311 binary wheels: {foreign}")
+          print(f"{len(wheels)} dependency wheels; every binary wheel targets cp311")
+          PY
+          {
+            echo "FREE_INFERENCE_WATCHDOG_WHEELHOUSE=$WHEELHOUSE"
+          } >> "$GITHUB_ENV"
+          ls -1 "$WHEELHOUSE"
+
+      # Runner-owned HOME/TMPDIR and absolute interpreter/tool paths are bound
+      # by value here so a later PATH change cannot silently substitute an
+      # account, a Hermes virtualenv or a different uv.
+      - name: Bind the runner-owned test environment
+        env:
+          MATRIX_PYTHON: ${{ steps.matrix_python.outputs.python-path }}
+          TEST_HOME: ${{ runner.temp }}/test-home
+          TEST_TMPDIR: ${{ runner.temp }}/test-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TEST_HOME" "$TEST_TMPDIR"
+          scripts_dir="$("$MATRIX_PYTHON" -c 'import sysconfig; print(sysconfig.get_path("scripts"))')"
+          uv="$scripts_dir/uv"
+          test -x "$uv"
+          uv_version="$("$uv" --version)"
+          printf 'uv: %s -> %s\n' "$uv" "$uv_version"
+          case "$uv_version" in
+            "uv 0.13.5 "*) ;;
+            *) echo "unexpected uv version: $uv_version" >&2; exit 1 ;;
+          esac
+          {
+            echo "FREE_INFERENCE_WATCHDOG_BUILD_PYTHON=$MATRIX_PYTHON"
+            echo "FREE_INFERENCE_WATCHDOG_SMOKE_PYTHON=$MATRIX_PYTHON"
+            echo "FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON=$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
+            echo "FREE_INFERENCE_WATCHDOG_UV=$uv"
+            echo "HOME=$TEST_HOME"
+            echo "TMPDIR=$TEST_TMPDIR"
+            echo "XDG_CACHE_HOME=$TEST_HOME/.cache"
+            echo "UV_CACHE_DIR=$TEST_HOME/uv-cache"
+          } >> "$GITHUB_ENV"
+
+      - name: Show the bound test environment
+        run: |
+          set -euo pipefail
+          env | LC_ALL=C sort | grep -E \
+            '^(FREE_INFERENCE_WATCHDOG_(FLOOR|INSTALLED|BUILD|SMOKE)_PYTHON|FREE_INFERENCE_WATCHDOG_(UV|WHEELHOUSE)|HOME|TMPDIR|XDG_CACHE_HOME|UV_CACHE_DIR)='
+
+      # Prepares nothing: both interpreters, uv and the wheelhouse are already
+      # in place, so the suite performs no provider, network or credential
+      # discovery. Strict markers plus -rs keep the two intended operator skips
+      # visible with their reason.
+      - name: Run the complete POSIX suite
+        env:
+          MATRIX_PYTHON: ${{ steps.matrix_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "$MATRIX_PYTHON" -m pytest tests -q --strict-markers -rs
+
+  # Unit 9a4: the narrow Windows standalone-consumer smoke. This job proves the
+  # installed wheel and its installer-generated console on a Windows runner; it
+  # deliberately does NOT run the POSIX producer/suite (that stays the linux
+  # job's authority). Every path below is runner-owned, every native exit code
+  # is checked explicitly, and there is no continue-on-error or skip.
+  windows:
+    name: windows / python 3.11 installed consumer
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the exact CPython 3.11 floor interpreter
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.11"
+          check-latest: true
+          allow-prereleases: false
+
+      # Runner-owned HOME/USERPROFILE/cache/temp plus a work directory whose
+      # name contains a space and a non-ASCII character. The smoke copies its
+      # own fixture into paths derived from this one, so Windows path handling
+      # is exercised rather than assumed.
+      - name: Bind owned paths and prove the interpreter
+        env:
+          PYTHON_PATH: ${{ steps.python.outputs.python-path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = $env:PYTHON_PATH
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+            throw "setup-python reported no interpreter: $python"
+          }
+          & $python -VV
+          if ($LASTEXITCODE -ne 0) { throw "interpreter -VV failed" }
+          & $python -c "import sys; assert sys.implementation.name == 'cpython'; assert sys.version_info[:2] == (3, 11); assert sys.version_info.releaselevel == 'final'; print('floor:', sys.version)"
+          if ($LASTEXITCODE -ne 0) { throw "the floor is not final CPython 3.11" }
+
+          $root = Join-Path $env:RUNNER_TEMP 'consumer-smoke'
+          $homeDir = Join-Path $root 'home'
+          $tempDir = Join-Path $root 'tmp'
+          $localAppData = Join-Path $homeDir 'AppData\Local'
+          $neutral = Join-Path $root 'neutral'
+          $work = Join-Path $root ('work space ' + [char]0x00e9)
+          foreach ($directory in @($root, $homeDir, $tempDir, $localAppData, $neutral, $work)) {
+            New-Item -ItemType Directory -Force -Path $directory | Out-Null
+          }
+          if ((Get-ChildItem -LiteralPath $work -Force | Measure-Object).Count -ne 0) {
+            throw "the smoke work directory is not empty: $work"
+          }
+
+          @(
+            "CONSUMER_SMOKE_PYTHON=$python"
+            "CONSUMER_SMOKE_ROOT=$root"
+            "CONSUMER_SMOKE_NEUTRAL=$neutral"
+            "CONSUMER_SMOKE_WORK=$work"
+            "HOME=$homeDir"
+            "USERPROFILE=$homeDir"
+            "LOCALAPPDATA=$localAppData"
+            "TEMP=$tempDir"
+            "TMP=$tempDir"
+            "PIP_DISABLE_PIP_VERSION_CHECK=1"
+            "PIP_NO_INPUT=1"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Reviewed build prerequisites live OUTSIDE the isolated environment; the
+      # wheel is built with the declared backend and no build isolation. Its
+      # dependencies are never resolved here.
+      - name: Provision reviewed build prerequisites and build the wheel
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = $env:CONSUMER_SMOKE_PYTHON
+          $root = $env:CONSUMER_SMOKE_ROOT
+          & $python -m pip install --no-cache-dir "setuptools==84.2.1"
+          if ($LASTEXITCODE -ne 0) { throw "setuptools provisioning failed" }
+          & $python -c "import setuptools; print('setuptools', setuptools.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "setuptools import failed" }
+
+          $dist = Join-Path $root 'dist'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          & $python -m pip wheel --no-deps --no-build-isolation --wheel-dir $dist $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { throw "wheel build failed" }
+
+          $wheels = @(Get-ChildItem -LiteralPath $dist -Filter 'free_inference_watchdog_mcp-*.whl')
+          if ($wheels.Count -ne 1) {
+            throw "expected exactly one built wheel, found $($wheels.Count)"
+          }
+          $wheel = $wheels[0].FullName
+          if ([System.IO.Path]::GetExtension($wheel) -ne '.whl') {
+            throw "the build did not produce a wheel: $wheel"
+          }
+          Write-Host "built wheel: $wheel"
+          "CONSUMER_SMOKE_WHEEL=$wheel" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # PyPI is used only for provisioning this native-platform wheelhouse. The
+      # isolated environment is installed from it OFFLINE, so the smoke itself
+      # cannot acquire anything.
+      - name: Download the native dependency wheelhouse
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = $env:CONSUMER_SMOKE_PYTHON
+          $wheelhouse = Join-Path $env:CONSUMER_SMOKE_ROOT 'wheelhouse'
+          New-Item -ItemType Directory -Force -Path $wheelhouse | Out-Null
+          & $python -m pip download --no-cache-dir --only-binary=:all: --dest $wheelhouse --index-url https://pypi.org/simple "mcp==2.3.0" "pydantic==2.14.1" "anyio==4.15.1"
+          if ($LASTEXITCODE -ne 0) { throw "dependency download failed" }
+
+          $verify = Join-Path $env:CONSUMER_SMOKE_ROOT 'verify_wheelhouse.py'
+          @'
+          import sys
+          from pathlib import Path
+
+          house = Path(sys.argv[1])
+          wheels = sorted(path.name for path in house.glob("*.whl"))
+          pins = {"mcp": "2.3.0", "pydantic": "2.14.1", "anyio": "4.15.1"}
+          present = {}
+          for name in wheels:
+              distribution, version = name.split("-")[:2]
+              present.setdefault(distribution.lower(), set()).add(version)
+          missing = {name: version for name, version in pins.items()
+                     if version not in present.get(name, set())}
+          if missing:
+              raise SystemExit(f"missing reviewed pins {missing} in {wheels}")
+          foreign = [name for name in wheels
+                     if "py3-none-any" not in name and "cp311" not in name]
+          if foreign:
+              raise SystemExit(f"non-cp311 binary wheels: {foreign}")
+          print(f"{len(wheels)} dependency wheels; every binary wheel targets cp311")
+          '@ | Set-Content -LiteralPath $verify -Encoding utf8
+          & $python $verify $wheelhouse
+          if ($LASTEXITCODE -ne 0) { throw "the wheelhouse does not carry the reviewed closure" }
+          "CONSUMER_SMOKE_WHEELHOUSE=$wheelhouse" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # A FRESH PEP 405 environment under runner temp, no system site-packages,
+      # installed OFFLINE from the native wheelhouse plus the built wheel.
+      - name: Create the isolated environment and install offline
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = $env:CONSUMER_SMOKE_PYTHON
+          $root = $env:CONSUMER_SMOKE_ROOT
+          $venv = Join-Path $root 'venv'
+          & $python -m venv --clear $venv
+          if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
+
+          $venvPython = Join-Path $venv 'Scripts\python.exe'
+          $console = Join-Path $venv 'Scripts\free-inference-watchdog-mcp.exe'
+          if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+            throw "the isolated interpreter is missing: $venvPython"
+          }
+          $config = Get-Content -LiteralPath (Join-Path $venv 'pyvenv.cfg')
+          if (-not ($config -match 'include-system-site-packages\s*=\s*false')) {
+            throw "the isolated environment inherits system site-packages"
+          }
+
+          & $venvPython -m pip install --no-cache-dir --no-index --find-links $env:CONSUMER_SMOKE_WHEELHOUSE --only-binary=:all: $env:CONSUMER_SMOKE_WHEEL "mcp==2.3.0" "pydantic==2.14.1" "anyio==4.15.1"
+          if ($LASTEXITCODE -ne 0) { throw "offline install failed" }
+          if (-not (Test-Path -LiteralPath $console -PathType Leaf)) {
+            throw "the installer did not create the console executable: $console"
+          }
+
+          & $venvPython -VV
+          if ($LASTEXITCODE -ne 0) { throw "installed interpreter -VV failed" }
+          & $venvPython -c "import sys, importlib.metadata as m; assert sys.version_info[:2] == (3, 11); assert sys.prefix != sys.base_prefix; versions = {name: m.version(name) for name in ('mcp', 'pydantic', 'anyio')}; assert versions == {'mcp': '2.3.0', 'pydantic': '2.14.1', 'anyio': '4.15.1'}, versions; print('installed:', sys.version); print('prefix:', sys.prefix); print('dependencies:', versions)"
+          if ($LASTEXITCODE -ne 0) { throw "installed dependency identity is wrong" }
+
+          @(
+            "CONSUMER_SMOKE_VENV_PYTHON=$venvPython"
+            "CONSUMER_SMOKE_CONSOLE=$console"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Neutral cwd outside the checkout, absolute script/fixture paths, an
+      # empty owned work directory and the environment's own absolute Python.
+      - name: Run the installed-consumer smoke
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $smoke = Join-Path $env:GITHUB_WORKSPACE 'tests\consumer_smoke.py'
+          $fixtures = Join-Path $env:GITHUB_WORKSPACE 'tests\fixtures\catalog'
+          foreach ($required in @($smoke, $fixtures)) {
+            if (-not (Test-Path -LiteralPath $required)) {
+              throw "missing smoke input: $required"
+            }
+          }
+          if (-not (Test-Path -LiteralPath $env:CONSUMER_SMOKE_NEUTRAL -PathType Container)) {
+            throw "missing neutral working directory: $env:CONSUMER_SMOKE_NEUTRAL"
+          }
+          Push-Location $env:CONSUMER_SMOKE_NEUTRAL
+          try {
+            & $env:CONSUMER_SMOKE_VENV_PYTHON -I $smoke --fixtures $fixtures --console $env:CONSUMER_SMOKE_CONSOLE --work $env:CONSUMER_SMOKE_WORK
+            if ($LASTEXITCODE -ne 0) { throw "the installed-consumer smoke failed" }
+          }
+          finally {
+            Pop-Location
+          }

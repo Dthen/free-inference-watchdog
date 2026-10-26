@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """build_site.py — self-contained static dashboard for the Free Inference Watchdog.
 
-Reads state/roster.json and renders site/index.html: a single dark page whose
-body is a PRESENCE MATRIX — one row per UNIQUE model id across the gateway
-union, one column per gateway, a green (nord14) dot where tracked, a `#`
-column counting the gateways each model reaches, rows sorted alphabetically
-by stripped name, and a footer row of per-gateway totals. Roster keys
-OUTSIDE DISPLAY_ORDER are unknown gateways: they get NO column (their ids
-may still join the union rows). The full roster is INLINED
-as JSON in <script type="application/json" id="roster-data"> so the page is
-fully self-contained (works from file://, no external fetches).
+Reads state/roster.json ONCE and publishes ONE coherent public snapshot as TWO
+artifacts under <root>/site/: ``catalog.json`` (the credential-free external
+export) and ``index.html`` (a single dark page whose body is a PRESENCE MATRIX —
+one row per UNIQUE model id across the gateway union, one column per gateway, a
+green (nord14) dot where tracked, a `#` column counting the gateways each model
+reaches, rows sorted alphabetically by stripped name, and a footer row of
+per-gateway totals). Roster keys OUTSIDE DISPLAY_ORDER are unknown gateways:
+they get NO column (and, on the public route, no published provider entry).
+The page carries the SAME public snapshot inline as
+``<script type="application/json" id="catalog-data">`` plus the shared tool
+definitions as ``<script type="application/json" id="tool-contract">``, so it is
+fully self-contained (works from file://, no external fetches) and never
+publishes the raw private roster.
 
 Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
   - Display order is derived from config_loader.PROVIDERS (sorted by the
@@ -23,8 +27,22 @@ Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
     #d8dee9 @ opacity .72, nord8 accent (counts) #88c0d0, nord9 column
     heads #81a1c1, nord14 dots #a3be8c.
 
-Determinism: same roster.json -> byte-identical HTML. All iteration goes
-through sorted()/DISPLAY_ORDER.
+Determinism: same roster + registry -> byte-identical HTML and JSON. All
+iteration goes through sorted()/DISPLAY_ORDER.
+
+Publication contract (one observation, one snapshot, two artifacts): the CLI
+reads the roster once, captures the already-resolved registry once, builds ONE
+validated public snapshot, and serializes/renders BOTH artifacts from that SAME
+object before either final file is replaced. The prepared pair is validated
+in-memory, both payloads are staged in exclusively-created unique temp files in
+the destination directory, replacement + exact-target read-back are serialized
+under one advisory build lock (POSIX ``fcntl`` flock on ``site/.build.lock``;
+a Windows producer needs a later equivalent), and the published pair is then
+read back from the EXACT final targets and validated again. Two individual
+renames are NOT a transaction: an interruption or a second-replacement I/O
+failure can leave a mixed pair, so that is reported as an ERROR and the pair
+validator rejects it. No rollback is attempted (it could clobber another
+successful writer) and no transactional/power-loss guarantee is claimed.
 
 Logo handling (stdlib-only at build time): assets/logo.png was downscaled
 to 128x128 with PIL during task prep (~31KB, within the <=128px / ~31KB
@@ -32,10 +50,21 @@ budget), so the builder embeds it as-is as a base64 data-URI. The >40KB
 fallback (stdlib PNG chunk parse + zlib + resample) was not needed. The
 builder itself only reads bytes and refuses logos over MAX_LOGO_BYTES.
 
+The shared tool definitions come from the BUILDER's bundled
+``watchdog_catalog/tools.json`` (never from the arbitrary --root fixture
+directory), decoded once through the accepted strict JSON loader and handed to
+the renderer explicitly.
+
 Usage: python3 build_site.py [--root DIR]   (default root = repo dir)
-Exit codes: 0 ok; 2 missing/corrupt roster, a provider value that is not a
-list of model-id strings, or a missing/oversized/unreadable logo — and
-site/index.html is NEVER written on failure (never publish garbage).
+Exit codes: 0 both artifacts published; 2 for a missing/corrupt/structurally
+invalid roster, an invalid registry/snapshot, a missing/oversized/unreadable
+logo, an unusable tool resource, or a serialization/render/validation/staging/
+lock/replacement failure — with stderr diagnostics, empty stdout and, for every
+failure BEFORE replacement begins, BOTH final files left byte-identical (or both
+absent). Failures after the first replacement has begun (an interruption, a
+second-replacement I/O error, or a release/close failure after a valid pair) are
+still reported as exit 2, but only that later failure's own surviving pair is
+claimed: no rollback and no both-last-good promise is made there.
 """
 
 from __future__ import annotations
@@ -44,11 +73,15 @@ import argparse
 import base64
 import json
 import os
-import re
 import sys
-import threading
+import tempfile
 from html import escape
 from pathlib import Path
+
+try:  # POSIX advisory locking for the producer's two-artifact publication.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows producer support is later work
+    fcntl = None
 
 # Probe-verified gateway wiring (single source of truth): see config_loader.py
 # GATEWAY_WIRING. We IMPORT rather than re-hardcode so a probed-URL fix
@@ -58,6 +91,18 @@ from pathlib import Path
 # render, and degrade tests monkeypatch config_loader.load_configs.
 import config_loader  # noqa: E402
 from config_loader import GATEWAY_WIRING, PROVIDERS  # noqa: E402
+
+# The accepted producer adapter: ONE captured roster + ONE captured registry ->
+# ONE validated public snapshot, its deterministic export text, and the pure
+# pair validator. Imported as module names (never inlined) so the CLI pipeline
+# is a single call each and tests can observe the one-shot acquisition.
+from catalog_export import (  # noqa: E402
+    build_snapshot,
+    capture_registry,
+    serialize_snapshot,
+    validate_artifact_pair,
+)
+from watchdog_catalog import catalog  # noqa: E402
 
 # Dthen's quality ranking, derived from config_loader.PROVIDERS (sorted by
 # `display` field in providers/*.json). Single source of truth; a display
@@ -69,28 +114,25 @@ REPO = Path(__file__).resolve().parent
 
 ROSTER_REL = Path("state/roster.json")
 SITE_REL = Path("site/index.html")
+CATALOG_REL = Path("site/catalog.json")
 LOGO_REL = Path("assets/logo.png")
+TOOLS_REL = Path("watchdog_catalog/tools.json")
+BUILD_LOCK_REL = Path("site/.build.lock")
 MAX_LOGO_BYTES = 40 * 1024  # refuse to embed a bloated logo
 
-# Regexes for strip_free_marker: match "free" only at a segment boundary
-# (preceded by a separator for suffix, followed by one for prefix). The
-# separator set is [-:_], matching how gateways tag free ids in practice.
-_FREE_SUFFIX = re.compile(r"[-:_]free$", re.I)
-_FREE_PREFIX = re.compile(r"^free[-:_]", re.I)
+#: The producer's explicit snapshot cadence, matching the operational tick and
+#: the existing local MCP cadence. A literal here (rather than an import of the
+#: watchdog runtime) keeps the builder free of the monitor/state layer; it
+#: changes NO operational cadence.
+BUILD_CADENCE_S = 3600
 
-
-def strip_free_marker(model_id: str) -> str:
-    """Remove ONLY a free marker at a segment boundary. Never fuzzy, never
-    a rename map. If stripping would empty the string, return the input.
-
-    A "free marker" is the substring "free" when it appears as a standalone
-    segment at the start or end of the id, delimited by '-', ':', or '_'.
-    Mid-string occurrences (``freetier``) and occurrences in the namespace
-    portion after a '/' with no further separator are NOT markers.
-    """
-    s = _FREE_SUFFIX.sub("", model_id)
-    s = _FREE_PREFIX.sub("", s)
-    return s or model_id
+# The free-marker stripper and the portable natural raw-ID key now live in the
+# pure, side-effect-free watchdog_catalog.query module (stdlib-only, no
+# config/state/SDK import). These names re-export those exact function objects
+# during the compatibility transition, so existing importers, the legacy
+# adapter and the public renderer never drift from a second copy.
+from watchdog_catalog.catalog import canonical_bytes  # noqa: E402
+from watchdog_catalog.query import natural_key, strip_free_marker  # noqa: E402
 
 
 def load_roster(root):
@@ -159,9 +201,56 @@ def load_logo_b64(root):
 
 
 def _natural_key(s):
-    """Numeric-segment-aware ordering so 'x-2.10' sorts after 'x-2.2'."""
-    return [int(p) if p.isdigit() else p.lower()
-            for p in re.split(r"(\d+)", s)]
+    """Thin private delegate to the accepted portable natural raw-ID key.
+
+    Kept as a name (rather than inlining the import at every call site) so the
+    module's private call surface is unchanged; the ordering RULE itself lives
+    only in ``watchdog_catalog.query.natural_key`` -- ASCII digit runs by run
+    length then digits, every other piece case-sensitively by code point, so a
+    very long digit run, mixed case, leading zeroes and non-ASCII digit
+    lookalikes can never raise the old heterogeneous int/str comparison error.
+    """
+    return natural_key(s)
+
+
+def _script_json(value):
+    """Encode one JSON value as the body of an inert HTML script element.
+
+    Encoding goes through the SAME accepted
+    :func:`watchdog_catalog.catalog.canonical_bytes` used for the whole public
+    snapshot and its export text (UTF-8, code-point sorted keys, compact
+    separators, ``ensure_ascii=True``, finite values only) -- never a second
+    set of JSON encoding or hash rules. That encoder already escapes U+2028 /
+    U+2029, control characters and every non-ASCII character, so the only
+    HTML-relevant literal left is ``<``; the small pure pass below turns each
+    of those into its JSON Unicode escape (and, defensively, ``>`` and ``&``),
+    which is still JSON and still decodes to the identical value.
+
+    Consequence: the body contains no ``<!--``, no ``<script`` and no
+    ``</script`` in any letter case, so it cannot open a comment, open a
+    script element or prematurely close the element it sits in -- the three
+    sequences WHATWG's script-content restrictions key on. Decoding preserves
+    every value, array order and the integer/float/string/null/bool
+    distinction. HTML entity encoding and JavaScript-only ``\\x`` escapes are
+    deliberately NOT used: neither is JSON, and neither survives script-data
+    parsing unchanged.
+    """
+    text = canonical_bytes(value).decode("utf-8")
+    return (text
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026"))
+
+
+def _islands_script(snapshot, tool_contract):
+    """The data-script slot: exactly two inline inert JSON islands, in order."""
+    return (
+        '<script type="application/json" id="catalog-data">'
+        + _script_json(snapshot)
+        + '</script>'
+        '<script type="application/json" id="tool-contract">'
+        + _script_json(tool_contract)
+        + '</script>')
 
 
 def build_provider_header_meta():
@@ -195,7 +284,7 @@ def build_provider_header_meta():
         return {}
 
 
-def build_groups(providers, provider_models):
+def build_groups(providers, provider_models, *, provider_order=None):
     """Group raw ids by their display `name` field, deterministically.
 
     Returns (group_names, groups, endpoints) where:
@@ -204,7 +293,7 @@ def build_groups(providers, provider_models):
       - groups: dict[group_name] -> {
             "gateways": set[str],                  # every gw carrying ANY variant
             "variants": list[(gateway, raw_id)],   # per-(gw,raw) wiring rows, in
-                                                   # DISPLAY_ORDER then natural key
+                                                   # provider order then natural key
           }
       - endpoints: number of distinct (gateway, raw_id) wiring pairs, i.e.
         sum(len(slot["variants"]) for slot in groups.values()). An id
@@ -216,7 +305,14 @@ def build_groups(providers, provider_models):
     Grouping key: the `name` field from each gateway's provider_models entry.
     Fallback: if a model id has no entry in provider_models (e.g. gateway
     fetch failed), use the raw id as the group name (don't crash).
+
+    provider_order: optional keyword-only provider precedence. None (the legacy
+    two-positional-argument shape) means the module DISPLAY_ORDER; an explicit
+    list -- including an EMPTY one -- is used verbatim, never truthiness-fallen
+    back to the global. Every internal provider loop and the variant sort use
+    this order, so a caller can render from its own explicit provider view.
     """
+    order = DISPLAY_ORDER if provider_order is None else list(provider_order)
     raw_ids = sorted({mid for models in providers.values() for mid in models})
     groups: dict = {}
     # Build the per-(gw, raw_id) variant map deterministically: one slot
@@ -226,7 +322,7 @@ def build_groups(providers, provider_models):
     for mid in raw_ids:
         # Find the group name by looking up the `name` field in provider_models
         group_name = mid  # fallback: raw id
-        for gw in DISPLAY_ORDER:
+        for gw in order:
             if mid in providers.get(gw, []):
                 model_info = provider_models.get(gw, {}).get(mid, {})
                 name = model_info.get("name")
@@ -234,13 +330,13 @@ def build_groups(providers, provider_models):
                     group_name = name
                     break  # first gateway with a name wins (stable)
         slot = groups.setdefault(group_name, {"gateways": set(), "variants": []})
-        for gw in DISPLAY_ORDER:
+        for gw in order:
             if mid in providers.get(gw, []):
                 slot["gateways"].add(gw)
                 slot["variants"].append((gw, mid))
     for slot in groups.values():
         slot["variants"].sort(
-            key=lambda pair: (DISPLAY_ORDER.index(pair[0]),
+            key=lambda pair: (order.index(pair[0]),
                               _natural_key(pair[1]))
         )
     group_names = sorted(groups.keys())
@@ -263,13 +359,29 @@ def build_counts(providers):
     return ids, counts
 
 
-def render_page(roster, logo_b64, header_meta=None):
-    """Render the full HTML document as one string (byte-deterministic).
+def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
+                   logo_b64, header_meta, data_script):
+    """Render the ONE shared matrix HTML document from explicit resolved views.
 
-    header_meta: gateway key -> {'signup_url', 'limits_note'} (see
-    build_provider_header_meta). None (default) = derive from the repo's
-    providers/*.json once per render; config load failure degrades to plain
-    headers, never a crash.
+    This private engine owns the single copy of the template, the alphabetical
+    display-name grouping, the per-(gateway, raw id) expansion rows, the counts
+    and the Nord styling. It performs NO roster/registry read, NO logo or header
+    config load and NO I/O: every input is handed in by a thin adapter.
+
+    gateways: explicit provider-ID view -- gateway key -> tracked raw ids. Only
+        keys present here can get a column; an EMPTY list is already filtered
+        out by the adapter (zero-model columns stay hidden).
+    models_by_gateway: per-provider model view -- gateway key -> raw id ->
+        mapping read for `name`, `context_length` and
+        `architecture.input_modalities`. A missing pair stays unknown.
+    provider_order: authoritative provider precedence for columns, group-name
+        selection and variant ordering. An explicit EMPTY list is honoured.
+    wiring: gateway key -> {'chat_completions_url', 'api_type'}.
+    header_meta: explicit trusted gateway -> {'signup_url', 'limits_note'} map;
+        never derived here.
+    data_script: the complete data-script slot markup. The legacy adapter
+        passes its single roster-data island; the public route passes the two
+        inert public islands (catalogue + tool contract).
 
     Rows are GROUPED by stripped name: a model that ships as
     `vendor/x:free` on gateway A and `vendor/x-free` on gateway B renders
@@ -277,31 +389,23 @@ def render_page(roster, logo_b64, header_meta=None):
     gateways reached (so a gateway carrying both variants counts once).
     The <tfoot> per-gateway totals stay RAW per-gateway counts — that is
     the honest "ids tracked per gateway" number and must not change
-    meaning just because the matrix collapsed. The embedded
-    <script id="roster-data"> JSON island keeps the RAW roster verbatim
-    (MCP and any other consumer read raw ids, not groups).
-
-    Providers with zero free models are hidden from the matrix — they
-    clutter the view with an empty column and inflate the gateway chip.
+    meaning just because the matrix collapsed.
     """
-    providers = roster["providers"]
-    # Hide providers with zero free models — they clutter the matrix with
-    # an empty column and inflate the "gateways" chip for no reason.
-    providers = {gw: ids for gw, ids in providers.items() if ids}
-    # Active gateways in display order: only providers with models.
-    active_gateways = [gw for gw in DISPLAY_ORDER if gw in providers]
-    provider_models = roster.get("provider_models", {})
-    group_names, groups, endpoints = build_groups(providers, provider_models)
+    # Active gateways in the caller's provider order: only providers with models.
+    active_gateways = [gw for gw in provider_order if gw in gateways]
+    group_names, groups, endpoints = build_groups(
+        gateways, models_by_gateway, provider_order=provider_order)
 
     def _wire_cell(gw, raw_id):
         """Return the inner-HTML for one (gateway, raw_id) wiring row.
 
-        Imports from GATEWAY_WIRING: the URL column carries the gateway's
-        chat_completions_url, so the reader gets the exact endpoint.
+        Reads the caller's wiring view: the URL and api type come from THAT
+        provider entry, so the reader gets the exact endpoint.
         """
-        w = GATEWAY_WIRING[gw]
-        # config_loader.build_gateway_wiring() always emits chat_completions_url
-        # and api_type for every provider -- the subscripts are safe.
+        w = wiring[gw]
+        # Both wiring sources (the legacy config_loader map and a validated
+        # public provider entry) always carry chat_completions_url and
+        # api_type for an ACTIVE gateway -- the subscripts are safe.
         url_text = w["chat_completions_url"]
         # All visible strings: escaped, monospaced, copy-pasteable.
         return (
@@ -325,7 +429,7 @@ def render_page(roster, logo_b64, header_meta=None):
         ctx_by_val = {}  # {value: set of providers}
         mod_by_val = {}  # {tuple_of_modalities: set of providers}
         for gw, mid in group["variants"]:
-            model_info = provider_models.get(gw, {}).get(mid, {})
+            model_info = models_by_gateway.get(gw, {}).get(mid, {})
             cl = model_info.get("context_length")
             arch = model_info.get("architecture", {})
             im = arch.get("input_modalities")
@@ -393,9 +497,6 @@ def render_page(roster, logo_b64, header_meta=None):
         )
         return name_row + expand_rows
 
-    if header_meta is None:
-        header_meta = build_provider_header_meta()
-
     def _head_cell(gw):
         """Gateway column head: '<gateway>' always visible; wrapped in a
         signup anchor when providers/*.json carries an https:// signup_url,
@@ -422,7 +523,7 @@ def render_page(roster, logo_b64, header_meta=None):
     # tracked per gateway" number and must not change meaning because
     # the matrix collapsed to one row per group above.
     foot_cells = "".join(
-        '<td class="n">%d</td>' % len(providers.get(gw, [])) for gw in active_gateways
+        '<td class="n">%d</td>' % len(gateways.get(gw, [])) for gw in active_gateways
     )
     chips = (
         f'<span class="chip"><b>{len(group_names)}</b> unique models</span>'
@@ -430,13 +531,8 @@ def render_page(roster, logo_b64, header_meta=None):
         f'<span class="chip"><b>{len(active_gateways)}</b> gateways</span>'
     )
     meta = "updated hourly"
-    # sort_keys keeps the embedded JSON byte-stable across builds; the
-    # JSON island stays the RAW roster so MCP and other consumers that
-    # read raw ids are unaffected by the matrix grouping.
-    roster_json = json.dumps(roster, sort_keys=True).replace("</", "<\\/")
-    roster_script = (
-        f'<script type="application/json" id="roster-data">{roster_json}</script>'
-    )
+    # The data-script slot is supplied fully formed by the adapter: the legacy
+    # one carries its roster-data island, the public route the two public ones.
     body_rows = "".join(
         f"<tbody>{row_html(name, i)}</tbody>"
         for i, name in enumerate(group_names)
@@ -513,7 +609,7 @@ def render_page(roster, logo_b64, header_meta=None):
     <h1>Free Inference Watchdog</h1>
     <div class="meta">{meta}</div>
     <div class="chips">{chips}</div>
-    {roster_script}
+    {data_script}
   </div>
 </header>
 <table>
@@ -526,9 +622,350 @@ def render_page(roster, logo_b64, header_meta=None):
 </div></body></html>"""
 
 
+def render_page(roster, logo_b64, header_meta=None):
+    """Render the full HTML document as one string (byte-deterministic).
+
+    Legacy adapter: keeps its existing signature, roster-data island bytes and
+    default header derivation EXACTLY. Providers with zero free models are
+    hidden from the matrix — they clutter the view with an empty column and
+    inflate the gateway chip.
+
+    header_meta: gateway key -> {'signup_url', 'limits_note'} (see
+    build_provider_header_meta). None (default) = derive from the repo's
+    providers/*.json once per render; config load failure degrades to plain
+    headers, never a crash. Wiring and display order are this module's
+    legacy GATEWAY_WIRING / DISPLAY_ORDER views.
+    """
+    providers = roster["providers"]
+    # Hide providers with zero free models — they clutter the matrix with
+    # an empty column and inflate the "gateways" chip for no reason.
+    providers = {gw: ids for gw, ids in providers.items() if ids}
+    if header_meta is None:
+        header_meta = build_provider_header_meta()
+    # sort_keys keeps the embedded JSON byte-stable across builds; the
+    # JSON island stays the RAW roster so MCP and other consumers that
+    # read raw ids are unaffected by the matrix grouping.
+    roster_json = json.dumps(roster, sort_keys=True).replace("</", "<\\/")
+    return _render_matrix(
+        gateways=providers,
+        models_by_gateway=roster.get("provider_models", {}),
+        provider_order=DISPLAY_ORDER,
+        wiring=GATEWAY_WIRING,
+        logo_b64=logo_b64,
+        header_meta=header_meta,
+        data_script=(
+            f'<script type="application/json" id="roster-data">'
+            f"{roster_json}</script>"),
+    )
+
+
+def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract):
+    """Render the matrix HTML from an already-VALIDATED public snapshot.
+
+    ``snapshot`` is a CALLER PRECONDITION: validation (and the eventual
+    build-before-render/write sequencing) belongs to the publishing unit, so
+    this function performs none itself. In-memory only — no roster/registry
+    read or capture, no logo/header/config load, no clock and no I/O. The
+    module's import-time producer configuration stays outside this function's
+    purity claim.
+
+    ``tool_contract`` is a REQUIRED keyword-only argument: the already-decoded
+    bare shared ``watchdog_catalog/tools.json`` array, loaded by the caller.
+    This explicit input keeps call-time rendering I/O-free instead of
+    introducing an implicit file read or an import-time mutable tool cache. A
+    valid snapshot and a reviewed JSON-native tool contract are caller
+    preconditions, as the valid snapshot was in 4c.
+
+    Every rendered fact is derived from the snapshot, never from a module
+    global or another provider's data:
+
+    * column order comes from ``snapshot["provider_order"]`` (an explicit empty
+      list is honoured, never replaced by DISPLAY_ORDER);
+    * tracked ids/models come from each public provider entry's ``model_ids`` /
+      ``models``;
+    * the wiring URL and api type come from THAT provider entry;
+    * tooltip context/modalities come from the selected pair's projected model
+      (unknown/null stays silent; a known 0 or known [] renders safely).
+
+    ``header_meta`` is an explicit trusted gateway -> {'signup_url',
+    'limits_note'} map. None means an EMPTY map on this route — deliberately
+    NOT a config read, so default headers are plain. The HTTPS-only scheme
+    guard and attribute escaping are shared template behaviour.
+
+    The data-script slot carries exactly two inline inert JSON islands, in
+    order: ``catalog-data`` (the COMPLETE public snapshot) then
+    ``tool-contract`` (the supplied tool array), each encoded through the
+    accepted canonical encoder plus the script-context escape — so the page
+    stays self-contained with no executable script, no network fetch and no
+    ``src`` attribute, and no raw private state.
+    """
+    provider_order = list(snapshot["provider_order"])
+    providers = snapshot["providers"]
+    # Explicit provider-ID / per-provider-model / wiring views. Zero-ID
+    # providers are dropped here so they get no hidden-but-present column.
+    gateways = {}
+    models_by_gateway = {}
+    wiring = {}
+    for key in provider_order:
+        entry = providers[key]
+        model_ids = entry["model_ids"]
+        if not model_ids:
+            continue
+        gateways[key] = list(model_ids)
+        models_by_gateway[key] = entry["models"]
+        wiring[key] = {
+            "chat_completions_url": entry["chat_completions_url"],
+            "api_type": entry["api_type"],
+        }
+    return _render_matrix(
+        gateways=gateways,
+        models_by_gateway=models_by_gateway,
+        provider_order=provider_order,
+        wiring=wiring,
+        logo_b64=logo_b64,
+        header_meta={} if header_meta is None else header_meta,
+        data_script=_islands_script(snapshot, tool_contract),
+    )
+
+
+def load_tool_contract():
+    """Decode the bundled shared tool resource ONCE at the acquisition boundary.
+
+    The path is the BUILDER's own packaged/repository copy
+    (``watchdog_catalog/tools.json``), deliberately NOT ``<root>/...``: an
+    arbitrary build root must never be able to inject the browser-visible tool
+    definitions. Decoding uses the accepted strict JSON loader, so a malformed
+    document (bad lexeme, duplicate member, unsafe number, over-deep nesting)
+    exits 2 with the frozen diagnostic instead of being repaired.
+    """
+    path = REPO / TOOLS_REL
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"build_site: cannot read tool resource {path}: {exc}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        contract = catalog.load_json(raw)
+    except catalog.CatalogError as exc:
+        print(f"build_site: corrupt tool resource {path}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if not isinstance(contract, list):
+        print(f"build_site: tool resource {path} must be a bare JSON array",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return contract
+
+
+def build_public_pair(root):
+    """Acquire ONCE and prepare BOTH artifacts from ONE public snapshot.
+
+    Exactly one roster read (the existing strict :func:`load_roster`), exactly
+    one capture of the already-resolved ``PROVIDERS`` / ``GATEWAY_WIRING`` maps
+    through the accepted :func:`catalog_export.capture_registry`, exactly one
+    :func:`catalog_export.build_snapshot`, then BOTH outputs derived from that
+    SAME object: :func:`catalog_export.serialize_snapshot` for the external
+    JSON text and :func:`render_catalog_page` for the HTML (with the bundled
+    tool contract and the trusted header metadata passed explicitly).
+
+    Returns ``(snapshot, catalog_text, html_text)``. Nothing is written here:
+    the caller stages and publishes only after the prepared pair validates.
+    """
+    roster = load_roster(root)                                    # ONE read
+    records = capture_registry(PROVIDERS, GATEWAY_WIRING)         # ONE capture
+    snapshot = build_snapshot(records, roster, cadence_s=BUILD_CADENCE_S)
+    tool_contract = load_tool_contract()
+    header_meta = build_provider_header_meta()
+    logo_b64 = load_logo_b64(root)
+    catalog_text = serialize_snapshot(snapshot)
+    html_text = render_catalog_page(
+        snapshot, logo_b64, header_meta, tool_contract=tool_contract)
+    validate_artifact_pair(catalog_text, html_text)
+    return snapshot, catalog_text, html_text
+
+
+class _PairWriteError(RuntimeError):
+    """A failed two-artifact publication (message is fixed, never reflective)."""
+
+
+def _discard(path):
+    """Remove one temp path this process OWNS; ignore everything else."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _stage(site_dir, target, text):
+    """Write ``text`` to a NEW exclusively-created temp file beside ``target``.
+
+    ``tempfile.mkstemp`` gives every invocation its own path in the destination
+    directory (same filesystem, so the later rename is atomic), including
+    overlapping builds in one process/thread and separate processes. The file is
+    fully written, flushed and fsynced before it is closed.
+
+    OWNERSHIP: from the instant the exclusive create succeeds this invocation
+    owns both the descriptor and the temp path, and every non-success exit
+    (fdopen, write, flush, fsync or close) closes what it owns and removes only
+    that temp before re-raising the PRIMARY error; cleanup errors are swallowed
+    so they can never mask it. The path is returned only on the successful
+    handoff, at which point the caller (the pair writer) owns it.
+    """
+    fd, name = tempfile.mkstemp(
+        dir=str(site_dir), prefix=f".{target.name}.", suffix=".tmp")
+    path = Path(name)
+    handle = None
+    handed_off = False
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        fd = -1  # the wrapper owns the descriptor from here on
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.close()
+        handle = None
+        handed_off = True
+        return path
+    finally:
+        if not handed_off:
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            _discard(path)
+
+
+def _read_published(path):
+    """Exact bytes of one final target, decoded with NO newline translation."""
+    return path.read_bytes().decode("utf-8")
+
+
+def write_artifact_pair(root, catalog_text, html_text):
+    """Stage, publish and VERIFY the two public artifacts as one pair.
+
+    Sequence (the pair of renames is still NOT a transaction):
+
+    1. validate the PREPARED pair in memory (defence in depth; the CLI already
+       built both from one snapshot);
+    2. write both complete payloads to unique, exclusively-created temp files in
+       the destination directory and close them -- nothing final is touched yet;
+    3. under one advisory build lock, rename ``catalog.json`` then
+       ``index.html`` into place;
+    4. read back the EXACT final targets and validate the pair again before
+       reporting success.
+
+    Raises :class:`_PairWriteError` on any staging (including a payload that is
+    not encodable as UTF-8), lock (open/acquire/release/close) or publication
+    failure. Owned temps are always removed; unrelated files are never touched,
+    the build lock file/inode is retained (never unlinked), no unlock is
+    attempted for a lock that was not acquired, and no rollback is attempted
+    (it could clobber a concurrent successful writer). Every final file is left
+    byte-identical (or absent) for a failure BEFORE the first replacement; once
+    replacement has begun a later failure (interruption or second-replacement
+    I/O error) may leave a mixed pair, which is reported as an error -- no
+    both-last-good promise is made there.
+    """
+    try:
+        validate_artifact_pair(catalog_text, html_text)
+    except (catalog.CatalogError, ValueError):
+        raise _PairWriteError("prepared catalogue pair rejected") from None
+
+    site_dir = root / SITE_REL.parent
+    try:
+        site_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _PairWriteError(f"cannot create {site_dir}: {exc}") from None
+
+    staged = []
+    lock_file = None
+    locked = False
+    # This invocation's OWN outcome. ``sys.exc_info()`` is NOT consulted: in a
+    # ``finally`` it reports whatever exception the CALLER happens to be
+    # handling, so an unrelated ambient ``except`` block would silently absorb
+    # this writer's release/close failure.
+    published = False
+    lock_path = site_dir / BUILD_LOCK_REL.name
+    try:
+        try:
+            for target, text in ((site_dir / CATALOG_REL.name, catalog_text),
+                                 (site_dir / SITE_REL.name, html_text)):
+                staged.append((_stage(site_dir, target, text), target))
+        except OSError as exc:
+            raise _PairWriteError(f"cannot stage artifacts: {exc}") from None
+        except UnicodeError as exc:
+            # A payload that cannot be encoded as UTF-8 (an unpaired surrogate
+            # in a raw id, say) is a staging fault like any other. The
+            # diagnostic is fixed and bounded: it never echoes the payload or
+            # the offending identifier, and no repair/replace encoding is done.
+            raise _PairWriteError(
+                "cannot stage artifacts: text is not encodable as UTF-8 "
+                f"({type(exc).__name__})") from None
+
+        if fcntl is None:  # pragma: no cover - Windows support is later work
+            raise _PairWriteError(
+                "artifact publication needs POSIX advisory locking (fcntl)")
+
+        try:
+            lock_file = open(lock_path, "a+b")
+        except OSError as exc:
+            raise _PairWriteError(
+                f"cannot open build lock {lock_path}: {exc}") from None
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise _PairWriteError(
+                f"cannot acquire build lock {lock_path}: {exc}") from None
+        locked = True
+
+        for temp, target in staged:
+            try:
+                os.replace(temp, target)
+            except OSError as exc:
+                raise _PairWriteError(
+                    f"cannot publish {target.name}: {exc}") from None
+        try:
+            published_catalog = _read_published(site_dir / CATALOG_REL.name)
+            published_html = _read_published(site_dir / SITE_REL.name)
+            validate_artifact_pair(published_catalog, published_html)
+        except (OSError, ValueError, catalog.CatalogError):
+            raise _PairWriteError(
+                "published artifacts did not validate") from None
+        published = True
+    finally:
+        for temp, _ in staged:
+            _discard(temp)
+        # Release only a lock this invocation actually acquired; a release or
+        # close failure is itself a publication failure (the pair may already
+        # be valid, but success must NOT be reported), while an error already
+        # in flight stays the primary one. "In flight" means THIS writer's own
+        # error (``published`` is only set on full success), never an ambient
+        # exception belonging to a caller's enclosing ``except`` block.
+        release_error = None
+        if locked and fcntl is not None:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            except OSError as exc:
+                release_error = exc
+        if lock_file is not None:
+            try:
+                lock_file.close()
+            except OSError as exc:
+                release_error = release_error or exc
+        if release_error is not None and published:
+            raise _PairWriteError(
+                f"cannot release build lock {lock_path}: {release_error}") from None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="Render site/index.html from state/roster.json (stdlib only)."
+        description="Publish site/index.html + site/catalog.json from "
+                    "state/roster.json (stdlib only)."
     )
     ap.add_argument(
         "--root",
@@ -537,23 +974,28 @@ def main(argv=None):
         help="project root containing state/ and receiving site/ (default: repo dir)",
     )
     args = ap.parse_args(argv)
-    roster = load_roster(args.root)
-    logo_b64 = load_logo_b64(args.root)
-    html = render_page(roster, logo_b64)
-    out = args.root / SITE_REL
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # Unique per process + thread, mirroring state.py's _atomic_write_json:
-    # a shared 'index.html.tmp' let two concurrent builders race — one
-    # builder's replace moved the other's temp away, so the loser died on
-    # FileNotFoundError (reviewer measured 17/3 failures at 20 parallel).
-    tmp = out.with_name(
-        f"{out.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(html, encoding="utf-8")
-    tmp.replace(out)  # atomic publish: never a torn or partial write
+    try:
+        snapshot, catalog_text, html_text = build_public_pair(args.root)
+    except catalog.CatalogError as exc:
+        print(f"build_site: invalid public snapshot: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    except Exception as exc:  # noqa: BLE001 - every preparation fault exits 2
+        print(f"build_site: cannot prepare public artifacts: {exc}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        write_artifact_pair(args.root, catalog_text, html_text)
+    except _PairWriteError as exc:
+        print(f"build_site: {exc}", file=sys.stderr)
+        raise SystemExit(2)
     # Progress goes to STDERR: the tick wrapper delivers non-empty STDOUT to
     # Discord home, so a successful rebuild must stay stdout-silent.
-    n_ids = len({m for models in roster["providers"].values() for m in models})
-    print(f"build_site: wrote {out} ({n_ids} unique ids)", file=sys.stderr)
+    n_ids = len({mid for entry in snapshot["providers"].values()
+                 for mid in entry["model_ids"]})
+    site_dir = args.root / SITE_REL.parent
+    print(f"build_site: wrote {site_dir / SITE_REL.name} and "
+          f"{site_dir / CATALOG_REL.name} ({n_ids} unique ids)",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":
