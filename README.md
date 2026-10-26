@@ -84,7 +84,7 @@ With no source flag the server reads the live public catalogue:
   prefer it; it is never an implicit failover, because the server does not fall
   back to a second URL.
 
-"Live" names the default URL, it is not a promise that the URL always answers.
+"Live" names the default URL — it is not a promise that the URL always answers.
 The source contract is unchanged: a failed fetch with no validated snapshot
 cached yet answers every tool call with the fixed `source_unavailable` error —
 a missing feed is never reported as an empty catalogue — while a validated last
