@@ -414,26 +414,76 @@ def test_oversized_logo_in_root_exits_2_without_writing(tmp_path):
     assert not (tmp_path / "site" / "index.html").exists()
 
 
-# ---------- I4: wrapper logs builder stderr instead of swallowing it --------
+# ---------- I4: wrapper logs the publisher stage instead of swallowing it -----
 #
 # OPERATOR READ-BACK, NOT A DEFAULT-SUITE CHECK. These two checks read a
 # DEPLOYED tick wrapper, which a portable checkout/CI run neither has nor may
 # assume. There is no path default and no HOME lookup: without
 # `--operator-tick-wrapper=PATH` both checks skip with an actionable opt-in
 # reason. A skip here is NOT evidence that the deployed wrapper passes.
+#
+# Task 11 moved the site stage from a direct `build_site.py` call to the
+# reviewed publisher (`scripts/publish_site.sh`), which now owns the shared
+# publication lock, the build, the coherent-pair validation, the scoped
+# artifact commit and -- with the explicit `--push` opt-in -- the push and its
+# destination read-back. The read-back below follows that DELEGATION: it is
+# read-only text inspection plus `bash -n`, and it never executes -- or
+# extracts and runs -- a command from a live wrapper.
+
+
+def _active_wrapper_lines(path):
+    """Yield the non-comment shell lines of `path`, trailing comments removed.
+
+    A commented-out command is documentation, not an active stage, so it must
+    never satisfy an active-command read-back.
+    """
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        yield re.sub(r"\s+#.*$", "", raw)
+
+
+def _active_publisher_stage(path):
+    """The single ACTIVE publisher invocation in `path` (read-only)."""
+    lines = [l for l in _active_wrapper_lines(path) if "publish_site.sh" in l]
+    assert len(lines) == 1, (
+        "expected exactly one ACTIVE publisher invocation "
+        f"(scripts/publish_site.sh), found {len(lines)}: {lines}"
+    )
+    return lines[0]
 
 
 @pytest.mark.operator
 def test_wrapper_build_stage_redirects_stderr_to_log(operator_tick_wrapper):
-    """Task-8 fix round I4: `|| true` alone swallowed builder failures
-    forever-silently; stderr must now append to state/site_build.log (log,
-    never page) while the || true never-page contract stays intact."""
-    line = next(
-        l for l in operator_tick_wrapper.read_text(encoding="utf-8").splitlines()
-        if "build_site.py" in l and not l.lstrip().startswith("#")
+    """Task 11: the site stage delegates to the reviewed publisher.
+
+    The wrapper must still start the publisher for THIS checkout with an
+    explicit `--root "$PWD"` and `--push`, append BOTH streams to
+    state/site_build.log, and keep the best-effort contract: a non-zero helper
+    exit, a missing helper or an unusable log destination shows up in the log,
+    never the page, and never changes the wrapper's exit code.
+    """
+    line = _active_publisher_stage(operator_tick_wrapper)
+
+    assert re.search(r"\bbash\s+scripts/publish_site\.sh\b", line), (
+        f"site stage no longer delegates to the publisher: {line}"
     )
-    assert "2>> state/site_build.log" in line, f"build stage lost its log: {line}"
-    assert line.rstrip().endswith("|| true"), "never-page contract broken"
+    assert re.search(r'--root\s+"?\$PWD"?(\s|$)', line), (
+        f"publisher stage lost its explicit current-checkout root: {line}"
+    )
+    assert re.search(r"--push(\s|$)", line), (
+        f"publisher stage lost its publication opt-in (--push): {line}"
+    )
+    assert re.search(r">>\s*state/site_build\.log\s+2>&1", line), (
+        f"build stage lost its log: {line}"
+    )
+    assert re.search(r"\|\|\s*true\b", line), (
+        f"never-page conjunction lost (|| true): {line}"
+    )
+    assert re.search(r"\}\s*2>/dev/null", line), (
+        f"redirection-failure containment lost (log, never page): {line}"
+    )
 
 
 @pytest.mark.operator
