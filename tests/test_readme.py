@@ -309,8 +309,10 @@ def _publication_claim_errors(section, tracked_html):
     tracked at ``HEAD``. Before that page carries the inlined scripts, saying
     the deployed dashboard already registers the tools is false; once it
     carries them, keeping a "not published yet" caveat is the stale claim.
+    Prose is whitespace-normalized first, because the README is hard-wrapped:
+    a claim split across a newline is still that claim.
     """
-    lowered = _plain(section).lower()
+    lowered = " ".join(_plain(section).lower().split())
     published = PUBLICATION_INLINE_MARKER in tracked_html
     claims = () if published else _CONSEQUENTIAL_PUBLICATION_CLAIMS
     caveats = _STALE_ARTIFACT_CAVEATS if published else ()
@@ -1143,6 +1145,15 @@ def test_browser_publication_status_is_bound_to_the_tracked_artifact(browser_pag
     (True,
      "The tracked site/index.html is still the older two-island snapshot and "
      "does not claim it has happened.",
+     ["still the older two-island snapshot", "does not claim it has happened"]),
+    # Hard-wrapped prose is the ordinary README case, so a claim split across a
+    # newline must be read as the same sentence it is on one line.
+    (False,
+     "The deployed dashboard now\nregisters the five tools.",
+     ["the deployed dashboard now registers"]),
+    (True,
+     "The tracked site/index.html is still the older\ntwo-island snapshot and "
+     "does\nnot claim it has happened.",
      ["still the older two-island snapshot", "does not claim it has happened"]),
 ])
 def test_publication_claim_predicate_accepts_both_valid_phases(
