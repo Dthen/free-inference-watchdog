@@ -18,7 +18,9 @@
  *     real shared query engine and returns ONE complete JSON TEXT result: the
  *     pure payload plus a separate top-level `source: {mode: "browser"}`, framed
  *     by the shared typed canonical encoder (never an ordinary JSON serializer,
- *     which would collapse a `1.0` float token to `1`);
+ *     which would collapse a `1.0` float token to `1`). The token this file
+ *     locks lives in UPSTREAM projected `pricing` metadata, never only in an
+ *     echoed query argument;
  *   * every descriptor carries `annotations: {readOnlyHint: true,
  *     untrustedContentHint: true, consequentialHint: false}`, fresh per
  *     descriptor and never a sanitizer for upstream text;
@@ -93,6 +95,13 @@ const EXPECTED_SOURCE = { mode: "browser" };
 
 /** Independent literal: the ~1.5K per-output RECOMMENDATION (never a cap). */
 const RECOMMENDED_CHARACTER_BUDGET = 1500;
+
+/** Independent literals: the PROJECTED metadata float tokens this file locks. */
+const PRICED_MODEL_ID = "vendor/priced-free";
+const PLAIN_MODEL_ID = "vendor/plain-free";
+const PRICING_PROMPT = 1.0;
+const PRICING_COMPLETION = 0.5;
+const PRICING_TOKENS_CANONICAL = "{\"completion\":0.5,\"prompt\":1.0}";
 
 // ---------- fakes for the DOM / native registration boundary --------------
 
@@ -279,6 +288,40 @@ function assertAnnotationTriplet(annotations) {
                "consequentialHint is exactly false");
 }
 
+/**
+ * The PROJECTED METADATA lock: a float token carried by UPSTREAM projected
+ * `pricing` metadata, never by an echoed query argument.
+ *
+ * `model` is the SELECTED public model inside the decoded payload, so the value
+ * assertions describe what a consumer reads; the text assertions describe the
+ * spelling the native layer actually receives. Both matter: the platform
+ * serializes an `execute` result itself, so only an already-encoded string can
+ * keep `1.0` distinct from `1`.
+ */
+function assertProjectedPricingTokens(model, text, label) {
+  assert.ok(model !== null && typeof model === "object",
+            `${label}: the selected public model is present`);
+  assert.deepEqual(Object.keys(model.pricing).sort(), ["completion", "prompt"],
+                   `${label}: pricing keeps exactly its two projected fields`);
+  assert.equal(catalog.isFloatToken(model.pricing.prompt), true,
+               `${label}: pricing.prompt must STILL be a typed float token, ` +
+               "not the integer 1");
+  assert.equal(Number(model.pricing.prompt), PRICING_PROMPT,
+               `${label}: pricing.prompt is 1.0 by value`);
+  assert.equal(catalog.isFloatToken(model.pricing.completion), true,
+               `${label}: pricing.completion must STILL be a typed float token`);
+  assert.equal(Number(model.pricing.completion), PRICING_COMPLETION,
+               `${label}: pricing.completion is 0.5 by value`);
+  assert.equal(catalog.canonicalText(model.pricing), PRICING_TOKENS_CANONICAL,
+               `${label}: pricing encodes as 1.0 and 0.5, never 1 and 0.5`);
+  assert.ok(text.includes("\"prompt\":1.0"),
+            `${label}: the framed TEXT spells "prompt":1.0`);
+  assert.ok(text.includes("\"completion\":0.5"),
+            `${label}: the framed TEXT spells "completion":0.5`);
+  assert.equal(/JsonFloat|\[object Object\]/.test(text), false,
+               `${label}: no internal float wrapper is rendered`);
+}
+
 // ---------- independent drift detectors -----------------------------------
 
 /**
@@ -460,6 +503,67 @@ function hostileSnapshot() {
         display_name: "Synthetic Hostile",
         model_ids: [HOSTILE_ID],
         models: { [HOSTILE_ID]: model },
+        stale: false
+      }
+    },
+    schema_version: 1,
+    tick_epoch: FIXTURE_TICK_EPOCH,
+    warnings: [],
+    snapshot_id: ""
+  });
+}
+
+/**
+ * Seal a snapshot whose TEXT must keep a typed token `JSON.stringify` cannot
+ * spell (`1.0`). The id comes from the shared body hash and the document from
+ * the shared canonical encoder, so `loadSnapshot` stays the real acceptance
+ * path; `seal()` remains the plain-text builder for every other fixture.
+ */
+function sealTyped(snapshot) {
+  snapshot.snapshot_id = catalog.snapshotHash(snapshot);
+  return { text: catalog.canonicalText(snapshot), snapshot };
+}
+
+/**
+ * A sealed snapshot whose UPSTREAM projected metadata carries float tokens in
+ * `pricing` — `prompt: 1.0` and `completion: 0.5` — beside a sibling model with
+ * the ordinary string spelling. `context_length` stays an integer, exactly as
+ * the frozen projection requires, so `pricing` is the ONLY float carrier here.
+ */
+function projectedPricingSnapshot() {
+  const priced = {
+    architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+    context_length: 8192,
+    description: "Synthetic priced endpoint",
+    id: PRICED_MODEL_ID,
+    name: "Priced Model",
+    pricing: {
+      completion: new catalog.JsonFloat(PRICING_COMPLETION),
+      prompt: new catalog.JsonFloat(PRICING_PROMPT)
+    },
+    supported_parameters: ["temperature"]
+  };
+  const plain = {
+    architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+    context_length: 4096,
+    description: "Synthetic plain endpoint",
+    id: PLAIN_MODEL_ID,
+    name: "Plain Model",
+    pricing: { completion: "0", prompt: "0" },
+    supported_parameters: ["temperature"]
+  };
+  return sealTyped({
+    cadence_s: FIXTURE_CADENCE_S,
+    provider_order: ["synthetic-priced"],
+    providers: {
+      "synthetic-priced": {
+        api_type: "openai",
+        chat_completions_url:
+          "https://synthetic-priced.example/v1/chat/completions",
+        display_name: "Synthetic Priced",
+        // Code-point order, exactly as the strict validator requires.
+        model_ids: [PLAIN_MODEL_ID, PRICED_MODEL_ID],
+        models: { [PLAIN_MODEL_ID]: plain, [PRICED_MODEL_ID]: priced },
         stale: false
       }
     },
@@ -1102,7 +1206,88 @@ describe("unit 8b — native text result, embedded source and payload parity", (
         .includes("\"min_context_length\":1.0"), false,
       "an ordinary serializer would lose the float token");
 
-    // 2. Hostile-looking ordinary STRINGS stay data, byte for byte.
+    // 2. PROJECTED METADATA — the same lock on a token that arrived from
+    //    UPSTREAM projected `pricing`, which no argument echo can stand in for.
+    //    Only the SEALED synthetic catalogue and the real strict loader feed
+    //    this: the fake registrar/DOM prove adapter behaviour only.
+    const priced = projectedPricingSnapshot();
+    const pricedContext = await registerWith(priced.text, CONTRACT_TEXT);
+    // The snapshot the adapter CAPTURED: the same island text through the same
+    // strict loader, so this is the validated input its callbacks query.
+    const captured = catalog.loadSnapshot(priced.text);
+    assert.equal(captured.snapshot_id, priced.snapshot.snapshot_id,
+                 "the synthetic catalogue seals with the shared body hash");
+    assert.equal(priced.snapshot.providers["synthetic-priced"]
+                   .models[PRICED_MODEL_ID].pricing.prompt.value,
+                 PRICING_PROMPT,
+                 "the UPSTREAM fixture field holds the float token 1.0");
+    const upstream = captured.providers["synthetic-priced"]
+      .models[PRICED_MODEL_ID].pricing;
+    assert.equal(catalog.isFloatToken(upstream.prompt), true,
+                 "the captured snapshot stores pricing.prompt as a TOKEN");
+    assert.equal(Number(upstream.prompt), PRICING_PROMPT);
+    assert.equal(catalog.isFloatToken(upstream.completion), true,
+                 "the captured snapshot stores pricing.completion as a TOKEN");
+    assert.equal(Number(upstream.completion), PRICING_COMPLETION);
+
+    // Every metadata-bearing tool is exercised in its OWN output shape;
+    // `watchdog_status` carries no model metadata at all (asserted below).
+    const pricedRows = [
+      ["list_free_models", "listFreeModels", {},
+       (payload) => payload.models["synthetic-priced"][PRICED_MODEL_ID]],
+      ["get_model", "getModel", { model_id: PRICED_MODEL_ID },
+       (payload) => payload.endpoints[0].metadata],
+      ["list_endpoints", "listEndpoints", {},
+       (payload) => payload.gateways["synthetic-priced"].models[PRICED_MODEL_ID]],
+      ["search_models", "searchModels", { query: "priced" },
+       (payload) => payload.endpoints[0].metadata]
+    ];
+    const capturedBefore = catalog.canonicalText(captured);
+    for (const [tool, coreName, args, select] of pricedRows) {
+      const descriptor = descriptorFor(pricedContext.modelContext, tool);
+      const forwarded = Object.assign({}, args);
+      const decoded = decodeNative(descriptor.execute(forwarded));
+      assertExactSource(decoded.source);
+      assert.equal(/^[ -~]*$/.test(decoded.text), true, `${tool}: one ASCII line`);
+      const pricedModel = select(decoded.payload);
+      assert.equal(pricedModel.id, PRICED_MODEL_ID,
+                   `${tool}: the priced endpoint is the selected model`);
+      assertProjectedPricingTokens(pricedModel, decoded.text, tool);
+      assertPayloadParity(decoded.payload,
+                          catalog[coreName](captured, Object.assign({}, args)),
+                          `${tool} projected metadata`);
+      // An ordinary consumer still parses this text; it simply cannot SEE the
+      // token, which is why the SPELLING above is the assertion that matters.
+      const ordinary = select(JSON.parse(decoded.text));
+      assert.equal(typeof ordinary.pricing.prompt, "number");
+      assert.equal(ordinary.pricing.prompt, 1,
+                   `${tool}: JSON.parse collapses 1.0 to 1 and stays valid`);
+      assert.deepEqual(forwarded, args, `${tool}: the argument is untouched`);
+    }
+    // Unrelated metadata is neither dropped nor rewritten.
+    const plainPricing = nativePayload(
+      descriptorFor(pricedContext.modelContext, "list_free_models"), {})
+      .models["synthetic-priced"][PLAIN_MODEL_ID].pricing;
+    assert.deepEqual(plainPricing, { completion: "0", prompt: "0" },
+                     "the sibling string spelling survives verbatim");
+    assert.equal(catalog.canonicalText(captured), capturedBefore,
+                 "framing never rewrites the captured snapshot");
+    assert.equal(catalog.isFloatToken(
+      captured.providers["synthetic-priced"]
+        .models[PRICED_MODEL_ID].pricing.prompt), true,
+      "the captured token is still typed after every call");
+    // Independent calls stay isolated on this path too.
+    const firstRun = nativePayload(
+      descriptorFor(pricedContext.modelContext, "list_endpoints"), {});
+    const secondRun = nativePayload(
+      descriptorFor(pricedContext.modelContext, "list_endpoints"), {});
+    assert.deepEqual(secondRun, firstRun, "repeat calls agree");
+    assert.notEqual(secondRun, firstRun, "repeat calls are fresh objects");
+    assert.equal(descriptorFor(pricedContext.modelContext, "watchdog_status")
+                   .execute({}).includes("pricing"), false,
+                 "watchdog_status has no metadata carrier to lock");
+
+    // 3. Hostile-looking ordinary STRINGS stay data, byte for byte.
     const hostile = hostileSnapshot();
     const hostileContext = await registerWith(hostile.text, CONTRACT_TEXT);
     const hostileDecoded = decodeNative(
@@ -1490,6 +1675,83 @@ describe("unit 8b — applied wrong-rule controls", () => {
         "float token collapsed"),
       /float token collapsed/,
       "typed-canonical parity rejects the collapsed float token");
+
+    // Mutant F — a METADATA-ONLY wrong rule: immediately before framing, every
+    // `pricing` float token is collapsed to its integer value and NOTHING else
+    // changes. The text stays complete JSON, the source, counts, wiring,
+    // unrelated metadata and the echoed argument token are untouched, so only
+    // the PROJECTED METADATA assertion can see the difference.
+    const pricingMutant = ADAPTER_SOURCE.replace(
+      "      return frame(catalog, payload);",
+      "      var framedPayload = payload;\n" +
+      "      (function collapse(value) {\n" +
+      "        if (value === null || typeof value !== \"object\") { return; }\n" +
+      "        var names = Object.keys(value);\n" +
+      "        for (var index = 0; index < names.length; index += 1) {\n" +
+      "          var member = value[names[index]];\n" +
+      "          if (names[index] !== \"pricing\" || member === null ||\n" +
+      "              typeof member !== \"object\") {\n" +
+      "            collapse(member);\n" +
+      "            continue;\n" +
+      "          }\n" +
+      "          var fields = Object.keys(member);\n" +
+      "          for (var field = 0; field < fields.length; field += 1) {\n" +
+      "            if (member[fields[field]] instanceof catalog.JsonFloat) {\n" +
+      "              member[fields[field]] =\n" +
+      "                Number(member[fields[field]].value);\n" +
+      "            }\n" +
+      "          }\n" +
+      "        }\n" +
+      "      })(framedPayload);\n" +
+      "      return frame(catalog, payload);");
+    assert.notEqual(pricingMutant, ADAPTER_SOURCE, "the pricing rule applied");
+    const pricedFixture = projectedPricingSnapshot();
+    const pricedSandbox = loadPageRealm(pricingMutant);
+    const pricedRegistration = await registerPageRealm(pricedSandbox,
+                                                        pricedFixture.text);
+    assert.equal(pricedRegistration.result.status, "registered",
+                 "the metadata-only mutant still registers all five tools");
+    const pricedMutantContext = pricedRegistration.modelContext;
+    const mutantDecoded = decodeNative(
+      descriptorFor(pricedMutantContext, "list_endpoints").execute({}));
+    assertExactSource(mutantDecoded.source);
+    const mutantModels =
+      mutantDecoded.payload.gateways["synthetic-priced"].models;
+    const directPriced = catalog.listEndpoints(
+      catalog.loadSnapshot(pricedFixture.text), {});
+    assert.ok(mutantDecoded.text.includes("\"prompt\":1}"),
+              "the mutation really collapsed 1.0 to the integer 1");
+    assert.equal(mutantDecoded.text.includes("\"prompt\":1.0"), false,
+                 "no float token survives in the collapsed frame");
+    // Everything the OLD locks watch is unchanged.
+    assert.deepEqual(mutantDecoded.payload.counts, directPriced.counts,
+                     "counts are untouched by the metadata-only rule");
+    assert.deepEqual(mutantModels[PRICED_MODEL_ID].architecture,
+                     directPriced.gateways["synthetic-priced"]
+                       .models[PRICED_MODEL_ID].architecture,
+                     "unrelated metadata is untouched");
+    assert.deepEqual(mutantModels[PLAIN_MODEL_ID].pricing,
+                     { completion: "0", prompt: "0" },
+                     "the sibling string spelling is untouched");
+    // The ARGUMENT-ECHO lock is blind to it: that token lives in `filters`.
+    const echoFloat = new pricedSandbox.WatchdogCatalog.JsonFloat(1.0);
+    assert.ok(descriptorFor(pricedMutantContext, "search_models")
+                .execute({ min_context_length: echoFloat })
+                .includes("\"min_context_length\":1.0"),
+              "the echoed argument token still survives, so the old lock passes");
+    // The PROJECTED METADATA assertion is the one that rejects it.
+    assert.throws(
+      () => assertProjectedPricingTokens(mutantModels[PRICED_MODEL_ID],
+                                         mutantDecoded.text, "pricing mutant"),
+      /typed float token/,
+      "the projected-metadata assertion rejects the collapsed token");
+    // Control: the unchanged adapter passes the very same assertion.
+    const pricedControl = await registerWith(pricedFixture.text, CONTRACT_TEXT);
+    const controlDecoded = decodeNative(
+      descriptorFor(pricedControl.modelContext, "list_endpoints").execute({}));
+    assertProjectedPricingTokens(
+      controlDecoded.payload.gateways["synthetic-priced"]
+        .models[PRICED_MODEL_ID], controlDecoded.text, "unchanged control");
 
     // Restored control: the unchanged adapter is still green.
     const restored = await registerWith();
