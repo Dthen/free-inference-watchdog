@@ -10,7 +10,9 @@ name: test
 #
 # Read-only by design: no publishing, deployment, provider, secret or write
 # permission exists in this workflow. The separate Windows job below runs only
-# the narrow installed-consumer smoke; the POSIX suite stays Linux-only.
+# the narrow installed-consumer smoke; the POSIX suite stays Linux-only. The
+# Node job (unit 9f) runs the browser code's own suites and the Python/Node
+# contract parity lane with Node installed explicitly.
 
 on:
   push:
@@ -43,6 +45,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+
+      # Unit 9f: the full Linux suite contains the Python/Node contract parity
+      # file, so Node is installed EXPLICITLY from the reviewed pin and bound by
+      # value later. An inherited runner image runtime is never relied on, and a
+      # lean image cannot silently turn parity into a PATH-discovery skip.
+      - name: Set up the exact Node.js runtime for the parity lane
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22"
+          check-latest: true
+          package-manager-cache: false
 
       # The floor must be a GENUINE CPython 3.11 in every matrix leg, including
       # the 3.x leg. It is installed first so its documented `python-path`
@@ -198,11 +212,20 @@ jobs:
             "uv 0.13.5 "*) ;;
             *) echo "unexpected uv version: $uv_version" >&2; exit 1 ;;
           esac
+          node_binary="$(command -v node)"
+          test -x "$node_binary"
+          node_version="$("$node_binary" --version)"
+          printf 'node: %s -> %s\n' "$node_binary" "$node_version"
+          case "$node_version" in
+            v22.*) ;;
+            *) echo "unexpected node version: $node_version" >&2; exit 1 ;;
+          esac
           {
             echo "FREE_INFERENCE_WATCHDOG_BUILD_PYTHON=$MATRIX_PYTHON"
             echo "FREE_INFERENCE_WATCHDOG_SMOKE_PYTHON=$MATRIX_PYTHON"
             echo "FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON=$FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON"
             echo "FREE_INFERENCE_WATCHDOG_UV=$uv"
+            echo "CONTRACT_NODE=$node_binary"
             echo "HOME=$TEST_HOME"
             echo "TMPDIR=$TEST_TMPDIR"
             echo "XDG_CACHE_HOME=$TEST_HOME/.cache"
@@ -213,7 +236,7 @@ jobs:
         run: |
           set -euo pipefail
           env | LC_ALL=C sort | grep -E \
-            '^(FREE_INFERENCE_WATCHDOG_(FLOOR|INSTALLED|BUILD|SMOKE)_PYTHON|FREE_INFERENCE_WATCHDOG_(UV|WHEELHOUSE)|HOME|TMPDIR|XDG_CACHE_HOME|UV_CACHE_DIR)='
+            '^(FREE_INFERENCE_WATCHDOG_(FLOOR|INSTALLED|BUILD|SMOKE)_PYTHON|FREE_INFERENCE_WATCHDOG_(UV|WHEELHOUSE)|CONTRACT_NODE|HOME|TMPDIR|XDG_CACHE_HOME|UV_CACHE_DIR)='
 
       # Prepares nothing: both interpreters, uv and the wheelhouse are already
       # in place, so the suite performs no provider, network or credential
@@ -225,6 +248,95 @@ jobs:
         run: |
           set -euo pipefail
           "$MATRIX_PYTHON" -m pytest tests -q --strict-markers -rs
+
+  # Unit 9f: the JS/parity lane. Node is installed EXPLICITLY from the reviewed
+  # pin, proven, and bound BY VALUE before either lane consumes it, so neither
+  # an inherited runner runtime nor a PATH change can substitute another Node or
+  # turn the parity file into a PATH-discovery skip. The two Node suites are the
+  # maintained browser code's own contract tests; the parity file drives the real
+  # Node CLI against the accepted Python core. Both lanes are read-only: no
+  # artifact is built, published or deployed here.
+  node:
+    name: node / js suites and python-node parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the exact CPython 3.11 floor interpreter
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.11"
+          check-latest: true
+          allow-prereleases: false
+
+      - name: Set up the exact Node.js runtime
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22"
+          check-latest: true
+          package-manager-cache: false
+
+      # Both runtimes are proven and written to GITHUB_ENV by VALUE. The Node
+      # major is asserted here rather than merely reported: a substituted
+      # runtime is a failure, not a differently-behaving green run.
+      - name: Bind and prove both runtimes
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          test -x "$PYTHON"
+          "$PYTHON" -VV
+          "$PYTHON" -I -c 'import sys
+          assert sys.implementation.name == "cpython", sys.implementation.name
+          assert sys.version_info[:2] == (3, 11), sys.version_info
+          assert sys.version_info.releaselevel == "final", sys.version_info
+          print("floor is genuine CPython 3.11:", sys.version)'
+
+          node_binary="$(command -v node)"
+          test -x "$node_binary"
+          "$node_binary" --version
+          "$node_binary" -e 'const major = Number(process.versions.node.split(".")[0]);
+          if (major !== 22) { throw new Error("unexpected Node major: " + process.versions.node); }
+          console.log("node:", process.version, process.execPath);'
+
+          {
+            echo "CONTRACT_NODE=$node_binary"
+            echo "CATALOG_PYTHON=$PYTHON"
+            echo "TEST_PYTHON=$PYTHON"
+          } >> "$GITHUB_ENV"
+
+      # The SAME reviewed pytest pin the full suite uses. Nothing else is
+      # installed: the parity file needs only pytest plus the stdlib pure core.
+      - name: Provision the reviewed pytest pin
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          PIP_CONFIG_FILE: /dev/null
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_INPUT: "1"
+        run: |
+          set -euo pipefail
+          "$PYTHON" -m pip install "pytest==9.1.1"
+          "$PYTHON" -m pytest --version
+
+      - name: Run the Node contract suites
+        run: |
+          set -euo pipefail
+          test -x "$CONTRACT_NODE"
+          "$CONTRACT_NODE" --test tests/js/catalog-query.test.cjs tests/js/webmcp.test.cjs
+
+      # The parity file's own explicit runtime override is authoritative: an
+      # empty or broken value FAILS, so this lane cannot go green on a skip.
+      - name: Run the Python/Node contract parity lane
+        run: |
+          set -euo pipefail
+          test -x "$TEST_PYTHON"
+          "$TEST_PYTHON" -m pytest tests/test_contract_parity.py -q --strict-markers -rs
 
   # Unit 9a4: the narrow Windows standalone-consumer smoke. This job proves the
   # installed wheel and its installer-generated console on a Windows runner; it

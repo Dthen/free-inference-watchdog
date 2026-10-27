@@ -119,8 +119,23 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 HELPER = REPO / "scripts" / "publish_site.sh"
+
+#: Explicit POSIX platform guard (unit 9f). This suite drives a POSIX Bash
+#: helper that takes a ``flock`` advisory lock and invokes git, so it belongs to
+#: the Linux CI job and the operator's POSIX host -- never to the Windows
+#: package/core smoke (``tests/consumer_smoke.py``). The guard SKIPS with an
+#: actionable reason instead of failing collection on a missing binary or a
+#: non-POSIX ``os.name``, and it never weakens an assertion on a supported host.
+MISSING_POSIX_TOOLS = tuple(
+    tool for tool in ("bash", "flock", "git") if shutil.which(tool) is None)
+pytestmark = pytest.mark.skipif(
+    os.name != "posix" or bool(MISSING_POSIX_TOOLS),
+    reason=("the publish wrapper gate is POSIX-only: os.name=%r, missing=%r; "
+            "run it in the Linux CI job" % (os.name, MISSING_POSIX_TOOLS)))
 
 SITE = Path("site")
 CATALOG = SITE / "catalog.json"
