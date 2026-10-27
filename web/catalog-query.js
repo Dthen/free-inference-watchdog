@@ -2067,6 +2067,187 @@
     };
   }
 
+  // ---------- pure whole-catalogue status: fixed-clock freshness -----------
+  //
+  // The dependency-free counterpart of the pure `watchdog_status` core in
+  // `watchdog_catalog/query.py`. `snapshot` is an already-VALIDATED public
+  // snapshot, so nothing here re-validates, rehashes, reads a file, the
+  // network, a provider or a clock. `now` is the REQUIRED separately supplied
+  // fixed clock (a strict non-negative safe-integer epoch in seconds): a
+  // programming precondition mirroring the snapshot precondition, never a
+  // public argument, so this core has no default, no fallback and no ambient
+  // time source. `args` is the COMPLETE decoded JSON argument value.
+
+  //: The frozen status warning order: the snapshot THREE codes followed by the
+  //: two derived status codes. `tick_epoch_future` and `tick_stale` are
+  //: mutually exclusive, so at most four codes appear in one payload.
+  var STATUS_WARNING_ORDER = [
+    "tick_epoch_unknown", "metadata_missing", "metadata_invalid",
+    "tick_epoch_future", "tick_stale"
+  ];
+
+  /**
+   * The pure core of the frozen `watchdog_status` tool.
+   *
+   * `watchdog_status` has NO public arguments: only the empty decoded object
+   * succeeds, and ANY own key (including `now`, `provider` and `limit`) is an
+   * unknown argument rejecting with the shared non-reflecting
+   * `invalid_arguments` envelope and `parameter` `null`. Validation runs before
+   * any clock use, so a hostile value under an unknown key is never coerced and
+   * never reflected.
+   *
+   * The payload carries exactly `ok`, `snapshot_id`, `tick_epoch`, `cadence_s`,
+   * `last_tick_age_s`, `tick_fresh`, `provider_staleness`, `provider_counts`,
+   * `metadata_coverage`, `counts`, `pending_alerts`, `site_published`,
+   * `site_publish_age_s` and `warnings`. `ok` is exactly `true` -- the valid
+   * snapshot was queried, never that its observations are fresh or its
+   * providers healthy. `snapshot_id`, `tick_epoch` (a future epoch included)
+   * and `cadence_s` are echoed literally: no clock-derived repair, no
+   * restamping and no hardcoded cadence.
+   *
+   * `last_tick_age_s` is `now - tick_epoch` for a known non-future tick and
+   * strictly `null` for a null or future tick -- never clamped to a healthy
+   * zero. `tick_fresh` is the inclusive one-cadence boundary: `true` exactly
+   * when the age is known and `<= cadence_s`, so age `0` and age `=== cadence_s`
+   * are both fresh and one second more is stale. Both are strict scalars.
+   *
+   * `provider_staleness` is a strict-bool map for EVERY `provider_order` key
+   * (zero-ID providers included) carrying each gateway's stale flag unchanged
+   * by the clock, and `provider_counts` is the matching non-negative integer
+   * map of each gateway's `model_ids` length, zero included, in display order.
+   * The two are independent signals: staleness may be `true` during a fresh
+   * tick and every provider may be `false` during an old one.
+   *
+   * `counts` is the WHOLE-CATALOGUE cardinality object -- every configured
+   * provider, every tracked `(provider, raw id)` pair, the literal union of raw
+   * ids and the distinct `stripFreeMarker` labels -- never a page or provider
+   * filtered count. `metadata_coverage` reports coverage over that same global
+   * tracked-pair denominator by NON-NULL presence: a known `0`, a known empty
+   * `[]` and a known `""` description count, a `null` does not. The metadata
+   * itself is never returned, so no registry deep copy is needed.
+   *
+   * `pending_alerts`, `site_published` and `site_publish_age_s` are each
+   * STRICTLY `null`: private operator state is not observable through this
+   * payload. `warnings` unions the snapshot warnings (never removed, even when
+   * redundant) with the derived `tick_epoch_unknown` (null epoch),
+   * `tick_epoch_future` (future epoch) and `tick_stale` (known age strictly
+   * greater than `cadence_s`), deduplicated in `STATUS_WARNING_ORDER`; a fresh
+   * known epoch adds none and a null or future epoch is never `tick_stale`.
+   *
+   * Every returned map and the warnings array is freshly allocated and the
+   * snapshot and arguments are never mutated, so a caller mutating a result can
+   * never corrupt the snapshot or another call.
+   */
+  function watchdogStatus(snapshot, args, now) {
+    if (!_isPlainObject(args)) {
+      return _argumentError(INVALID_ARGUMENTS, null);
+    }
+    // No public arguments: any own key is unknown and rejects before the clock.
+    if (Object.keys(args).length !== 0) {
+      return _argumentError(INVALID_ARGUMENTS, null);
+    }
+
+    var order = snapshot.provider_order;
+    var providers = snapshot.providers;
+    var cadence = snapshot.cadence_s;
+    var tick = snapshot.tick_epoch;
+
+    var lastTickAgeS;
+    var tickFresh;
+    if (tick === null || tick > now) {
+      lastTickAgeS = null;
+      tickFresh = false;
+    } else {
+      lastTickAgeS = now - tick;
+      tickFresh = lastTickAgeS <= cadence;
+    }
+
+    var endpoints = 0;
+    var distinctRawIds = new Set();
+    var markerLabels = new Set();
+    var coverage = {
+      endpoints: 0,
+      context_length_known: 0,
+      input_modalities_known: 0,
+      output_modalities_known: 0,
+      supported_parameters_known: 0,
+      description_known: 0
+    };
+    for (var index = 0; index < order.length; index += 1) {
+      var entry = providers[order[index]];
+      var ids = entry.model_ids;
+      for (var position = 0; position < ids.length; position += 1) {
+        var rawId = ids[position];
+        endpoints += 1;
+        distinctRawIds.add(rawId);
+        markerLabels.add(stripFreeMarker(rawId));
+        var model = entry.models[rawId];
+        // NON-NULL presence, never truthiness: 0, [] and "" are known.
+        if (model.context_length !== null) {
+          coverage.context_length_known += 1;
+        }
+        var architecture = model.architecture;
+        if (architecture.input_modalities !== null) {
+          coverage.input_modalities_known += 1;
+        }
+        if (architecture.output_modalities !== null) {
+          coverage.output_modalities_known += 1;
+        }
+        if (model.supported_parameters !== null) {
+          coverage.supported_parameters_known += 1;
+        }
+        if (model.description !== null) {
+          coverage.description_known += 1;
+        }
+      }
+    }
+    coverage.endpoints = endpoints;
+
+    var providerCounts = {};
+    for (var key = 0; key < order.length; key += 1) {
+      _defineMember(providerCounts, order[key],
+                    providers[order[key]].model_ids.length);
+    }
+
+    // A fresh set: the snapshot warnings array is never mutated.
+    var present = new Set(snapshot.warnings);
+    if (tick === null) {
+      present.add("tick_epoch_unknown");
+    } else if (tick > now) {
+      present.add("tick_epoch_future");
+    } else if (now - tick > cadence) {
+      present.add("tick_stale");
+    }
+    var warnings = [];
+    for (var code = 0; code < STATUS_WARNING_ORDER.length; code += 1) {
+      if (present.has(STATUS_WARNING_ORDER[code])) {
+        warnings.push(STATUS_WARNING_ORDER[code]);
+      }
+    }
+
+    return {
+      ok: true,
+      snapshot_id: snapshot.snapshot_id,
+      tick_epoch: tick,
+      cadence_s: cadence,
+      last_tick_age_s: lastTickAgeS,
+      tick_fresh: tickFresh,
+      provider_staleness: _staleFlags(providers, order),
+      provider_counts: providerCounts,
+      metadata_coverage: coverage,
+      counts: {
+        gateways: order.length,
+        endpoints: endpoints,
+        distinct_raw_ids: distinctRawIds.size,
+        marker_group_labels: markerLabels.size
+      },
+      pending_alerts: null,
+      site_published: null,
+      site_publish_age_s: null,
+      warnings: warnings
+    };
+  }
+
   return {
     MAX_SAFE_INT: MAX_SAFE_INT,
     MAX_JSON_DEPTH: MAX_JSON_DEPTH,
@@ -2091,6 +2272,7 @@
     compareEndpointPairs: compareEndpointPairs,
     listFreeModels: listFreeModels,
     listEndpoints: listEndpoints,
-    getModel: getModel
+    getModel: getModel,
+    watchdogStatus: watchdogStatus
   };
 });

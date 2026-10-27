@@ -1613,6 +1613,23 @@ const GET_MODEL_ENDPOINT_FIELDS = ["api_type", "chat_completions_url",
                                    "metadata", "model_id", "provider", "stale"];
 const GET_MODEL_COUNT_FIELDS = ["distinct_raw_ids", "endpoints",
                                 "exact_matches", "marker_group_labels"];
+// The frozen `watchdog_status` field sets and status-only warning order, copied
+// from README's `Success envelope — watchdog_status` tables: the snapshot THREE
+// codes followed by the two derived status codes.
+const STATUS_FIELDS = ["cadence_s", "counts", "last_tick_age_s",
+                       "metadata_coverage", "ok", "pending_alerts",
+                       "provider_counts", "provider_staleness",
+                       "site_publish_age_s", "site_published", "snapshot_id",
+                       "tick_epoch", "tick_fresh", "warnings"];
+const STATUS_COUNT_FIELDS = ["distinct_raw_ids", "endpoints", "gateways",
+                             "marker_group_labels"];
+const STATUS_COVERAGE_FIELDS = ["context_length_known", "description_known",
+                                "endpoints", "input_modalities_known",
+                                "output_modalities_known",
+                                "supported_parameters_known"];
+const STATUS_WARNING_ORDER = ["tick_epoch_unknown", "metadata_missing",
+                              "metadata_invalid", "tick_epoch_future",
+                              "tick_stale"];
 // The frozen absence caveat literal, copied from README's `get_model` table.
 const GET_MODEL_CAVEAT =
   "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a " +
@@ -1831,12 +1848,14 @@ const QUERY_REFERENCE_SCRIPT = [
   "payload = json.load(sys.stdin)",
   "handlers = {'list_free_models': query_module.list_free_models,",
   "            'list_endpoints': query_module.list_endpoints,",
-  "            'get_model': query_module.get_model}",
+  "            'get_model': query_module.get_model,",
+  "            'watchdog_status': query_module.watchdog_status}",
   "results = []",
   "for case in payload['cases']:",
   "    snapshot = load_snapshot(case['snapshot_text'])",
   "    handler = handlers[case['tool']]",
-  "    results.append(json.dumps(handler(snapshot, case['args']),",
+  "    extra = {} if case.get('now') is None else {'now': case['now']}",
+  "    results.append(json.dumps(handler(snapshot, case['args'], **extra),",
   "                              sort_keys=True, ensure_ascii=True,",
   "                              separators=(',', ':'), allow_nan=False))",
   "print(json.dumps({'origin': query_module.__file__, 'results': results}))"
@@ -1863,7 +1882,8 @@ function runQueryReference(cases) {
 
 function assertQueryParity(tool, cases, javascriptResults) {
   const pythonResults = runQueryReference(cases.map((entry) => ({
-    tool: tool, snapshot_text: entry.snapshot_text, args: entry.args
+    tool: tool, snapshot_text: entry.snapshot_text, args: entry.args,
+    now: entry.now
   })));
   for (let index = 0; index < cases.length; index += 1) {
     assert.equal(catalog.canonicalText(javascriptResults[index]),
@@ -3378,6 +3398,559 @@ describe("pure get_model query", () => {
 });
 
 // --------------------------------------------------------------------------
+// pure watchdog_status: fixed-clock whole-catalogue health
+// --------------------------------------------------------------------------
+//
+// `watchdog_status` reports published-catalogue health over the WHOLE snapshot
+// at a REQUIRED, separately supplied fixed clock. `args` is `{}` on every
+// golden -- the clock is never a tool argument and never an ambient read -- and
+// every expected payload below is either the independently authored
+// `cases.json` / `argument-cases.json` row or a hand-written literal from
+// README's `Success envelope — watchdog_status` and argument tables.
+
+/** Epoch 0 at clock 0: a VALID fresh observation, never "missing". */
+function zeroEpochSnapshot() {
+  return resealedSnapshot("lookup.json", (body) => {
+    body.tick_epoch = 0;
+  });
+}
+
+/** Every tracked pair carries a KNOWN EMPTY description string. */
+function describedSnapshot() {
+  return resealedSnapshot("lookup.json", (body) => {
+    for (const provider of body.provider_order) {
+      for (const rawId of body.providers[provider].model_ids) {
+        body.providers[provider].models[rawId].description = "";
+      }
+    }
+  });
+}
+
+/** The snapshot THREE warning codes, plus one derived status code at query. */
+function composedWarningSnapshot() {
+  return resealedSnapshot("lookup.json", (body) => {
+    body.warnings = ["tick_epoch_unknown", "metadata_missing",
+                     "metadata_invalid"];
+  });
+}
+
+describe("pure watchdog_status query", () => {
+  it("reproduces every independent success golden exactly", () => {
+    const rows = queryRows("watchdog_status");
+    // Row identity is asserted so a dropped or duplicated golden cannot shrink
+    // the loop and still pass.
+    assert.equal(rows.length, 9, rows.map((row) => row.id).join(","));
+    assert.equal(new Set(rows.map((row) => row.id)).size, 9,
+                 "every golden id is unique");
+    assert.deepEqual(rows.map((row) => row.id).sort(), [
+      "status_capability_unknown_epoch_now_fresh",
+      "status_lookup_future_epoch_not_stale",
+      "status_lookup_old_tick_stale_healthy_providers",
+      "status_metadata_age_at_cadence_fresh",
+      "status_metadata_age_below_cadence_fresh",
+      "status_metadata_age_just_over_cadence_stale",
+      "status_short_cadence_age_at_cadence_fresh",
+      "status_short_cadence_age_just_over_stale",
+      "status_unknown_time_missing_epoch"
+    ]);
+    for (const row of rows) {
+      // Every status case is argument-free with its own literal case clock.
+      assert.deepEqual(row.args, {}, row.id);
+      assert.ok(Number.isInteger(row.now) && row.now >= 0, row.id);
+      // Per-row fixture override with the documented `lookup.json` default --
+      // never a wrong-fixture fallback.
+      const snapshot = acceptedSnapshot(row.fixture || "lookup.json");
+      const snapshotText = catalog.canonicalText(snapshot);
+      const args = JSON.parse(JSON.stringify(row.args));
+      const result = catalog.watchdogStatus(snapshot, args, row.now);
+      assertSameValue(result, row.expect, row.id);
+      assert.deepEqual(Object.keys(result).sort(), STATUS_FIELDS, row.id);
+      assert.deepEqual(Object.keys(result.counts).sort(), STATUS_COUNT_FIELDS,
+                       row.id);
+      assert.deepEqual(Object.keys(result.metadata_coverage).sort(),
+                       STATUS_COVERAGE_FIELDS, row.id);
+      // Strict scalar types: ok exactly true, tick_fresh a strict bool.
+      assert.equal(result.ok, true, row.id);
+      assert.equal(typeof result.tick_fresh, "boolean", row.id);
+      assert.ok(result.last_tick_age_s === null ||
+                Number.isInteger(result.last_tick_age_s), row.id);
+      // Provenance echoes the consumed snapshot literally; a future epoch is
+      // never repaired and the cadence is never a hardcoded 3600.
+      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
+      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
+      assert.equal(result.cadence_s, snapshot.cadence_s, row.id);
+      // Inclusive freshness: age 0 and age == cadence are fresh; a null or
+      // future tick is null age and false, never clamped to a healthy zero.
+      const tick = snapshot.tick_epoch;
+      const cadence = snapshot.cadence_s;
+      if (tick === null || tick > row.now) {
+        assert.equal(result.last_tick_age_s, null, row.id);
+        assert.equal(result.tick_fresh, false, row.id);
+      } else {
+        assert.equal(result.last_tick_age_s, row.now - tick, row.id);
+        assert.equal(result.tick_fresh, row.now - tick <= cadence, row.id);
+        assert.ok(result.last_tick_age_s >= 0, row.id);
+      }
+      // Every provider_order key, zero-ID providers included, in display order.
+      assert.deepEqual(Object.keys(result.provider_staleness),
+                       snapshot.provider_order, row.id);
+      assert.deepEqual(Object.keys(result.provider_counts),
+                       snapshot.provider_order, row.id);
+      for (const provider of snapshot.provider_order) {
+        const entry = snapshot.providers[provider];
+        assert.equal(typeof result.provider_staleness[provider], "boolean",
+                     `${row.id}:${provider}`);
+        assert.equal(result.provider_staleness[provider], entry.stale,
+                     `${row.id}:${provider}`);
+        assert.ok(Number.isInteger(result.provider_counts[provider]) &&
+                  result.provider_counts[provider] >= 0,
+                  `${row.id}:${provider}`);
+        assert.equal(result.provider_counts[provider],
+                     entry.model_ids.length, `${row.id}:${provider}`);
+      }
+      // Whole-catalogue counts, structurally restated from the snapshot; the
+      // literal golden above remains the correctness oracle.
+      const pairs = [];
+      for (const provider of snapshot.provider_order) {
+        for (const rawId of snapshot.providers[provider].model_ids) {
+          pairs.push(rawId);
+        }
+      }
+      assert.deepEqual(result.counts, {
+        gateways: snapshot.provider_order.length,
+        endpoints: pairs.length,
+        distinct_raw_ids: new Set(pairs).size,
+        marker_group_labels:
+          new Set(pairs.map((rawId) => catalog.stripFreeMarker(rawId))).size
+      }, row.id);
+      // Coverage is NON-NULL presence: a known 0 / [] / "" counts, null does
+      // not, over the global tracked-pair denominator.
+      const coverage = {
+        endpoints: pairs.length, context_length_known: 0,
+        input_modalities_known: 0, output_modalities_known: 0,
+        supported_parameters_known: 0, description_known: 0
+      };
+      for (const provider of snapshot.provider_order) {
+        const entry = snapshot.providers[provider];
+        for (const rawId of entry.model_ids) {
+          const model = entry.models[rawId];
+          if (model.context_length !== null) {
+            coverage.context_length_known += 1;
+          }
+          if (model.architecture.input_modalities !== null) {
+            coverage.input_modalities_known += 1;
+          }
+          if (model.architecture.output_modalities !== null) {
+            coverage.output_modalities_known += 1;
+          }
+          if (model.supported_parameters !== null) {
+            coverage.supported_parameters_known += 1;
+          }
+          if (model.description !== null) {
+            coverage.description_known += 1;
+          }
+        }
+      }
+      assert.deepEqual(result.metadata_coverage, coverage, row.id);
+      assert.equal(result.metadata_coverage.endpoints,
+                   result.counts.endpoints, row.id);
+      for (const value of Object.values(result.metadata_coverage)) {
+        assert.ok(Number.isInteger(value) && value >= 0 &&
+                  value <= result.metadata_coverage.endpoints, row.id);
+      }
+      // The three unobservables are STRICTLY null -- never 0 or false.
+      assert.equal(result.pending_alerts, null, row.id);
+      assert.equal(result.site_published, null, row.id);
+      assert.equal(result.site_publish_age_s, null, row.id);
+      // Snapshot warnings plus derived codes, deduplicated in frozen order.
+      assert.deepEqual(result.warnings,
+                       STATUS_WARNING_ORDER.filter(
+                         (code) => result.warnings.includes(code)), row.id);
+      assert.equal(result.warnings.length,
+                   new Set(result.warnings).size, row.id);
+      // Inputs are never mutated.
+      assert.equal(catalog.canonicalText(snapshot), snapshotText,
+                   `${row.id}: the snapshot is never mutated`);
+      assert.deepEqual(args, {}, `${row.id}: the arguments are never mutated`);
+    }
+  });
+
+  it("moves only the clock-derived fields across the freshness boundary", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const clocks = [1759199999, 1759200000, 1759203600, 1759203601];
+    const results = clocks.map((clock) => catalog.watchdogStatus(lookup, {},
+                                                                 clock));
+    // Provenance, provider maps, counts and coverage are clock-INVARIANT.
+    for (const field of ["provider_staleness", "provider_counts",
+                         "metadata_coverage", "counts", "snapshot_id",
+                         "tick_epoch", "cadence_s", "pending_alerts",
+                         "site_published", "site_publish_age_s"]) {
+      for (const result of results) {
+        assertSameValue(result[field], results[0][field], field);
+      }
+    }
+    // Only age, freshness and warnings move -- future, exact tick, at cadence,
+    // one second over.
+    assert.deepEqual(results.map((result) => result.last_tick_age_s),
+                     [null, 0, 3600, 3601]);
+    assert.deepEqual(results.map((result) => result.tick_fresh),
+                     [false, true, true, false]);
+    assert.deepEqual(results.map((result) => result.warnings),
+                     [["tick_epoch_future"], [], [], ["tick_stale"]]);
+
+    // The boundary uses the SNAPSHOT cadence: at 120 s, age 120 is fresh and
+    // 121 is stale -- never a hardcoded 3600.
+    const short = acceptedSnapshot("status-short-cadence.json");
+    assert.equal(catalog.watchdogStatus(short, {}, 1759200120).last_tick_age_s,
+                 120);
+    assert.equal(catalog.watchdogStatus(short, {}, 1759200120).tick_fresh, true);
+    assert.deepEqual(catalog.watchdogStatus(short, {}, 1759200120).warnings,
+                     ["metadata_missing"]);
+    const over = catalog.watchdogStatus(short, {}, 1759200121);
+    assert.equal(over.cadence_s, 120);
+    assert.equal(over.last_tick_age_s, 121);
+    assert.equal(over.tick_fresh, false);
+    assert.deepEqual(over.warnings, ["metadata_missing", "tick_stale"]);
+
+    // A null epoch is never a stale known observation, however late the clock.
+    const unknown = catalog.watchdogStatus(
+      acceptedSnapshot("status-unknown-time.json"), {}, 4102444800);
+    assert.equal(unknown.last_tick_age_s, null);
+    assert.equal(unknown.tick_fresh, false);
+    assert.deepEqual(unknown.warnings,
+                     ["tick_epoch_unknown", "metadata_missing"]);
+  });
+
+  it("returns fresh, isolated containers and never aliases an input", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const frozen = catalog.canonicalText(lookup);
+    const first = catalog.watchdogStatus(lookup, {}, 1759203601);
+    const second = catalog.watchdogStatus(lookup, {}, 1759203601);
+    assertSameValue(first, second, "two identical calls agree");
+    // Interleaved sync calls, not a worker-concurrency test: every mutable
+    // outer container is freshly allocated.
+    for (const field of ["provider_staleness", "provider_counts",
+                         "metadata_coverage", "counts", "warnings"]) {
+      assert.notEqual(first[field], second[field],
+                      `${field} is separately allocated`);
+    }
+    first.provider_staleness["synthetic-a"] = true;
+    first.provider_counts["synthetic-a"] = 99;
+    first.metadata_coverage.endpoints = 99;
+    first.counts.gateways = 99;
+    first.warnings.push("injected");
+    assert.equal(catalog.canonicalText(lookup), frozen,
+                 "the snapshot is untouched");
+    assert.equal(second.provider_staleness["synthetic-a"], false);
+    assert.equal(second.provider_counts["synthetic-a"], 3);
+    assert.equal(second.counts.gateways, 3);
+    assert.deepEqual(second.warnings, ["tick_stale"]);
+    assertSameValue(catalog.watchdogStatus(lookup, {}, 1759203601), second,
+                    "a later call is unaffected");
+
+    // Interleaving the three earlier tools neither sees nor supplies state.
+    const statusA = catalog.watchdogStatus(lookup, {}, 1759200000);
+    const models = catalog.listFreeModels(lookup, {});
+    const endpoints = catalog.listEndpoints(lookup, {});
+    const model = catalog.getModel(lookup, {model_id: "vendor/shared"});
+    const statusB = catalog.watchdogStatus(lookup, {}, 1759200000);
+    assertSameValue(statusA, statusB, "interleaved status calls agree");
+    statusB.provider_counts["synthetic-b"] = 42;
+    statusB.warnings.push("injected");
+    assert.equal(models.n_gateways, 3);
+    assert.equal(endpoints.ok, true);
+    assert.equal(endpoints.counts.endpoints, 5);
+    assert.equal(model.counts.endpoints, 2);
+    assert.equal(catalog.canonicalText(lookup), frozen, "still untouched");
+
+    // A fresh error envelope on every call, independent of the clock.
+    const errorOne = catalog.watchdogStatus(lookup, {now: 0}, 0);
+    errorOne.error.code = "mutated";
+    errorOne.ok = true;
+    const errorTwo = catalog.watchdogStatus(lookup, {now: 0}, 0);
+    assertArgumentEnvelope(errorTwo, "invalid_arguments", null,
+                           "a fresh envelope on every call");
+    assert.notEqual(errorOne, errorTwo);
+    assert.equal(catalog.canonicalText(lookup), frozen);
+  });
+
+  it("mirrors the accepted Python status controls literally", () => {
+    // (1) epoch 0 at clock 0 is a VALID fresh observation, never "missing",
+    // and adds no warning.
+    const atZero = catalog.watchdogStatus(zeroEpochSnapshot(), {}, 0);
+    assert.equal(atZero.tick_epoch, 0);
+    assert.equal(atZero.last_tick_age_s, 0);
+    assert.equal(atZero.tick_fresh, true);
+    assert.deepEqual(atZero.warnings, []);
+
+    // (2) A legitimately EMPTY registry is an all-provider control: empty maps
+    // and a fully zeroed counts/coverage pair.
+    const whole = catalog.watchdogStatus(emptyRegistrySnapshot(), {},
+                                         1759200000);
+    assert.deepEqual(Object.keys(whole).sort(), STATUS_FIELDS);
+    assert.equal(whole.ok, true);
+    assert.deepEqual(whole.provider_staleness, {});
+    assert.deepEqual(whole.provider_counts, {});
+    assert.deepEqual(whole.counts, {gateways: 0, endpoints: 0,
+                                    distinct_raw_ids: 0,
+                                    marker_group_labels: 0});
+    assert.deepEqual(whole.metadata_coverage, {
+      endpoints: 0, context_length_known: 0, input_modalities_known: 0,
+      output_modalities_known: 0, supported_parameters_known: 0,
+      description_known: 0
+    });
+
+    // (3) A known-EMPTY description string is known: all five pairs count.
+    assert.equal(
+      catalog.watchdogStatus(describedSnapshot(), {},
+                             1759200000).metadata_coverage.description_known,
+      5);
+
+    // (4) The maximal FOUR-code composition in the frozen order. A full five
+    // is unreachable: the two derived codes are mutually exclusive.
+    const composed = composedWarningSnapshot();
+    assert.deepEqual(catalog.watchdogStatus(composed, {}, 1759203601).warnings,
+                     ["tick_epoch_unknown", "metadata_missing",
+                      "metadata_invalid", "tick_stale"]);
+    assert.deepEqual(catalog.watchdogStatus(composed, {}, 1759199999).warnings,
+                     ["tick_epoch_unknown", "metadata_missing",
+                      "metadata_invalid", "tick_epoch_future"]);
+
+    // (5) Prototype-looking provider and raw-ID keys stay literal data.
+    const lookalike = lookalikeKeySnapshot();
+    const lookalikeText = catalog.canonicalText(lookalike);
+    const proto = catalog.watchdogStatus(lookalike, {}, 1759200000);
+    assert.deepEqual(Object.keys(proto.provider_staleness),
+                     ["__proto__", "constructor"]);
+    assert.equal(proto.provider_staleness["__proto__"], true);
+    assert.equal(proto.provider_staleness["constructor"], false);
+    assert.equal(proto.provider_counts["__proto__"], 3);
+    assert.equal(proto.provider_counts["constructor"], 1);
+    assert.deepEqual(proto.counts, {gateways: 2, endpoints: 4,
+                                    distinct_raw_ids: 4,
+                                    marker_group_labels: 4});
+    assert.equal(proto.last_tick_age_s, null);
+    assert.equal(proto.tick_fresh, false);
+    assert.deepEqual(proto.warnings, ["tick_epoch_unknown"]);
+    assert.equal({}.polluted, undefined);
+    assert.equal(Object.prototype.polluted, undefined);
+    assert.equal(catalog.canonicalText(lookalike), lookalikeText,
+                 "the lookalike snapshot is never mutated");
+
+    // (6) A zero-ID provider is still a configured gateway: count 0, stale flag
+    // carried forward, and one whole-catalogue gateway.
+    const capability = catalog.watchdogStatus(
+      acceptedSnapshot("capability-unknown.json"), {}, 1759200000);
+    assert.equal(capability.provider_counts["synthetic-b"], 0);
+    assert.equal(capability.provider_staleness["synthetic-b"], true);
+    assert.equal(capability.counts.gateways, 2);
+    assert.equal(capability.counts.endpoints, 2);
+
+    // (7) One raw id shared by two gateways is two endpoints and ONE distinct
+    // raw id; marker labels are labels, never verified identities.
+    const shared = catalog.watchdogStatus(acceptedSnapshot("lookup.json"), {},
+                                          1759200000);
+    assert.equal(shared.provider_counts["synthetic-a"], 3);
+    assert.equal(shared.provider_counts["synthetic-b"], 2);
+    assert.deepEqual(shared.counts, {gateways: 3, endpoints: 5,
+                                     distinct_raw_ids: 4,
+                                     marker_group_labels: 3});
+
+    // (8) NON-NULL, not truthiness: a known 0 / [] / "" counts as known while
+    // null does not, over the two short-cadence pairs.
+    const short = catalog.watchdogStatus(
+      acceptedSnapshot("status-short-cadence.json"), {}, 1759200000);
+    assert.deepEqual(short.metadata_coverage, {
+      endpoints: 2, context_length_known: 1, input_modalities_known: 1,
+      output_modalities_known: 1, supported_parameters_known: 1,
+      description_known: 1
+    });
+
+    // (9) No private operator state is observable through this payload.
+    for (const payload of [whole, proto, shared, short, atZero]) {
+      assert.equal(payload.pending_alerts, null);
+      assert.equal(payload.site_published, null);
+      assert.equal(payload.site_publish_age_s, null);
+      assert.deepEqual(Object.keys(payload).sort(), STATUS_FIELDS);
+      for (const absent of ["state_root", "source", "path", "cache", "tool",
+                            "caveats", "endpoints", "query",
+                            "provider_health", "pricing"]) {
+        assert.equal(Object.prototype.hasOwnProperty.call(payload, absent),
+                     false, `no ${absent} field`);
+      }
+    }
+  });
+
+  it("accepts only the empty argument object", () => {
+    const invalid = argumentRows("invalid_cases", "watchdog_status");
+    const valid = argumentRows("valid_controls", "watchdog_status");
+    assert.equal(invalid.length, 1, "one frozen invalid row");
+    assert.equal(invalid[0].id, "unknown_arg_watchdog_status");
+    assert.deepEqual(invalid[0].args, {now: 1759200000});
+    assert.equal(valid.length, 1, "one frozen acceptance control");
+    assert.equal(valid[0].id, "valid_omitted_watchdog_status");
+    assert.deepEqual(valid[0].args, {});
+
+    const lookup = acceptedSnapshot("lookup.json");
+    const frozen = catalog.canonicalText(lookup);
+
+    for (const row of invalid) {
+      // The COMPLETE literal, independently authored envelope.
+      const snapshot = acceptedSnapshot(row.fixture);
+      const args = JSON.parse(JSON.stringify(row.args));
+      const result = catalog.watchdogStatus(snapshot, args, 1759200000);
+      assertSameValue(result, row.expect, row.id);
+      assertArgumentEnvelope(result, "invalid_arguments", null, row.id);
+      assert.deepEqual(args, row.args,
+                       "the argument object is never mutated");
+    }
+    for (const row of valid) {
+      const result = catalog.watchdogStatus(
+        acceptedSnapshot(row.fixture), JSON.parse(JSON.stringify(row.args)),
+        1759200000);
+      assert.equal(result.ok, true, row.id);
+    }
+
+    // A whole argument value that is not a JSON object rejects with parameter
+    // null -- never a coerced array, number, string or bool.
+    for (const args of [null, [], 5, "x", false, true, 1.5, undefined,
+                        [["now", 1]]]) {
+      assertArgumentEnvelope(catalog.watchdogStatus(lookup, args, 0),
+                             "invalid_arguments", null,
+                             `non-object ${JSON.stringify(args)}`);
+    }
+
+    // ANY own key is unknown, `now` included: the separately supplied clock
+    // never authorizes `args.now`.
+    for (const key of ["now", "provider", "limit", "offset", "query",
+                       "snapshot_id", "hostile"]) {
+      assertArgumentEnvelope(
+        catalog.watchdogStatus(lookup, {[key]: 1759200000}, 0),
+        "invalid_arguments", null, `unknown key ${key}`);
+    }
+    assertArgumentEnvelope(
+      catalog.watchdogStatus(lookup, {now: 1759200000,
+                                      provider: "synthetic-a"}, 0),
+      "invalid_arguments", null, "two unknown keys");
+    for (const protoArgs of [JSON.parse('{"__proto__":1}'),
+                             JSON.parse('{"constructor":1}'),
+                             JSON.parse('{"toString":1}')]) {
+      assertArgumentEnvelope(catalog.watchdogStatus(lookup, protoArgs, 0),
+                             "invalid_arguments", null,
+                             "prototype-looking argument key");
+    }
+    assert.equal(catalog.watchdogStatus(lookup, {}, 0).ok, true);
+
+    // The clock is not touched before the argument boundary: the throwing
+    // coercion sentinel never runs because the unknown key rejects first.
+    const throwingClock = {
+      valueOf() {
+        throw new Error("the fixed clock was read before validation");
+      },
+      [Symbol.toPrimitive]() {
+        throw new Error("the fixed clock was read before validation");
+      }
+    };
+    assertArgumentEnvelope(
+      catalog.watchdogStatus(lookup, {now: 1759200000}, throwingClock),
+      "invalid_arguments", null, "unknown key before clock use");
+    assertArgumentEnvelope(catalog.watchdogStatus(lookup, null,
+                                                 throwingClock),
+                           "invalid_arguments", null,
+                           "non-object before clock use");
+
+    // A hostile value under an unknown key is never reflected.
+    const hostile = catalog.watchdogStatus(lookup,
+                                           {now: "<script>undefined"}, 0);
+    assertArgumentEnvelope(hostile, "invalid_arguments", null,
+                           "hostile value");
+    assert.equal(JSON.stringify(hostile).includes("script"), false,
+                 "no hostile value reflection");
+    assert.equal(catalog.canonicalText(lookup), frozen,
+                 "the snapshot is never mutated");
+  });
+
+  it("never reads an ambient wall clock", () => {
+    const source = fs.readFileSync(
+      path.join(REPO_ROOT, "web", "catalog-query.js"), "utf8");
+    for (const forbidden of ["Date.now", "new Date", "performance.now",
+                             "Math.random", "setTimeout", "setInterval",
+                             "process.hrtime"]) {
+      assert.equal(source.includes(forbidden), false,
+                   `the pure module never references ${forbidden}`);
+    }
+    const lookup = acceptedSnapshot("lookup.json");
+    const realNow = Date.now;
+    try {
+      Date.now = () => { throw new Error("ambient clock read"); };
+      const atTick = catalog.watchdogStatus(lookup, {}, 1759200000);
+      assert.equal(atTick.last_tick_age_s, 0);
+      assert.equal(atTick.tick_fresh, true);
+      assert.deepEqual(atTick.warnings, []);
+      const stale = catalog.watchdogStatus(lookup, {}, 1759203601);
+      assert.equal(stale.last_tick_age_s, 3601);
+      assert.deepEqual(stale.warnings, ["tick_stale"]);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("agrees with the unchanged Python reference over the selected inputs",
+     () => {
+    const cases = queryRows("watchdog_status").map((row) => ({
+      label: row.id,
+      snapshot_text: readFixtureText(row.fixture || "lookup.json"),
+      args: JSON.parse(JSON.stringify(row.args)),
+      now: row.now
+    }));
+    const lookupText = readFixtureText("lookup.json");
+    const shortText = readFixtureText("status-short-cadence.json");
+    for (const entry of [
+      ["boundary-unknown-now", lookupText, {now: 1759200000}, 1759200000],
+      ["boundary-unknown-provider", lookupText, {provider: "synthetic-a"},
+       1759200000],
+      ["boundary-unknown-limit", lookupText, {limit: 5}, 1759200000],
+      ["boundary-non-object", lookupText, 5, 0],
+      ["boundary-null-object", lookupText, null, 0],
+      ["boundary-multi-key", lookupText, {now: 1, limit: 2}, 0],
+      ["boundary-empty", lookupText, {}, 0],
+      ["boundary-future", lookupText, {}, 1759199999],
+      ["boundary-exact-tick", lookupText, {}, 1759200000],
+      ["boundary-at-cadence", lookupText, {}, 1759203600],
+      ["boundary-over-cadence", lookupText, {}, 1759203601],
+      ["boundary-short-at", shortText, {}, 1759200120],
+      ["boundary-short-over", shortText, {}, 1759200121],
+      ["boundary-far-future-clock", readFixtureText("status-unknown-time.json"),
+       {}, 4102444800]
+    ]) {
+      cases.push({label: entry[0], snapshot_text: entry[1], args: entry[2],
+                  now: entry[3]});
+    }
+    cases.push({label: "control-empty-registry",
+                snapshot_text: catalog.canonicalText(emptyRegistrySnapshot()),
+                args: {}, now: 1759200000});
+    cases.push({label: "control-epoch-zero",
+                snapshot_text: catalog.canonicalText(zeroEpochSnapshot()),
+                args: {}, now: 0});
+    cases.push({label: "control-described",
+                snapshot_text: catalog.canonicalText(describedSnapshot()),
+                args: {}, now: 1759200000});
+    cases.push({label: "control-composed-stale",
+                snapshot_text: catalog.canonicalText(composedWarningSnapshot()),
+                args: {}, now: 1759203601});
+    cases.push({label: "control-composed-future",
+                snapshot_text: catalog.canonicalText(composedWarningSnapshot()),
+                args: {}, now: 1759199999});
+    cases.push({label: "control-lookalike",
+                snapshot_text: catalog.canonicalText(lookalikeKeySnapshot()),
+                args: {}, now: 1759200000});
+    const results = cases.map((entry) => catalog.watchdogStatus(
+      catalog.loadSnapshot(entry.snapshot_text), entry.args, entry.now));
+    assertQueryParity("watchdog_status", cases, results);
+  });
+});
+
+// --------------------------------------------------------------------------
 // cross-fixture integration and the dual (browser + Node) export
 // --------------------------------------------------------------------------
 describe("fixture integration and export shape", () => {
@@ -3447,7 +4020,7 @@ describe("fixture integration and export shape", () => {
       "endpointKey", "getModel", "isFloatToken", "listEndpoints",
       "listFreeModels", "loadJson", "loadSnapshot", "naturalKey",
       "normalizeCapabilities", "projectCapabilities", "projectModel",
-      "snapshotHash", "stripFreeMarker", "validateSnapshot"
+      "snapshotHash", "stripFreeMarker", "validateSnapshot", "watchdogStatus"
     ]);
     assert.equal(catalog.MAX_SAFE_INT, 9007199254740991);
     assert.equal(catalog.MAX_JSON_DEPTH, 64);
