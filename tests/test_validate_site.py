@@ -1,6 +1,6 @@
-"""Unit 9e: the read-only Pages artifact validator and its deployment gate.
+"""Unit 9e/9f: the read-only Pages artifact gates and their deployment wiring.
 
-Two focused groups, both stdlib-only and fully synthetic:
+Three focused groups, all stdlib-only and fully synthetic:
 
 * the CLI group runs the REAL ``scripts/validate_site.py`` as an isolated
   ``-I -S`` child from an unrelated cwd (with spaces and non-ASCII characters
@@ -16,30 +16,45 @@ Two focused groups, both stdlib-only and fully synthetic:
 * the workflow group reads the ACTUAL checked-in ``deploy-dashboard.yml`` with a
   minimal indentation extractor (not a YAML implementation), asserts the
   fail-closed wiring -- managed CPython 3.11 bound by value, one unconditional
-  validator step invoking the real CLI against the SAME uploaded directory,
-  strictly before the preserved upload/deploy actions, with full trigger paths
-  and no bypass -- and then EXECUTES the extracted validation command under
-  bounded local Bash against a good pair (an upload/deploy sentinel is
-  reached) and a broken pair (it is not).
+  pair-validation step and one unconditional source-freshness step invoking the
+  real CLIs against the SAME uploaded directory, strictly before the preserved
+  upload/deploy actions, with full trigger paths including the maintained
+  ``web/**`` sources and no bypass -- and then EXECUTES both extracted commands
+  under bounded local Bash against a good pair (an upload/deploy sentinel is
+  reached), a broken pair (it is not) and a schema-valid pair whose inlined
+  scripts are STALE (it is not). ``web/**`` is a trigger precisely so a source
+  change cannot deploy a page that predates it.
+* the freshness group runs the REAL ``scripts/check_page_sources.py`` against
+  synthetic pages built from the maintained sources: the exact bodies are
+  accepted read-only, and a missing, reordered, duplicated, extra, mutated,
+  truncated or unreadable script (or source) is rejected. It also pins the
+  checker's marker table and bootstrap marker to ``build_site``'s own literals,
+  so the gate cannot drift away from the builder it is checking, and pins the
+  JS/parity CI lane in ``test.yml`` -- setup-node installed explicitly, Node
+  bound by value, the two Node suites and the Python/Node parity file executed.
 
-Both groups end with metadata-free negative controls: a scratch CLI copy whose
-real pair validation is bypassed must make this file's own rejection helper
-FAIL, and a scratch workflow copy with the gate weakened or removed must make
-this file's own wiring/sentinel checks FAIL. Those controls live only in
-owned temporary directories; the tracked source, the tests and their
-expectations are untouched.
+Both public gates end with metadata-free negative controls: a scratch CLI copy
+whose real pair validation is bypassed must make this file's own rejection
+helper FAIL, a scratch workflow copy with either gate weakened or removed must
+make this file's own wiring/sentinel checks FAIL, and a stale-script page must
+be rejected by the freshness CLI itself. Those controls live only in owned
+temporary directories; the tracked source, the tests and their expectations are
+untouched.
 
 Nothing here publishes, deploys, installs, fetches or reads private state: the
 catalogue input is the accepted synthetic golden fixture
 ``tests/fixtures/catalog/basic.json`` and the page is an explicitly synthetic
 whole document carrying the same JSON island. ``validate_artifact_pair`` (the
 real shared validator) is called directly to prove each accepted fixture is a
-coherent pair.
+coherent pair. The maintained ``web/*.js`` sources are the repository's own
+committed files, read here only as inert text.
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -53,9 +68,24 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 CLI = REPO / "scripts" / "validate_site.py"
+SOURCES_CLI = REPO / "scripts" / "check_page_sources.py"
 WORKFLOW = REPO / ".github" / "workflows" / "deploy-dashboard.yml"
 TEST_WORKFLOW = REPO / ".github" / "workflows" / "test.yml"
 FIXTURES = REPO / "tests" / "fixtures" / "catalog"
+WEB = REPO / "web"
+
+#: The maintained executable page sources, as ``build_site`` names them.
+MAINTAINED_SOURCES = (
+    ("catalog-query", "catalog-query.js"),
+    ("webmcp", "webmcp.js"),
+)
+BOOTSTRAP_MARKER = "boot"
+
+#: The two read-only gate commands the Pages job must execute, in order.
+GATE_SCRIPTS = ("scripts/validate_site.py", "scripts/check_page_sources.py")
+
+#: A fixed token planted only in a stale inlined body: it must never be echoed.
+SOURCE_ECHO_MARKER = "inline-source-tampered-marker"
 
 CHILD_TIMEOUT_S = 120
 DIAGNOSTIC_LIMIT = 300
@@ -114,17 +144,64 @@ def _make_site(site, catalog_text=None, html_text=None):
     return site
 
 
+def _source_text(name, web=None):
+    return ((web if web is not None else WEB) / name).read_text(encoding="utf-8")
+
+
+def _page_with_scripts(catalog_text, scripts):
+    """A synthetic page whose executable slot is exactly ``scripts``.
+
+    ``scripts`` is an ordered sequence of ``(marker, body)`` pairs, rendered
+    with the builder's own element shape so the freshness gate sees the same
+    markup a real ``build_site`` run emits.
+    """
+    elements = "\n".join(
+        f'<script data-watchdog="{marker}">' + body + "</script>"
+        for marker, body in scripts)
+    return ("<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\">\n"
+            "<title>synthetic standalone dashboard fixture</title>\n</head>\n"
+            "<body>\n<main>synthetic fixture</main>\n"
+            + _island(catalog_text) + "\n" + elements + "\n</body>\n</html>\n")
+
+
+def _builder_bootstrap_source():
+    """The builder's own bootstrap text: the third element's expected body."""
+    import build_site
+
+    return build_site.PAGE_BOOTSTRAP_SOURCE
+
+
+def _fresh_scripts(web=None, *, overrides=None):
+    """The maintained source pairs plus the builder's exact bootstrap body."""
+    overrides = overrides or {}
+    scripts = [(marker, overrides.get(marker, _source_text(name, web)))
+               for marker, name in MAINTAINED_SOURCES]
+    scripts.append((BOOTSTRAP_MARKER, overrides.get(
+        BOOTSTRAP_MARKER, _builder_bootstrap_source())))
+    return scripts
+
+
+def _fresh_page(catalog_text, web=None, *, overrides=None):
+    return _page_with_scripts(catalog_text, _fresh_scripts(web, overrides=overrides))
+
+
 def _copy_checkout(destination):
-    """A private copy of the CLI plus ONLY the pure validator modules it needs.
+    """A private copy of BOTH read-only CLIs plus the modules/files they read.
 
     ``watchdog_catalog/``'s transport modules need the SDK and are copied too
     only so the layout matches a real checkout; the audit below proves they are
-    never imported.
+    never imported. ``web/`` carries the maintained page sources the freshness
+    gate compares against, and it is the copy's OWN ``web/`` directory -- the
+    gate resolves its sources from its checkout, never from the site directory.
     """
     (destination / "scripts").mkdir(parents=True, exist_ok=True)
     shutil.copy2(CLI, destination / "scripts" / "validate_site.py")
+    if SOURCES_CLI.is_file():
+        shutil.copy2(SOURCES_CLI, destination / "scripts" / "check_page_sources.py")
     shutil.copy2(REPO / "catalog_export.py", destination / "catalog_export.py")
     shutil.copytree(REPO / "watchdog_catalog", destination / "watchdog_catalog",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(WEB, destination / "web",
                     ignore=shutil.ignore_patterns("__pycache__"))
     return destination
 
@@ -598,7 +675,11 @@ def _trigger_paths(text):
 
 
 def _assert_workflow_gate(text):
-    """The fail-closed wiring contract, asserted structurally (no YAML library)."""
+    """The fail-closed wiring contract, asserted structurally (no YAML library).
+
+    Returns the two executed gate commands (pair validation, source freshness)
+    so the caller can run exactly what the workflow runs.
+    """
     steps = _workflow_steps(text)
     uses = [_pin(_step_key(step, "uses")) for step in steps]
     runs = [_step_key(step, "run") or "" for step in steps]
@@ -614,27 +695,15 @@ def _assert_workflow_gate(text):
 
     validators = [index for index, run in enumerate(runs)
                   if "scripts/validate_site.py" in run]
-    assert len(validators) == 1, "exactly one validator step"
-    validate_index = validators[0]
-    assert validate_index < upload[0] < deploy[0], "validation must precede upload"
+    fresh = [index for index, run in enumerate(runs)
+             if "scripts/check_page_sources.py" in run]
+    assert len(validators) == 1, "exactly one pair-validation step"
+    assert len(fresh) == 1, "exactly one source-freshness step"
+    validate_index, fresh_index = validators[0], fresh[0]
+    assert validate_index < fresh_index < upload[0] < deploy[0], \
+        "both gates must precede upload, pair validation first"
 
-    validate_step = steps[validate_index]
-    run = runs[validate_index]
-    assert re.search(r"(?m)^set -euo pipefail$", run), "not fail-closed"
-    assert re.search(r"-I\s+-S\s+\S*scripts/validate_site\.py", run), \
-        "the real CLI is not invoked with an isolated interpreter"
-    for swallowed in ("|| true", "|| echo", "|| :", "set +e"):
-        assert swallowed not in run, swallowed
-    assert re.search(r"(?m)^\s*if\s", run) is None, "a conditional gate"
-    assert _step_key(validate_step, "uses") is None
-    assert _step_mapping(validate_step, "if") == {}
-    assert "continue-on-error" not in validate_step
-
-    # The SAME directory is validated and uploaded.
-    upload_target = _step_mapping(steps[upload[0]], "with")["path"].strip("'\"")
-    assert _resolved_site_dir(run) == upload_target == "site"
-
-    # A managed CPython 3.11 is set up before the gate and bound BY VALUE.
+    # A managed CPython 3.11 is set up before both gates and bound BY VALUE.
     setups = [index for index, use in enumerate(uses)
               if use.startswith("actions/setup-python@")]
     assert len(setups) == 1
@@ -643,11 +712,39 @@ def _assert_workflow_gate(text):
     assert _step_mapping(setup_step, "with")["python-version"].strip("'\"") == "3.11"
     setup_id = _step_key(setup_step, "id")
     assert setup_id
-    reference = "${{ steps.%s.outputs.python-path }}" % setup_id
-    environ = _step_mapping(validate_step, "env")
-    bound = [name for name, value in environ.items() if value == reference]
-    assert len(bound) == 1, "the interpreter is not bound from setup-python"
-    assert '"$%s"' % bound[0] in run
+
+    # The SAME directory is validated, freshness-checked and uploaded.
+    upload_target = _step_mapping(steps[upload[0]], "with")["path"].strip("'\"")
+
+    def _gate(step, script, *, site_argument=True):
+        run = _step_key(step, "run")
+        assert re.search(r"(?m)^set -euo pipefail$", run), "not fail-closed"
+        assert re.search(r"-I\s+-S\s+\S*" + re.escape(script), run), \
+            "%s is not invoked with an isolated interpreter" % script
+        for swallowed in ("|| true", "|| echo", "|| :", "set +e"):
+            assert swallowed not in run, swallowed
+        assert re.search(r"(?m)^\s*if\s", run) is None, "a conditional gate"
+        assert _step_key(step, "uses") is None
+        assert _step_mapping(step, "if") == {}
+        assert "continue-on-error" not in step
+        environ = _step_mapping(step, "env")
+        bound = [name for name, value in environ.items()
+                 if value == "${{ steps.%s.outputs.python-path }}" % setup_id]
+        assert len(bound) == 1, \
+            "%s does not bind the interpreter from setup-python by value" % script
+        assert '"$%s"' % bound[0] in run, script
+        if site_argument:
+            assert _resolved_site_dir(run) == upload_target, script
+        return run
+
+    assert upload_target == "site"
+    validate_run = _gate(steps[validate_index], "scripts/validate_site.py")
+    freshness_run = _gate(steps[fresh_index], "scripts/check_page_sources.py")
+    assert _resolved_site_dir(validate_run) == upload_target
+    assert _resolved_site_dir(freshness_run) == upload_target
+    # Sources are the gate's OWN checkout copies: the site directory, an
+    # operator or a trigger cannot choose what the page is compared against.
+    assert "--web-dir" not in freshness_run
 
     # The reviewed pins are the ones already in the full test workflow.
     test_uses = [_pin(_step_key(step, "uses"))
@@ -656,11 +753,13 @@ def _assert_workflow_gate(text):
                            if use.startswith("actions/checkout@")]:
         assert uses[index] in test_uses, (uses[index], "unreviewed pin")
 
-    # Triggers/limits preserved, with the validator's own inputs watched.
+    # Triggers/limits preserved, with EVERY gate input watched -- including the
+    # maintained web sources, so a source change can never deploy a stale page.
     paths = _trigger_paths(text)
     for required in ("site/**", ".github/workflows/deploy-dashboard.yml",
-                     "scripts/validate_site.py", "catalog_export.py",
-                     "watchdog_catalog/**", "build_site.py"):
+                     "scripts/validate_site.py", "scripts/check_page_sources.py",
+                     "catalog_export.py", "watchdog_catalog/**", "build_site.py",
+                     "web/**"):
         assert required in paths, required
     assert "branches: [master]" in text
     assert re.search(r"(?m)^  workflow_dispatch:", text)
@@ -684,34 +783,38 @@ def _assert_workflow_gate(text):
             assert swallowed not in run_text, swallowed
         for forbidden in ("pip install", "build_site.py", "inference_watchdog"):
             assert forbidden not in run_text, forbidden
+    return validate_run, freshness_run
 
 
 def _gate_run(text, root, *, sentinel, home, tmpdir):
-    """Execute the workflow's own extracted validation command, then a sentinel.
+    """Execute the workflow's own extracted gate commands, then a sentinel.
 
-    The sentinel stands for the upload/deploy steps: it is reached only when the
-    executed command exits 0, exactly as a GitHub step failure stops the job.
+    Both gates run in document order against the same checkout-shaped root,
+    with each step's own environment applied and the setup-python expression
+    bound to this interpreter. The sentinel stands for the upload/deploy steps:
+    it is reached only when every executed gate exits 0, exactly as a GitHub
+    step failure stops the rest of the job.
     """
-    steps = _workflow_steps(text)
-    selected = [step for step in steps
-                if "scripts/validate_site.py" in (_step_key(step, "run") or "")]
-    assert len(selected) == 1
-    step = selected[0]
-    run_text = _step_key(step, "run")
-    environ = _step_mapping(step, "env")
-    reference = [name for name, value in environ.items()
-                 if ".outputs.python-path" in value]
-    assert len(reference) == 1
-    env = _child_env(home, tmpdir)
-    env[reference[0]] = sys.executable
-    proc = subprocess.run(["/bin/bash", "-c", run_text], cwd=str(root), env=env,
-                          capture_output=True, text=True,
-                          timeout=CHILD_TIMEOUT_S)
-    reached = False
-    if proc.returncode == 0:
-        sentinel.write_text("upload/deploy reached\n", encoding="utf-8")
-        reached = True
-    return proc, reached
+    selected = [step for step in _workflow_steps(text)
+                if any(script in (_step_key(step, "run") or "")
+                       for script in GATE_SCRIPTS)]
+    assert len(selected) == 2, "both gates must be present to execute the job"
+    procs = []
+    for step in selected:
+        environ = _step_mapping(step, "env")
+        reference = [name for name, value in environ.items()
+                     if ".outputs.python-path" in value]
+        assert len(reference) == 1
+        env = _child_env(home, tmpdir)
+        env[reference[0]] = sys.executable
+        proc = subprocess.run(
+            ["/bin/bash", "-c", _step_key(step, "run")], cwd=str(root),
+            env=env, capture_output=True, text=True, timeout=CHILD_TIMEOUT_S)
+        procs.append(proc)
+        if proc.returncode != 0:
+            return procs, False
+    sentinel.write_text("upload/deploy reached\n", encoding="utf-8")
+    return procs, True
 
 
 def _without_step(text, needle):
@@ -732,72 +835,571 @@ def _without_step(text, needle):
     return "\n".join(kept) + "\n"
 
 
-def _weakened_gate(text):
-    """Append ``|| true`` to whichever command line invokes the real CLI."""
+def _weakened_gate(text, script):
+    """Append ``|| true`` to the command line that invokes ``script``."""
     lines = text.splitlines()
     # The LAST match is the executed command: earlier ones are trigger paths.
     for index in reversed(range(len(lines))):
         line = lines[index]
-        if "scripts/validate_site.py" in line and not line.strip().startswith("#"):
+        if script in line and not line.strip().startswith("#"):
             lines[index] = line + " || true"
             return "\n".join(lines) + "\n"
-    raise AssertionError("no CLI invocation to weaken")
+    raise AssertionError("no CLI invocation to weaken for %s" % script)
 
 
 def test_pages_workflow_gates_upload_on_the_real_validator(tmp_path):
     workflow_text = WORKFLOW.read_text(encoding="utf-8")
 
     # -- (a) the checked-in wiring satisfies the contract ------------------
-    _assert_workflow_gate(workflow_text)
+    validate_run, freshness_run = _assert_workflow_gate(workflow_text)
+    assert "check_page_sources.py" in (freshness_run or "")
 
-    # -- (b) execute the ACTUAL extracted command, then the sentinel -------
+    # -- (b) execute the ACTUAL extracted commands, then the sentinel ------
     # One owned checkout-shaped root per run: the workflow's relative
-    # `scripts/validate_site.py` and `site` resolve from this cwd exactly as
-    # they do from $GITHUB_WORKSPACE on a runner.
+    # `scripts/...` and `site` resolve from this cwd exactly as they do from
+    # $GITHUB_WORKSPACE on a runner. The page embeds the ROOT'S OWN sources,
+    # which is exactly what a fresh `build_site` run produces.
     good_root = _copy_checkout(tmp_path / "workflow checkout é")
-    good = _make_site(good_root / "site")
+    good = _make_site(good_root / "site",
+                      html_text=_fresh_page(_catalog_text(), good_root / "web"))
     home = tmp_path / "home"
     home.mkdir()
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
     sentinel = tmp_path / "upload-deploy-sentinel"
     before = _tree(good)
+    checkout_before = _tree(good_root)
 
-    proc, reached = _gate_run(workflow_text, good_root, sentinel=sentinel,
-                              home=home, tmpdir=tmpdir)
-    assert proc.returncode == 0, proc.stderr
+    procs, reached = _gate_run(workflow_text, good_root, sentinel=sentinel,
+                               home=home, tmpdir=tmpdir)
+    assert [proc.returncode for proc in procs] == [0, 0], \
+        [proc.stderr for proc in procs]
     assert reached and sentinel.exists()
-    assert proc.stdout == ""
-    assert "Traceback" not in proc.stderr
-    assert _tree(good) == before, "validation wrote to the uploaded directory"
+    for proc in procs:
+        assert proc.stdout == "", "a gate step must stay stdout-silent"
+        assert "Traceback" not in proc.stderr
+    assert _tree(good) == before, "a gate wrote to the uploaded directory"
+    assert _tree(good_root) == checkout_before, "a gate wrote to the checkout"
     assert _tree(home) == {}
 
+    # -- (c) a broken pair stops at the pair gate --------------------------
     broken_root = _copy_checkout(tmp_path / "workflow broken checkout é")
     broken = _make_site(broken_root / "site", html_text=(
         "<!DOCTYPE html><html><body><p>no island</p></body></html>\n"))
     broken_sentinel = tmp_path / "broken-sentinel"
-    proc, reached = _gate_run(workflow_text, broken_root,
-                              sentinel=broken_sentinel, home=home, tmpdir=tmpdir)
-    assert proc.returncode == 2, proc.stderr
+    procs, reached = _gate_run(workflow_text, broken_root,
+                               sentinel=broken_sentinel, home=home, tmpdir=tmpdir)
+    assert [proc.returncode for proc in procs] == [2], \
+        [proc.returncode for proc in procs]
     assert not reached and not broken_sentinel.exists(), \
         "a rejected pair reached the upload/deploy step"
-    assert proc.stdout == "" and "Traceback" not in proc.stderr
+    assert procs[-1].stdout == "" and "Traceback" not in procs[-1].stderr
 
-    # -- (c) negative controls: weakened and removed gates ----------------
-    weakened = _weakened_gate(workflow_text)
+    # -- (d) a COHERENT pair with STALE inline scripts stops at freshness --
+    from catalog_export import validate_artifact_pair
+
+    stale_root = _copy_checkout(tmp_path / "workflow stale checkout é")
+    current = _source_text("catalog-query.js", stale_root / "web")
+    stale_page = _fresh_page(
+        _catalog_text(), stale_root / "web",
+        overrides={"catalog-query": current + "\n// " + SOURCE_ECHO_MARKER + "\n"})
+    # The pair itself is genuinely coherent: only the inlined source is stale.
+    validate_artifact_pair(_catalog_text(), stale_page)
+    stale = _make_site(stale_root / "site", html_text=stale_page)
+    stale_before = _tree(stale)
+    stale_sentinel = tmp_path / "stale-sentinel"
+    procs, reached = _gate_run(workflow_text, stale_root,
+                               sentinel=stale_sentinel, home=home, tmpdir=tmpdir)
+    assert [proc.returncode for proc in procs] == [0, 2], \
+        [proc.returncode for proc in procs]
+    assert not reached and not stale_sentinel.exists(), \
+        "a page with stale inline scripts reached the upload/deploy step"
+    assert procs[-1].stdout == "" and "Traceback" not in procs[-1].stderr
+    assert SOURCE_ECHO_MARKER not in procs[-1].stderr, "the body was echoed"
+    assert _tree(stale) == stale_before
+
+    # -- (e) negative controls: weakened and removed gates -----------------
+    weakened_pair = _weakened_gate(workflow_text, "scripts/validate_site.py")
     with pytest.raises(AssertionError):
-        _assert_workflow_gate(weakened)
+        _assert_workflow_gate(weakened_pair)
+    # BOTH gates must be weakened before a broken page can reach the sentinel:
+    # that is exactly why the wiring assertion and the "not reached" expectation
+    # above are real behavior checks rather than tautologies.
+    weakened_both = _weakened_gate(weakened_pair, "scripts/check_page_sources.py")
+    with pytest.raises(AssertionError):
+        _assert_workflow_gate(weakened_both)
     control_sentinel = tmp_path / "control-sentinel"
-    proc, reached = _gate_run(weakened, broken_root, sentinel=control_sentinel,
-                              home=home, tmpdir=tmpdir)
+    procs, reached = _gate_run(weakened_both, broken_root,
+                               sentinel=control_sentinel, home=home, tmpdir=tmpdir)
     assert reached and control_sentinel.exists(), \
         "the weakened control did not reach the sentinel"
     # The same expectation this file asserts above now fails for real behavior.
     with pytest.raises(AssertionError):
         assert not reached and not control_sentinel.exists()
 
+    weakened_freshness = _weakened_gate(workflow_text,
+                                        "scripts/check_page_sources.py")
+    with pytest.raises(AssertionError):
+        _assert_workflow_gate(weakened_freshness)
+    freshness_sentinel = tmp_path / "freshness-control-sentinel"
+    procs, reached = _gate_run(weakened_freshness, stale_root,
+                               sentinel=freshness_sentinel, home=home,
+                               tmpdir=tmpdir)
+    assert reached and freshness_sentinel.exists(), \
+        "the weakened freshness control did not reach the sentinel"
+
     removed = _without_step(workflow_text, "Validate the site")
     assert not [step for step in _workflow_steps(removed)
                 if "scripts/validate_site.py" in (_step_key(step, "run") or "")]
     with pytest.raises(AssertionError):
         _assert_workflow_gate(removed)
+
+    removed_freshness = _without_step(workflow_text,
+                                      "Verify the page embeds the maintained")
+    assert not [step for step in _workflow_steps(removed_freshness)
+                if "scripts/check_page_sources.py" in (_step_key(step, "run") or "")]
+    with pytest.raises(AssertionError):
+        _assert_workflow_gate(removed_freshness)
+    with pytest.raises(AssertionError):
+        _gate_run(removed_freshness, stale_root, sentinel=tmp_path / "x",
+                  home=home, tmpdir=tmpdir)
+
+
+# ---------------------------------------------------------------------------
+# group 3: the source-to-inline-artifact freshness gate (unit 9f)
+# ---------------------------------------------------------------------------
+
+
+def _run_sources_cli(script, site_dir, *, cwd, home, tmpdir, web_dir=None,
+                     extra=()):
+    args = [sys.executable, "-I", "-S", str(script)]
+    if site_dir is not None:
+        args.extend(["--site-dir", str(site_dir)])
+    if web_dir is not None:
+        args.extend(["--web-dir", str(web_dir)])
+    args.extend(extra)
+    return subprocess.run(
+        args, cwd=str(cwd), env=_child_env(home, tmpdir),
+        capture_output=True, text=True, timeout=CHILD_TIMEOUT_S)
+
+
+def _assert_freshness_rejected(proc, *, content_echo=(), path_echo=()):
+    _assert_rejected(proc, path_echo=path_echo, content_echo=content_echo)
+    assert "stale" in proc.stderr or "missing" in proc.stderr \
+        or "unexpected" in proc.stderr or "unreadable" in proc.stderr \
+        or "UTF-8" in proc.stderr or "regular file" in proc.stderr \
+        or "empty" in proc.stderr or "unterminated" in proc.stderr \
+        or "cannot be" in proc.stderr, proc.stderr
+
+
+def test_page_source_checker_accepts_only_the_exact_current_sources(tmp_path):
+    assert SOURCES_CLI.is_file(), "the freshness gate CLI is missing"
+    checkout = _copy_checkout(tmp_path / "freshness checkout é")
+    script = checkout / "scripts" / "check_page_sources.py"
+    web = checkout / "web"
+    home = tmp_path / "home"
+    home.mkdir()
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    neutral = tmp_path / "neutral cwd é"
+    neutral.mkdir()
+    (neutral / "unrelated-sentinel.txt").write_text("untouched\n", encoding="utf-8")
+
+    # -- (a) the exact current sources are ACCEPTED, read-only -------------
+    site = _make_site(tmp_path / "fresh site é",
+                      html_text=_fresh_page(_catalog_text(), web))
+    (site / "unrelated-sentinel.txt").write_text("untouched\n", encoding="utf-8")
+    watched = {"site": site, "checkout": checkout, "neutral": neutral,
+               "home": home}
+    before = {name: _tree(root) for name, root in watched.items()}
+    proc = _run_sources_cli(script, site, cwd=neutral, home=home, tmpdir=tmpdir)
+    _assert_accepted(proc)
+    for name, root in watched.items():
+        assert _tree(root) == before[name], (name, "changed by a successful run")
+    assert not list(checkout.rglob("__pycache__")), "bytecode was written"
+    assert not list(checkout.rglob("*.pyc"))
+    # A page whose bodies are the SAME BYTES but reached through an explicit
+    # --web-dir is accepted too: the option selects the expectation, never the
+    # published artifact.
+    assert _run_sources_cli(script, site, cwd=neutral, home=home, tmpdir=tmpdir,
+                            web_dir=web).returncode == 0
+    # Prose that merely MENTIONS the attribute cannot satisfy or disturb the
+    # gate: the count is tag-scoped, so page text is never read as a script.
+    prose = _make_site(
+        tmp_path / "prose site é",
+        html_text=_fresh_page(_catalog_text(), web).replace(
+            "<main>synthetic fixture</main>",
+            '<main>mentions data-watchdog="legacy" in prose</main>', 1))
+    assert _run_sources_cli(script, prose, cwd=neutral, home=home,
+                            tmpdir=tmpdir).returncode == 0
+
+    # -- (b) conventional help and explicit argument errors ----------------
+    help_proc = _run_sources_cli(script, None, cwd=neutral, home=home,
+                                 tmpdir=tmpdir, extra=["--help"])
+    assert help_proc.returncode == 0
+    assert "--site-dir" in help_proc.stdout and "--web-dir" in help_proc.stdout
+    assert help_proc.stderr == ""
+    for label, extra in (
+            ("missing --site-dir", [str(script)]),
+            ("abbreviated long option", [str(script), "--site", str(site)]),
+            ("unknown option",
+             [str(script), "--site-dir", str(site), "--nope"]),
+            ("absent site directory",
+             [str(script), "--site-dir", str(tmp_path / "absent site")]),
+            ("absent web directory",
+             [str(script), "--site-dir", str(site),
+              "--web-dir", str(tmp_path / "absent web")]),
+    ):
+        proc = subprocess.run(
+            [sys.executable, "-I", "-S"] + extra, cwd=str(neutral),
+            env=_child_env(home, tmpdir), capture_output=True, text=True,
+            timeout=CHILD_TIMEOUT_S)
+        assert proc.returncode == 2, (label, proc.returncode, proc.stderr)
+        assert proc.stdout == "" and proc.stderr.strip(), label
+        assert "Traceback" not in proc.stderr, label
+        assert len(proc.stderr) <= DIAGNOSTIC_LIMIT, (label, proc.stderr)
+
+    # -- (c) every stale or malformed page fails closed, without writes ----
+    scripts = _fresh_scripts(web)
+    fresh = _fresh_page(_catalog_text(), web)
+
+    def _drop(marker):
+        return _page_with_scripts(
+            _catalog_text(), [pair for pair in scripts if pair[0] != marker])
+
+    def _swap():
+        first, second, boot = scripts
+        return _page_with_scripts(_catalog_text(), [second, first, boot])
+
+    def _duplicate():
+        first, second, boot = scripts
+        return _page_with_scripts(_catalog_text(), [first, first, second, boot])
+
+    def _extra():
+        return _page_with_scripts(_catalog_text(),
+                                  [("legacy", "/* legacy */\n")] + scripts)
+
+    def _stale(marker):
+        return _page_with_scripts(
+            _catalog_text(),
+            [(name, body if name != marker
+              else body + "\n// " + SOURCE_ECHO_MARKER + "\n")
+             for name, body in scripts])
+
+    def _empty_boot():
+        return _page_with_scripts(
+            _catalog_text(),
+            [(name, "" if name == BOOTSTRAP_MARKER else body)
+             for name, body in scripts])
+
+    def _decorated_tag():
+        return fresh.replace('<script data-watchdog="catalog-query">',
+                             '<script data-watchdog="catalog-query" defer>', 1)
+
+    page_only = [
+        ("page from before the page scripts existed", _page(_catalog_text())),
+        ("missing maintained script", _drop("catalog-query")),
+        ("missing adapter script", _drop("webmcp")),
+        ("missing bootstrap", _drop(BOOTSTRAP_MARKER)),
+        ("reordered scripts", _swap()),
+        ("duplicated script", _duplicate()),
+        ("unexpected extra script", _extra()),
+        ("stale engine body", _stale("catalog-query")),
+        ("stale adapter body", _stale("webmcp")),
+        ("stale bootstrap body", _stale(BOOTSTRAP_MARKER)),
+        ("empty bootstrap body", _empty_boot()),
+        ("unterminated last script element", fresh.rsplit("</script>", 1)[0]),
+        ("marker on an unexpected tag shape", _decorated_tag()),
+        ("no closing tag at all", fresh.replace("</script>", "")),
+    ]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "catalog-query.js").write_text(_source_text("catalog-query.js"),
+                                              encoding="utf-8")
+
+    def _page_symlink(case):
+        (case / "index.html").unlink()
+        (case / "index.html").symlink_to(outside / "catalog-query.js")
+
+    def _page_directory(case):
+        (case / "index.html").unlink()
+        (case / "index.html").mkdir()
+
+    def _page_missing(case):
+        (case / "index.html").unlink()
+
+    def _page_non_utf8(case):
+        (case / "index.html").write_bytes(fresh.encode("utf-8") + b"\xff")
+
+    if hasattr(os, "mkfifo"):
+        def _page_fifo(case):
+            (case / "index.html").unlink()
+            os.mkfifo(case / "index.html")
+        page_mutations = [_page_fifo]
+    else:
+        page_mutations = []
+
+    source_cases = []
+
+    def _source_case(label, mutate):
+        case_web = tmp_path / ("web %s é" % label.replace(" ", "-"))
+        shutil.copytree(web, case_web)
+        mutate(case_web)
+        source_cases.append((label, case_web))
+
+    def _source_missing(case_web):
+        (case_web / "webmcp.js").unlink()
+
+    def _source_directory(case_web):
+        (case_web / "catalog-query.js").unlink()
+        (case_web / "catalog-query.js").mkdir()
+
+    def _source_non_utf8(case_web):
+        (case_web / "catalog-query.js").write_bytes(
+            (case_web / "catalog-query.js").read_bytes() + b"\xff")
+
+    def _source_symlink(case_web):
+        (case_web / "catalog-query.js").unlink()
+        (case_web / "catalog-query.js").symlink_to(outside / "catalog-query.js")
+
+    _source_case("missing source file", _source_missing)
+    _source_case("directory source file", _source_directory)
+    _source_case("non-UTF-8 source file", _source_non_utf8)
+    _source_case("symlinked source file", _source_symlink)
+    if os.geteuid() != 0:
+        def _source_unreadable(case_web):
+            os.chmod(case_web / "catalog-query.js", 0o000)
+        _source_case("unreadable source file", _source_unreadable)
+
+    for index, (label, html_text) in enumerate(page_only):
+        case = _make_site(tmp_path / ("page case %02d é" % index),
+                          html_text=html_text)
+        (case / "unrelated-sentinel.txt").write_text("untouched\n",
+                                                     encoding="utf-8")
+        case_before = {name: _tree(root) for name, root in watched.items()}
+        case_before["case"] = _tree(case)
+        proc = _run_sources_cli(script, case, cwd=neutral, home=home,
+                                tmpdir=tmpdir)
+        _assert_freshness_rejected(proc, content_echo=[SOURCE_ECHO_MARKER],
+                                   path_echo=[tmp_path])
+        assert _tree(case) == case_before["case"], (label, "artifacts changed")
+        for name, root in watched.items():
+            assert _tree(root) == case_before[name], (label, name, "wrote outside")
+
+    for index, mutate in enumerate([_page_symlink, _page_directory,
+                                    _page_missing, _page_non_utf8]
+                                   + page_mutations):
+        case = _make_site(tmp_path / ("page shape %02d é" % index),
+                          html_text=fresh)
+        mutate(case)
+        proc = _run_sources_cli(script, case, cwd=neutral, home=home,
+                                tmpdir=tmpdir)
+        _assert_freshness_rejected(proc, path_echo=[tmp_path])
+
+    for label, case_web in source_cases:
+        case = _make_site(tmp_path / ("source case %s é" % label.replace(" ", "-")),
+                          html_text=fresh)
+        proc = _run_sources_cli(script, case, cwd=neutral, home=home,
+                                tmpdir=tmpdir, web_dir=case_web)
+        _assert_freshness_rejected(proc, path_echo=[tmp_path])
+
+    # -- (d) negative control: a checker that ignores the bodies -----------
+    control = _copy_checkout(tmp_path / "freshness control checkout é")
+    control_script = control / "scripts" / "check_page_sources.py"
+    control_text = control_script.read_text(encoding="utf-8")
+    assert "!=" in control_text, "the checker does not compare bodies"
+    control_script.write_text(
+        control_text.replace(
+            "if bodies[marker] != sources[marker]:",
+            "if False:  # control: never compare the inlined body"),
+        encoding="utf-8")
+    stale_site = _make_site(tmp_path / "control stale site é",
+                            html_text=_stale("catalog-query"))
+    control_proc = _run_sources_cli(control_script, stale_site, cwd=neutral,
+                                    home=home, tmpdir=tmpdir,
+                                    web_dir=web)
+    assert control_proc.returncode == 0, control_proc.stderr
+    with pytest.raises(AssertionError):
+        _assert_freshness_rejected(control_proc)
+
+
+def test_page_source_table_matches_the_builder_and_stays_stdlib_only():
+    assert SOURCES_CLI.is_file()
+    import build_site
+
+    spec = importlib.util.spec_from_file_location("check_page_sources",
+                                                  SOURCES_CLI)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.PAGE_SOURCE_FILES == tuple(
+        (marker, path.as_posix()) for marker, path in build_site.PAGE_SOURCE_FILES)
+    assert module.PAGE_BOOTSTRAP_MARKER == build_site.PAGE_BOOTSTRAP_MARKER
+    assert module.PAGE_BOOTSTRAP_SOURCE == build_site.PAGE_BOOTSTRAP_SOURCE
+    assert module.HTML_NAME == build_site.SITE_REL.name
+
+    tree = ast.parse(SOURCES_CLI.read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert imported <= {"__future__", "argparse", "os", "re", "stat", "sys"}, \
+        "the freshness gate must stay stdlib-only and producer-free"
+
+
+def _workflow_job(text, name):
+    """One job block from a multi-job workflow, split by indentation only."""
+    lines = text.splitlines()
+    block = []
+    inside = False
+    for line in lines:
+        if re.match(r"^  %s:\s*$" % re.escape(name), line):
+            inside = True
+            block = [line]
+            continue
+        if inside:
+            # A following job header or its leading comment block ends this
+            # job: both sit at exactly two spaces of indentation.
+            if line.startswith("  ") and not line.startswith("   "):
+                break
+            if re.match(r"^[A-Za-z]", line):
+                break
+            block.append(line)
+    assert block, "no %r job in the test workflow" % name
+    return "\n".join(block)
+
+
+def _executed_run_lines(run_text):
+    """The lines of a ``run:`` block the shell would actually execute.
+
+    A leading ``#`` (after indentation) is a shell comment, and its text is
+    still present in the job, so a substring search over the job block can be
+    satisfied by a DISABLED command. Only non-comment lines count as executed.
+    """
+    return [line.strip() for line in run_text.splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+
+
+def _assert_test_workflow_lane(text):
+    """The JS/parity lane: Node installed explicitly, bound by value, executed."""
+    node_job = _workflow_job(text, "node")
+    assert "runs-on: ubuntu-latest" in node_job
+    assert "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1" \
+        in node_job, "Node must be installed explicitly from the reviewed pin"
+    assert re.search(r'(?m)^\s+node-version: "22"$', node_job), node_job
+    assert "pytest==9.1.1" in node_job
+    assert "CONTRACT_NODE" in node_job and "GITHUB_ENV" in node_job
+    assert "CATALOG_PYTHON" in node_job, \
+        "the Node suites' Python reference must be bound, not PATH-discovered"
+    assert "continue-on-error" not in node_job
+
+    # Both lanes must be EXECUTED, not merely named somewhere in the job: read
+    # each step's run: block and require the literal command on a non-comment
+    # line, so prefixing it with '#' disables the lane and fails HERE.
+    steps = _workflow_steps(node_job)
+    executed = [_executed_run_lines(_step_key(step, "run") or "")
+                for step in steps]
+
+    node_lane = [(index, line) for index, lines in enumerate(executed)
+                 for line in lines
+                 if "--test" in line and '"$CONTRACT_NODE"' in line]
+    assert len(node_lane) == 1, "the Node contract suites are not executed"
+    node_index, node_command = node_lane[0]
+    for suite in ("tests/js/catalog-query.test.cjs", "tests/js/webmcp.test.cjs"):
+        assert suite in node_command, (suite, node_command)
+
+    parity_lane = [(index, line) for index, lines in enumerate(executed)
+                   for line in lines
+                   if "tests/test_contract_parity.py" in line
+                   and "-m pytest" in line]
+    assert len(parity_lane) == 1, "the parity lane is not executed"
+    parity_index, parity_command = parity_lane[0]
+    assert '"$TEST_PYTHON"' in parity_command, \
+        "the parity lane must use the bound interpreter, not a PATH lookup"
+
+    # CONTRACT_NODE must be BOUND by an executed line, not just mentioned.
+    bindings = [line for lines in executed for line in lines
+                if line.startswith('echo "CONTRACT_NODE=')]
+    assert bindings, "CONTRACT_NODE is not bound by an executed line"
+
+    # The runtime is proven and bound BEFORE either lane consumes it.
+    setups = [index for index, step in enumerate(steps)
+              if _pin(_step_key(step, "uses")).startswith("actions/setup-node@")]
+    assert len(setups) == 1
+    assert setups[0] < node_index and setups[0] < parity_index
+
+    # The full Linux suite runs the same parity file with an explicit runtime:
+    # a PATH-discovered Node would let it skip on a lean runner.
+    linux_job = _workflow_job(text, "linux")
+    assert "actions/setup-node@" in linux_job
+    assert "CONTRACT_NODE" in linux_job
+    assert 'python-version: ["3.11", "3.x"]' in linux_job
+
+    # The Windows job stays the package/core smoke: no POSIX suite, no Node.
+    windows_job = _workflow_job(text, "windows")
+    assert "consumer_smoke.py" in windows_job
+    assert "pytest tests" not in windows_job
+    assert "tests/js" not in windows_job
+
+    # No host execution context leaks into any workflow.
+    for leaked in ("/home/kimbo", "/mnt/HC_Volume", ".hermes/cache",
+                   "/home/kimbo/.local"):
+        assert leaked not in text, leaked
+    assert re.search(r"(?m)^\s+continue-on-error:", text) is None
+
+
+def _without_job(text, name):
+    lines = text.splitlines()
+    kept = []
+    dropping = False
+    for line in lines:
+        if re.match(r"^  %s:\s*$" % re.escape(name), line):
+            dropping = True
+            continue
+        if dropping and re.match(r"^  [A-Za-z0-9_-]+:\s*$", line):
+            dropping = False
+        if not dropping:
+            kept.append(line)
+    return "\n".join(kept) + "\n"
+
+
+def _comment_out_only_match(text, needle):
+    """Comment out the single workflow line containing ``needle``."""
+    lines = text.splitlines()
+    hits = [index for index, line in enumerate(lines) if needle in line]
+    assert len(hits) == 1, (needle, hits)
+    index = hits[0]
+    indent = len(lines[index]) - len(lines[index].lstrip(" "))
+    lines[index] = " " * indent + "#" + lines[index].lstrip(" ")
+    return "\n".join(lines) + "\n"
+
+
+def test_test_workflow_runs_the_js_suites_and_the_parity_lane():
+    text = TEST_WORKFLOW.read_text(encoding="utf-8")
+    # The unchanged workflow is the positive control for every mutation below.
+    _assert_test_workflow_lane(text)
+
+    without_node = _without_job(text, "node")
+    assert "tests/test_contract_parity.py" not in without_node
+    with pytest.raises(AssertionError):
+        _assert_test_workflow_lane(without_node)
+
+    # A commented-out command line still carries its command as a substring, so
+    # the lane assertion has to read executed lines, not the job's text. Each
+    # lane is mutated on its own: one disabled step must not hide the other.
+    commented_node = _comment_out_only_match(text, '"$CONTRACT_NODE" --test')
+    assert '"$CONTRACT_NODE" --test' in commented_node, "mutation did not apply"
+    with pytest.raises(AssertionError):
+        _assert_test_workflow_lane(commented_node)
+
+    commented_parity = _comment_out_only_match(
+        text, '"$TEST_PYTHON" -m pytest tests/test_contract_parity.py')
+    assert '"$TEST_PYTHON" -m pytest tests/test_contract_parity.py' \
+        in commented_parity, "mutation did not apply"
+    with pytest.raises(AssertionError):
+        _assert_test_workflow_lane(commented_parity)
+

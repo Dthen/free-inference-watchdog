@@ -15,6 +15,16 @@ definitions as ``<script type="application/json" id="tool-contract">``, so it is
 fully self-contained (works from file://, no external fetches) and never
 publishes the raw private roster.
 
+Progressive enhancement (Task 8): after those two inert islands the page
+carries three EMPTY-SRC classic scripts -- the maintained ``web/catalog-query.js``
+engine, the maintained ``web/webmcp.js`` adapter, and one bootstrap that calls
+``WatchdogWebMCP.setup()`` once. The scripts come from the BUILDER's own
+repository copies (never from ``--root``) and are inlined byte for byte; Node is
+needed for the tests, not for generation. Nothing about the matrix, the CSS-only
+row expansion, the links or the JSON islands changes when the native WebMCP API
+is absent or registration fails: the ordinary page stays exactly as useful as it
+was before JavaScript existed.
+
 Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
   - Display order is derived from config_loader.PROVIDERS (sorted by the
     `display` field in each provider's JSON config). This does NOT match
@@ -119,6 +129,45 @@ LOGO_REL = Path("assets/logo.png")
 TOOLS_REL = Path("watchdog_catalog/tools.json")
 BUILD_LOCK_REL = Path("site/.build.lock")
 MAX_LOGO_BYTES = 40 * 1024  # refuse to embed a bloated logo
+
+#: The maintained executable page sources, in page order, as
+#: ``(marker, repo-relative path)``. The marker names the script element
+#: (``data-watchdog``) so both the page and its tests can identify it without
+#: matching a whole body. These paths are the BUILDER's own files, never
+#: ``<root>/web/...``: a build root must not be able to choose the script a
+#: visitor's browser runs.
+PAGE_SOURCE_FILES = (
+    ("catalog-query", Path("web/catalog-query.js")),
+    ("webmcp", Path("web/webmcp.js")),
+)
+
+#: The marker of the third and last page script: the ONE bootstrap call.
+PAGE_BOOTSTRAP_MARKER = "boot"
+
+#: The whole progressive enhancement, and deliberately nothing more: look the
+#: adapter up, make ONE registration attempt, and swallow a fault so the
+#: ordinary matrix above can never be disturbed. It rewrites no DOM, reads no
+#: other global, starts no timer, fetches nothing and reports nothing. It sits
+#: after the two data islands in document order, so the adapter's island reads
+#: always see them. `setup()` never rejects by contract; the trailing handler
+#: is what keeps an adapter fault out of the console as an unhandled rejection.
+PAGE_BOOTSTRAP_SOURCE = """(function () {
+  "use strict";
+  var adapter = typeof globalThis === "undefined"
+    ? undefined
+    : globalThis.WatchdogWebMCP;
+  if (!adapter || typeof adapter.setup !== "function") {
+    return;
+  }
+  adapter.setup().catch(function () {});
+})();
+"""
+
+#: Sequences that cannot appear in inlined script text. A classic inline
+#: ``<script>`` body is SCRIPT DATA: the HTML tokenizer ends the element at the
+#: first ``</script`` (any letter case, whitespace or slash padding included)
+#: and ``<!--`` starts the legacy comment/script-escape states.
+_FORBIDDEN_SCRIPT_SEQUENCES = ("</script", "<!--")
 
 #: The producer's explicit snapshot cadence, matching the operational tick and
 #: the existing local MCP cadence. A literal here (rather than an import of the
@@ -253,6 +302,65 @@ def _islands_script(snapshot, tool_contract):
         + '</script>')
 
 
+def _assert_script_body(body, label):
+    """Refuse source text that could escape or re-frame its script element.
+
+    A classic inline ``<script>`` body is SCRIPT DATA, so ``</script`` (any
+    letter case, with whitespace or slash padding) ends the element early and
+    ``<!--`` opens the legacy comment/script-escape states. Neither sequence
+    may appear in inlined text, and the builder REFUSES instead of escaping or
+    rewriting it: escaping would corrupt a maintained JavaScript file, and
+    rewriting it would make the published bytes differ from the source the
+    tests pin. A violation is a build fault, never a silent repair.
+    """
+    if not isinstance(body, str) or not body:
+        raise ValueError(f"{label} source must be a non-empty string")
+    lowered = body.lower()
+    for forbidden in _FORBIDDEN_SCRIPT_SEQUENCES:
+        if forbidden in lowered:
+            raise ValueError(
+                f"{label} source contains {forbidden!r} and cannot be inlined")
+
+
+def _page_scripts_script(sources):
+    """Render the executable page-script slot: maintained sources, then boot.
+
+    ``sources`` is an explicit ordered sequence of ``(marker, text)`` pairs.
+    ``None`` renders the template-only page with no executable slot at all (the
+    path a unit test pins); the PUBLISHING route always hands in
+    :func:`load_maintained_sources`. Markers and their order are fixed here, so
+    no caller can relabel, reorder or extend what a visitor's browser runs.
+
+    The returned markup starts and ends with a newline so the slot sits on its
+    own lines; the legacy route passes no slot and its bytes stay unchanged.
+    """
+    if sources is None:
+        return ""
+    if isinstance(sources, (str, bytes)) or not isinstance(
+            sources, (list, tuple)):
+        raise ValueError("page sources must be an ordered sequence of pairs")
+    if len(sources) != len(PAGE_SOURCE_FILES):
+        raise ValueError(
+            "page sources must supply exactly the maintained files, in order")
+    elements = []
+    for index, (expected, _) in enumerate(PAGE_SOURCE_FILES):
+        pair = sources[index]
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError("each page source must be a (marker, text) pair")
+        marker, body = pair
+        if marker != expected:
+            raise ValueError(
+                f"page source at position {index} must be {expected!r}")
+        _assert_script_body(body, marker)
+        elements.append(
+            f'<script data-watchdog="{marker}">' + body + '</script>')
+    _assert_script_body(PAGE_BOOTSTRAP_SOURCE, PAGE_BOOTSTRAP_MARKER)
+    elements.append(
+        f'<script data-watchdog="{PAGE_BOOTSTRAP_MARKER}">'
+        + PAGE_BOOTSTRAP_SOURCE + '</script>')
+    return "\n" + "\n".join(elements) + "\n"
+
+
 def build_provider_header_meta():
     """gateway key -> {'signup_url': str, 'limits_note': str} (fields may be
     absent — both are OPTIONAL operator-maintained facts in providers/*.json,
@@ -360,7 +468,7 @@ def build_counts(providers):
 
 
 def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
-                   logo_b64, header_meta, data_script):
+                   logo_b64, header_meta, data_script, page_scripts=""):
     """Render the ONE shared matrix HTML document from explicit resolved views.
 
     This private engine owns the single copy of the template, the alphabetical
@@ -382,6 +490,10 @@ def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
     data_script: the complete data-script slot markup. The legacy adapter
         passes its single roster-data island; the public route passes the two
         inert public islands (catalogue + tool contract).
+    page_scripts: the complete executable page-script slot markup, rendered by
+        :func:`_page_scripts_script` from explicit sources. The legacy adapter
+        and the template-only route pass nothing, so their bytes are unchanged
+        and no executable script appears at all.
 
     Rows are GROUPED by stripped name: a model that ships as
     `vendor/x:free` on gateway A and `vendor/x-free` on gateway B renders
@@ -619,7 +731,7 @@ def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
 <tfoot><tr><th>tracked ids per gateway</th><td></td>{foot_cells}</tr></tfoot>
 </table>
 <footer class="note"><div class="footer-links"><a href="https://github.com/Dthen/free-inference-watchdog" target="_blank" rel="noopener">GitHub</a><a href="https://ko-fi.com/dthen" target="_blank" rel="noopener">Ko-fi</a></div></footer>
-</div></body></html>"""
+</div>{page_scripts}</body></html>"""
 
 
 def render_page(roster, logo_b64, header_meta=None):
@@ -659,7 +771,8 @@ def render_page(roster, logo_b64, header_meta=None):
     )
 
 
-def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract):
+def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract,
+                        sources=None):
     """Render the matrix HTML from an already-VALIDATED public snapshot.
 
     ``snapshot`` is a CALLER PRECONDITION: validation (and the eventual
@@ -696,8 +809,16 @@ def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract):
     order: ``catalog-data`` (the COMPLETE public snapshot) then
     ``tool-contract`` (the supplied tool array), each encoded through the
     accepted canonical encoder plus the script-context escape — so the page
-    stays self-contained with no executable script, no network fetch and no
-    ``src`` attribute, and no raw private state.
+    stays self-contained with no network fetch and no ``src`` attribute, and no
+    raw private state.
+
+    ``sources`` is the EXPLICIT executable page-script input: an ordered
+    sequence of ``(marker, text)`` pairs for :data:`PAGE_SOURCE_FILES`, handed
+    in by the acquisition boundary. This function never reads a file, so its
+    purity is unchanged; ``None`` is the template-only route (no executable
+    slot), and :func:`build_public_pair` ALWAYS supplies
+    :func:`load_maintained_sources`, so every generated artifact carries the
+    enhancement.
     """
     provider_order = list(snapshot["provider_order"])
     providers = snapshot["providers"]
@@ -725,6 +846,7 @@ def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract):
         logo_b64=logo_b64,
         header_meta={} if header_meta is None else header_meta,
         data_script=_islands_script(snapshot, tool_contract),
+        page_scripts=_page_scripts_script(sources),
     )
 
 
@@ -757,6 +879,41 @@ def load_tool_contract():
     return contract
 
 
+def load_maintained_sources():
+    """Acquire the BUILDER's own maintained page sources ONCE.
+
+    The paths are this module's repository copies (``web/catalog-query.js``
+    then ``web/webmcp.js``), deliberately NOT ``<root>/web/...``: an arbitrary
+    build root must never be able to choose the executable script a visitor's
+    browser runs. Reading and validating belongs to this acquisition boundary —
+    the renderer receives the text as an explicit argument and stays pure — and
+    the text is handed on byte for byte, so the published page and the
+    maintained files cannot drift.
+
+    Node is not involved: generation stays stdlib-only. Each body is checked
+    for the two script-data sequences that cannot be inlined, and a bad or
+    unreadable source exits 2 with a fixed diagnostic before anything is
+    written.
+    """
+    sources = []
+    for marker, rel in PAGE_SOURCE_FILES:
+        path = REPO / rel
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"build_site: cannot read page source {path}: {exc}",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        try:
+            _assert_script_body(text, marker)
+        except ValueError as exc:
+            print(f"build_site: unusable page source {path}: {exc}",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        sources.append((marker, text))
+    return tuple(sources)
+
+
 def build_public_pair(root):
     """Acquire ONCE and prepare BOTH artifacts from ONE public snapshot.
 
@@ -775,11 +932,13 @@ def build_public_pair(root):
     records = capture_registry(PROVIDERS, GATEWAY_WIRING)         # ONE capture
     snapshot = build_snapshot(records, roster, cadence_s=BUILD_CADENCE_S)
     tool_contract = load_tool_contract()
+    sources = load_maintained_sources()
     header_meta = build_provider_header_meta()
     logo_b64 = load_logo_b64(root)
     catalog_text = serialize_snapshot(snapshot)
     html_text = render_catalog_page(
-        snapshot, logo_b64, header_meta, tool_contract=tool_contract)
+        snapshot, logo_b64, header_meta, tool_contract=tool_contract,
+        sources=sources)
     validate_artifact_pair(catalog_text, html_text)
     return snapshot, catalog_text, html_text
 

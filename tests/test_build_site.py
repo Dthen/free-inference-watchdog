@@ -9,6 +9,11 @@ state/roster.json into site/index.html. Pinned here:
   site/catalog.json); the page carries it inline as
   <script type="application/json" id="catalog-data"> plus the shared tool
   definitions as id="tool-contract", and both extract cleanly with json.loads,
+- after those two inert islands the page carries exactly three empty-src
+  classic scripts -- the maintained web/catalog-query.js, the maintained
+  web/webmcp.js, then ONE bootstrap call -- inlined byte for byte from the
+  builder's own files (never from --root), so the page stays useful without
+  WebMCP and without JavaScript,
 - output is DETERMINISTIC (same roster -> byte-identical HTML),
 - PROVIDER DISPLAY ORDER is Dthen's quality ranking [nous, tokenrouter, kilo,
   openrouter, amd, bai, nim] — openrouter BEFORE amd/bai (limits), nim last,
@@ -120,7 +125,7 @@ def test_catalog_data_script_extracts_cleanly():
         proc = _run_builder(SEED_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        islands = _script_elements(html)
+        islands = _json_islands(html)
         assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
         data = json.loads(islands[0][1])
         assert data["schema_version"] == 1 and data["snapshot_id"]
@@ -230,15 +235,17 @@ def test_presence_matrix_structure():
 def test_no_snapshot_or_alert_wording():
     """Header copy contract: rebuild-cadence wording only —
     NO snapshot/alert/stale/outage wording anywhere in the VISIBLE page copy.
-    (The two inert public JSON islands are excluded: the catalogue legitimately
-    carries public keys like ``snapshot_id`` and ``warnings`` as DATA.)"""
+    (The two inert public JSON islands AND the three maintained page scripts
+    are excluded: the catalogue legitimately carries public keys like
+    ``snapshot_id`` and ``warnings`` as DATA, and the shared engine names the
+    same concepts in code.)"""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         proc = _run_builder(SEED_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        copy = _strip_public_islands(html).lower()
+        copy = _strip_public_payloads(html).lower()
         for word in ("snapshot", "alert", "stale", "outage"):
             assert word not in copy, f"forbidden copy word '{word}' in page"
 
@@ -309,7 +316,7 @@ def test_out_of_range_tick_epoch_projects_to_null_with_warning(
     proc = _run_builder(roster, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
-    catalog = json.loads(_script_elements(html)[0][1])
+    catalog = json.loads(_json_islands(html)[0][1])
     assert catalog["tick_epoch"] == projected
     assert ("tick_epoch_unknown" in catalog["warnings"]) is (projected is None)
     external = json.loads(
@@ -347,7 +354,7 @@ def test_publish_staging_paths_are_unique_per_invocation(tmp_path, monkeypatch):
         return (
             serialize_snapshot(snapshot),
             build_site.render_catalog_page(
-                snapshot, "ZmFrZWxvZ28=", tool_contract=tool_contract),
+                snapshot, "ZmFrZWxvZ28=", tool_contract=tool_contract, sources=_page_sources()),
         )
 
     pairs = [pair(1), pair(2)]
@@ -834,7 +841,7 @@ def test_published_catalogue_keeps_raw_ids(tmp_path):
     assert "vendor-x/poolside-s-2.1-free" in catalog["providers"]["tokenrouter"]["model_ids"]
     assert "vendor-x/poolside-s-2.1:free" in catalog["providers"]["nous"]["model_ids"]
     assert "vendor-x/poolside-s-2.1-free" in catalog["providers"]["kilo"]["model_ids"]
-    assert _typed(json.loads(_script_elements(html)[0][1])) == _typed(catalog)
+    assert _typed(json.loads(_json_islands(html)[0][1])) == _typed(catalog)
 
 
 def test_grouped_deterministic_output(tmp_path):
@@ -1190,12 +1197,15 @@ def test_expand_html_well_formed_round_trip(tmp_path):
         assert not errors, f"html.parser reported parse errors: {errors}"
 
 
-def test_expand_no_script_beyond_public_islands(tmp_path):
-    """Exactly the TWO inert public JSON islands; the toggle stays CSS-only.
+def test_expand_page_carries_two_inert_islands_and_maintained_scripts(
+        tmp_path):
+    """Exactly two inert JSON islands, then the three maintained page scripts.
 
     The old single raw roster island is gone: the page carries the catalogue
-    and the shared tool contract, both ``application/json`` and inert, and no
-    executable script anywhere.
+    and the shared tool contract, both ``application/json`` and inert, and the
+    executable part is ONLY the builder's own maintained sources plus its
+    one-call bootstrap -- all empty-src, so the matrix toggle stays CSS-only
+    and the page still works with JS disabled or from ``file://``.
     """
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -1204,12 +1214,31 @@ def test_expand_no_script_beyond_public_islands(tmp_path):
         proc = _run_builder(EXPAND_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        islands = _script_elements(html)
+        islands = _json_islands(html)
         assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS), (
             f"expected exactly the two public islands, found {islands}")
         assert [attrs.get("type") for attrs, _ in islands] == [
             "application/json", "application/json"]
         assert 'id="roster-data"' not in html
+
+        scripts = _script_elements(html)
+        assert [attrs.get("type") for attrs, _ in scripts] == [
+            "application/json", "application/json", None, None, None]
+        assert [attrs.get("data-watchdog") for attrs, _ in scripts] == [
+            None, None, "catalog-query", "webmcp", "boot"]
+        assert all(attrs.get("src") is None for attrs, _ in scripts), \
+            "the page must stay self-contained (no external script src)"
+        # Document order: both islands strictly precede every page script.
+        assert [index for index, (attrs, _) in enumerate(scripts)
+                if attrs.get("id")] == [0, 1]
+
+        # Source integrity: the inlined bodies are the maintained files,
+        # byte for byte, in page order.
+        assert _page_script_body(html, "catalog-query") == (
+            REPO / "web" / "catalog-query.js").read_text(encoding="utf-8")
+        assert _page_script_body(html, "webmcp") == (
+            REPO / "web" / "webmcp.js").read_text(encoding="utf-8")
+        assert _page_script_body(html, "boot")
 
 
 def test_expand_every_raw_id_in_html_collapsed(tmp_path):
@@ -1796,6 +1825,88 @@ def _strip_public_islands(html):
     return stripped
 
 
+# ---------- Unit 8d: the inlined maintained page scripts -------------------
+#
+# The generated public page carries three EMPTY-SRC classic scripts after the
+# two inert islands, in this fixed order: the maintained shared query engine,
+# the maintained WebMCP adapter, then the one-call bootstrap. `data-watchdog`
+# names each one so a test can identify it without matching its whole body.
+
+_PAGE_SCRIPT_MARKERS = ("catalog-query", "webmcp", "boot")
+
+
+def _json_islands(html):
+    """The inert ``application/json`` islands, in document order."""
+    return [script for script in _script_elements(html)
+            if script[0].get("type", "").strip().lower() == "application/json"]
+
+
+def _page_scripts(html):
+    """The generated page's classic (executable) scripts, in document order."""
+    return [script for script in _script_elements(html)
+            if script[0].get("type") is None]
+
+
+def _page_script_body(html, marker):
+    """The exact inner text of the one page script carrying `marker`."""
+    matches = [body for attrs, body in _page_scripts(html)
+               if attrs.get("data-watchdog") == marker]
+    assert len(matches) == 1, (marker, matches)
+    return matches[0]
+
+
+_PAGE_SLOT_RE = (
+    r'\n<script data-watchdog="catalog-query">.*?</script>'
+    r'\n<script data-watchdog="webmcp">.*?</script>'
+    r'\n<script data-watchdog="boot">.*?</script>\n'
+)
+
+
+def _strip_page_scripts(html):
+    """Drop the whole page-script slot, asserting it exists once, in order."""
+    for marker in _PAGE_SCRIPT_MARKERS:
+        assert html.count(f'<script data-watchdog="{marker}">') == 1, marker
+    stripped, count = re.subn(_PAGE_SLOT_RE, "", html, count=1, flags=re.S)
+    assert count == 1, "expected the three page scripts adjacent, in order"
+    return stripped
+
+
+def _strip_public_payloads(html):
+    """Drop the two inert islands AND the three page scripts."""
+    return _strip_page_scripts(_strip_public_islands(html))
+
+
+def _page_sources():
+    """The builder's OWN maintained page sources, exactly as it acquires them."""
+    import build_site
+
+    return build_site.load_maintained_sources()
+
+
+def _page_node_binary():
+    """Node for the generated-page execution checks (same rules as parity)."""
+    import os
+    import shutil
+
+    override = os.environ.get("CONTRACT_NODE")
+    if override is not None:
+        if not override:
+            pytest.fail("CONTRACT_NODE is set but empty; set it to a Node "
+                        "binary or unset it to use PATH discovery")
+        resolved = shutil.which(override)
+        if resolved is None and os.path.isfile(override):
+            resolved = os.path.abspath(override)
+        if resolved is None:
+            pytest.fail(f"CONTRACT_NODE={override!r} is not an executable Node "
+                        "binary; the explicit override is authoritative")
+        return resolved
+    resolved = shutil.which("node")
+    if resolved is None:
+        pytest.skip("Node is not on PATH: install Node or set CONTRACT_NODE to "
+                    "run the generated-page execution checks")
+    return resolved
+
+
 def _typed(value):
     """A type-carrying view of one JSON value (1 / 1.0 / True stay distinct)."""
     if isinstance(value, bool):
@@ -1922,17 +2033,17 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
 
         html = build_site.render_catalog_page(
             snapshot, PUBLIC_RENDER_LOGO, header_meta,
-            tool_contract=tool_contract)
+            tool_contract=tool_contract, sources=_page_sources())
         assert html == build_site.render_catalog_page(
             snapshot, PUBLIC_RENDER_LOGO, header_meta,
-            tool_contract=tool_contract), "output must be deterministic"
+            tool_contract=tool_contract, sources=_page_sources()), "output must be deterministic"
         assert snapshot == snapshot_before, "snapshot was mutated by rendering"
         assert header_meta == header_before, "header map was mutated by rendering"
 
-        # The matrix/visible-document bytes are the FULL page minus ONLY the
-        # two inert islands, so every matrix assertion below is unaffected by
-        # their payload text.
-        matrix_html = _strip_public_islands(html)
+        # The matrix/visible-document bytes are the FULL page minus the two
+        # inert islands AND the three maintained page scripts, so every matrix
+        # assertion below is unaffected by their payload text.
+        matrix_html = _strip_public_payloads(html)
 
         # --- snapshot-authoritative column order / headers -----------------
         assert _thead_columns(matrix_html) == [
@@ -2017,12 +2128,14 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
         assert 'href="https://github.com/Dthen/free-inference-watchdog"' in matrix_html
         assert 'href="https://ko-fi.com/dthen"' in matrix_html
 
-        # --- the two inert islands: ids, type, order, complete payloads ----
-        islands = _script_elements(html)
+        # --- the inert islands, then the maintained page scripts -----------
+        islands = _json_islands(html)
         assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
         assert [attrs.get("type") for attrs, _ in islands] == [
             "application/json", "application/json"]
         assert all(attrs.get("src") is None for attrs, _ in islands)
+        assert [attrs.get("data-watchdog") for attrs, _ in _page_scripts(html)] == [
+            "catalog-query", "webmcp", "boot"]
         assert 'id="roster-data"' not in html
         assert "<script" not in matrix_html
         assert _typed(json.loads(islands[0][1])) == _typed(
@@ -2031,17 +2144,17 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
 
         # --- default headers are plain and I/O-free ------------------------
         default_html = build_site.render_catalog_page(
-            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract)
+            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract, sources=_page_sources())
         assert "<a " not in _thead(default_html)
         assert _thead_columns(default_html) == [
             "model", "#", "synthetic-beta", "synthetic-alpha"]
-        assert [attrs.get("id") for attrs, _ in _script_elements(default_html)] \
+        assert [attrs.get("id") for attrs, _ in _json_islands(default_html)] \
             == list(_ISLAND_IDS)
 
         # --- true empty registry stays a valid, distinguishable page -------
         empty_html = build_site.render_catalog_page(
             _public_snapshot({}, {}), PUBLIC_RENDER_LOGO,
-            tool_contract=tool_contract)
+            tool_contract=tool_contract, sources=_page_sources())
         assert _thead_columns(empty_html) == ["model", "#"]
         assert 'class="name-row"' not in empty_html
         empty_chips = empty_html.split('<div class="chips">', 1)[1].split(
@@ -2049,9 +2162,9 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
         assert "<b>0</b> unique models" in empty_chips
         assert "<b>0</b> endpoints" in empty_chips
         assert "<b>0</b> gateways" in empty_chips
-        empty_matrix = _strip_public_islands(empty_html)
+        empty_matrix = _strip_public_payloads(empty_html)
         assert "<script" not in empty_matrix
-        empty_islands = _script_elements(empty_html)
+        empty_islands = _json_islands(empty_html)
         assert [attrs.get("id") for attrs, _ in empty_islands] == list(_ISLAND_IDS)
         assert json.loads(empty_islands[1][1]) == tool_contract
     finally:
@@ -2109,16 +2222,19 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
         legacy_roster, PUBLIC_RENDER_LOGO, parity_header_meta)
     public_html = build_site.render_catalog_page(
         parity_snapshot, PUBLIC_RENDER_LOGO, parity_header_meta,
-        tool_contract=tool_contract)
+        tool_contract=tool_contract, sources=_page_sources())
     assert re.findall(r'<script\b[^>]*>', legacy_html) == [
         '<script type="application/json" id="roster-data">']
-    assert [attrs.get("id") for attrs, _ in _script_elements(public_html)] == [
+    assert [attrs.get("id") for attrs, _ in _json_islands(public_html)] == [
         "catalog-data", "tool-contract"]
+    assert [attrs.get("data-watchdog") for attrs, _ in _page_scripts(public_html)] \
+        == ["catalog-query", "webmcp", "boot"]
     stripped_legacy = re.sub(
         r'<script type="application/json" id="roster-data">.*?</script>', "",
         legacy_html, count=1, flags=re.S)
-    assert stripped_legacy == _strip_public_islands(public_html), (
-        "public route must reuse the ONE legacy template byte-for-byte")
+    assert stripped_legacy == _strip_public_payloads(public_html), (
+        "public route must reuse the ONE legacy template byte-for-byte, "
+        "adding only the inert islands and the maintained page scripts")
 
     # ---- (b) secret-safe public HTML from real capture/build -------------
     token_sentinel = "sk-live-SENTINEL-TOKEN-9f3a"
@@ -2174,7 +2290,7 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
                               cadence_s=1800)
     assert snapshot == snapshot_before
     safe_html = build_site.render_catalog_page(
-        snapshot, PUBLIC_RENDER_LOGO, header_meta, tool_contract=tool_contract)
+        snapshot, PUBLIC_RENDER_LOGO, header_meta, tool_contract=tool_contract, sources=_page_sources())
 
     assert snapshot == snapshot_before, "snapshot mutated by rendering"
     assert configs == configs_before and wiring == wiring_before
@@ -2182,7 +2298,7 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
     assert header_meta == header_before
 
     # Both inert islands are present and decode to the intended public data.
-    safe_islands = _script_elements(safe_html)
+    safe_islands = _json_islands(safe_html)
     assert [attrs.get("id") for attrs, _ in safe_islands] == list(_ISLAND_IDS)
     embedded_catalogue = json.loads(safe_islands[0][1])
     embedded_tools = json.loads(safe_islands[1][1])
@@ -2338,13 +2454,13 @@ def test_embedded_islands_are_whole_value_lossless_and_deterministic():
         tools_before = copy.deepcopy(tool_contract)
 
         html = build_site.render_catalog_page(
-            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract)
+            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract, sources=_page_sources())
         assert html == build_site.render_catalog_page(
-            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract), label
+            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract, sources=_page_sources()), label
         assert snapshot == snapshot_before, f"{label}: snapshot mutated"
         assert tool_contract == tools_before, f"{label}: tool array mutated"
 
-        islands = _script_elements(html)
+        islands = _json_islands(html)
         assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS), label
         assert [attrs.get("type") for attrs, _ in islands] == [
             "application/json", "application/json"], label
@@ -2399,7 +2515,7 @@ def test_embedded_islands_are_whole_value_lossless_and_deterministic():
         if label == "zero-id":
             assert embedded["providers"]["synthetic-empty"]["model_ids"] == []
             assert embedded["providers"]["synthetic-empty"]["models"] == {}
-            assert "name-row" not in _strip_public_islands(html)
+            assert "name-row" not in _strip_public_payloads(html)
         if label == "true-empty":
             assert embedded["provider_order"] == []
             assert embedded["providers"] == {}
@@ -2472,10 +2588,10 @@ def test_script_context_hostile_text_is_inert_and_lossless():
     snapshot = build_snapshot(capture_registry(configs, wiring), roster,
                               cadence_s=3600)
     html = build_site.render_catalog_page(
-        snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract)
+        snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract, sources=_page_sources())
 
     assert html == build_site.render_catalog_page(
-        snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract)
+        snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract, sources=_page_sources())
     assert snapshot == snapshot_before, "snapshot mutated by rendering"
     assert configs == configs_before and wiring == wiring_before
     assert roster == roster_before, "roster input mutated"
@@ -2524,18 +2640,32 @@ def test_script_context_hostile_text_is_inert_and_lossless():
     audit.close()
     assert audit.open is None, "an island was left unterminated"
     assert audit.bad == [], f"injected markup/attribute: {audit.bad}"
-    assert [attrs.get("id") for attrs, _ in audit.scripts] == list(_ISLAND_IDS)
-    assert [attrs.get("type") for attrs, _ in audit.scripts] == [
+    inert = [script for script in audit.scripts
+             if script[0].get("type", "").strip().lower() == "application/json"]
+    executable = [script for script in audit.scripts
+                  if script[0].get("type") is None]
+    assert [attrs.get("id") for attrs, _ in inert] == list(_ISLAND_IDS)
+    assert [attrs.get("type") for attrs, _ in inert] == [
         "application/json", "application/json"]
     assert all(attrs.get("src") is None for attrs, _ in audit.scripts)
+    # The executable part is ONLY this build's maintained page scripts: no
+    # upstream text can add, rename or reorder one.
+    assert [attrs.get("data-watchdog") for attrs, _ in executable] == [
+        "catalog-query", "webmcp", "boot"]
     assert len([tag for tag, _ in audit.tags if tag == "img"]) == 1
-    assert len([tag for tag, _ in audit.tags if tag == "script"]) == 2
+    assert len([tag for tag, _ in audit.tags if tag == "script"]) == 5
 
-    catalogue_body, tools_body = audit.scripts[0][1], audit.scripts[1][1]
+    catalogue_body, tools_body = inert[0][1], inert[1][1]
     for body in (catalogue_body, tools_body):
         assert body.isascii()
         for forbidden in ("<", ">", "&", "\u2028", "\u2029", "<!--", "</"):
             assert forbidden not in body, forbidden
+    # Hostile upstream text never reaches executable code: it stays DATA in
+    # the inert islands, and the browser executes only the maintained sources.
+    for attrs, body in executable:
+        assert "alert(" not in body, attrs
+        assert "evil.example" not in body, attrs
+        assert "<script" not in body.lower(), attrs
 
     # ---- complete round-trip of every hostile value, both islands --------
     embedded = json.loads(catalogue_body)
@@ -2557,7 +2687,7 @@ def test_script_context_hostile_text_is_inert_and_lossless():
     assert "</script>" in embedded_tools[0]["description"]  # inert, retained
 
     # ---- the visible matrix still escapes its text -----------------------
-    matrix_html = _strip_public_islands(html)
+    matrix_html = _strip_public_payloads(html)
     assert "<script" not in matrix_html
     assert "<!--" not in matrix_html
     assert escape(hostile_name) in matrix_html
@@ -2565,6 +2695,362 @@ def test_script_context_hostile_text_is_inert_and_lossless():
     assert "evil.example" not in matrix_html
     assert "src=//evil.example" not in matrix_html
     assert "SENTINEL-HOSTILE-TOKEN" not in matrix_html
+
+
+# ---------- Unit 8d: inlined maintained page JS, no-API / no-JS behaviour --
+#
+# The generated page must stay useful WITHOUT WebMCP and WITHOUT JavaScript.
+# Its executable part is exactly three empty-src classic scripts taken from the
+# BUILDER's own maintained files (never from --root), in page order: the shared
+# query engine, the WebMCP adapter, then ONE bootstrap call. These checks
+# execute the page-extracted scripts in a Node `vm` realm. A fake registrar is
+# WIRING evidence only -- it proves the page is wired as designed and is never
+# a claim of native WebMCP support (that is 8e/10d's verification).
+
+_PAGE_DRIVER = r'''
+"use strict";
+// Evaluates the page's OWN extracted scripts, in page order, against a
+// document double that exposes ONLY the two islands and the native seam.
+const fs = require("node:fs");
+const vm = require("node:vm");
+
+const [catalogPath, contractPath, queryPath, adapterPath, bootPath, mode] =
+  process.argv.slice(2);
+
+const islands = {
+  "catalog-data": fs.readFileSync(catalogPath, "utf8"),
+  "tool-contract": fs.readFileSync(contractPath, "utf8")
+};
+const net = { fetch: 0, xhr: 0, timers: 0 };
+const calls = [];
+const islandReads = [];
+let modelContextReads = 0;
+
+const registrar = {
+  registerTool(descriptor) {
+    if (this !== registrar) {
+      throw new Error("registerTool receiver changed");
+    }
+    calls.push(descriptor);
+    return Promise.resolve();
+  }
+};
+
+const document = {
+  getElementById(id) {
+    islandReads.push(id);
+    return Object.prototype.hasOwnProperty.call(islands, id)
+      ? { textContent: islands[id] }
+      : null;
+  }
+};
+Object.defineProperty(document, "modelContext", {
+  get() {
+    modelContextReads += 1;
+    return mode === "native" ? registrar : undefined;
+  }
+});
+
+const sandbox = { Date: Date, document: document };
+sandbox.globalThis = sandbox;
+sandbox.fetch = function () { net.fetch += 1; throw new Error("no network"); };
+sandbox.XMLHttpRequest = function () {
+  net.xhr += 1;
+  throw new Error("no network");
+};
+sandbox.setTimeout = function () {
+  net.timers += 1;
+  throw new Error("no timers");
+};
+vm.createContext(sandbox);
+
+// Exactly the page order: engine, adapter, then the page's own bootstrap.
+vm.runInContext(fs.readFileSync(queryPath, "utf8"), sandbox);
+vm.runInContext(fs.readFileSync(adapterPath, "utf8"), sandbox);
+vm.runInContext(fs.readFileSync(bootPath, "utf8"), sandbox);
+
+(async function () {
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  const report = {
+    mode: mode,
+    modelContextReads: modelContextReads,
+    islandReads: islandReads,
+    calls: calls.map(function (descriptor) { return descriptor.name; }),
+    descriptors: calls.map(function (descriptor) {
+      return {
+        name: descriptor.name,
+        description: descriptor.description,
+        schemaType: descriptor.inputSchema && descriptor.inputSchema.type,
+        annotations: descriptor.annotations
+      };
+    }),
+    net: net
+  };
+  if (mode === "native") {
+    const byName = {};
+    for (const descriptor of calls) {
+      byName[descriptor.name] = descriptor;
+    }
+    // A routine lookup and the explicit bulk export, through the registered
+    // descriptors: no browser-only truncation, counts stay truthful.
+    const searchText = await byName.search_models.execute({ limit: 1 });
+    const bulkText = await byName.list_free_models.execute({});
+    report.search = JSON.parse(searchText);
+    report.bulk = JSON.parse(bulkText);
+    report.searchLength = searchText.length;
+    report.bulkLength = bulkText.length;
+  }
+  process.stdout.write(JSON.stringify(report));
+})().catch(function (error) {
+  process.stderr.write("page driver failed: " +
+    (error && error.stack ? error.stack : String(error)) + "\n");
+  process.exitCode = 1;
+});
+'''
+
+
+def _run_page_driver(work, html, mode, node):
+    """Run the generated page's OWN scripts in a Node realm; return the report."""
+    work.mkdir(parents=True, exist_ok=True)
+    islands = {attrs["id"]: body for attrs, body in _json_islands(html)}
+    paths = {}
+    for island_id, name in (("catalog-data", "catalog.json"),
+                            ("tool-contract", "contract.json")):
+        paths[island_id] = work / name
+        paths[island_id].write_text(islands[island_id], encoding="utf-8")
+    for marker in _PAGE_SCRIPT_MARKERS:
+        paths[marker] = work / f"{marker}.js"
+        paths[marker].write_text(_page_script_body(html, marker),
+                                 encoding="utf-8")
+    driver = work / "page-driver.cjs"
+    driver.write_text(_PAGE_DRIVER, encoding="utf-8")
+
+    proc = subprocess.run(
+        [node, str(driver),
+         str(paths["catalog-data"]), str(paths["tool-contract"]),
+         str(paths["catalog-query"]), str(paths["webmcp"]),
+         str(paths["boot"]), mode],
+        capture_output=True, text=True, timeout=120, cwd=str(work),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip(), proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_generated_page_scripts_come_from_the_builder_not_the_build_root(
+        tmp_path):
+    """A decoy web/ tree under --root can never become the page's JavaScript."""
+    _seed_logo(tmp_path)
+    decoy = tmp_path / "web"
+    decoy.mkdir()
+    for name in ("catalog-query.js", "webmcp.js"):
+        (decoy / name).write_text('alert("decoy-source");\n', encoding="utf-8")
+    proc = _run_builder(PAIR_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+
+    assert "decoy-source" not in html
+    assert _page_script_body(html, "catalog-query") == (
+        REPO / "web" / "catalog-query.js").read_text(encoding="utf-8")
+    assert _page_script_body(html, "webmcp") == (
+        REPO / "web" / "webmcp.js").read_text(encoding="utf-8")
+
+
+def test_page_script_slot_rejects_unsafe_or_misordered_sources():
+    """Sources are inlined as raw script text, so unsafe text is a hard fault.
+
+    The builder never rewrites a maintained file: a body that could close the
+    element (`</script`), open a legacy comment (`<!--`) or arrive out of the
+    fixed order is rejected instead of being escaped or reordered, and the
+    template-only route (``sources=None``) emits no page script at all.
+    """
+    import build_site
+    from catalog_export import serialize_snapshot
+
+    tool_contract = _load_tool_contract()
+    snapshot = _public_snapshot({"synthetic-beta": ["acme/token-2:free"]}, {})
+
+    def render(sources):
+        return build_site.render_catalog_page(
+            snapshot, PUBLIC_RENDER_LOGO, tool_contract=tool_contract,
+            sources=sources)
+
+    real = _page_sources()
+    html = render(real)
+    assert [marker for marker, _ in real] == ["catalog-query", "webmcp"]
+    assert [marker for marker, _ in real] == [
+        marker for marker, _ in build_site.PAGE_SOURCE_FILES]
+    for attrs, body in _page_scripts(html):
+        assert "src" not in attrs
+    # Pair validation is unaffected by the extra scripts.
+    from catalog_export import validate_artifact_pair
+    validate_artifact_pair(serialize_snapshot(snapshot), html)
+
+    # The documented template-only route: no page script slot.
+    assert _page_scripts(render(None)) == []
+    assert [attrs.get("id") for attrs, _ in _json_islands(render(None))] == \
+        list(_ISLAND_IDS)
+
+    hostile = (
+        ("catalog-query", "</script><script>alert(1)</script>"),
+        ("webmcp", "// fine\n"),
+    )
+    with pytest.raises(ValueError):
+        render(hostile)
+    with pytest.raises(ValueError):
+        render((("catalog-query", "<!-- classic comment\n"), ("webmcp", "x")))
+    with pytest.raises(ValueError):
+        render(tuple(reversed(real)))
+    with pytest.raises(ValueError):
+        render(real[:1])
+    with pytest.raises(ValueError):
+        render(real + (("boot", "// duplicate slot\n"),))
+
+
+def test_page_scripts_are_inert_without_the_native_api(tmp_path, ):
+    """No native API: ONE honest no-op attempt, no island read, no network.
+
+    The generated page is built by the real CLI, its scripts are extracted and
+    evaluated in page order, and `document.modelContext` is absent. The
+    bootstrap must resolve quietly: nothing is registered, neither island is
+    parsed, no fetch/timer/XHR happens, and the plain document is untouched
+    (the double exposes no other DOM surface, so any write would throw).
+    """
+    node = _page_node_binary()
+    _seed_logo(tmp_path)
+    proc = _run_builder(PAIR_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+
+    report = _run_page_driver(tmp_path / "driver-absent", html, "absent", node)
+    assert report["calls"] == [], report
+    assert report["islandReads"] == [], report
+    assert report["modelContextReads"] == 1, report  # exactly one detection
+    assert report["net"] == {"fetch": 0, "xhr": 0, "timers": 0}, report
+
+
+def test_page_bootstrap_registers_the_five_shared_tools_once(tmp_path):
+    """Wiring evidence: the page's own bootstrap registers the five tools.
+
+    A fake registrar proves the ADAPTER/page wiring only. Descriptions and
+    schemas come from the embedded shared contract, annotations are the
+    documented triplet, and one routine search plus the bulk export come back
+    complete with truthful count/pagination fields.
+    """
+    node = _page_node_binary()
+    _seed_logo(tmp_path)
+    proc = _run_builder(PAIR_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+
+    report = _run_page_driver(tmp_path / "driver-native", html, "native", node)
+    assert report["calls"] == list(_TOOL_NAMES), report
+    assert report["islandReads"] == list(_ISLAND_IDS), report
+    assert report["net"] == {"fetch": 0, "xhr": 0, "timers": 0}, report
+
+    contract = {definition["name"]: definition
+                for definition in _load_tool_contract()}
+    for descriptor in report["descriptors"]:
+        definition = contract[descriptor["name"]]
+        assert descriptor["description"] == definition["description"]
+        assert descriptor["schemaType"] == "object"
+        assert descriptor["annotations"] == {
+            "readOnlyHint": True,
+            "untrustedContentHint": True,
+            "consequentialHint": False,
+        }
+
+    search = report["search"]
+    assert search["source"] == {"mode": "browser"}
+    assert search["limit"] == 1
+    assert search["returned_count"] == len(search["endpoints"]) == 1
+    assert search["total_matches"] == 3
+    assert search["next_offset"] == 1
+
+    bulk = report["bulk"]
+    assert bulk["source"] == {"mode": "browser"}
+    assert bulk["total_ids"] == 2
+    # Per-gateway id counts stay raw (nous carries two variants, kilo one) --
+    # never collapsed into the distinct-id total.
+    assert bulk["counts"]["nous"] == 2 and bulk["counts"]["kilo"] == 1
+    assert bulk["providers"]["kilo"] == ["vendor-z/shared-free"]
+    assert bulk["providers"]["openrouter"] == []  # published, legitimately empty
+    assert bulk["models"]["nous"]["vendor-z/shared-free"]["name"] == (
+        "vendor-z/shared")
+    assert report["bulkLength"] > 0 and report["searchLength"] > 0
+
+
+def test_page_stays_useful_without_javascript_or_a_server(tmp_path):
+    """JS-disabled and file:// use: the matrix, links and expansion survive.
+
+    With every script element removed the page is still a complete,
+    self-describing document: rows, dots, expandable wiring rows and links are
+    plain markup, the toggle is pure CSS, and nothing is fetched or linked
+    externally (the only ``src`` is the embedded data-URI logo).
+    """
+    _seed_logo(tmp_path)
+    proc = _run_builder(EXPAND_ROSTER, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    html = _build_html(tmp_path)
+
+    # Self-contained: no external script/link/base, no <iframe>, no inline
+    # event handlers anywhere in the document.
+    assert "<link" not in html and "<base" not in html
+    assert "<iframe" not in html and "<object" not in html
+    assert 'http-equiv="refresh"' not in html
+    assert re.findall(r"<script\b[^>]*\bsrc=", html) == []
+    assert all(src.startswith("data:image/png;base64,")
+               for src in re.findall(r'\bsrc="([^"]*)"', html))
+
+    # The page a JS-disabled browser shows: every script removed, everything
+    # a reader needs still present.
+    no_js = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.S)
+    assert "<script" not in no_js
+    assert no_js.count('class="name-row"') == 3
+    assert no_js.count('class="expand"') == 6
+    assert "tbody tr:has(input.row-expand:checked) ~ tr.expand" in no_js
+    for mid in ("vendor-x/poolside-s-2.1:free", "vendor-x/poolside-s-2.1-free",
+                "vendor-x/standalone-1:free", "vendor-x/standalone-2-free"):
+        assert mid in no_js
+    from config_loader import GATEWAY_WIRING
+    assert GATEWAY_WIRING["tokenrouter"]["chat_completions_url"] in no_js
+    assert 'href="https://github.com/Dthen/free-inference-watchdog"' in no_js
+    assert 'href="https://ko-fi.com/dthen"' in no_js
+    # The islands are plain data a page script (or a reader) can still get.
+    assert no_js.count('type="application/json"') == 0  # scripts were removed
+    assert "catalog-data" not in no_js
+
+
+def test_page_source_acquisition_failure_keeps_both_last_good_artifacts(
+        tmp_path, monkeypatch, capsys):
+    """A missing maintained source is a build fault BEFORE any replacement.
+
+    The page scripts are part of the artifact contract, so an unreadable one
+    must exit 2 with no partial publication: both last-good targets stay
+    byte-identical and no temp file is left behind.
+    """
+    from pathlib import Path as _Path
+
+    import build_site
+
+    _seed_logo(tmp_path)
+    _write_roster(tmp_path, PAIR_ROSTER)
+    _seed_last_good(tmp_path)
+    capsys.readouterr()
+
+    monkeypatch.setattr(build_site, "PAGE_SOURCE_FILES", (
+        ("catalog-query", _Path("web/does-not-exist.js")),
+        ("webmcp", _Path("web/webmcp.js")),
+    ))
+    assert _run_cli(tmp_path) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "page source" in captured.err
+
+    for name, blob in LAST_GOOD.items():
+        assert (tmp_path / "site" / name).read_bytes() == blob
+    assert _site_leftovers(tmp_path) == []
 
 
 # ---------- Unit 4e: validated public artifact-pair publication -------------
@@ -2795,7 +3281,7 @@ def _expected_pair(root):
         build_site.render_catalog_page(
             snapshot, build_site.load_logo_b64(root),
             build_site.build_provider_header_meta(),
-            tool_contract=_pair_tool_contract()),
+            tool_contract=_pair_tool_contract(), sources=_page_sources()),
     )
 
 
@@ -2818,7 +3304,8 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
     _seed_logo(tmp_path)
     _write_roster(tmp_path, PAIR_ROSTER)
 
-    calls = {"load": 0, "capture": 0, "build": 0, "serialize": [], "render": []}
+    calls = {"load": 0, "capture": 0, "build": 0, "load_sources": 0,
+             "serialize": [], "render": [], "sources": []}
     seen = {}
     real_load = build_site.load_roster
     real_capture = build_site.capture_registry
@@ -2848,17 +3335,26 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
         calls["serialize"].append(snapshot)
         return real_serialize(snapshot)
 
-    def spy_render(snapshot, logo_b64, header_meta=None, *, tool_contract):
+    def spy_render(snapshot, logo_b64, header_meta=None, *, tool_contract,
+                   sources=None):
         calls["render"].append((snapshot, tool_contract))
+        calls["sources"].append(sources)
         html = real_render(snapshot, logo_b64, header_meta,
-                           tool_contract=tool_contract)
+                           tool_contract=tool_contract, sources=sources)
         calls["html"] = html
         return html
+
+    real_sources = build_site.load_maintained_sources
+
+    def spy_sources():
+        calls["load_sources"] += 1
+        return real_sources()
 
     for name, spy in (("load_roster", spy_load),
                       ("capture_registry", spy_capture),
                       ("build_snapshot", spy_build),
                       ("serialize_snapshot", spy_serialize),
+                      ("load_maintained_sources", spy_sources),
                       ("render_catalog_page", spy_render)):
         monkeypatch.setattr(build_site, name, spy)
 
@@ -2873,12 +3369,20 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
 
     # --- one observation, one capture, one validated snapshot --------------
     assert calls["load"] == 1 and calls["capture"] == 1 and calls["build"] == 1
+    # The maintained page sources are acquired ONCE per build and handed to
+    # the renderer explicitly (never read from inside the pure renderer).
+    assert calls["load_sources"] == 1
     assert calls["cadence"] == 3600 == build_site.BUILD_CADENCE_S
     snapshot = calls["snapshot"]
     assert len(calls["serialize"]) == 1 and len(calls["render"]) == 1
     assert calls["serialize"][0] is snapshot, "JSON must come from THE snapshot"
     assert calls["render"][0][0] is snapshot, "HTML must come from THE snapshot"
     assert calls["render"][0][1] == _pair_tool_contract()
+    # The renderer received the acquired sources explicitly; it never read a
+    # file itself (the renderer's purity boundary is unchanged).
+    assert len(calls["sources"]) == 1 and calls["sources"][0] is not None
+    assert [marker for marker, _ in calls["sources"][0]] == [
+        "catalog-query", "webmcp"]
     assert build_site.PROVIDERS == providers_before
     assert build_site.GATEWAY_WIRING == wiring_before
     assert seen["roster"] == roster_before, "operational roster must be unmutated"
@@ -2909,15 +3413,15 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
     assert "mystery-gateway" not in published["providers"]
     assert "vendor-m/ghost-free" not in html_text
 
-    # --- no raw private state, no legacy island, two inert islands only ----
+    # --- no raw private state, no legacy island, two inert islands first ---
     for sentinel in PAIR_SENTINELS:
         assert sentinel not in catalog_text, sentinel
         assert sentinel not in html_text, sentinel
-    islands = _script_elements(html_text)
+    islands = _json_islands(html_text)
     assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
     assert 'id="roster-data"' not in html_text
-    assert len(re.findall(r"<script\b", html_text)) == 2
-    matrix_html = _strip_public_islands(html_text)
+    assert len(re.findall(r"<script\b", html_text)) == 5
+    matrix_html = _strip_public_payloads(html_text)
     assert "vendor-z/shared" in matrix_html
     assert "Context length: 4096" in matrix_html
 
@@ -2955,7 +3459,7 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
     assert all(entry["model_ids"] == [] and entry["models"] == {}
                for entry in empty_published["providers"].values())
     assert empty_published["snapshot_id"] and empty_published["tick_epoch"] == 42
-    assert "name-row" not in _strip_public_islands(empty_html)
+    assert "name-row" not in _strip_public_payloads(empty_html)
     assert empty_catalog != catalog_text
 
     # --- stdlib only: no SDK import and no PATH/Node binary needed ---------
@@ -3657,7 +4161,7 @@ def _rendered_other_pair(root):
     return (
         serialize_snapshot(snapshot),
         build_site.render_catalog_page(
-            snapshot, "ZmFrZWxvZ28=", tool_contract=_pair_tool_contract()),
+            snapshot, "ZmFrZWxvZ28=", tool_contract=_pair_tool_contract(), sources=_page_sources()),
     )
 
 
@@ -3692,7 +4196,7 @@ def test_concurrent_publication_and_generated_file_ignore_rules(
             snapshot["snapshot_id"],
             catalog_export.serialize_snapshot(snapshot),
             build_site.render_catalog_page(
-                snapshot, "ZmFrZWxvZ28=", tool_contract=tool_contract),
+                snapshot, "ZmFrZWxvZ28=", tool_contract=tool_contract, sources=_page_sources()),
         )
 
     candidates = [candidate(epoch) for epoch in (11, 22, 33, 44)]

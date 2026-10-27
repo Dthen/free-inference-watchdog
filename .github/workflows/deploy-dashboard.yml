@@ -1,18 +1,24 @@
 name: Deploy dashboard to Pages
 
 # This workflow publishes the checked-in `site` directory exactly as it is.
-# Before anything is uploaded it validates that `site/catalog.json` and
-# `site/index.html` describe ONE coherent public snapshot, so a stale,
-# truncated or mismatched pair can never be deployed. The gate is read-only and
-# self-contained: it installs nothing, reads no provider configuration, private
-# roster state or credential, contacts no watched-project remote and rebuilds
-# nothing. Browser/inline freshness stays a separate concern.
+# Before anything is uploaded TWO read-only gates run, unconditionally and in
+# order: `site/catalog.json` and `site/index.html` must describe ONE coherent
+# public snapshot, and the page must inline the CURRENT maintained `web/*.js`
+# sources byte for byte. A stale, truncated or mismatched pair can therefore
+# never be deployed, and neither can a page whose executable code predates the
+# sources (which is why `web/**` is a trigger: a source change must fail here
+# until the producer regenerates the page, never deploy stale JavaScript). Both
+# gates are self-contained: they install nothing, read no provider
+# configuration, private roster state or credential, contact no watched-project
+# remote and rebuild nothing.
 on:
   push:
     branches: [master]
     paths:
       - 'site/**'
       - 'scripts/validate_site.py'
+      - 'scripts/check_page_sources.py'
+      - 'web/**'
       - 'catalog_export.py'
       - 'watchdog_catalog/**'
       - 'build_site.py'
@@ -65,6 +71,21 @@ jobs:
           site_dir='site'
           test -x "$VALIDATE_PYTHON"
           "$VALIDATE_PYTHON" -I -S scripts/validate_site.py --site-dir "$site_dir"
+
+      # The second unconditional gate. It compares the page's inlined
+      # `data-watchdog` bodies against THIS checkout's `web/` sources, so a
+      # source change that was never rebuilt into `site/index.html` stops here
+      # instead of deploying stale JavaScript. No source directory is passed:
+      # the gate resolves its own checkout copies, and the site directory can
+      # never choose what it is compared against.
+      - name: Verify the page embeds the maintained sources
+        env:
+          FRESHNESS_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          site_dir='site'
+          test -x "$FRESHNESS_PYTHON"
+          "$FRESHNESS_PYTHON" -I -S scripts/check_page_sources.py --site-dir "$site_dir"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

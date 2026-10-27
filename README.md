@@ -16,6 +16,7 @@ code change.
 | You want to… | Start at |
 |---|---|
 | query the free-model catalogue from an MCP client | [Query the catalogue over MCP](#query-the-catalogue-over-mcp) — no keys, no cron, no local roster, no alerting |
+| use the same five tools inside a browser page | [Browser (WebMCP) tools in the dashboard](#browser-webmcp-tools-in-the-dashboard) — the page's loaded snapshot; needs a browser that exposes the in-page API |
 | run the watchdog yourself, alert on changes, self-host | [Self-hosting the watchdog](#self-hosting-the-watchdog) — provider keys, Discord webhook, cron host |
 
 ## Query the catalogue over MCP
@@ -37,8 +38,13 @@ never spends a credit and never grants access to a model. To actually run a
 model you need your own credentials with that gateway, under that gateway's own
 rules and terms — nothing here supplies, proxies or bypasses them. Nor is this a
 hosted endpoint: the server is a LOCAL process that your MCP client launches
-over stdio. This ref exposes no remotely connectable MCP HTTP URL, and no
-browser MCP support (see [WebMCP](#webmcp-planned-not-available)).
+over stdio. This ref exposes no remotely connectable MCP HTTP URL. Browser
+agents are served a different way and by a different artifact: the generated
+dashboard page embeds the same catalogue and registers the five read-only tools
+with the browser's in-page WebMCP API, within the availability limits described
+in [Browser (WebMCP) tools in the dashboard](#browser-webmcp-tools-in-the-dashboard).
+That page is a rendered document, not the JSON feed, and still not a hosted
+endpoint.
 
 ### Install the pinned commit
 
@@ -372,8 +378,8 @@ The same catalogue ships as one public JSON document (`site/catalog.json`,
 `schema_version` 1): an integrity-hashed `snapshot_id`, the observation epoch
 `tick_epoch`, the cadence it was measured against, `provider_order`, a
 `providers` map of credential-free projected metadata, and a frozen `warnings`
-list. It is the credential-free contract the MCP server and any future browser
-adapter consume.
+list. It is the credential-free contract the MCP server and the dashboard's
+in-page browser tools consume.
 
 **Where it lives.** Both routes serve the same document, rebuilt and published
 by the hourly tick:
@@ -400,17 +406,95 @@ snapshot works, so your own served copy behaves the same. Field definitions,
 nullability and validation rules are in *Published catalogue snapshot (v1) —
 contract draft* below.
 
-### WebMCP (planned, not available)
+### Browser (WebMCP) tools in the dashboard
 
-Browser support is **planned, not available** in this ref: there is no WebMCP
-registration, no in-page adapter and no JavaScript implementation here. When it
-lands it will run inside a page that has the catalogue embedded, which is a
-different thing from the stdio server described above.
+The dashboard page carries the catalogue and the shared tool definitions as two
+inert JSON islands, and — when the browser exposes the in-page WebMCP API
+(`document.modelContext.registerTool`) — registers the **same five read-only
+tools**: `search_models`, `get_model`, `list_endpoints`, `list_free_models` and
+`watchdog_status`. That integration is implemented in this ref: the maintained
+`web/catalog-query.js` engine and `web/webmcp.js` adapter plus one bootstrap
+call are inlined into `site/index.html` by the page builder. It is a
+progressive enhancement, not a requirement: with no API, with JavaScript
+disabled, or after a failed registration the ordinary matrix and its row
+expansion render exactly as before.
 
-To be explicit about a common mix-up: WebMCP is an in-page browser API. It is
-**not** a remotely connectable MCP HTTP URL, and it will not turn this package
-into a hosted server you can point a remote client at. The only transport in
-this ref is local stdio.
+**Availability is conditional — there is no universal browser support.**
+
+| Situation | What is required |
+|---|---|
+| local development, or an ordinary visitor | Chrome with `chrome://flags/#enable-webmcp-testing` set to **Enabled** and the browser relaunched |
+| a public origin, without that flag | the origin enrolled in the WebMCP origin trial (available from Chrome 149) |
+| every case | a secure context: `https://`, `http://localhost`/`127.0.0.1`, or a `file://` open of the built page — an opaque origin has no API even with the flag |
+| a cross-origin iframe | the `tools` Permissions Policy delegated (`<iframe allow="tools">`); the default is `self`, so cross-origin frames get nothing |
+
+Enrolling a public origin in the trial is optional and separately authorized:
+nothing in this repository, its build or its deploy path enrols one. Static
+hosting needs no trial for a visitor who enables the flag, but ordinary
+visitors of a public origin get no API without either. Chrome's own
+documentation calls WebMCP a proposed standard under active change — see
+[WebMCP](https://developer.chrome.com/docs/ai/webmcp) (updated 2026-10-07), the
+[Imperative API](https://developer.chrome.com/docs/ai/webmcp/imperative-api)
+(2026-10-16), [tool security](https://developer.chrome.com/docs/ai/webmcp/secure-tools)
+(2026-09-01) and the [DevTools WebMCP panel](https://developer.chrome.com/docs/devtools/application/webmcp)
+(2026-05-12) — and the version you run may differ from the one described here.
+
+**Setup, exercised on a fresh build of this checkout** (Chrome for Testing
+156.0.8078.4, over `http://127.0.0.1` and over `file://`; without the flag
+`document.modelContext` is absent and setup reports `unsupported`, with it five
+tools are discovered and run):
+
+1. Open the page — the dashboard at <https://models.dthen.xyz>, or a built copy
+   of `site/index.html`. The page is self-contained, so a `file://` open works
+   too; see *Publication status* below for the copy this ref tracks.
+2. Enable `chrome://flags/#enable-webmcp-testing` → **Enabled** → relaunch
+   Chrome.
+3. Confirm in DevTools → **Application** → **WebMCP**: *Available Tools* lists
+   the five tools and an invocation counter, *Invoked Tools* logs each call
+   with its input, output and status, and the panel's manual test area runs a
+   tool without an agent. The Model Context Tool Inspector extension is the
+   documented alternative for prompting a model against them.
+
+The browser tools answer from the snapshot embedded in the page when it loaded.
+Arguments, payloads, ordering, errors and caveats are the ones documented in
+*Metadata search semantics* and the envelopes below — no browser-only fields
+and no browser-only truncation — with one addition: every returned payload,
+success or argument error, carries `source: {"mode": "browser"}`. Browser mode
+is not an HTTP refresh, a cache hit or a monitor tick: opening a tab starts no
+monitoring job, no cron tick and no provider request, and the page never asks
+for a provider key. Each descriptor also carries three advisory hints —
+`readOnlyHint: true` (the tools only read an immutable snapshot),
+`untrustedContentHint: true` (upstream model text is untrusted data) and
+`consequentialHint: false` (nothing is booked, bought or written). Hints are
+metadata for the agent and the browser; they never sanitize upstream text.
+
+**Output size: a recommendation, not a cap.** Chrome's security guidance
+*recommends* about 1.5K characters per individual tool output; it is not a
+protocol limit. This page never truncates, drops metadata, shortens an array or
+invents pagination to fit it. `list_free_models` and `list_endpoints` are
+deliberate bulk exports and routinely exceed it — a synthetic 120-id catalogue
+produced 47,487 characters of `list_free_models` text in verification — and one
+large upstream description can push even a two-row `search_models` page past it
+(12,138 characters on that same synthetic catalogue). Read that as a known
+usability limitation of the bulk tools, not a hidden hard cap. Routine agent
+lookups belong in `search_models` with an explicit small `limit` (1–5), a
+provider filter where useful, then `get_model` for details; `limit` bounds rows,
+never serialized characters.
+
+To be explicit about a common mix-up: WebMCP is an **in-page** browser API. It
+is **not** a remotely connectable MCP HTTP URL, and it does not turn this
+package into a hosted server you can point a remote client at. A browser-side
+agent that already has the page open calls these tools in that page; the only
+transport this ref ships is local stdio, and the two routes share tool
+definitions and payload semantics, not a process.
+
+**Publication status.** The tracked `site/index.html` in this ref is still the
+older two-island snapshot, written before the page scripts were inlined; a
+fresh build of this checkout carries the integration and is what the setup
+above was verified against. Regenerating and deploying that page is a separate,
+separately authorized step, and this page does not claim it has happened — so
+treat the browser route as implemented and locally verified, not as a promise
+about the currently deployed dashboard.
 
 ---
 
@@ -1135,11 +1219,18 @@ exceed that guidance. `watchdog_status` describes **published catalogue
 health** only — never live or private operator or cron health, and never a
 provider probe.
 
-This subsection scopes to the shared **data** resource alone: packaging
-the file as package data, embedding it in HTML, comparing it against MCP
-SDK schema generation, and the native browser registration annotations
-remain their own later units. No runtime, package, SDK or browser
-integration is claimed here.
+This subsection scopes to the shared **data** resource itself, and that
+resource ships: it is packaged as the package's one MCP resource, embedded in
+the dashboard as the `tool-contract` island, and read by `web/webmcp.js` for
+all five browser descriptors (each a defensive copy — there is no second
+schema table in the page). The transport derives the live advertised schema
+from its Python signatures and their constrained aliases, proves the generated
+property-name set equals the reviewed one, and copies only the reviewed
+description text from here — so no type, bound, default, requiredness, pattern
+or unknown-argument rule of a live registration is read out of this file.
+Packaging, embedding, SDK schema comparison and native browser registration are
+therefore ordinary shipped behaviour documented elsewhere in this README, not
+later work.
 
 ### Identity, lookup, and ordering (frozen rules)
 

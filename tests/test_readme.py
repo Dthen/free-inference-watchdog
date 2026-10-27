@@ -56,6 +56,20 @@ same way — observation time and the clock seams to `watchdog_status`'s injecte
 `now`, the async source's own seams and a raising-clock construction probe; the
 packaged tool contract to the `inputSchema` objects `tools.json` actually ships
 — and the obsolete sentences are planted as mutations those predicates reject.
+
+Browser route (unit 10d): the README's WebMCP section documents a GENERATED
+artifact, so it is executed rather than read. A synthetic roster is built into a
+real page by the real builder, the two inert islands and the three inlined
+classic scripts are read back out of that HTML, and the scripts are run in a
+Node realm against a fake in-page host: five registrations, the three documented
+annotations, `source: {mode: "browser"}` provenance on success AND argument
+errors, and complete bulk output that is compared field-for-field with the
+shared Python core over the page's own snapshot. Availability is pinned as a
+SCOPE (development flag, Chrome 149+ origin trial, secure context, `tools`
+Permissions Policy) with no universal claim, the oversize-output rule is pinned
+as Chrome's RECOMMENDATION rather than a cap, the tracked page is checked
+against the "not published yet" caveat, and the retired "planned / no adapter /
+later units" claims are planted as mutations the same predicates reject.
 """
 
 import asyncio
@@ -206,6 +220,46 @@ def _documented_args():
 def _tool_names():
     contract = json.loads(TOOL_CONTRACT.read_text(encoding="utf-8"))
     return [entry["name"] for entry in contract]
+
+
+# -- the browser route's honesty predicates (unit 10d) ----------------------
+#
+# The stale claims are matched as PATTERNS, not as "the old sentence", so a
+# re-worded denial is caught too, and each pattern is exercised against a
+# planted sample in the tests that use it.
+
+#: Claims the shipped source and a fresh build both contradict.
+_BROWSER_DENIAL_PATTERNS = (
+    "no browser mcp support",
+    "no webmcp registration",
+    "no in-page adapter",
+    "no javascript implementation",
+    "planned, not available",
+    "planned and not available",
+    "browser integration remains",
+    "browser-registration work",
+    "works in every browser",
+    "supported in every browser",
+    "the deployed dashboard registers",
+)
+
+#: A browser claim scoped as "later work" — the D3 regression.
+_BROWSER_DEFERRAL = re.compile(
+    r"browser[^.]{0,120}(later unit|future work|not implemented|remain)", re.I)
+
+
+def _browser_denials(text):
+    """Every stale or over-broad browser claim in ``text``.
+
+    Broad on purpose: the README *may* say a public origin has no API without
+    the flag or trial, but it may not say there is no browser support, and it
+    may not call the browser work future work or universal.
+    """
+    plain = _plain(text).lower()
+    found = [pattern for pattern in _BROWSER_DENIAL_PATTERNS if pattern in plain]
+    for match in _BROWSER_DEFERRAL.finditer(plain):
+        found.append("deferred: " + " ".join(match.group(0).split()))
+    return found
 
 
 # -- consumer metadata, freshness and identity examples (unit 10b1) ----------
@@ -603,19 +657,442 @@ def test_consumer_section_documents_the_live_feed_as_the_default():
         "the obsolete-feed-claim check is not sensitive to a planted claim")
 
 
-def test_consumer_section_keeps_webmcp_planned_and_unavailable():
-    """WebMCP is still planned, not available, and not a remote MCP HTTP URL —
-    a deployed catalogue feed does not deploy a browser adapter."""
+def test_consumer_section_keeps_webmcp_distinct_from_a_remote_url():
+    """The consumer route must not deny the shipped browser support, and must
+    still distinguish an in-page browser API from a remotely connectable MCP
+    HTTP URL. The stale "planned, not available" wording is planted below so
+    the predicate is proven sensitive rather than vacuous (unit 10d)."""
     section = _section(_readme(), CONSUMER_HEADING)
     lowered = _plain(section).lower()
 
-    webmcp = [p for p in _paragraphs(_plain(section))
-              if "webmcp" in p.lower() and "planned" in p.lower()]
-    assert webmcp, "the WebMCP planned-status paragraph is gone"
-    assert any("not available" in p.lower() for p in webmcp), \
-        "WebMCP must be labelled not available"
+    assert _browser_denials(_readme()) == [], (
+        "README still denies the browser support this ref ships")
+    assert "webmcp" in lowered, "the consumer route no longer mentions WebMCP"
+    assert "in-page" in lowered, \
+        "the consumer route must say WebMCP is an in-page API"
     assert "not a remotely connectable mcp http url" in lowered, \
         "WebMCP must be distinguished from a remote MCP HTTP URL"
+    assert "browser-webmcp-tools-in-the-dashboard" in section, \
+        "the consumer route must route browser readers to the browser section"
+
+    planted = section + (
+        "\nBrowser support is planned, not available: there is no in-page "
+        "adapter and no JavaScript implementation here.\n")
+    assert _browser_denials(planted), \
+        "the browser-denial check is not sensitive to a planted denial"
+
+
+# -- browser (WebMCP) route, EXECUTED (unit 10d) ----------------------------
+#
+# The browser claim is a claim about a GENERATED ARTIFACT, so these tests build
+# the real page from a synthetic roster through the real builder, read the two
+# inert islands and the three inlined classic scripts out of the generated
+# HTML, and RUN those scripts in a Node realm with a fake `document`. What the
+# README says about setup — the native API it feature-detects, the five
+# registered tools, the annotation hints, the browser provenance and the
+# "never truncate to fit the recommendation" rule — is bound to what the page
+# actually does, and the payload is compared against the shared Python core
+# over the SAME embedded snapshot. Availability is checked as a SCOPE (flag,
+# trial, secure context, permissions policy) because "conditional" is the only
+# accurate statement, and the stale denials are planted so the predicate is
+# proven sensitive.
+
+BROWSER_HEADING = "### Browser (WebMCP) tools in the dashboard"
+BUILDER = REPO / "build_site.py"
+BROWSER_PAGE_SCRIPT_MARKERS = ("catalog-query", "webmcp", "boot")
+#: Chrome's security guidance RECOMMENDATION — not a protocol limit, and not
+#: this project's cap (browser contract 4.6).
+RECOMMENDED_OUTPUT_CHARS = 1500
+
+#: Synthetic roster: three gateways (one tracking zero ids), a ~6K-character
+#: upstream description, and ids that sort differently from insertion order.
+BROWSER_ROSTER_PROVIDERS = {
+    "nous": ["vendor-a/browser-huge:free", "vendor-a/browser-small",
+             "vendor-b/shared-model"],
+    "tokenrouter": ["vendor-b/shared-model", "vendor-b/browser-tool"],
+    "amd": [],
+}
+LONG_UPSTREAM_DESCRIPTION = "Synthetic long upstream description. " * 150
+
+
+def _browser_model(name, description=None):
+    return {
+        "name": name,
+        "description": description if description is not None
+        else f"Synthetic description for {name}.",
+        "context_length": 8192,
+        "architecture": {"input_modalities": ["text"],
+                         "output_modalities": ["text"]},
+        "supported_parameters": ["temperature"],
+        "pricing": {"prompt": 0.5, "completion": 1.5},
+    }
+
+
+def _browser_provider_models():
+    models = {}
+    for provider, ids in BROWSER_ROSTER_PROVIDERS.items():
+        models[provider] = {
+            raw: _browser_model(
+                f"Browser {raw.split('/')[-1]}",
+                LONG_UPSTREAM_DESCRIPTION if "huge" in raw else None)
+            for raw in ids}
+    return models
+
+
+def _page_node_binary():
+    """Node for the generated-page execution checks (same rules as parity)."""
+    import shutil
+
+    override = os.environ.get("CONTRACT_NODE")
+    if override is not None:
+        if not override:
+            pytest.fail("CONTRACT_NODE is set but empty; set it to a Node "
+                        "binary or unset it to use PATH discovery")
+        resolved = shutil.which(override)
+        if resolved is None and os.path.isfile(override):
+            resolved = os.path.abspath(override)
+        if resolved is None:
+            pytest.fail(f"CONTRACT_NODE={override!r} is not an executable Node "
+                        "binary; the explicit override is authoritative")
+        return resolved
+    resolved = shutil.which("node")
+    if resolved is None:
+        pytest.skip("Node is not on PATH: install Node or set CONTRACT_NODE to "
+                    "run the generated-page execution checks")
+        raise AssertionError("unreachable: pytest.skip always raises")
+    return resolved
+
+
+def _build_browser_page(root):
+    """Build a real page from the synthetic roster; return its HTML."""
+    state = root / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (root / "assets").mkdir(parents=True, exist_ok=True)
+    (root / "assets" / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    (state / "roster.json").write_text(json.dumps({
+        "tick_epoch": 1787800000,
+        "providers": BROWSER_ROSTER_PROVIDERS,
+        "provider_models": _browser_provider_models(),
+        "stale_providers": [],
+    }), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(BUILDER), "--root", str(root)],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return (root / "site" / "index.html").read_text(encoding="utf-8")
+
+
+def _browser_page_parts(html):
+    """The page's two inert islands and its three classic scripts, in order."""
+    def _island(island_id):
+        match = re.search(
+            r'<script type="application/json" id="'
+            + re.escape(island_id) + r'">(.*?)</script>', html, re.S)
+        assert match, f"the generated page has no {island_id} island"
+        return match.group(1)
+
+    scripts = dict(re.findall(
+        r'<script data-watchdog="([a-z-]+)">(.*?)</script>', html, re.S))
+    return {
+        "islands": {"catalog-data": _island("catalog-data"),
+                    "tool-contract": _island("tool-contract")},
+        "scripts": scripts,
+    }
+
+
+#: Executes the page's own classic scripts against a fake in-page WebMCP host —
+#: the documented setup path, with no browser and no network.
+_PAGE_EXECUTION_JS = r"""
+"use strict";
+const fs = require("fs");
+const vm = require("vm");
+const spec = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const registrations = [];
+const documentStub = {
+  getElementById(id) {
+    const text = spec.islands[id];
+    return text === undefined ? null : { textContent: text };
+  },
+  modelContext: {
+    registerTool(descriptor) {
+      registrations.push(descriptor);
+      return Promise.resolve();
+    },
+    getTools() {
+      return Promise.resolve(registrations.map((d) => ({ name: d.name })));
+    }
+  }
+};
+const sandbox = { document: documentStub };
+vm.createContext(sandbox);
+for (const body of spec.scripts) { vm.runInContext(body, sandbox); }
+(async () => {
+  const setup = await vm.runInContext("WatchdogWebMCP.setup()", sandbox);
+  const results = {};
+  for (const call of spec.calls) {
+    const descriptor = registrations.find((d) => d.name === call.tool);
+    if (!descriptor) { throw new Error("no registered tool: " + call.tool); }
+    const text = await descriptor.execute(call.args);
+    results[call.label] = { type: typeof text, text: text };
+  }
+  console.log(JSON.stringify({
+    setup: { status: setup.status, reason: setup.reason,
+             registered: setup.registered },
+    registered: registrations.map((d) => d.name),
+    annotations: registrations.map((d) => d.annotations || null),
+    results: results
+  }));
+})().catch((e) => { console.log(JSON.stringify({ error: String(e) })); process.exit(1); });
+"""
+
+BROWSER_CALLS = (
+    {"label": "paged", "tool": "search_models",
+     "args": {"query": "browser", "limit": 2}},
+    {"label": "bulk", "tool": "list_free_models", "args": {}},
+    {"label": "bad_provider", "tool": "search_models",
+     "args": {"provider": "not-a-gateway"}},
+)
+
+
+@pytest.fixture(scope="module")
+def browser_page(tmp_path_factory):
+    """One real build, then one real execution of the page's own scripts."""
+    node = _page_node_binary()
+    root = tmp_path_factory.mktemp("browser-page")
+    html = _build_browser_page(root)
+    parts = _browser_page_parts(html)
+    assert sorted(parts["scripts"]) == sorted(BROWSER_PAGE_SCRIPT_MARKERS), (
+        "the generated page does not carry the three maintained page scripts")
+
+    spec = {
+        "islands": parts["islands"],
+        "scripts": [parts["scripts"][marker]
+                    for marker in BROWSER_PAGE_SCRIPT_MARKERS],
+        "calls": list(BROWSER_CALLS),
+    }
+    spec_path = root / "page-spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    runner = root / "run-page.cjs"
+    runner.write_text(_PAGE_EXECUTION_JS, encoding="utf-8")
+    proc = subprocess.run([node, str(runner), str(spec_path)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    execution = json.loads(proc.stdout)
+    assert "error" not in execution, execution["error"]
+
+    from watchdog_catalog import catalog, query
+
+    snapshot = catalog.load_snapshot(parts["islands"]["catalog-data"])
+    return {
+        "html": html,
+        "parts": parts,
+        "execution": execution,
+        "snapshot": snapshot,
+        "bulk_expected": query.list_free_models(snapshot, {}),
+        "paged_expected": query.search_models(
+            snapshot, {"query": "browser", "limit": 2}),
+        "total_ids": len({raw for ids in BROWSER_ROSTER_PROVIDERS.values()
+                          for raw in ids}),
+    }
+
+
+def _json_result(browser_page, label):
+    """One native-path result, decoded with the SHARED strict loader."""
+    from watchdog_catalog import catalog
+
+    entry = browser_page["execution"]["results"][label]
+    assert entry["type"] == "string", (
+        f"{label} must return JSON TEXT, not a bare object: {entry['type']}")
+    return catalog.load_json(entry["text"])
+
+
+def test_documented_browser_setup_registers_the_page_tools(browser_page):
+    """The README's setup claim is executed, not read: the built page's own
+    scripts register exactly the five shared tools, from the embedded contract,
+    with the three documented annotations."""
+    execution = browser_page["execution"]
+    assert execution["setup"]["status"] == "registered", execution["setup"]
+    assert execution["registered"] == _tool_names(), (
+        "the page did not register exactly the shared tool set")
+    assert execution["setup"]["registered"] == _tool_names()
+
+    for annotations in execution["annotations"]:
+        assert annotations["readOnlyHint"] is True
+        assert annotations["untrustedContentHint"] is True
+        assert annotations["consequentialHint"] is False
+
+    section = _plain(_section(_readme(), BROWSER_HEADING))
+    for name in _tool_names():
+        assert name in section, f"the browser section never names {name}"
+    assert "document.modelContext.registerTool" in section, \
+        "the documented detection point is not the shipped one"
+    for hint in ("readOnlyHint", "untrustedContentHint", "consequentialHint"):
+        assert hint in section, f"the browser section omits {hint}"
+
+    # The hints the README states are the ones the shipped adapter carries.
+    adapter = (REPO / "web" / "webmcp.js").read_text(encoding="utf-8")
+    for hint in ("readOnlyHint", "untrustedContentHint", "consequentialHint"):
+        assert hint in adapter, f"the shipped adapter no longer sets {hint}"
+
+
+def test_documented_browser_payloads_match_the_embedded_snapshot(browser_page):
+    """Browser results are `source: {mode: browser}` wrapped PURE payloads over
+    the page's own snapshot: complete bulk output, a real page with a truthful
+    `next_offset`, and no browser-only truncation or dropped metadata."""
+    paged = _json_result(browser_page, "paged")
+    assert paged["source"] == {"mode": "browser"}
+    expected = browser_page["paged_expected"]
+    paged_core = {key: value for key, value in paged.items() if key != "source"}
+    assert paged_core == expected, "the page answered differently from the core"
+
+    bulk = _json_result(browser_page, "bulk")
+    assert bulk["source"] == {"mode": "browser"}
+    bulk_core = {key: value for key, value in bulk.items() if key != "source"}
+    assert bulk_core == browser_page["bulk_expected"], (
+        "bulk output is not the complete core payload")
+    assert bulk["total_ids"] == browser_page["total_ids"]
+    assert sorted(bulk["providers"]) == sorted(
+        browser_page["snapshot"]["provider_order"]), (
+        "every snapshot gateway must survive the browser boundary")
+    assert any(not ids for ids in bulk["providers"].values()), (
+        "the fixture no longer carries a zero-id gateway")
+
+    bad = _json_result(browser_page, "bad_provider")
+    assert bad["ok"] is False and bad["error"]["code"] == "unknown_provider"
+    assert bad["source"] == {"mode": "browser"}, (
+        "argument errors must carry the same honest provenance")
+
+    section = _plain(_section(_readme(), BROWSER_HEADING))
+    assert '"mode": "browser"' in section, \
+        "the documented browser provenance is not the shipped one"
+    assert "no browser-only truncation" in section, \
+        "the section dropped the no-truncation promise"
+
+
+def test_bulk_output_is_documented_as_a_recommendation_not_a_cap(browser_page):
+    """Chrome RECOMMENDS ~1.5K characters per output; the page must not truncate
+    to fit it, and the README must say so and route routine lookups to
+    `search_models`."""
+    paged_text = browser_page["execution"]["results"]["paged"]["text"]
+    bulk_text = browser_page["execution"]["results"]["bulk"]["text"]
+    assert len(paged_text) > RECOMMENDED_OUTPUT_CHARS, (
+        "the fixture no longer exercises the oversize case")
+    assert len(bulk_text) > RECOMMENDED_OUTPUT_CHARS
+
+    section = _plain(_section(_readme(), BROWSER_HEADING))
+    lowered = section.lower()
+    assert "recommendation, not a cap" in lowered
+    assert "1.5k" in lowered
+    assert "no browser-only truncation" in lowered
+    assert "search_models" in section and "limit" in section, \
+        "the section no longer routes routine lookups to a bounded search"
+    assert "get_model" in section, \
+        "the section no longer routes detail lookups to get_model"
+
+    # Same guidance in the shipped descriptions the page registers.
+    contract = {entry["name"]: entry["description"]
+                for entry in json.loads(TOOL_CONTRACT.read_text(encoding="utf-8"))}
+    for bulk_tool in ("list_free_models", "list_endpoints"):
+        description = contract[bulk_tool]
+        assert "search_models" in description
+        assert "1-5" in description
+        assert "no hard universal output cap" in description
+
+
+def test_browser_availability_is_scoped_not_universal():
+    """Ordinary-visitor availability is stated accurately: the development flag,
+    the Chrome 149+ origin trial (optional, separately authorized), the secure
+    context, and the `tools` permissions policy — with no universal claim."""
+    section = _plain(_section(_readme(), BROWSER_HEADING))
+    lowered = section.lower()
+
+    assert "no universal browser support" in lowered
+    assert "chrome://flags/#enable-webmcp-testing" in section
+    assert "origin trial" in lowered and "chrome 149" in lowered
+    assert "secure context" in lowered
+    assert "https://" in section and "file://" in section
+    assert "permissions policy" in lowered and 'allow="tools"' in section
+    assert "optional" in lowered and "separately authorized" in lowered, \
+        "origin-trial enrolment must stay optional and separately authorized"
+    assert "never" in lowered and "enrol" in lowered
+
+    assert _browser_denials(_readme()) == [], (
+        "README carries a stale or over-broad browser claim: "
+        f"{_browser_denials(_readme())}")
+
+
+def test_browser_publication_is_not_claimed(browser_page):
+    """The tracked page still predates the integration, so the README must
+    distinguish implemented-and-locally-verified from published."""
+    section = _plain(_section(_readme(), BROWSER_HEADING))
+    lowered = section.lower()
+    assert "publication status" in lowered
+    assert "site/index.html" in section
+    assert "separately authorized" in lowered
+    assert "does not claim it has happened" in lowered, \
+        "the section must not imply the regenerated page was published"
+
+    # Bind the caveat to the artifact actually tracked at this commit, and to
+    # the fresh build the setup instructions were exercised against.
+    assert 'data-watchdog="webmcp"' in browser_page["html"], \
+        "a fresh build no longer carries the inlined adapter"
+    tracked = subprocess.run(
+        ["git", "show", "HEAD:site/index.html"],
+        cwd=str(REPO), capture_output=True, text=True)
+    if tracked.returncode != 0:
+        pytest.skip("not a git checkout with a tracked site/index.html")
+    assert 'data-watchdog="webmcp"' not in tracked.stdout, (
+        "the tracked page already carries the inlined page scripts — the "
+        "stale-artifact caveat in the README is now wrong")
+
+
+def test_agents_documents_the_browser_surface_it_ships():
+    """AGENTS.md is the architecture map: it must describe the shipped browser
+    surface and its availability limits, not the retired 'planned' rule."""
+    agents = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    plain = _plain(agents)
+    lowered = plain.lower()
+
+    assert _browser_denials(agents) == [], (
+        f"AGENTS.md still carries a stale browser claim: {_browser_denials(agents)}")
+    assert "## browser surface (webmcp)" in lowered
+    for path in ("web/catalog-query.js", "web/webmcp.js", "build_site.py"):
+        assert path in agents, f"AGENTS.md no longer names {path}"
+    assert "document.modelContext.registerTool" in agents
+    assert "chrome://flags/#enable-webmcp-testing" in agents
+    assert "origin trial" in lowered
+    assert "remotely connectable mcp http url" in lowered
+    assert "no polyfill" in lowered
+    assert "source: {mode: \"browser\"}" in agents.replace("**", "")
+
+    # The site allowlist must keep exactly two generated payloads and say the
+    # inlined sources do not widen it.
+    assert "exactly two generated site payloads" in agents
+    assert "do not widen the allowlist" in agents
+    assert "a local build is never publication" in agents
+
+    planted = agents.replace(
+        "## Browser surface (WebMCP)",
+        "## Browser surface (WebMCP)\n- Browser-native WebMCP is PLANNED, not "
+        "implemented: no in-page adapter.")
+    assert _browser_denials(planted), \
+        "the AGENTS browser-claim check is not sensitive to a planted denial"
+
+
+def test_shared_tool_definitions_are_documented_as_shipped():
+    """The shared contract's closing paragraph must not call packaging,
+    embedding or browser registration 'later units' (D3)."""
+    text = _readme()
+    heading = "### Shared tool definitions (frozen resource)"
+    section = _section(text, heading)
+    plain = _plain(section)
+    assert _browser_denials(section) == [], (
+        f"the shared-definitions section still defers browser work: "
+        f"{_browser_denials(section)}")
+    assert "web/webmcp.js" in section
+    assert "tool-contract" in section
+    assert "not\nlater work" in section or "not later work" in " ".join(section.split()), \
+        "the section must say the shipped work is shipped"
 
 
 def test_cache_fallback_is_not_documented_as_acquisition_success(tmp_path):
