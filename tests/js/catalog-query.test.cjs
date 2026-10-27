@@ -4487,6 +4487,73 @@ const SEARCH_TEXT_BOUNDARY_ROWS = [
 ];
 
 /**
+ * The astral text registry: ONE provider whose three rows put a valid astral
+ * character in a different field each -- the raw id, the name and a non-null
+ * description -- using two DIFFERENT astral characters, so a lone-surrogate
+ * query cannot pass by matching one chosen emoji.
+ *
+ * Every expectation is the accepted Python rule: `query` is a literal,
+ * untrimmed, ASCII-only-folded CODE-POINT substring of the pair's own raw id,
+ * name or non-null description. A valid astral character is ONE code point but
+ * TWO UTF-16 code units, so a query holding only its high or low half is not a
+ * substring of it -- while the whole character is.
+ */
+const SEARCH_ASTRAL_ROWS = [
+  // Inactive text: unchanged provider order and natural raw-ID order.
+  ["empty", "", [["greek", "desc-target"], ["greek", "name-target"],
+                 ["greek", "scalar-\u{1F31F}"]]],
+  // The whole astral character matches the raw ID row AND the name row.
+  ["astral", "\u{1F31F}", [["greek", "name-target"],
+                           ["greek", "scalar-\u{1F31F}"]]],
+  // Scoped to one field by the surrounding literal text.
+  ["astral-raw", "scalar-\u{1F31F}", [["greek", "scalar-\u{1F31F}"]]],
+  ["astral-name", "\u{1F31F} n", [["greek", "name-target"]]],
+  // The ASCII-only fold still applies to an astral-bearing query and field.
+  ["astral-upper-prefix", "SCALAR-", [["greek", "scalar-\u{1F31F}"]]],
+  ["astral-upper", "SCALAR-\u{1F31F}", [["greek", "scalar-\u{1F31F}"]]],
+  // A DIFFERENT astral character, matched through the description.
+  ["clef", "\u{1D11E}", [["greek", "desc-target"]]],
+  ["clef-prose", "\u{1D11E} p", [["greek", "desc-target"]]],
+  // ... whose own halves are not substrings of it either: a general rule, not
+  // one blacklisted emoji or two specific code units.
+  ["clef-high-half", "\uD834", []],
+  ["clef-low-half", "\uDD1E", []],
+  // The reported regression: each isolated half of U+1F31F is NOT a substring
+  // of the valid astral character, exactly like Python's code-point `in`.
+  ["high-half", "\uD83C", []],
+  ["low-half", "\uDF1F", []],
+  // Near misses: a half plus an ordinary character stays literal.
+  ["high-half-plus-x", "\uD83Cx", []],
+  ["low-half-prefix", "scalar-\uDF1F", []],
+  ["low-half-plus-name", "\uDF1F n", []]
+];
+
+/**
+ * A resealed, VALIDATED snapshot carrying two different astral characters in
+ * three different fields of ONE provider. `searchSnapshot` re-seals through the
+ * accepted validator and hash, and the live Python dispatcher re-loads the same
+ * canonical text with the accepted `load_snapshot` before calling the reference
+ * stage, so BOTH runtimes accept this snapshot independently.
+ */
+function searchAstralSnapshot() {
+  const astral = "\u{1F31F}";
+  const clef = "\u{1D11E}";
+  const models = {};
+  withOwnKey(models, "scalar-" + astral,
+             searchModel("scalar-" + astral, "Scalar One"));
+  withOwnKey(models, "name-target",
+             searchModel("name-target", "Scalar " + astral + " Name",
+                         {description: "Plain prose."}));
+  withOwnKey(models, "desc-target",
+             searchModel("desc-target", "Desc Target",
+                         {description: "Clef " + clef + " prose."}));
+  return searchSnapshot(["greek"], {
+    greek: searchProvider(models, "Greek Gateway",
+                          "https://greek.example/v1/chat/completions")
+  });
+}
+
+/**
  * The context/modality/parameter boundary registry: known 0, known high values,
  * unknown (null) metadata, known-empty arrays, per-provider differing metadata
  * behind a SHARED raw ID and a 210-endpoint bulk provider.
@@ -4763,6 +4830,45 @@ describe("pure metadata-search stage helpers", () => {
                                                      {provider: "empty"}), []);
     assert.equal(catalog.canonicalText(snapshot), before,
                  "boundary controls never mutate the snapshot");
+  });
+
+  it("matches astral text by code point, never by an isolated surrogate half", () => {
+    const snapshot = searchAstralSnapshot();
+    // The shape of the class under test: each astral character is ONE code
+    // point but TWO UTF-16 code units, which is exactly where a code-unit
+    // search and Python's code-point `in` can disagree.
+    assert.equal("\u{1F31F}".length, 2, "U+1F31F is two code units");
+    assert.equal("\u{1D11E}".length, 2, "U+1D11E is two code units");
+    const before = catalog.canonicalText(snapshot);
+    for (const [label, query, expected] of SEARCH_ASTRAL_ROWS) {
+      const result = catalog.searchTextProviderPairs(snapshot, {query: query});
+      assert.deepEqual(result.map(pairIdentity), expected,
+                       `${label}: query=${JSON.stringify(query)}`);
+      for (const pair of result) {
+        // Complete ordered literals above are compared as a whole; these
+        // checks only pin the fresh two-string pair shape.
+        assert.equal(Array.isArray(pair) && pair.length, 2,
+                     `${label}: fresh two-string pairs`);
+        assert.equal(typeof pair[0], "string", label);
+        assert.equal(typeof pair[1], "string", label);
+      }
+    }
+    // The reported regression in its shortest form: a query holding ONLY one
+    // half of a valid astral character selects nothing, and the whole
+    // character still selects its pair.
+    assert.deepEqual(
+      catalog.searchTextProviderPairs(snapshot, {query: "\uD83C"}), [],
+      "an isolated high surrogate is not a substring of U+1F31F");
+    assert.deepEqual(
+      catalog.searchTextProviderPairs(snapshot, {query: "\uDF1F"}), [],
+      "an isolated low surrogate is not a substring of U+1F31F");
+    assert.deepEqual(
+      catalog.searchTextProviderPairs(snapshot, {query: "\u{1F31F}"})
+        .map(pairIdentity),
+      [["greek", "name-target"], ["greek", "scalar-\u{1F31F}"]],
+      "the whole astral character still matches");
+    assert.equal(catalog.canonicalText(snapshot), before,
+                 "surrogate-half controls never mutate the snapshot");
   });
 
   it("reproduces the four frozen inclusive-context goldens", () => {
@@ -5293,6 +5399,21 @@ describe("pure metadata-search stage helpers", () => {
 
     assert.equal(cases.length, 22 + 12 + 6 + 9 + 3 + 9,
                  "the parity case set is complete");
+    assertStageParity(cases);
+  });
+
+  it("agrees with the unchanged Python reference on astral and surrogate halves", () => {
+    const snapshot = searchAstralSnapshot();
+    const cases = SEARCH_ASTRAL_ROWS.map(([label, query]) =>
+      stagePairCase("astral-" + label, snapshot, {query: query}));
+    assert.equal(cases.length, SEARCH_ASTRAL_ROWS.length,
+                 "the astral parity set is complete");
+    // The live dispatcher re-loads this exact canonical text with the accepted
+    // Python `load_snapshot`, resolves the module through the accepted
+    // in-repository origin guard, and calls the real
+    // `_search_text_provider_pairs` on the unchanged floor interpreter -- so a
+    // Python rejection of this snapshot, a foreign module or a surviving
+    // code-unit predicate all fail here rather than being masked.
     assertStageParity(cases);
   });
 });

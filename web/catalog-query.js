@@ -2305,6 +2305,69 @@
   }
 
   /**
+   * True when `text` holds a UTF-16 surrogate code unit -- i.e. when a
+   * code-unit search and a code-point search can disagree, because every
+   * astral character is a surrogate PAIR and an unpaired surrogate is itself
+   * one code unit.
+   */
+  function _hasSurrogateCodeUnit(text) {
+    for (var index = 0; index < text.length; index += 1) {
+      var code = text.charCodeAt(index);
+      if (code >= 0xd800 && code <= 0xdfff) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * `text` split into one string per Unicode CODE POINT, in order.
+   *
+   * A valid surrogate pair becomes ONE element and an unpaired surrogate stays
+   * one element, which is exactly Python's `str` model. `codePointAt` is already
+   * used by `_compareCodePoints()`, so this adds no new platform prerequisite.
+   */
+  function _codePointParts(text) {
+    var parts = [];
+    var index = 0;
+    while (index < text.length) {
+      var width = text.codePointAt(index) > 0xffff ? 2 : 1;
+      parts.push(text.slice(index, index + width));
+      index += width;
+    }
+    return parts;
+  }
+
+  /**
+   * Literal substring test with the accepted Python `in` semantics.
+   *
+   * The needle must match a run of whole CODE POINTS of `field`, so an isolated
+   * surrogate never matches one half of a valid astral character -- the one
+   * place where UTF-16 code-unit search diverges from Python. When neither side
+   * contains a surrogate code unit the two rules provably agree, so the plain
+   * code-unit search stays the fast path.
+   */
+  function _textIncludes(field, needle) {
+    if (!_hasSurrogateCodeUnit(field) && !_hasSurrogateCodeUnit(needle)) {
+      return field.indexOf(needle) !== -1;
+    }
+    var haystack = _codePointParts(field);
+    var wanted = _codePointParts(needle);
+    for (var start = 0; start + wanted.length <= haystack.length;
+         start += 1) {
+      var offset = 0;
+      while (offset < wanted.length &&
+             haystack[start + offset] === wanted[offset]) {
+        offset += 1;
+      }
+      if (offset === wanted.length) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * The pure candidate-selection stage: literal text plus exact provider.
    *
    * `snapshot` is an already-VALIDATED public snapshot. `options.query` is null
@@ -2324,8 +2387,13 @@
    * `query` is a LITERAL, UNTRIMMED substring compared separately against the
    * pair's own raw id, `name` and non-null `description` after the shared
    * ASCII-only fold (A-Z to a-z; every other code point -- including a non-ASCII
-   * uppercase letter -- stays literal). There is no regular expression, fuzzy
-   * alias, marker stripping or JSON/metadata serialization: capability arrays,
+   * uppercase letter -- stays literal). The comparison is over Unicode CODE
+   * POINTS, exactly like Python's `in`: a valid astral character is one code
+   * point, so a query holding only one surrogate half of it is NOT a substring
+   * of it and an unpaired-surrogate query matches nothing. The query type is
+   * never narrowed, rejected or rewritten to get that agreement. There is no
+   * regular expression, fuzzy alias, marker stripping or JSON/metadata
+   * serialization: capability arrays,
    * pricing, wiring URLs, provider keys and object key names are never searched,
    * a query spanning two separately concatenated fields never matches, and one
    * pair's fields are never borrowed from a sibling provider. Null or `""`
@@ -2357,7 +2425,7 @@
           for (var field = 0; field < fields.length; field += 1) {
             var value = fields[field];
             if (value !== null && value !== undefined &&
-                _asciiLower(value).includes(needle)) {
+                _textIncludes(_asciiLower(value), needle)) {
               matched = true;
               break;
             }
