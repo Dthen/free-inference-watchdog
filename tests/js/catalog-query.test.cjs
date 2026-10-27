@@ -874,6 +874,41 @@ describe("wiring URL authority", () => {
     }
   });
 
+  // The reference `_check_bracketed_host` is `\Av[a-fA-F0-9]+\..+\Z`, and
+  // Python's `.` excludes ONLY `\n`. A payload carrying U+2028/U+2029 is
+  // therefore ACCEPTED by the reference, while JavaScript's `.` excludes those
+  // two separators (and `\r`) as line terminators. The expected verdicts below
+  // were taken from the reference -- floor 3.11.15 `_is_wiring_url` AND
+  // `validate_snapshot` over a Python-sealed body -- never from this module.
+  // The whole-URL ASCII whitespace/control scan runs FIRST, so the payload
+  // class is never consulted for LF, CR, FF or any other forbidden control;
+  // those rows pin that containment, and the malformed rows pin that the
+  // bracket/version/userinfo/fragment rules still win around the payload.
+  it("keeps IPvFuture payload characters in step with the reference dot", () => {
+    // Accepted by the reference: the two Unicode separators in both payload
+    // positions and together, with ordinary neighbours that already agreed.
+    for (const url of ["http://[v1.\u2028x]/", "http://[v1.\u2029x]/",
+                       "http://[v1.x\u2028]/", "http://[v1.x\u2029]/",
+                       "http://[v1.a\u2028b\u2029c]/", "http://[vA.\u2028]",
+                       "http://[v1.\u2028x]#", "http://[v1.xy]/",
+                       "http://[v1.\u00e9]/", "http://[v1.\u0085x]/"]) {
+      assertWiringAccepts(url);
+    }
+    // Refused by the reference: forbidden ASCII controls in the payload, a
+    // separator outside the payload (version, before the dot, before the
+    // bracket, after the bracket), and an empty payload.
+    for (const url of ["http://[v1.x\u000ay]/", "http://[v1.x\u000dy]/",
+                       "http://[v1.\u2028x\u000a]/",
+                       "http://[v1.x\u000cy]/", "http://[v1\u2028.x]/",
+                       "http://[v\u20281.x]/", "http://[\u2028v1.x]/",
+                       "http://[v1.\u2028x]z/",
+                       "http://[v1.\u2028x]#frag",
+                       "http://user@[v1.\u2028x]/", "http://[v1.\u2028x/",
+                       "http://[v1.]/"]) {
+      assertWiringRejects(url);
+    }
+  });
+
   // Python's `urlsplit` -> `_checknetloc` is a REJECTION-ONLY safety check on a
   // non-ASCII netloc: drop the delimiters already present (`@ : # ?`), NFKC
   // normalize, and refuse the URL when the normalization changed the text AND

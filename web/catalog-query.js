@@ -1002,7 +1002,13 @@
   /** `_check_bracketed_host`: IPvFuture literal, otherwise IPv6 only. */
   function _isBracketedHost(hostname) {
     if (hostname.charAt(0) === "v") {
-      return /^v[0-9A-Fa-f]+\..+$/.test(hostname);
+      // The reference payload class is `\Av[a-fA-F0-9]+\..+\Z`: Python's dot
+      // excludes ONLY LF, so U+2028/U+2029 (and CR) are legal payload
+      // characters. JavaScript's dot also excludes those line terminators, so
+      // the payload is spelled `[^\n]` -- the reference class, not a blacklist
+      // of the separators observed to differ. The whole-URL ASCII
+      // whitespace/control scan still refuses LF/CR before this helper runs.
+      return /^v[0-9A-Fa-f]+\.[^\n]+$/.test(hostname);
     }
     return _isIpv6Text(hostname);
   }
