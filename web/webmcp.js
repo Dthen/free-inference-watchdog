@@ -63,9 +63,35 @@
  *
  * A whole-tool-unit abort is intentional: a partial registration is reported
  * honestly rather than being retried or repaired, and later tools are not
- * attempted after a failure. Lifecycle/retry/duplicate-setup coverage belongs
- * to the next unit; `AbortSignal`/`exposedTo` registration options, page
- * wiring and auto-setup are also out of scope here.
+ * attempted after a failure.
+ *
+ * RETRY POLICY — ONE registration attempt per document, for that document's
+ * remaining lifetime. This is a small ownership record, not a lifecycle
+ * framework:
+ *
+ *   * The first supported setup that passes EVERY pre-registration check owns
+ *     the document and starts the single native registration attempt. That
+ *     attempt — pending or settled, succeeded or failed — is what every later
+ *     `setup()` on the same document observes: the same outcome values,
+ *     honestly reported, in a fresh result container, with NO second native
+ *     call, no island re-parse and no new clock reading.
+ *   * The attempt's validated snapshot, parsed contract, core binding and clock
+ *     seam are the ones its callbacks keep using. Later duplicate options or
+ *     island edits neither refresh nor replace the registered tools.
+ *   * Pre-registration failures are NOT ownership: an absent native API, a
+ *     missing shared engine, or a missing/malformed island or contract leaves
+ *     the document free, so a later explicit call can succeed once the API, the
+ *     engine or the islands are available or corrected. Nothing retries by
+ *     itself — there are no timers and no background work.
+ *   * A registration failure is terminal for that document: the confirmed
+ *     prefix and the actual failing tool name are cached and replayed, so a
+ *     partial registration is never retried or silently upgraded to success.
+ *     There is deliberately NO rollback claim (throwing native code may have
+ *     made changes before it threw) and no removal or reset of unrelated
+ *     tools, no invented `getTools` inventory and no invented native success.
+ *   * A fresh document — a reload, or another tab/frame — is the retry
+ *     boundary. `AbortSignal`/`exposedTo` registration options, a public
+ *     unregistration API, page wiring and auto-setup remain out of scope.
  *
  * NATIVE RETURN BOUNDARY — a complete JSON TEXT result. The current documented
  * imperative `execute` returns a string (the order-status example's "return the
@@ -539,6 +565,85 @@
     };
   }
 
+  // ---------- document-lifetime ownership ---------------------------------
+
+  /**
+   * ONE registration attempt per document, for that document's lifetime.
+   *
+   * Keyed by the document OBJECT itself — never by URL, title or a global
+   * flag — so another tab/frame or a fresh reload is genuinely independent and
+   * stays the natural retry boundary. A WeakMap keeps the record collectable
+   * with its document; it holds one promise and nothing else.
+   */
+  var OWNERSHIP = new WeakMap();
+
+  /** Can this value be a WeakMap key at all? */
+  function isDocumentKey(value) {
+    return value !== null &&
+           (typeof value === "object" || typeof value === "function");
+  }
+
+  /**
+   * A fresh copy of one setup result.
+   *
+   * `result()` already slices the name array, so every caller owns its own
+   * container and array: a caller that mutates what it was handed cannot poison
+   * a later duplicate's answer.
+   */
+  function copyResult(value) {
+    return result(value.status, value.reason, value.registered,
+                  value.failed, value.code);
+  }
+
+  /**
+   * The single registration sequence for one owned document.
+   *
+   * Never rejects and never repairs: a synchronous throw and a rejected promise
+   * are reported distinctly, the already-confirmed prefix is preserved, the
+   * actual failing tool name is kept and no later tool is attempted. The
+   * descriptors were built from the ONE captured snapshot/contract, so these
+   * callbacks keep that snapshot whatever a later duplicate passes in.
+   */
+  async function registerDescriptors(native, descriptors) {
+    var registered = [];
+    for (var position = 0; position < descriptors.length; position += 1) {
+      var descriptor = descriptors[position];
+      var pending;
+      try {
+        pending = native.registerTool.call(native.modelContext, descriptor);
+      } catch (error) {
+        return result("registration_failed", "native_registration_threw",
+                      registered, descriptor.name);
+      }
+      try {
+        await pending;
+      } catch (error) {
+        return result("registration_failed", "native_registration_rejected",
+                      registered, descriptor.name);
+      }
+      registered.push(descriptor.name);
+    }
+    return result("registered", null, registered);
+  }
+
+  /**
+   * Start the ONE attempt for `document` and record it BEFORE the first native
+   * call.
+   *
+   * The sequence is started on the next promise job precisely so that the
+   * ownership record exists first: a registrar callback that calls `setup()`
+   * again synchronously observes this attempt instead of starting a second
+   * one. The recorded promise IS the sequence, so no caller has to reconcile
+   * two different promises.
+   */
+  function beginAttempt(document, native, descriptors) {
+    var attempt = Promise.resolve().then(function () {
+      return registerDescriptors(native, descriptors);
+    });
+    OWNERSHIP.set(document, attempt);
+    return attempt;
+  }
+
   // ---------- the only entry point ---------------------------------------
 
   function globalObject() {
@@ -553,10 +658,11 @@
    * Register the five shared tools against the loaded page snapshot.
    *
    * Resolves — never rejects — with the small result described in the file
-   * header. Failures are values: ordinary page code is never asked to catch.
-   * The snapshot is validated and seal-checked ONCE here; every later tool
-   * call queries that captured snapshot without refreshing, reloading or
-   * re-sealing it, and without reading provider state.
+   * header, INCLUDING on a duplicate setup of the same document: the owned
+   * attempt's outcome is reported again, honestly, and nothing is registered a
+   * second time. The snapshot is validated and seal-checked ONCE for the one
+   * attempt; every later tool call queries that captured snapshot without
+   * refreshing, reloading or re-sealing it, and without reading provider state.
    */
   async function setup(options) {
     var opts = options === null || options === undefined ? {} : options;
@@ -570,19 +676,27 @@
       : (host === undefined ? undefined : host.WatchdogCatalog);
     var clock = opts.clock !== undefined ? opts.clock : defaultClock;
 
-    // 1. Feature-detect the current native API. Absent -> honest no-op, with
+    // 1. Document lifetime: ONE attempt per document, pending or settled. A
+    //    duplicate observes that attempt and reports the same outcome — no
+    //    second native call, no island re-read, no engine check, no clock read.
+    var owned = isDocumentKey(document) ? OWNERSHIP.get(document) : undefined;
+    if (owned !== undefined) {
+      return copyResult(await owned);
+    }
+
+    // 2. Feature-detect the current native API. Absent -> honest no-op, with
     //    no island read, no clock read and no document mutation.
     var native = detect(document);
     if (native === null) {
       return result("unsupported", "native_api_absent");
     }
 
-    // 2. The shared engine must be present: this adapter owns no query.
+    // 3. The shared engine must be present: this adapter owns no query.
     if (!coreAvailable(catalog)) {
       return result("invalid", "core_unavailable");
     }
 
-    // 3. Read exactly the two inert islands through textContent.
+    // 4. Read exactly the two inert islands through textContent.
     var catalogText = readIsland(document, CATALOG_ISLAND_ID);
     if (catalogText === null) {
       return result("invalid", "catalog_island_missing");
@@ -592,7 +706,7 @@
       return result("invalid", "contract_island_missing");
     }
 
-    // 4. Decode with the SHARED strict loader (no permissive JSON.parse: float
+    // 5. Decode with the SHARED strict loader (no permissive JSON.parse: float
     //    tokens and duplicate members stay observable) and validate/seal the
     //    snapshot exactly once, here.
     var snapshot;
@@ -618,35 +732,19 @@
       return result("invalid", reason);
     }
 
-    // 5. Register every descriptor, in shared-contract order, awaiting each
-    //    native call and preserving its receiver. A synchronous throw and a
-    //    rejected promise are reported distinctly and stop the sequence.
+    // 6. Build every descriptor from the ONE captured contract and snapshot.
+    //    Nothing here touches the native API, so a build fault is not an
+    //    ownership event.
     var descriptors = [];
     for (var index = 0; index < contract.length; index += 1) {
       descriptors.push(makeDescriptor(contract[index], snapshot, catalog,
                                       clock));
     }
 
-    var registered = [];
-    for (var position = 0; position < descriptors.length; position += 1) {
-      var descriptor = descriptors[position];
-      var pending;
-      try {
-        pending = native.registerTool.call(native.modelContext, descriptor);
-      } catch (error) {
-        return result("registration_failed", "native_registration_threw",
-                      registered, descriptor.name);
-      }
-      try {
-        await pending;
-      } catch (error) {
-        return result("registration_failed", "native_registration_rejected",
-                      registered, descriptor.name);
-      }
-      registered.push(descriptor.name);
-    }
-
-    return result("registered", null, registered);
+    // 7. Own the document BEFORE the first native call, then await that ONE
+    //    attempt. Every pre-registration fault above left the document free;
+    //    from here on a fresh document/reload is the retry boundary.
+    return copyResult(await beginAttempt(document, native, descriptors));
   }
 
   return {
