@@ -1273,6 +1273,17 @@ def _workflow_job(text, name):
     return "\n".join(block)
 
 
+def _executed_run_lines(run_text):
+    """The lines of a ``run:`` block the shell would actually execute.
+
+    A leading ``#`` (after indentation) is a shell comment, and its text is
+    still present in the job, so a substring search over the job block can be
+    satisfied by a DISABLED command. Only non-comment lines count as executed.
+    """
+    return [line.strip() for line in run_text.splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+
+
 def _assert_test_workflow_lane(text):
     """The JS/parity lane: Node installed explicitly, bound by value, executed."""
     node_job = _workflow_job(text, "node")
@@ -1280,20 +1291,46 @@ def _assert_test_workflow_lane(text):
     assert "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1" \
         in node_job, "Node must be installed explicitly from the reviewed pin"
     assert re.search(r'(?m)^\s+node-version: "22"$', node_job), node_job
-    assert "--test" in node_job
-    for suite in ("tests/js/catalog-query.test.cjs", "tests/js/webmcp.test.cjs"):
-        assert suite in node_job, suite
-    assert "tests/test_contract_parity.py" in node_job
     assert "pytest==9.1.1" in node_job
     assert "CONTRACT_NODE" in node_job and "GITHUB_ENV" in node_job
     assert "CATALOG_PYTHON" in node_job, \
         "the Node suites' Python reference must be bound, not PATH-discovered"
     assert "continue-on-error" not in node_job
+
+    # Both lanes must be EXECUTED, not merely named somewhere in the job: read
+    # each step's run: block and require the literal command on a non-comment
+    # line, so prefixing it with '#' disables the lane and fails HERE.
+    steps = _workflow_steps(node_job)
+    executed = [_executed_run_lines(_step_key(step, "run") or "")
+                for step in steps]
+
+    node_lane = [(index, line) for index, lines in enumerate(executed)
+                 for line in lines
+                 if "--test" in line and '"$CONTRACT_NODE"' in line]
+    assert len(node_lane) == 1, "the Node contract suites are not executed"
+    node_index, node_command = node_lane[0]
+    for suite in ("tests/js/catalog-query.test.cjs", "tests/js/webmcp.test.cjs"):
+        assert suite in node_command, (suite, node_command)
+
+    parity_lane = [(index, line) for index, lines in enumerate(executed)
+                   for line in lines
+                   if "tests/test_contract_parity.py" in line
+                   and "-m pytest" in line]
+    assert len(parity_lane) == 1, "the parity lane is not executed"
+    parity_index, parity_command = parity_lane[0]
+    assert '"$TEST_PYTHON"' in parity_command, \
+        "the parity lane must use the bound interpreter, not a PATH lookup"
+
+    # CONTRACT_NODE must be BOUND by an executed line, not just mentioned.
+    bindings = [line for lines in executed for line in lines
+                if line.startswith('echo "CONTRACT_NODE=')]
+    assert bindings, "CONTRACT_NODE is not bound by an executed line"
+
     # The runtime is proven and bound BEFORE either lane consumes it.
-    setup_at = node_job.index("actions/setup-node@")
-    suites_at = node_job.index("--test")
-    parity_at = node_job.index("tests/test_contract_parity.py")
-    assert setup_at < suites_at and setup_at < parity_at
+    setups = [index for index, step in enumerate(steps)
+              if _pin(_step_key(step, "uses")).startswith("actions/setup-node@")]
+    assert len(setups) == 1
+    assert setups[0] < node_index and setups[0] < parity_index
 
     # The full Linux suite runs the same parity file with an explicit runtime:
     # a PATH-discovered Node would let it skip on a lean runner.
@@ -1330,12 +1367,39 @@ def _without_job(text, name):
     return "\n".join(kept) + "\n"
 
 
+def _comment_out_only_match(text, needle):
+    """Comment out the single workflow line containing ``needle``."""
+    lines = text.splitlines()
+    hits = [index for index, line in enumerate(lines) if needle in line]
+    assert len(hits) == 1, (needle, hits)
+    index = hits[0]
+    indent = len(lines[index]) - len(lines[index].lstrip(" "))
+    lines[index] = " " * indent + "#" + lines[index].lstrip(" ")
+    return "\n".join(lines) + "\n"
+
+
 def test_test_workflow_runs_the_js_suites_and_the_parity_lane():
     text = TEST_WORKFLOW.read_text(encoding="utf-8")
+    # The unchanged workflow is the positive control for every mutation below.
     _assert_test_workflow_lane(text)
 
     without_node = _without_job(text, "node")
     assert "tests/test_contract_parity.py" not in without_node
     with pytest.raises(AssertionError):
         _assert_test_workflow_lane(without_node)
+
+    # A commented-out command line still carries its command as a substring, so
+    # the lane assertion has to read executed lines, not the job's text. Each
+    # lane is mutated on its own: one disabled step must not hide the other.
+    commented_node = _comment_out_only_match(text, '"$CONTRACT_NODE" --test')
+    assert '"$CONTRACT_NODE" --test' in commented_node, "mutation did not apply"
+    with pytest.raises(AssertionError):
+        _assert_test_workflow_lane(commented_node)
+
+    commented_parity = _comment_out_only_match(
+        text, '"$TEST_PYTHON" -m pytest tests/test_contract_parity.py')
+    assert '"$TEST_PYTHON" -m pytest tests/test_contract_parity.py' \
+        in commented_parity, "mutation did not apply"
+    with pytest.raises(AssertionError):
+        _assert_test_workflow_lane(commented_parity)
 
