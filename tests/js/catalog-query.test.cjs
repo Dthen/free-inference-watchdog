@@ -16,6 +16,7 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 
 const catalog = require("../../web/catalog-query.js");
 
@@ -1861,6 +1862,32 @@ const QUERY_REFERENCE_SCRIPT = [
   "print(json.dumps({'origin': query_module.__file__, 'results': results}))"
 ].join("\n");
 
+// Private origin guard for the live reference probe. All four `assertQueryParity`
+// call sites go through it, so it is the single place that decides whether the
+// imported Python module really is this repository's copy.
+//
+// Both sides are resolved with `fs.realpathSync` first, so a symlink cannot
+// smuggle a foreign module in under an in-root name. Containment is then decided
+// with `path.relative` instead of a raw string prefix: a prefix test accepts any
+// sibling whose name merely begins with the root's name (`<root>-old`,
+// `<root>.bak`), which is the sibling-prefix path-traversal class (CWE-22).
+// `path.relative` yields "" for the root itself, a leading `..` segment for
+// anything above it, and a plain descendant path otherwise, so the check follows
+// real path boundaries and the platform `path.sep`. The `path.isAbsolute` clause
+// covers the Windows different-drive result, which is returned absolute rather
+// than as a `..` path.
+function assertReferenceModuleOrigin(originPath, repoRoot) {
+  const resolvedOrigin = fs.realpathSync(originPath);
+  const resolvedRoot = fs.realpathSync(repoRoot);
+  const relative = path.relative(resolvedRoot, resolvedOrigin);
+  const inside = relative !== "" && relative !== ".." &&
+    !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
+  assert.ok(inside,
+    `the reference module is this repository's copy: ${originPath} ` +
+    `(resolved ${resolvedOrigin}, root ${resolvedRoot})`);
+  return resolvedOrigin;
+}
+
 function runQueryReference(cases) {
   const { execFileSync } = require("node:child_process");
   const env = Object.assign({}, process.env);
@@ -1872,9 +1899,7 @@ function runQueryReference(cases) {
     encoding: "utf8", maxBuffer: 32 * 1024 * 1024
   });
   const parsed = JSON.parse(stdout);
-  assert.ok(fs.realpathSync(parsed.origin).startsWith(
-              fs.realpathSync(REPO_ROOT)),
-            `the reference module is this repository's copy: ${parsed.origin}`);
+  assertReferenceModuleOrigin(parsed.origin, REPO_ROOT);
   assert.equal(parsed.results.length, cases.length,
                "one reference result per case");
   return parsed.results;
@@ -1891,6 +1916,57 @@ function assertQueryParity(tool, cases, javascriptResults) {
                  `${cases[index].label}: typed canonical payload matches Python`);
   }
 }
+
+describe("live reference origin guard", () => {
+  it("accepts only resolved paths that name the repository root or its descendants", () => {
+    // Synthetic trees live under this run's owned TMPDIR, never beside the real
+    // project, and are removed before the test returns.
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "unit7e-origin-"));
+    try {
+      const repoRoot = path.join(base, "repo");
+      const moduleDir = path.join(repoRoot, "watchdog_catalog");
+      fs.mkdirSync(moduleDir, {recursive: true});
+      const modulePath = path.join(moduleDir, "query.py");
+      fs.writeFileSync(modulePath, "# synthetic in-root reference module\n");
+      // A real sibling directory whose name starts with the root's name -- the
+      // exact shape a raw `startsWith` comparison cannot distinguish.
+      const siblingDir = path.join(base, "repo-old", "watchdog_catalog");
+      fs.mkdirSync(siblingDir, {recursive: true});
+      const siblingPath = path.join(siblingDir, "query.py");
+      fs.writeFileSync(siblingPath, "# synthetic same-prefix sibling module\n");
+      // In-root symlink whose resolved target escapes the root.
+      const escapingLink = path.join(moduleDir, "escaped.py");
+      fs.symlinkSync(siblingPath, escapingLink);
+
+      // Positive control through the real guard: an in-root module is accepted
+      // and reported by its resolved path.
+      assert.equal(assertReferenceModuleOrigin(modulePath, repoRoot),
+                   fs.realpathSync(modulePath),
+                   "in-root module accepted by its resolved path");
+      // Second positive control: the actual repository module this guard serves
+      // (the four assertQueryParity call sites depend on it).
+      assert.equal(assertReferenceModuleOrigin(
+                     path.join(REPO_ROOT, "watchdog_catalog", "query.py"),
+                     REPO_ROOT),
+                   fs.realpathSync(
+                     path.join(REPO_ROOT, "watchdog_catalog", "query.py")),
+                   "the repository's own reference module is accepted");
+      // Premise, not the guard: the sibling really does share the raw prefix, so
+      // the rejections below isolate boundary semantics rather than spelling.
+      assert.ok(fs.realpathSync(siblingPath).startsWith(fs.realpathSync(repoRoot)),
+                "premise: the same-prefix sibling shares the resolved raw prefix");
+      // The guard must reject the prefix-sharing sibling and the resolved escape.
+      for (const rejected of [siblingPath, escapingLink]) {
+        assert.throws(() => assertReferenceModuleOrigin(rejected, repoRoot),
+                      {name: "AssertionError",
+                       message: /the reference module is this repository's copy/},
+                      `${rejected} is not this repository's copy`);
+      }
+    } finally {
+      fs.rmSync(base, {recursive: true, force: true});
+    }
+  });
+});
 
 describe("pure list_free_models query", () => {
   it("reproduces every independent success golden exactly", () => {
