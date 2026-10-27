@@ -1118,12 +1118,12 @@ def test_browser_publication_status_is_bound_to_the_tracked_artifact(browser_pag
         "the publication paragraph contradicts the tracked site/index.html "
         f"({phase} phase): {_publication_claim_errors(section, tracked)}")
 
-    # The same paragraph must stay accurate on the other side of the boundary,
-    # so publishing a refreshed page never requires rewriting this section.
-    assert _publication_claim_errors(
-        section, f'<script {PUBLICATION_INLINE_MARKER}></script>') == [], (
-        "the publication paragraph would become stale once the page-script "
-        "build is published")
+    # The same paragraph must stay accurate once a page BUILT from this source
+    # is the published one, so the transition never requires a docs rewrite.
+    # `browser_page["html"]` is the real builder output for this checkout.
+    assert _publication_claim_errors(section, browser_page["html"]) == [], (
+        "the publication paragraph would become stale once a page built from "
+        "this ref is published")
 
 
 @pytest.mark.parametrize("published, prose, expected", [
