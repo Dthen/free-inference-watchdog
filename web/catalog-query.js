@@ -1525,6 +1525,132 @@
     return [model, overrideWarnings === null ? pair[1] : overrideWarnings];
   }
 
+  // ---------- pure ordering and free-marker helpers -----------------------
+  //
+  // Ports of the dependency-free primitives in `watchdog_catalog/query.py`:
+  // `strip_free_marker`, `natural_key` and `endpoint_key` (README, "Total
+  // ordering rule" and "Natural comparator"). They are PURE: each reads only
+  // its arguments, returns fresh data, never mutates its inputs and never
+  // touches a clock, the environment, configuration, the network or a
+  // provider SDK. They carry no tool-argument validation or error envelope --
+  // that belongs to the later query units.
+
+  //: Python `$` (non-MULTILINE) also matches before ONE final LF, while JS `$`
+  //: is strict end-of-input; `(?=\n?$)` restores the reference semantics.
+  var FREE_SUFFIX = /[-:_]free(?=\n?$)/i;
+  var FREE_PREFIX = /^free[-:_]/i;
+
+  /**
+   * Remove ONLY a delimiter-bounded free marker, exactly like the reference.
+   *
+   * ONE suffix pass, then ONE prefix pass -- never recursive or global
+   * stripping -- then fall back to the original input when a strip would empty
+   * it. Only `-`, `:` and `_` bound a marker, so bare `free`, delimiter-only
+   * labels, `vendor/freebie` and `vendor/freetier` are returned verbatim. Every
+   * unstripped character survives: case, whitespace and namespace text are
+   * preserved and the id is never renamed or normalised.
+   */
+  function stripFreeMarker(rawId) {
+    var stripped = rawId.replace(FREE_SUFFIX, "");
+    stripped = stripped.replace(FREE_PREFIX, "");
+    return stripped || rawId;
+  }
+
+  //: ONLY maximal ASCII `[0-9]+` runs are digit runs. The capture group keeps
+  //: every intervening text piece -- including the empty boundary pieces -- so
+  //: the token sequence preserves the string's exact boundaries.
+  var ASCII_DIGIT_RUN = /([0-9]+)/;
+
+  /**
+   * The natural raw-ID sort key: the Python `natural_key` tuple as an array of
+   * tagged triples.
+   *
+   * A digit run becomes `["d", originalLength, run]` (digit count, then lexical
+   * ASCII digits: no int/float parse of long runs, no leading-zero stripping)
+   * and every other piece becomes `["t", 0, piece]`, compared case-sensitively
+   * by Unicode code point with the shorter sequence first on a strict prefix.
+   * Non-ASCII numeric-looking characters (`١`, `²`) are TEXT, never digit runs,
+   * and the raw id is never rewritten or trimmed. Keys are fresh data.
+   */
+  function naturalKey(rawId) {
+    var pieces = rawId.split(ASCII_DIGIT_RUN);
+    var key = [];
+    for (var index = 0; index < pieces.length; index += 1) {
+      var piece = pieces[index];
+      if (index % 2) {
+        key.push(["d", piece.length, piece]);
+      } else {
+        key.push(["t", 0, piece]);
+      }
+    }
+    return key;
+  }
+
+  /** Lexicographic triplet comparison of two already-built natural keys. */
+  function _compareNaturalKeys(leftKey, rightKey) {
+    var shared = Math.min(leftKey.length, rightKey.length);
+    for (var index = 0; index < shared; index += 1) {
+      var leftToken = leftKey[index];
+      var rightToken = rightKey[index];
+      if (leftToken[0] !== rightToken[0]) {
+        // `d` < `t`: a digit-run token sorts before a text token.
+        return leftToken[0] < rightToken[0] ? -1 : 1;
+      }
+      if (leftToken[1] !== rightToken[1]) {
+        return leftToken[1] < rightToken[1] ? -1 : 1;
+      }
+      var order = _compareCodePoints(leftToken[2], rightToken[2]);
+      if (order !== 0) {
+        return order < 0 ? -1 : 1;
+      }
+    }
+    if (leftKey.length === rightKey.length) {
+      return 0;
+    }
+    return leftKey.length < rightKey.length ? -1 : 1;
+  }
+
+  /**
+   * Compare two raw ids under the frozen natural order: negative, zero or
+   * positive, with equal ids comparing zero. Suitable for `Array.prototype
+   * .sort`; no locale, no case folding and no UTF-16 code-unit ordering.
+   */
+  function compareNaturalIds(left, right) {
+    return _compareNaturalKeys(naturalKey(left), naturalKey(right));
+  }
+
+  /**
+   * The sort key for the `(provider, raw model id)` endpoint identity:
+   * `[providerOrder index, naturalKey(rawId)]`.
+   *
+   * `providerOrder` is the caller's already-validated ordered list of
+   * registered provider keys, and precedence is that list's INDEX -- never
+   * alphabetic key order, provider-map insertion order or global raw-ID order.
+   * A raw id shared by two providers stays TWO distinct pairs ordered by
+   * provider precedence. An unregistered provider is outside the documented
+   * precondition and is rejected instead of silently ranking at -1.
+   */
+  function endpointKey(providerOrder, provider, rawId) {
+    var index = providerOrder.indexOf(provider);
+    if (index === -1) {
+      throw new TypeError("endpointKey() requires a registered provider");
+    }
+    return [index, naturalKey(rawId)];
+  }
+
+  /**
+   * Compare two `[provider, rawId]` pairs by supplied provider precedence and
+   * then by natural raw-ID order; identical pairs compare zero.
+   */
+  function compareEndpointPairs(providerOrder, leftPair, rightPair) {
+    var left = endpointKey(providerOrder, leftPair[0], leftPair[1]);
+    var right = endpointKey(providerOrder, rightPair[0], rightPair[1]);
+    if (left[0] !== right[0]) {
+      return left[0] < right[0] ? -1 : 1;
+    }
+    return _compareNaturalKeys(left[1], right[1]);
+  }
+
   return {
     MAX_SAFE_INT: MAX_SAFE_INT,
     MAX_JSON_DEPTH: MAX_JSON_DEPTH,
@@ -1541,6 +1667,11 @@
     projectCapabilities: projectCapabilities,
     normalizeCapabilities: normalizeCapabilities,
     projectModel: projectModel,
-    isFloatToken: isFloatToken
+    isFloatToken: isFloatToken,
+    stripFreeMarker: stripFreeMarker,
+    naturalKey: naturalKey,
+    compareNaturalIds: compareNaturalIds,
+    endpointKey: endpointKey,
+    compareEndpointPairs: compareEndpointPairs
   };
 });

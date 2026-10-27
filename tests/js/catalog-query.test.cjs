@@ -33,6 +33,48 @@ function readFixtureDocument(name) {
   return JSON.parse(readFixtureText(name));
 }
 
+const REPO_ROOT = path.join(__dirname, "..", "..");
+
+// Test-owned parity probe against the unchanged Python reference helper. The
+// committed literal fixtures remain the correctness oracle; this only checks
+// that the dependency-free port did not drift from `watchdog_catalog/query.py`.
+const REFERENCE_SCRIPT = [
+  "import json, sys",
+  'sys.path.insert(0, ".")',
+  "from watchdog_catalog.query import (strip_free_marker, natural_key,",
+  "                                   endpoint_key)",
+  "payload = json.load(sys.stdin)",
+  'order = payload["provider_order"]',
+  "print(json.dumps({",
+  '    "markers": [strip_free_marker(x) for x in payload["ids"]],',
+  '    "keys": [[list(t) for t in natural_key(x)] for x in payload["ids"]],',
+  '    "order": sorted(payload["ids"], key=natural_key),',
+  '    "pairs": [list(p) for p in sorted(',
+  '        [tuple(p) for p in payload["pairs"]],',
+  "        key=lambda p: endpoint_key(order, p[0], p[1]))],",
+  "}))"
+].join("\n");
+
+function referencePython() {
+  for (const candidate of [process.env.CATALOG_PYTHON,
+                           "/home/kimbo/.local/bin/python3.11"]) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return "python3";
+}
+
+function runPythonReference(payload) {
+  const { execFileSync } = require("node:child_process");
+  const env = Object.assign({}, process.env);
+  delete env.PYTHONPATH;
+  const stdout = execFileSync(referencePython(), ["-c", REFERENCE_SCRIPT], {
+    cwd: REPO_ROOT, env, input: JSON.stringify(payload), encoding: "utf8"
+  });
+  return JSON.parse(stdout);
+}
+
 const RAW_ERROR_MESSAGE = "Invalid catalogue JSON.";
 const INVALID_SNAPSHOT_MESSAGE = "Invalid catalogue snapshot.";
 const UNSUPPORTED_VERSION_MESSAGE = "Unsupported catalogue schema version.";
@@ -1152,6 +1194,394 @@ describe("public capability and model projection", () => {
 });
 
 // --------------------------------------------------------------------------
+// pure ordering and free-marker helpers
+// --------------------------------------------------------------------------
+// The frozen README contracts: (a) the marker stripper removes ONE delimiter-
+// bounded suffix then ONE prefix pass and falls back to the input when a strip
+// would empty it -- Python's `$` also matches before ONE final LF; (b) provider
+// precedence is the INDEX in `provider_order`; (c) within a provider, raw ids
+// compare by maximal ASCII `[0-9]+` runs (ORIGINAL digit count, then lexical
+// ASCII digits), with case-sensitive Unicode CODE POINT text. Every expectation
+// below is a literal fixture row or a hand-authored literal, never an array
+// produced by the comparator under test. `array.sort` is always called with the
+// PRODUCTION comparator, so no second comparator is implemented in the tests.
+describe("ordering and free-marker helpers", () => {
+  const orderingCases = readFixtureDocument("ordering-cases.json");
+  const orderingSnapshot = readFixtureDocument("ordering.json");
+  const markerCases = readFixtureDocument("cases.json");
+
+  // Literal delimiter-only fallbacks and the characterised regex edges of
+  // `watchdog_catalog/query.py` (one suffix pass, one prefix pass, Python `$`).
+  const MARKER_FALLBACK_CONTROLS = [
+    [":free", ":free"], ["-free", "-free"], ["_free", "_free"],
+    ["free:", "free:"], ["free-", "free-"], ["free_", "free_"],
+    ["free", "free"]
+  ];
+  const MARKER_COMPAT_EDGES = [
+    ["free-free-X-free-free", "free-X-free"],
+    ["vendor/x:free\n", "vendor/x\n"],
+    ["vendor/x:free\n\n", "vendor/x:free\n\n"],
+    ["free:", "free:"],
+    [" free-x ", " free-x "],
+    ["vendor/freebie", "vendor/freebie"],
+    ["FREE-X:free", "X"],
+    // The final-LF nuance is Python `$`, not a JS `$`: ONE final LF is still an
+    // end-of-input anchor for the suffix, a CRLF is not, and neither are the
+    // Unicode line separators that a dot/all-`\s` guess would sweep up.
+    ["vendor/x:free\r\n", "vendor/x:free\r\n"],
+    ["Vendor/X:FREE\n", "Vendor/X\n"],
+    ["free:x\n", "x\n"],
+    ["-free\n", "\n"],
+    ["_free\n", "\n"],
+    ["free\n", "free\n"],
+    ["vendor/x:free\u2028", "vendor/x:free\u2028"],
+    ["vendor/x:free\u2029", "vendor/x:free\u2029"],
+    ["vendor/x:free\u0085", "vendor/x:free\u0085"],
+    ["vendor/x:free\r", "vendor/x:free\r"],
+    [" vendor/x:free ", " vendor/x:free "],
+    ["x_free_\r\n", "x_free_\r\n"]
+  ];
+
+  const NATURAL_KEY_CONTROLS = [
+    [["", "vendor/x"], ["", "vendor/x"]],
+    [["vendor/x0", "vendor/x"], ["vendor/x", "vendor/x0"]],
+    [["a1b10", "a1b02", "a1b2"], ["a1b2", "a1b02", "a1b10"]],
+    [["vendor/model", " vendor/model "], [" vendor/model ", "vendor/model"]],
+    [["vendor/item02", "vendor/item1"],
+     ["vendor/item1", "vendor/item02"]]
+  ];
+
+  function sortedBy(ids, compare) {
+    return ids.slice().sort(compare);
+  }
+
+  it("strips only a delimiter-bounded marker in one suffix and one prefix pass",
+     () => {
+       const rows = markerCases.marker_strip_rule;
+       assert.equal(rows.length, 17, "the frozen marker table has 17 rows");
+       assert.equal(new Set(rows.map((row) => row.raw_id)).size, 17);
+       for (const row of rows) {
+         assert.equal(catalog.stripFreeMarker(row.raw_id), row.stripped,
+                      `marker rule mismatch for ${JSON.stringify(row.raw_id)}`);
+       }
+       for (const [rawId, want] of MARKER_FALLBACK_CONTROLS) {
+         assert.equal(catalog.stripFreeMarker(rawId), want,
+                      `fallback control for ${JSON.stringify(rawId)}`);
+       }
+       for (const [rawId, want] of MARKER_COMPAT_EDGES) {
+         assert.equal(catalog.stripFreeMarker(rawId), want,
+                      `compat edge for ${JSON.stringify(rawId)}`);
+       }
+       // One pass only, never recursive/global stripping.
+       assert.equal(catalog.stripFreeMarker("free-free-X-free-free"),
+                    "free-X-free");
+       // Raw strings are returned verbatim, never normalised or retyped.
+       assert.equal(catalog.stripFreeMarker("vendor/model-renamed"),
+                    "vendor/model-renamed");
+       assert.equal(catalog.stripFreeMarker("vendor/Ａ:free"), "vendor/Ａ");
+     });
+
+  it("builds the tagged natural key without rewriting the raw id", () => {
+    // A digit run keeps its ORIGINAL text and digit count; text pieces keep
+    // every intervening character and both empty boundary tokens.
+    assert.deepEqual(catalog.naturalKey("vendor/item02"),
+                     [["t", 0, "vendor/item"], ["d", 2, "02"], ["t", 0, ""]]);
+    assert.deepEqual(catalog.naturalKey("10"),
+                     [["t", 0, ""], ["d", 2, "10"], ["t", 0, ""]]);
+    assert.deepEqual(catalog.naturalKey(""), [["t", 0, ""]]);
+    assert.deepEqual(catalog.naturalKey("a1b2"),
+                     [["t", 0, "a"], ["d", 1, "1"], ["t", 0, "b"],
+                      ["d", 1, "2"], ["t", 0, ""]]);
+    // Non-ASCII numeric-looking characters are TEXT, never digit runs.
+    assert.deepEqual(catalog.naturalKey("١"), [["t", 0, "١"]]);
+    assert.deepEqual(catalog.naturalKey("²"), [["t", 0, "²"]]);
+    // A 64-digit run is never parsed as a number: length and text survive.
+    const longDigits = "9".repeat(63) + "1";
+    const longKey = catalog.naturalKey(`vendor/long${longDigits}`);
+    assert.deepEqual(longKey[1], ["d", 64, longDigits]);
+    // Fresh keys: two calls are equal but never the same arrays.
+    const first = catalog.naturalKey("vendor/item1");
+    const second = catalog.naturalKey("vendor/item1");
+    assert.deepEqual(first, second);
+    assert.notEqual(first, second);
+    assert.notEqual(first[1], second[1]);
+  });
+
+  it("reproduces all seven literal ordering vectors forward and reversed",
+     () => {
+       const rows = orderingCases.cases;
+       assert.equal(rows.length, 7, "the frozen vector table has 7 rows");
+       assert.equal(new Set(rows.map((row) => row.id)).size, 7);
+       const corpus = new Set();
+       for (const row of rows) {
+         const supplied = row.input.slice();
+         const expected = row.expected.slice();
+         assert.equal(supplied.length, expected.length, row.id);
+         assert.notDeepEqual(supplied, expected, `${row.id}: a real sort`);
+         const before = JSON.stringify(supplied);
+         assert.deepEqual(sortedBy(supplied, catalog.compareNaturalIds),
+                          expected, row.id);
+         assert.equal(JSON.stringify(supplied), before, `${row.id}: no mutation`);
+         assert.deepEqual(
+           sortedBy(supplied.slice().reverse(), catalog.compareNaturalIds),
+           expected, `${row.id}: reverse-supplied`);
+         for (const id of supplied) {
+           corpus.add(id);
+         }
+         for (const id of expected) {
+           corpus.add(id);
+         }
+       }
+       for (const [supplied, expected] of NATURAL_KEY_CONTROLS) {
+         assert.deepEqual(sortedBy(supplied, catalog.compareNaturalIds),
+                          expected, JSON.stringify(supplied));
+         for (const id of supplied) {
+           corpus.add(id);
+         }
+       }
+       assert.ok(corpus.size >= 20, `corpus size ${corpus.size}`);
+     });
+
+  it("compares by digit length, code point and strict prefix", () => {
+    const cmp = catalog.compareNaturalIds;
+    // NO integer/float conversion and NO leading-zero stripping.
+    assert.ok(cmp("vendor/item1", "vendor/item2") < 0);
+    assert.ok(cmp("vendor/item2", "vendor/item02") < 0);
+    assert.ok(cmp("vendor/item02", "vendor/item10") < 0);
+    assert.ok(cmp("vendor/item10", "vendor/item000") < 0);
+    assert.ok(cmp("vendor/x1", "vendor/x01") < 0);
+    assert.ok(cmp("vendor/x01", "vendor/x001") < 0);
+    // Equal-length long runs fall back to lexical ASCII digits.
+    const tail = "long" + "9".repeat(63);
+    assert.ok(cmp(`vendor/${tail}1`, `vendor/${tail}2`) < 0);
+    assert.ok(cmp(`vendor/${tail}2`, `vendor/${tail}1`) > 0);
+    // Adjacent run lengths: SHORTER digit count first, even when every digit
+    // is the same character (numeric values would be equal here).
+    assert.ok(cmp("vendor/long1", "vendor/long11") < 0);
+    // Code-point text order, case-sensitive, no folding/locale/normalisation.
+    assert.ok(cmp("vendor/B", "vendor/a") < 0);
+    assert.ok(cmp("vendor/a", "vendor/Ｂ") < 0);
+    assert.ok(cmp("vendor/Ａ", "vendor/Ｂ") < 0);
+    assert.ok(cmp("vendor/Ａ", "vendor/😀") < 0);
+    assert.ok(cmp("vendor/😀", "vendor/Ａ") > 0,
+              "astral sorts after U+FF21, not by UTF-16 lead unit");
+    assert.ok(cmp("Iy", "iy") < 0, "no case folding");
+    // Digit-run text vs non-ASCII numeric-looking text.
+    assert.ok(cmp("2", "١") < 0);
+    assert.ok(cmp("10", "a") < 0);
+    // Strict prefix sorts first; empty string is a real key value.
+    assert.ok(cmp("vendor/x", "vendor/x0") < 0);
+    assert.ok(cmp("", "vendor/x") < 0);
+    // Surrounding space is never trimmed.
+    assert.ok(cmp(" vendor/model ", "vendor/model") < 0);
+    // Equality is exactly string identity.
+    assert.equal(cmp("vendor/item1", "vendor/item1"), 0);
+    assert.equal(cmp("", ""), 0);
+    assert.ok(cmp("vendor/item1", "vendor/item01") < 0);
+  });
+
+  it("is a total order over the combined boundary corpus without mutation",
+     () => {
+       const corpus = [];
+       for (const row of orderingCases.cases) {
+         corpus.push(...row.input, ...row.expected);
+       }
+       for (const [supplied] of NATURAL_KEY_CONTROLS) {
+         corpus.push(...supplied);
+       }
+       corpus.push("", "vendor/x", " vendor/model ", "vendor/model",
+                   "vendor/😀", "vendor/Ａ", "vendor/a", "vendor/B",
+                   "vendor/item١", "²", "١", "1", "01", "10", "a1b2",
+                   "__proto__", "constructor", "toString", "hasOwnProperty",
+                   "vendor/" + "9".repeat(64), "vendor/" + "9".repeat(65));
+       const unique = Array.from(new Set(corpus));
+       const before = JSON.stringify(unique);
+       const cmp = catalog.compareNaturalIds;
+       // Prototype-looking ids are plain strings, never object keys.
+       assert.ok(cmp("__proto__", "constructor") < 0);
+       assert.equal(sortedBy(["toString", "__proto__", "constructor"], cmp)
+                      .length, 3);
+       for (const left of unique) {
+         assert.equal(cmp(left, left), 0, `${left} reflexive`);
+         for (const right of unique) {
+           const forward = Math.sign(cmp(left, right));
+           const backward = Math.sign(cmp(right, left));
+           assert.equal(forward, backward === 0 ? 0 : -backward,
+                        `${left} ~ ${right} antisymmetry`);
+           if (left !== right) {
+             assert.notEqual(forward, 0, `${left} vs ${right} distinguishes`);
+           }
+         }
+       }
+       // Transitivity along the produced total order, and no comparator that
+       // disagrees with itself when the corpus is sorted twice.
+       const ordered = sortedBy(unique, cmp);
+       assert.equal(JSON.stringify(unique), before, "input array untouched");
+       for (let index = 1; index < ordered.length; index += 1) {
+         assert.ok(cmp(ordered[index - 1], ordered[index]) < 0,
+                   `${ordered[index - 1]} < ${ordered[index]}`);
+       }
+       assert.deepEqual(sortedBy(ordered.slice().reverse(), cmp), ordered);
+     });
+
+  it("orders endpoint pairs by supplied provider precedence then natural id",
+     () => {
+       const providerOrder = orderingSnapshot.provider_order;
+       const physicalOrder = Object.keys(orderingSnapshot.providers);
+       assert.deepEqual(providerOrder,
+                        ["synthetic-b", "synthetic-a", "synthetic-c"]);
+       assert.deepEqual(physicalOrder,
+                        ["synthetic-a", "synthetic-b", "synthetic-c"]);
+       assert.notDeepEqual(providerOrder, physicalOrder,
+                           "precedence is not map insertion order");
+       const golden = markerCases.cases
+         .find((row) => row.id === "list_free_ordering_all")
+         .expect.providers;
+       assert.deepEqual(Object.keys(golden).sort(),
+                        providerOrder.slice().sort());
+       const expectedPairs = [];
+       for (const provider of providerOrder) {
+         for (const rawId of golden[provider]) {
+           expectedPairs.push([provider, rawId]);
+         }
+       }
+       assert.equal(expectedPairs.length, 10, "ten endpoints");
+       assert.equal(new Set(expectedPairs.map((pair) => pair.join("\u0000")))
+                      .size, 10);
+       const physicalPairs = [];
+       for (const provider of physicalOrder) {
+         for (const rawId of orderingSnapshot.providers[provider].model_ids) {
+           physicalPairs.push([provider, rawId]);
+         }
+       }
+       assert.equal(physicalPairs.length, 10);
+       assert.notDeepEqual(physicalPairs, expectedPairs,
+                           "the fixture input is genuinely unsorted");
+       const compare = (left, right) =>
+         catalog.compareEndpointPairs(providerOrder, left, right);
+       const snapshotBefore = JSON.stringify(orderingSnapshot);
+       assert.deepEqual(sortedBy(physicalPairs, compare), expectedPairs);
+       assert.deepEqual(sortedBy(physicalPairs.slice().reverse(), compare),
+                        expectedPairs);
+       assert.equal(JSON.stringify(orderingSnapshot), snapshotBefore,
+                    "fixture document untouched");
+       // Not alphabetic provider order: b...b, then a, then nothing from c.
+       assert.deepEqual(Array.from(new Set(expectedPairs.map((p) => p[0]))),
+                        ["synthetic-b", "synthetic-a"]);
+       // The caller-supplied order is authoritative: reversing it reverses
+       // provider precedence.
+       const flipped = ["synthetic-c", "synthetic-a", "synthetic-b"];
+       assert.ok(catalog.compareEndpointPairs(
+         flipped, ["synthetic-a", "vendor/item2"],
+         ["synthetic-b", "vendor/item2"]) < 0);
+       assert.ok(catalog.compareEndpointPairs(
+         providerOrder, ["synthetic-a", "vendor/item2"],
+         ["synthetic-b", "vendor/item2"]) > 0);
+       // A shared raw id stays TWO distinct pairs ordered by precedence.
+       const shared = markerCases.cases
+         .find((row) => row.id ===
+                       "get_model_ordering_identical_raw_id_provider_precedence")
+         .expect;
+       assert.deepEqual(shared.exact_gateways, ["synthetic-b", "synthetic-a"]);
+       const sharedPairs = [["synthetic-a", "vendor/item2"],
+                            ["synthetic-b", "vendor/item2"]];
+       const sortedShared = sortedBy(sharedPairs, compare);
+       assert.deepEqual(sortedShared.map((pair) => pair[0]),
+                        ["synthetic-b", "synthetic-a"]);
+       assert.deepEqual(sortedShared.map((pair) => pair[0]),
+                        shared.endpoints.map((endpoint) => endpoint.provider));
+       assert.notEqual(compare(sortedShared[0], sortedShared[1]), 0);
+       // Identical pairs compare equal; the zero-id provider still ranks.
+       assert.equal(compare(["synthetic-b", "vendor/item1"],
+                            ["synthetic-b", "vendor/item1"]), 0);
+       assert.deepEqual(golden["synthetic-c"], []);
+       assert.deepEqual(
+         orderingSnapshot.providers["synthetic-c"].model_ids, []);
+       assert.ok(compare(["synthetic-b", "vendor/item1"],
+                         ["synthetic-c", "vendor/absent"]) < 0);
+       assert.ok(compare(["synthetic-a", "vendor/item2"],
+                         ["synthetic-c", "vendor/absent"]) < 0);
+     });
+
+  it("exposes endpointKey as index plus natural key under the same rules", () => {
+    const providerOrder = orderingSnapshot.provider_order;
+    const key = catalog.endpointKey(providerOrder, "synthetic-b",
+                                    "vendor/item1");
+    assert.deepEqual(key, [0, [["t", 0, "vendor/item"], ["d", 1, "1"],
+                              ["t", 0, ""]]]);
+    assert.deepEqual(catalog.endpointKey(providerOrder, "synthetic-c", "x"),
+                     [2, [["t", 0, "x"]]]);
+    // Same pair, same key value; keys are fresh data.
+    const again = catalog.endpointKey(providerOrder, "synthetic-b",
+                                      "vendor/item1");
+    assert.deepEqual(again, key);
+    assert.notEqual(again, key);
+    assert.notEqual(again[1], key[1]);
+    // The index is a plain array lookup, so a prototype-named provider is a
+    // normal registered key rather than an object-member hazard.
+    assert.deepEqual(catalog.endpointKey(["__proto__", "a"], "__proto__", "z"),
+                     [0, [["t", 0, "z"]]]);
+    // An unregistered provider is outside the documented precondition and is
+    // rejected loudly instead of silently ranking at -1.
+    assert.throws(() => catalog.endpointKey(providerOrder, "nope", "vendor/x"),
+                  TypeError);
+    assert.throws(() => catalog.compareEndpointPairs(
+      providerOrder, ["nope", "vendor/x"], ["synthetic-a", "vendor/item2"]),
+                  TypeError);
+  });
+
+  it("agrees with the unchanged Python reference helper", () => {
+    // Test-owned parity check (NOT the later permanent 7g harness): the
+    // committed literal fixtures above stay the correctness oracle; this run
+    // only proves the port did not drift from `watchdog_catalog/query.py`.
+    const ids = [];
+    for (const row of markerCases.marker_strip_rule) {
+      ids.push(row.raw_id);
+    }
+    for (const [rawId] of MARKER_FALLBACK_CONTROLS) {
+      ids.push(rawId);
+    }
+    for (const [rawId] of MARKER_COMPAT_EDGES) {
+      ids.push(rawId);
+    }
+    for (const row of orderingCases.cases) {
+      ids.push(...row.input);
+    }
+    for (const [supplied] of NATURAL_KEY_CONTROLS) {
+      ids.push(...supplied);
+    }
+    ids.push("", "vendor/😀", " vendor/model ", "vendor/item١", "²", "١",
+             "__proto__", "vendor/" + "9".repeat(64),
+             "vendor/" + "9".repeat(65));
+    const uniqueIds = Array.from(new Set(ids));
+    const providerOrder = orderingSnapshot.provider_order;
+    const pairs = [];
+    for (const provider of Object.keys(orderingSnapshot.providers)) {
+      for (const rawId of orderingSnapshot.providers[provider].model_ids) {
+        pairs.push([provider, rawId]);
+      }
+    }
+    pairs.push(["synthetic-a", "vendor/item2"],
+               ["synthetic-b", "vendor/item2"],
+               ["synthetic-b", "__proto__"]);
+    const result = runPythonReference({
+      ids: uniqueIds, pairs: pairs, provider_order: providerOrder
+    });
+    assert.deepEqual(
+      uniqueIds.map((rawId) => catalog.stripFreeMarker(rawId)),
+      result.markers, "marker outputs agree with Python");
+    assert.deepEqual(uniqueIds.map((rawId) => catalog.naturalKey(rawId)),
+                     result.keys, "natural keys agree with Python");
+    assert.deepEqual(sortedBy(uniqueIds, catalog.compareNaturalIds),
+                     result.order, "natural order agrees with Python");
+    assert.deepEqual(
+      sortedBy(pairs, (left, right) =>
+        catalog.compareEndpointPairs(providerOrder, left, right)),
+      result.pairs, "endpoint order agrees with Python");
+  });
+});
+
+// --------------------------------------------------------------------------
 // cross-fixture integration and the dual (browser + Node) export
 // --------------------------------------------------------------------------
 describe("fixture integration and export shape", () => {
@@ -1216,9 +1646,11 @@ describe("fixture integration and export shape", () => {
   it("keeps the public surface deliberate", () => {
     assert.deepEqual(Object.keys(catalog).sort(), [
       "CatalogError", "JsonFloat", "MAX_JSON_DEPTH", "MAX_SAFE_INT",
-      "SCHEMA_VERSION", "canonicalBytes", "canonicalText", "decodeTypedJson",
-      "isFloatToken", "loadJson", "loadSnapshot", "normalizeCapabilities",
-      "projectCapabilities", "projectModel", "snapshotHash", "validateSnapshot"
+      "SCHEMA_VERSION", "canonicalBytes", "canonicalText",
+      "compareEndpointPairs", "compareNaturalIds", "decodeTypedJson",
+      "endpointKey", "isFloatToken", "loadJson", "loadSnapshot", "naturalKey",
+      "normalizeCapabilities", "projectCapabilities", "projectModel",
+      "snapshotHash", "stripFreeMarker", "validateSnapshot"
     ]);
     assert.equal(catalog.MAX_SAFE_INT, 9007199254740991);
     assert.equal(catalog.MAX_JSON_DEPTH, 64);
