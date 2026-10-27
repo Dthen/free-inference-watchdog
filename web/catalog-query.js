@@ -2390,7 +2390,8 @@
    * uppercase letter -- stays literal). The comparison is over Unicode CODE
    * POINTS, exactly like Python's `in`: a valid astral character is one code
    * point, so a query holding only one surrogate half of it is NOT a substring
-   * of it and an unpaired-surrogate query matches nothing. The query type is
+   * of it, while an unpaired-surrogate query matches only a field holding that
+   * same literal unpaired code unit. The query type is
    * never narrowed, rejected or rewritten to get that agreement. There is no
    * regular expression, fuzzy alias, marker stripping or JSON/metadata
    * serialization: capability arrays,
@@ -2567,6 +2568,292 @@
       "supported_parameters");
   }
 
+  //: The frozen public `search_models` argument signature, in validation order.
+  //: Validation walks THIS array after the whole-object and unknown-key checks,
+  //: so precedence is independent of the caller's member insertion order.
+  var SEARCH_SIGNATURE = [
+    "query", "provider", "min_context_length", "input_modalities",
+    "supported_parameters", "limit", "offset"
+  ];
+
+  //: The frozen pagination defaults and inclusive maximum.
+  var SEARCH_DEFAULT_LIMIT = 50;
+  var SEARCH_DEFAULT_OFFSET = 0;
+  var SEARCH_MAX_LIMIT = 200;
+
+  /**
+   * The public tool-argument integer normalization: a strict non-negative safe
+   * integer VALUE, else null.
+   *
+   * A JSON integer argument is a finite numeric value with zero fractional part
+   * in `0..MAX_SAFE_INT`, so the numeric `1.0` IS the integer `1` -- including a
+   * typed `JsonFloat` decoded argument, whose wrapper keeps the token a float
+   * for the raw `filters` echo while validating by value. A bool is rejected
+   * BEFORE the number branch (`true` is never `1`); a numeric string, fraction,
+   * unsafe/huge numeric and non-finite value are rejected too. `Number.isInteger`
+   * alone is NOT a safe test -- MDN documents that values around 2**53 lose
+   * precision and still report as integers -- so the `MAX_SAFE_INT` bound is
+   * checked separately, exactly like the reference. A negative zero normalizes
+   * to `0`, matching Python `int(-0.0)`.
+   *
+   * This is the TOOL-INPUT boundary rule only; it never relaxes the strict-int
+   * snapshot/context projection, which stays `_isSafeNonNegInt`.
+   */
+  function _searchSafeInteger(value) {
+    var number;
+    if (value instanceof JsonFloat) {
+      number = value.value;
+    } else if (typeof value === "number") {
+      number = value;
+    } else {
+      return null;
+    }
+    if (!Number.isFinite(number) || !Number.isInteger(number) ||
+        number < 0 || number > MAX_SAFE_INT) {
+      return null;
+    }
+    return number === 0 ? 0 : number;
+  }
+
+  /**
+   * The public capability-array rule: an ARRAY whose EVERY member is a nonempty
+   * string. `[]` is accepted; a bare string, object or any non-string or
+   * empty-string member rejects the WHOLE parameter -- never a partial salvage.
+   * Casing, padding and duplicates stay literal.
+   */
+  function _searchNonemptyStringList(value) {
+    if (!Array.isArray(value)) {
+      return false;
+    }
+    for (var index = 0; index < value.length; index += 1) {
+      if (typeof value[index] !== "string" || value[index].length === 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * The pure core of the frozen public `search_models` tool.
+   *
+   * `snapshot` is an already-VALIDATED public snapshot: the `loadSnapshot`,
+   * source and adapter boundary owns raw, structural and hash validation, so
+   * this function performs NO validation, NO hash recompute, NO I/O and NO
+   * clock/environment/config/SDK read. `args` is the ENTIRE DECODED argument
+   * value, passed explicitly -- never splatted -- and the same implementation
+   * runs in Node and in the browser.
+   *
+   * Argument validation is deterministic and in the frozen order: `args` must
+   * be a JSON object; then ANY unknown OWN key rejects with parameter null
+   * (exact own-key membership, so a literal `__proto__`, `constructor` or
+   * `toString` member is unknown rather than inherited); then the frozen
+   * signature order -- `query`, `provider`, `min_context_length`,
+   * `input_modalities`, `supported_parameters`, `limit`, `offset` -- stopping
+   * at the FIRST error regardless of the object's key insertion order.
+   * `query` is omitted/null or ANY string (kept literally, never trimmed);
+   * `provider` is omitted/null or one exact `provider_order` key (a non-string
+   * is invalid_arguments, an absent string -- empty, padded or wrong-case --
+   * is unknown_provider, and a registered zero-ID provider is valid);
+   * `min_context_length` is omitted/null or a safe non-negative integer value;
+   * the two capability arrays are omitted/null or arrays of nonempty strings
+   * (invalid members reject the WHOLE parameter, never a partial salvage);
+   * `limit` is omitted (50) or an integer 1..200 (explicit null is invalid);
+   * `offset` is omitted (0) or a safe integer (explicit null is invalid). A
+   * numeric `1.0` -- including a typed `JsonFloat` decoded argument -- is
+   * accepted as the integer VALUE while a bool, numeric string, fraction,
+   * unsafe integer or non-finite number is rejected with its own parameter
+   * name; the RAW supplied value is still echoed in `filters`.
+   *
+   * Only after EVERY argument validates does it compose the accepted stages in
+   * order -- `searchTextProviderPairs`, `searchMinContextPairs`,
+   * `searchInputModalityPairs`, `searchSupportedParameterPairs` -- on the SAME
+   * `(provider, rawId)` pairs, then count `total_matches`, then take ONE global
+   * `offset:offset + limit` slice of the already ordered complete match set.
+   * Pagination is never an earlier filter, never a per-provider operation and
+   * never capped by a stage; `slice` clamps a start at or beyond the end to an
+   * empty page, exactly like Python slicing.
+   *
+   * The success payload carries exactly `ok`, `query`, `filters`, `limit`,
+   * `offset`, `snapshot_id`, `tick_epoch`, `provider_staleness`, `endpoints`,
+   * `total_matches`, `returned_count`, `next_offset`, `counts` and `caveats`.
+   * `query` and every `filters` member echo the RAW supplied value (arrays
+   * freshly copied, order/case/duplicates preserved, `[]` distinct from null)
+   * while `limit`/`offset` echo the effective strict integer.
+   * `provider_staleness` covers every `provider_order` key when `provider` is
+   * omitted, else exactly the selected key -- retained on empty, exhausted and
+   * beyond-end pages. `endpoints` is the returned page with the exact fourteen
+   * projected fields: pair-specific wiring and display values, the raw id
+   * unchanged, the five normalized capability fields from
+   * `normalizeCapabilities` and `metadata` as a deep copy of that pair's
+   * complete projected public model (original casing/order/duplicates, pricing
+   * types and typed `JsonFloat` wrappers included). `next_offset` is
+   * `offset + returned_count` only when that is LESS than `total_matches`, else
+   * null. `counts` is PAGE scoped -- exactly `gateways`, `endpoints`,
+   * `distinct_raw_ids` and `marker_group_labels` -- and all-zero on an empty
+   * page even when matches exist; marker labels are the frozen
+   * `stripFreeMarker` labels, never verified model identities. `caveats`
+   * freshly carries the accepted absence caveat.
+   *
+   * Every returned container, array, row, filter echo, caveat and metadata
+   * object (with its nested architecture/parameter/pricing containers) is
+   * freshly allocated, so a caller mutating a result can never corrupt the
+   * snapshot, the argument object or another call. The inputs are never
+   * mutated.
+   */
+  function searchModels(snapshot, args) {
+    if (!_isPlainObject(args)) {
+      return _argumentError(INVALID_ARGUMENTS, null);
+    }
+    var keys = Object.keys(args);
+    for (var key = 0; key < keys.length; key += 1) {
+      // `SEARCH_SIGNATURE.indexOf` is exact own-name membership: `in` or a
+      // prototype lookup would accept `toString`/`constructor` as known.
+      if (SEARCH_SIGNATURE.indexOf(keys[key]) === -1) {
+        return _argumentError(INVALID_ARGUMENTS, null);
+      }
+    }
+
+    var suppliedQuery = _member(args, "query");
+    var query = suppliedQuery === _MISSING || suppliedQuery === null ||
+                suppliedQuery === undefined ? null : suppliedQuery;
+    if (query !== null && typeof query !== "string") {
+      return _argumentError(INVALID_ARGUMENTS, "query");
+    }
+
+    var suppliedProvider = _member(args, "provider");
+    var provider = suppliedProvider === _MISSING || suppliedProvider === null ||
+                   suppliedProvider === undefined ? null : suppliedProvider;
+    if (provider !== null && typeof provider !== "string") {
+      return _argumentError(INVALID_ARGUMENTS, "provider");
+    }
+    var order = snapshot.provider_order;
+    if (provider !== null && order.indexOf(provider) === -1) {
+      return _argumentError(UNKNOWN_PROVIDER, "provider");
+    }
+
+    var suppliedMinContext = _member(args, "min_context_length");
+    var rawMinContext = suppliedMinContext === _MISSING ||
+                        suppliedMinContext === undefined
+      ? null : suppliedMinContext;
+    var minContextLength = null;
+    if (rawMinContext !== null) {
+      minContextLength = _searchSafeInteger(rawMinContext);
+      if (minContextLength === null) {
+        return _argumentError(INVALID_ARGUMENTS, "min_context_length");
+      }
+    }
+
+    var requested = {};
+    var capabilityNames = ["input_modalities", "supported_parameters"];
+    for (var name = 0; name < capabilityNames.length; name += 1) {
+      var suppliedArray = _member(args, capabilityNames[name]);
+      var requestedArray = suppliedArray === _MISSING ||
+                           suppliedArray === undefined ? null : suppliedArray;
+      if (requestedArray !== null &&
+          !_searchNonemptyStringList(requestedArray)) {
+        return _argumentError(INVALID_ARGUMENTS, capabilityNames[name]);
+      }
+      requested[capabilityNames[name]] = requestedArray;
+    }
+
+    var limit = SEARCH_DEFAULT_LIMIT;
+    if (_member(args, "limit") !== _MISSING) {
+      limit = _searchSafeInteger(_member(args, "limit"));
+      if (limit === null || limit < 1 || limit > SEARCH_MAX_LIMIT) {
+        return _argumentError(INVALID_ARGUMENTS, "limit");
+      }
+    }
+
+    var offset = SEARCH_DEFAULT_OFFSET;
+    if (_member(args, "offset") !== _MISSING) {
+      offset = _searchSafeInteger(_member(args, "offset"));
+      if (offset === null) {
+        return _argumentError(INVALID_ARGUMENTS, "offset");
+      }
+    }
+
+    var matches = searchTextProviderPairs(
+      snapshot, {query: query, provider: provider});
+    matches = searchMinContextPairs(snapshot, matches, minContextLength);
+    matches = searchInputModalityPairs(
+      snapshot, matches, requested.input_modalities);
+    matches = searchSupportedParameterPairs(
+      snapshot, matches, requested.supported_parameters);
+
+    var totalMatches = matches.length;
+    var page = matches.slice(offset, offset + limit);
+
+    var providers = snapshot.providers;
+    var endpoints = [];
+    for (var index = 0; index < page.length; index += 1) {
+      var providerKey = page[index][0];
+      var rawId = page[index][1];
+      var entry = _member(providers, providerKey);
+      var model = _member(entry.models, rawId);
+      var normalized = normalizeCapabilities(model);
+      endpoints.push({
+        provider: providerKey,
+        model_id: rawId,
+        chat_completions_url: entry.chat_completions_url,
+        api_type: entry.api_type,
+        stale: entry.stale,
+        name: model.name,
+        description: model.description,
+        context_length: normalized.context_length,
+        input_modalities: normalized.input_modalities,
+        output_modalities: normalized.output_modalities,
+        supported_parameters: normalized.supported_parameters,
+        unknown_fields: normalized.unknown_fields,
+        metadata: _copyValue(model)
+      });
+    }
+
+    var returnedCount = endpoints.length;
+    var nextOffset = offset + returnedCount;
+    if (nextOffset >= totalMatches) {
+      nextOffset = null;
+    }
+
+    var selected = provider === null ? order.slice() : [provider];
+    var gateways = new Set();
+    var distinctRawIds = new Set();
+    var markerLabels = new Set();
+    for (var row = 0; row < endpoints.length; row += 1) {
+      gateways.add(endpoints[row].provider);
+      distinctRawIds.add(endpoints[row].model_id);
+      markerLabels.add(stripFreeMarker(endpoints[row].model_id));
+    }
+
+    return {
+      ok: true,
+      query: query,
+      filters: {
+        provider: provider,
+        min_context_length: _copyValue(rawMinContext),
+        input_modalities: requested.input_modalities === null
+          ? null : requested.input_modalities.slice(),
+        supported_parameters: requested.supported_parameters === null
+          ? null : requested.supported_parameters.slice()
+      },
+      limit: limit,
+      offset: offset,
+      snapshot_id: snapshot.snapshot_id,
+      tick_epoch: snapshot.tick_epoch,
+      provider_staleness: _staleFlags(providers, selected),
+      endpoints: endpoints,
+      total_matches: totalMatches,
+      returned_count: returnedCount,
+      next_offset: nextOffset,
+      counts: {
+        gateways: gateways.size,
+        endpoints: returnedCount,
+        distinct_raw_ids: distinctRawIds.size,
+        marker_group_labels: markerLabels.size
+      },
+      caveats: [ABSENCE_CAVEAT]
+    };
+  }
+
   return {
     MAX_SAFE_INT: MAX_SAFE_INT,
     MAX_JSON_DEPTH: MAX_JSON_DEPTH,
@@ -2596,6 +2883,7 @@
     searchTextProviderPairs: searchTextProviderPairs,
     searchMinContextPairs: searchMinContextPairs,
     searchInputModalityPairs: searchInputModalityPairs,
-    searchSupportedParameterPairs: searchSupportedParameterPairs
+    searchSupportedParameterPairs: searchSupportedParameterPairs,
+    searchModels: searchModels
   };
 });

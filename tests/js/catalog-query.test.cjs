@@ -57,21 +57,22 @@ const REFERENCE_SCRIPT = [
 ].join("\n");
 
 function referencePython() {
-  for (const candidate of [process.env.CATALOG_PYTHON,
-                           "/home/kimbo/.local/bin/python3.11"]) {
-    if (candidate && fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return "python3";
+  // An explicit override is authoritative; otherwise the normal PATH Python is
+  // used. The old hard-coded host interpreter path is deliberately gone so this
+  // suite stays installable and portable.
+  const override = process.env.CATALOG_PYTHON;
+  return override && override.length > 0 ? override : "python3";
 }
 
 function runPythonReference(payload) {
   const { execFileSync } = require("node:child_process");
   const env = Object.assign({}, process.env);
   delete env.PYTHONPATH;
+  delete env.PYTHONHOME;
+  env.PYTHONDONTWRITEBYTECODE = "1";
   const stdout = execFileSync(referencePython(), ["-c", REFERENCE_SCRIPT], {
-    cwd: REPO_ROOT, env, input: JSON.stringify(payload), encoding: "utf8"
+    cwd: REPO_ROOT, env, input: JSON.stringify(payload), encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024, timeout: 120000
   });
   return JSON.parse(stdout);
 }
@@ -5421,6 +5422,771 @@ describe("pure metadata-search stage helpers", () => {
 // --------------------------------------------------------------------------
 // cross-fixture integration and the dual (browser + Node) export
 // --------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// pure search_models query: pagination, argument errors, complete payload
+// ---------------------------------------------------------------------------
+describe("pure search_models query", () => {
+  const PAYLOAD_KEYS = ["caveats", "counts", "endpoints", "filters", "limit",
+                        "next_offset", "offset", "ok", "provider_staleness",
+                        "query", "returned_count", "snapshot_id", "tick_epoch",
+                        "total_matches"].sort();
+  const ENDPOINT_KEYS = ["api_type", "chat_completions_url", "context_length",
+                         "description", "input_modalities", "metadata",
+                         "model_id", "name", "output_modalities", "provider",
+                         "stale", "supported_parameters", "unknown_fields"].sort();
+  const FILTER_KEYS = ["input_modalities", "min_context_length", "provider",
+                       "supported_parameters"].sort();
+  const COUNT_KEYS = ["distinct_raw_ids", "endpoints", "gateways",
+                      "marker_group_labels"].sort();
+
+  /** The frozen argument-error envelope with its literal message. */
+  function searchArgumentError(code, parameter) {
+    const messages = {invalid_arguments: "Invalid tool arguments.",
+                      unknown_provider: "Unknown provider."};
+    return {ok: false, error: {code: code, message: messages[code],
+                               parameter: parameter}};
+  }
+
+  /** Typed argument decoding from a JSON literal (float tokens preserved). */
+  function typedArgs(text) {
+    return catalog.decodeTypedJson(text);
+  }
+
+  /** One provider whose `model_ids` is the required natural-order array. */
+  function sealedProvider(models, displayName, url, options) {
+    const opts = options || {};
+    const ids = Object.keys(models).sort(catalog.compareNaturalIds);
+    const ordered = {};
+    for (const rawId of Object.keys(models)) {
+      withOwnKey(ordered, rawId, models[rawId]);
+    }
+    return {display_name: displayName, chat_completions_url: url,
+            api_type: "openai", model_ids: ids, models: ordered,
+            stale: opts.stale === true};
+  }
+
+  /** A resealed synthetic snapshot the REAL validator accepts. */
+  function sealedSearchSnapshot(providerOrder, providers, options) {
+    const opts = options || {};
+    const ordered = {};
+    for (const key of Object.keys(providers)) {
+      withOwnKey(ordered, key, providers[key]);
+    }
+    return resealSnapshot({
+      schema_version: 1,
+      snapshot_id: "0".repeat(64),
+      tick_epoch: opts.tick_epoch === undefined ? 1759200000
+                                                : opts.tick_epoch,
+      cadence_s: opts.cadence_s === undefined ? 3600 : opts.cadence_s,
+      provider_order: providerOrder.slice(),
+      providers: ordered,
+      warnings: opts.warnings === undefined ? [] : opts.warnings.slice()
+    });
+  }
+
+  function identities(page) {
+    return page.endpoints.map((row) => [row.provider, row.model_id]);
+  }
+
+  function assertSearchShape(result, where) {
+    assert.deepEqual(Object.keys(result).sort(), PAYLOAD_KEYS, where);
+    assert.equal(result.ok, true, where);
+    assert.deepEqual(Object.keys(result.filters).sort(), FILTER_KEYS, where);
+    assert.deepEqual(Object.keys(result.counts).sort(), COUNT_KEYS, where);
+    for (const name of ["limit", "offset", "total_matches", "returned_count"]) {
+      assert.ok(Number.isInteger(result[name]) && result[name] >= 0,
+                `${where}: ${name} is a non-negative strict integer`);
+    }
+    if (result.next_offset !== null) {
+      assert.ok(Number.isInteger(result.next_offset), where);
+    }
+    for (const row of result.endpoints) {
+      assert.deepEqual(Object.keys(row).sort(), ENDPOINT_KEYS, where);
+      assert.equal(typeof row.stale, "boolean", where);
+      assert.equal(typeof row.metadata, "object", where);
+      assert.ok(Array.isArray(row.unknown_fields), where);
+    }
+    assert.ok(Array.isArray(result.caveats), where);
+  }
+
+  function querySearchRows() {
+    const doc = readFixtureDocument("cases.json");
+    return {doc: doc, rows: doc.cases.filter((row) => row.tool ===
+                                             "search_models")};
+  }
+
+  it("reproduces every one of the twenty-nine frozen search goldens", () => {
+    const {doc, rows} = querySearchRows();
+    assert.equal(rows.length, 29, "all 29 frozen search rows");
+    assert.equal(new Set(rows.map((row) => row.id)).size, 29);
+    const seenFixtures = new Set();
+    for (const row of rows) {
+      const fixture = row.fixture === undefined ? doc.fixture : row.fixture;
+      seenFixtures.add(fixture);
+      const snapshot = catalog.loadSnapshot(readFixtureText(fixture));
+      const before = catalog.canonicalText(snapshot);
+      const args = typedArgs(JSON.stringify(row.args));
+      const argsBefore = JSON.stringify(row.args);
+      const result = catalog.searchModels(snapshot, args);
+
+      // The WHOLE payload equals the independent stored literal, typed.
+      assert.equal(catalog.canonicalText(result),
+                   catalog.canonicalText(row.expect), row.id);
+      assertSameValue(result, row.expect, row.id);
+      assertSearchShape(result, row.id);
+      assertSearchShape(row.expect, row.id);
+
+      // Raw echoes: query and filters keep the supplied value verbatim.
+      assert.equal(result.query, row.args.query === undefined
+        ? null : row.args.query, row.id);
+      for (const name of ["provider", "min_context_length",
+                          "input_modalities", "supported_parameters"]) {
+        assertSameValue(result.filters[name],
+                        row.args[name] === undefined ? null : row.args[name],
+                        `${row.id}:${name}`);
+        if (Array.isArray(row.args[name])) {
+          assert.notEqual(result.filters[name], row.args[name],
+                          `${row.id}: filter echo is a copy`);
+        }
+      }
+      // Effective pagination is a strict integer value.
+      assert.equal(result.limit, row.args.limit === undefined ? 50
+                                                              : row.args.limit);
+      assert.equal(result.offset, row.args.offset === undefined ? 0
+                                                                : row.args.offset);
+      // Provenance mirrors the consumed snapshot and the caveat is fresh.
+      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
+      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
+      assert.equal(result.caveats.length, 1, row.id);
+      assert.equal(result.caveats[0],
+                   "Cross-gateway ABSENCE is unreliable: gateways rename " +
+                   "inconsistently, so a missing exact id does NOT prove the " +
+                   "model is unavailable there.", row.id);
+
+      // Metadata is THAT pair's complete projected model, deep-copied.
+      for (const endpoint of result.endpoints) {
+        const pairModel = snapshot.providers[endpoint.provider].models[
+          endpoint.model_id];
+        assert.equal(catalog.canonicalText(endpoint.metadata),
+                     catalog.canonicalText(pairModel), row.id);
+        assert.notEqual(endpoint.metadata, pairModel, row.id);
+        assert.notEqual(endpoint.metadata.architecture,
+                        pairModel.architecture, row.id);
+      }
+
+      // Fresh result, untouched inputs and a repeatable call.
+      assert.notEqual(result, row.expect, row.id);
+      assert.equal(JSON.stringify(row.args), argsBefore, row.id);
+      assert.equal(catalog.canonicalText(snapshot), before, row.id);
+      const again = catalog.searchModels(snapshot, typedArgs(
+        JSON.stringify(row.args)));
+      assert.equal(catalog.canonicalText(again),
+                   catalog.canonicalText(row.expect), row.id);
+      again.caveats.length = 0;
+      again.endpoints.length = 0;
+      assert.equal(catalog.canonicalText(catalog.searchModels(
+        snapshot, typedArgs(JSON.stringify(row.args)))),
+        catalog.canonicalText(row.expect), row.id);
+    }
+    assert.deepEqual([...seenFixtures].sort(),
+                     ["capability-unknown.json", "lookup.json",
+                      "metadata-edge-cases.json", "ordering.json",
+                      "search-text.json"]);
+  });
+
+  it("matches every frozen argument row: 47 envelopes and 21 controls", () => {
+    const doc = readFixtureDocument("argument-cases.json");
+    assert.equal(doc.invalid_cases.length, 47);
+    assert.equal(doc.valid_controls.length, 21);
+    const dispatch = {
+      search_models: (snapshot, args) => catalog.searchModels(snapshot, args),
+      get_model: (snapshot, args) => catalog.getModel(snapshot, args),
+      list_free_models: (snapshot, args) => catalog.listFreeModels(snapshot,
+                                                                   args),
+      list_endpoints: (snapshot, args) => catalog.listEndpoints(snapshot, args),
+      watchdog_status: (snapshot, args) => catalog.watchdogStatus(
+        snapshot, args, 1759200000)
+    };
+    for (const row of doc.invalid_cases) {
+      const snapshot = catalog.loadSnapshot(readFixtureText(row.fixture));
+      const result = dispatch[row.tool](snapshot, typedArgs(
+        JSON.stringify(row.args)));
+      assert.deepEqual(result, row.expect, row.id);
+      assert.equal(result.ok, false, row.id);
+      assert.deepEqual(Object.keys(result).sort(), ["error", "ok"], row.id);
+      assert.deepEqual(Object.keys(result.error).sort(),
+                       ["code", "message", "parameter"], row.id);
+    }
+    for (const row of doc.valid_controls) {
+      const snapshot = catalog.loadSnapshot(readFixtureText(row.fixture));
+      const result = dispatch[row.tool](snapshot, typedArgs(
+        JSON.stringify(row.args)));
+      assert.equal(result.ok, true, row.id);
+      if (row.tool === "search_models") {
+        assertSearchShape(result, row.id);
+      }
+    }
+  });
+
+  it("keeps the frozen error precedence independent of key order", () => {
+    const snapshot = acceptedSnapshot("lookup.json");
+    const call = (text) => catalog.searchModels(snapshot, typedArgs(text));
+
+    // Signature order, not insertion order: query wins over offset.
+    assert.deepEqual(call('{"offset":null,"query":[]}'),
+                     searchArgumentError("invalid_arguments", "query"));
+    // ... provider wins over min_context_length ...
+    assert.deepEqual(call('{"min_context_length":-1,"provider":"synthetic-z"}'),
+                     searchArgumentError("unknown_provider", "provider"));
+    // ... and min_context_length wins over the capability arrays.
+    assert.deepEqual(call(
+      '{"input_modalities":"text","min_context_length":true}'),
+      searchArgumentError("invalid_arguments", "min_context_length"));
+    // ANY unknown own key wins before every known-signature error.
+    assert.deepEqual(call('{"query":[],"bogus":1}'),
+                     searchArgumentError("invalid_arguments", null));
+    // Prototype-looking OWN keys are unknown names, never inherited lookups.
+    for (const name of ["__proto__", "constructor", "toString",
+                        "hasOwnProperty"]) {
+      const args = typedArgs(`{"${name}": 1}`);
+      assert.ok(Object.prototype.hasOwnProperty.call(args, name), name);
+      assert.deepEqual(catalog.searchModels(snapshot, args),
+                       searchArgumentError("invalid_arguments", null), name);
+    }
+    // A literal `__proto__` member stays data in the echoed filter object.
+    const protoQuery = typedArgs('{"query":"x","provider":null}');
+    withOwnKey(protoQuery, "constructor", 1);
+    assert.deepEqual(catalog.searchModels(snapshot, protoQuery),
+                     searchArgumentError("invalid_arguments", null));
+    // A non-object argument is the same null-parameter envelope.
+    for (const value of [[], 5, "x", null, true]) {
+      assert.deepEqual(catalog.searchModels(snapshot, value),
+                       searchArgumentError("invalid_arguments", null));
+    }
+  });
+
+  function bulkSnapshot() {
+    const omega = {};
+    for (let index = 0; index < 120; index += 1) {
+      const rawId = "om-" + String(index).padStart(3, "0");
+      withOwnKey(omega, rawId, searchModel(rawId, "Omega row " + rawId, {
+        description: "Bulk population row for the omega gateway.",
+        context_length: index >= 115 ? 65536 : 8192,
+        input_modalities: ["text"], output_modalities: ["text"],
+        supported_parameters: ["temperature"]
+      }));
+    }
+    const alpha = {};
+    for (let index = 0; index < 95; index += 1) {
+      const rawId = "al-" + String(index).padStart(3, "0");
+      withOwnKey(alpha, rawId, searchModel(rawId, "Alpha row " + rawId, {
+        description: "Bulk population row for the alpha gateway.",
+        context_length: 8192, input_modalities: ["text"],
+        output_modalities: ["text"], supported_parameters: ["temperature"]
+      }));
+    }
+    // A provider-map insertion order different from `provider_order`.
+    const providers = {};
+    withOwnKey(providers, "zero", sealedProvider(
+      {}, "Zero", "https://zero.example/v1/chat/completions"));
+    withOwnKey(providers, "alpha", sealedProvider(
+      alpha, "Alpha", "https://alpha.example/v1/chat/completions"));
+    withOwnKey(providers, "omega", sealedProvider(
+      omega, "Omega", "https://omega.example/v1/chat/completions"));
+    return sealedSearchSnapshot(["omega", "alpha", "zero"], providers);
+  }
+
+  it("paginates 215 pairs with one global sort-then-slice", () => {
+    const snapshot = bulkSnapshot();
+    assert.equal(snapshot.providers.omega.model_ids.length, 120);
+    assert.equal(snapshot.providers.alpha.model_ids.length, 95);
+    assert.notDeepEqual(snapshot.provider_order,
+                        Object.keys(snapshot.providers));
+    assert.notDeepEqual(snapshot.provider_order,
+                        snapshot.provider_order.slice().sort());
+    const before = catalog.canonicalText(snapshot);
+    const omegaIds = snapshot.providers.omega.model_ids;
+    const alphaIds = snapshot.providers.alpha.model_ids;
+
+    const defaultPage = catalog.searchModels(snapshot, {});
+    assertSearchShape(defaultPage, "default");
+    assert.equal(defaultPage.limit, 50);
+    assert.equal(defaultPage.offset, 0);
+    assert.equal(defaultPage.total_matches, 215);
+    assert.equal(defaultPage.returned_count, 50);
+    assert.equal(defaultPage.next_offset, 50);
+    assert.deepEqual(identities(defaultPage),
+                     omegaIds.slice(0, 50).map((id) => ["omega", id]));
+    assert.deepEqual(defaultPage.provider_staleness,
+                     {omega: false, alpha: false, zero: false});
+    assert.deepEqual(defaultPage.counts, {gateways: 1, endpoints: 50,
+                                          distinct_raw_ids: 50,
+                                          marker_group_labels: 50});
+
+    const maxPage = catalog.searchModels(snapshot, {limit: 200});
+    assert.equal(maxPage.returned_count, 200);
+    assert.equal(maxPage.next_offset, 200);
+    assert.equal(maxPage.endpoints[119].model_id, "om-119");
+    assert.equal(maxPage.endpoints[120].provider, "alpha");
+    assert.equal(maxPage.endpoints[120].model_id, "al-000");
+    const tail = catalog.searchModels(snapshot, {limit: 200, offset: 200});
+    assert.equal(tail.returned_count, 15);
+    assert.equal(tail.next_offset, null);
+    assert.deepEqual(tail.endpoints.map((row) => row.model_id),
+                     alphaIds.slice(80));
+    assert.equal(tail.total_matches, 215);
+
+    const cross = catalog.searchModels(snapshot, {limit: 2, offset: 119});
+    assert.deepEqual(identities(cross), [["omega", "om-119"],
+                                         ["alpha", "al-000"]]);
+    assert.equal(cross.next_offset, 121);
+    assert.deepEqual(cross.counts, {gateways: 2, endpoints: 2,
+                                    distinct_raw_ids: 2,
+                                    marker_group_labels: 2});
+
+    const exactEnd = catalog.searchModels(snapshot, {limit: 2, offset: 213});
+    assert.equal(exactEnd.returned_count, 2);
+    assert.equal(exactEnd.next_offset, null);
+    const continuing = catalog.searchModels(snapshot, {limit: 2, offset: 211});
+    assert.equal(continuing.next_offset, 213);
+
+    for (const offset of [215, 999999, catalog.MAX_SAFE_INT]) {
+      const page = catalog.searchModels(snapshot, {limit: 2, offset: offset});
+      assert.equal(page.offset, offset);
+      assert.equal(page.returned_count, 0);
+      assert.equal(page.next_offset, null);
+      assert.equal(page.total_matches, 215);
+      assert.deepEqual(page.counts, {gateways: 0, endpoints: 0,
+                                    distinct_raw_ids: 0,
+                                    marker_group_labels: 0});
+      assert.deepEqual(page.provider_staleness,
+                       {omega: false, alpha: false, zero: false});
+    }
+
+    // Filter BEFORE the single slice: no qualifying row is in the first
+    // unfiltered window, and the filtered page is the later match window.
+    const filtered = catalog.searchModels(snapshot,
+                                          {min_context_length: 65536,
+                                           limit: 3});
+    assert.deepEqual(filtered.endpoints.map((row) => row.model_id),
+                     ["om-115", "om-116", "om-117"]);
+    assert.equal(filtered.total_matches, 5);
+    assert.equal(filtered.next_offset, 3);
+    assert.deepEqual(filtered.counts, {gateways: 1, endpoints: 3,
+                                       distinct_raw_ids: 3,
+                                       marker_group_labels: 3});
+
+    // A zero-ID provider and a genuinely empty registry both succeed.
+    const zeroPage = catalog.searchModels(snapshot, {provider: "zero"});
+    assert.deepEqual(zeroPage.endpoints, []);
+    assert.equal(zeroPage.total_matches, 0);
+    assert.deepEqual(zeroPage.provider_staleness, {zero: false});
+    const empty = catalog.searchModels(
+      sealedSearchSnapshot([], {}, {}), {});
+    assert.equal(empty.ok, true);
+    assert.deepEqual(empty.provider_staleness, {});
+    assert.deepEqual(empty.counts, {gateways: 0, endpoints: 0,
+                                    distinct_raw_ids: 0,
+                                    marker_group_labels: 0});
+    assert.equal(catalog.canonicalText(snapshot), before);
+  });
+
+  it("scopes page counts and staleness to the returned page", () => {
+    const markerId = "acme/chat:free";
+    function markerModel(rawId) {
+      return searchModel(rawId, "Marker " + rawId, {
+        input_modalities: ["text"], supported_parameters: ["temperature"]
+      });
+    }
+    const marker = {};
+    withOwnKey(marker, markerId, markerModel(markerId));
+    withOwnKey(marker, "acme/other", markerModel("acme/other"));
+    const second = {};
+    withOwnKey(second, "acme/chat_free", markerModel("acme/chat_free"));
+    const third = {};
+    withOwnKey(third, markerId, markerModel(markerId));
+    const snapshot = sealedSearchSnapshot(["p1", "p2", "p3"], {
+      p1: sealedProvider(marker, "P1", "https://p1.example/v1/chat/completions",
+                         {stale: true}),
+      p2: sealedProvider(second, "P2",
+                         "https://p2.example/v1/chat/completions"),
+      p3: sealedProvider(third, "P3", "https://p3.example/v1/chat/completions",
+                         {stale: true})
+    });
+    const page = catalog.searchModels(snapshot, {query: "acme"});
+    assert.deepEqual(identities(page), [["p1", markerId],
+                                        ["p1", "acme/other"],
+                                        ["p2", "acme/chat_free"],
+                                        ["p3", markerId]]);
+    assert.equal(page.total_matches, 4);
+    assert.deepEqual(page.counts, {gateways: 3, endpoints: 4,
+                                   distinct_raw_ids: 3,
+                                   marker_group_labels: 2});
+    assert.deepEqual(page.provider_staleness,
+                     {p1: true, p2: false, p3: true});
+
+    // A single-provider page keeps only its own scope and stale flag.
+    const p3 = catalog.searchModels(snapshot, {provider: "p3"});
+    assert.deepEqual(identities(p3), [["p3", markerId]]);
+    assert.equal(p3.endpoints[0].stale, true);
+    assert.equal(p3.endpoints[0].chat_completions_url,
+                 "https://p3.example/v1/chat/completions");
+    assert.deepEqual(p3.provider_staleness, {p3: true});
+    assert.deepEqual(p3.counts, {gateways: 1, endpoints: 1,
+                                 distinct_raw_ids: 1,
+                                 marker_group_labels: 1});
+
+    // An exhausted page keeps every provider's staleness but zero counts.
+    const exhausted = catalog.searchModels(snapshot, {offset: 99});
+    assert.deepEqual(exhausted.counts, {gateways: 0, endpoints: 0,
+                                        distinct_raw_ids: 0,
+                                        marker_group_labels: 0});
+    assert.deepEqual(exhausted.provider_staleness,
+                     {p1: true, p2: false, p3: true});
+  });
+
+  it("never borrows capabilities across providers with the same raw id", () => {
+    const conflictId = "vendor/conflict";
+    const a = {};
+    withOwnKey(a, conflictId, searchModel(conflictId, "Conflict A", {
+      context_length: 65536, input_modalities: ["text"],
+      output_modalities: ["text"], supported_parameters: ["temperature"]
+    }));
+    const b = {};
+    withOwnKey(b, conflictId, searchModel(conflictId, "Conflict B", {
+      context_length: 8192, input_modalities: ["text", "image"],
+      output_modalities: ["text"], supported_parameters: ["temperature"]
+    }));
+    const snapshot = sealedSearchSnapshot(["gw-a", "gw-b"], {
+      "gw-a": sealedProvider(a, "Gate A",
+                             "https://gw-a.example/v1/chat/completions"),
+      "gw-b": sealedProvider(b, "Gate B",
+                             "https://gw-b.example/v1/chat/completions")
+    });
+    const before = catalog.canonicalText(snapshot);
+    const neither = catalog.searchModels(snapshot, {
+      min_context_length: 65536, input_modalities: ["image"]});
+    assert.deepEqual(neither.endpoints, []);
+    assert.equal(neither.total_matches, 0);
+    assert.equal(neither.next_offset, null);
+    assert.deepEqual(identities(catalog.searchModels(snapshot, {
+      min_context_length: 65536, input_modalities: ["text"],
+      supported_parameters: ["temperature"]})), [["gw-a", conflictId]]);
+    assert.deepEqual(identities(catalog.searchModels(snapshot, {
+      min_context_length: 8192, input_modalities: ["IMAGE"],
+      supported_parameters: ["TEMPERATURE"]})), [["gw-b", conflictId]]);
+
+    // Capability AND is on the SAME pair: no union satisfies a conjunction.
+    const splitId = "vendor/split";
+    const left = {};
+    withOwnKey(left, splitId, searchModel(splitId, "Split A", {
+      context_length: 65536, input_modalities: ["text"],
+      supported_parameters: ["temperature"]
+    }));
+    const right = {};
+    withOwnKey(right, splitId, searchModel(splitId, "Split B", {
+      context_length: 65536, input_modalities: ["text"],
+      supported_parameters: ["max_tokens"]
+    }));
+    const split = sealedSearchSnapshot(["gw-a", "gw-b"], {
+      "gw-a": sealedProvider(left, "Gate A",
+                             "https://gw-a.example/v1/chat/completions"),
+      "gw-b": sealedProvider(right, "Gate B",
+                             "https://gw-b.example/v1/chat/completions")
+    });
+    assert.deepEqual(catalog.searchModels(split, {
+      supported_parameters: ["temperature", "max_tokens"]}).endpoints, []);
+    assert.deepEqual(identities(catalog.searchModels(split, {
+      supported_parameters: ["temperature"]})), [["gw-a", splitId]]);
+    assert.deepEqual(identities(catalog.searchModels(split, {
+      supported_parameters: ["max_tokens"]})), [["gw-b", splitId]]);
+    assert.equal(catalog.canonicalText(snapshot), before);
+  });
+
+  it("separates normalized fields from the raw metadata deep copy", () => {
+    const cased = searchModel("vendor/cased", "Cased", {
+      description: "Prose for the cased row.", context_length: 100,
+      input_modalities: ["TEXT", "Image", "text"], output_modalities: [],
+      supported_parameters: ["Temperature", "TEMPERATURE"],
+      pricing: {prompt: "0.5", completion: 0}
+    });
+    const unknown = searchModel("vendor/unknown", "Unknown");
+    const models = {};
+    withOwnKey(models, "vendor/cased", cased);
+    withOwnKey(models, "vendor/unknown", unknown);
+    const snapshot = sealedSearchSnapshot(["norm"], {
+      norm: sealedProvider(models, "Norm",
+                           "https://norm.example/v1/chat/completions")
+    });
+    const before = catalog.canonicalText(snapshot);
+    const args = typedArgs(
+      '{"input_modalities":["TEXT","text"],' +
+      '"supported_parameters":["temperature"],"limit":1.0}');
+    const result = catalog.searchModels(snapshot, args);
+    assert.deepEqual(result.filters, {
+      provider: null, min_context_length: null,
+      input_modalities: ["TEXT", "text"],
+      supported_parameters: ["temperature"]
+    });
+    assert.notEqual(result.filters.input_modalities, args.input_modalities);
+    assert.notEqual(result.filters.supported_parameters,
+                    args.supported_parameters);
+    assert.deepEqual(identities(result), [["norm", "vendor/cased"]]);
+    const row = result.endpoints[0];
+    assert.deepEqual(row.input_modalities, ["text", "image"]);
+    assert.deepEqual(row.output_modalities, []);
+    assert.deepEqual(row.supported_parameters, ["temperature"]);
+    assert.deepEqual(row.unknown_fields, []);
+    assert.deepEqual(row.metadata.architecture.input_modalities,
+                     ["TEXT", "Image", "text"]);
+    assert.deepEqual(row.metadata.supported_parameters,
+                     ["Temperature", "TEMPERATURE"]);
+    assert.deepEqual(row.metadata.pricing, {prompt: "0.5", completion: 0});
+    assert.equal(typeof row.metadata.pricing.completion, "number");
+    assert.notEqual(row.metadata, cased);
+    assert.notEqual(row.metadata.architecture, cased.architecture);
+    assert.notEqual(row.metadata.pricing, cased.pricing);
+    assert.notEqual(row.metadata.supported_parameters,
+                    cased.supported_parameters);
+
+    const unknownRow = catalog.searchModels(snapshot, {query: "unknown"}).endpoints[0];
+    assert.equal(unknownRow.context_length, null);
+    assert.equal(unknownRow.input_modalities, null);
+    assert.deepEqual(unknownRow.unknown_fields,
+                     ["context_length", "input_modalities",
+                      "output_modalities", "supported_parameters"]);
+    assertSameValue(unknownRow.metadata, unknown, "unknown metadata");
+
+    // Deep isolation: mutating any returned category never reaches a later
+    // call, the argument object or the snapshot.
+    const saved = catalog.canonicalText(result);
+    result.filters.input_modalities.push("injected");
+    result.filters.supported_parameters.length = 0;
+    result.provider_staleness.norm = true;
+    row.input_modalities.push("injected");
+    row.unknown_fields.push("injected");
+    row.metadata.architecture.input_modalities.push("injected");
+    row.metadata.pricing.prompt = "9";
+    row.metadata.supported_parameters.push("injected");
+    result.counts.gateways = 99;
+    result.caveats.length = 0;
+    result.endpoints.length = 0;
+    assert.equal(catalog.canonicalText(catalog.searchModels(snapshot, args)),
+                 saved);
+    assert.equal(catalog.canonicalText(snapshot), before);
+    assert.equal(args.input_modalities.length, 2);
+  });
+
+  it("echoes a raw 1.0 filter while paginating with strict integers", () => {
+    const priced = searchModel("vendor/priced", "Priced", {
+      context_length: 0, input_modalities: ["text"],
+      output_modalities: ["text"], supported_parameters: ["temperature"],
+      pricing: {prompt: new catalog.JsonFloat(1),
+                completion: new catalog.JsonFloat(0.5)}
+    });
+    const models = {};
+    withOwnKey(models, "vendor/priced", priced);
+    const body = sealedSearchSnapshot(["floats"], {
+      floats: sealedProvider(models, "Floats",
+                             "https://floats.example/v1/chat/completions")
+    });
+    const text = catalog.canonicalText(body);
+    assert.ok(text.includes('"prompt":1.0'), "the document keeps a float token");
+    const snapshot = catalog.loadSnapshot(text);
+    assert.equal(catalog.snapshotHash(snapshot), snapshot.snapshot_id);
+
+    const result = catalog.searchModels(snapshot, typedArgs(
+      '{"min_context_length":1.0,"limit":1.0,"offset":1.0}'));
+    assert.equal(result.limit, 1);
+    assert.equal(result.offset, 1);
+    assert.ok(!catalog.isFloatToken(result.limit), "limit is a strict integer");
+    assert.ok(catalog.isFloatToken(result.filters.min_context_length),
+              "the raw 1.0 filter echo keeps its float token");
+    assert.equal(result.filters.min_context_length.value, 1);
+    assert.ok(catalog.canonicalText(result).includes(
+      '"min_context_length":1.0'));
+    assert.ok(catalog.canonicalText(result).includes('"limit":1,'));
+
+    const page = catalog.searchModels(snapshot, {min_context_length: 0});
+    assert.equal(page.returned_count, 1);
+    const copied = page.endpoints[0].metadata.pricing;
+    assert.ok(catalog.isFloatToken(copied.prompt), "typed pricing preserved");
+    assert.ok(catalog.isFloatToken(copied.completion));
+    assert.equal(copied.prompt.value, 1);
+    assert.equal(copied.completion.value, 0.5);
+    assert.notEqual(copied, priced.pricing);
+  });
+
+  it("handles prototype-looking keys, unicode and lone surrogates", () => {
+    // A registry whose provider and model keys are prototype member names.
+    const protoModels = {};
+    withOwnKey(protoModels, "__proto__", searchModel("__proto__", "Literal",
+                                                     {context_length: 0}));
+    withOwnKey(protoModels, "constructor", searchModel("constructor",
+                                                       "Constructor"));
+    withOwnKey(protoModels, "hasOwnProperty",
+              searchModel("hasOwnProperty", "Own"));
+    const plainModels = {};
+    withOwnKey(plainModels, "vendor/plain", searchModel("vendor/plain",
+                                                        "Plain"));
+    const stringModels = {};
+    withOwnKey(stringModels, "vendor/tostring",
+              searchModel("vendor/tostring", "Stringly"));
+    const snapshot = sealedSearchSnapshot(
+      ["__proto__", "constructor", "toString", "empty"], (() => {
+        // A `{"__proto__": ...}` object LITERAL would set the prototype; the
+        // registry needs an ordinary OWN member, exactly as JSON.parse makes it.
+        const providers = {};
+        withOwnKey(providers, "__proto__", sealedProvider(
+          protoModels, "Literal proto",
+          "https://proto.example/v1/chat/completions", {stale: true}));
+        withOwnKey(providers, "constructor", sealedProvider(
+          plainModels, "Constructor",
+          "https://constructor.example/v1/chat/completions"));
+        withOwnKey(providers, "toString", sealedProvider(
+          stringModels, "ToString",
+          "https://tostring.example/v1/chat/completions"));
+        withOwnKey(providers, "empty", sealedProvider(
+          {}, "Empty", "https://empty.example/v1/chat/completions"));
+        return providers;
+      })());
+    const page = catalog.searchModels(snapshot, {limit: 200});
+    assert.deepEqual(identities(page), [["__proto__", "__proto__"],
+                                        ["__proto__", "constructor"],
+                                        ["__proto__", "hasOwnProperty"],
+                                        ["constructor", "vendor/plain"],
+                                        ["toString", "vendor/tostring"]]);
+    assert.deepEqual(page.provider_staleness,
+                     flagMap([["__proto__", true], ["constructor", false],
+                              ["toString", false], ["empty", false]]));
+    assert.deepEqual(identities(catalog.searchModels(snapshot,
+                                                     {query: "__proto__"})),
+                     [["__proto__", "__proto__"]]);
+    assert.deepEqual(identities(catalog.searchModels(
+      snapshot, {provider: "constructor"})), [["constructor", "vendor/plain"]]);
+
+    // Unicode natural order and ASCII-only folding.
+    const unicodeIds = ["vendor/\u00e9", "vendor/\u00c9",
+                        "vendor/e\u0301", "vendor/\ud83d\ude00",
+                        "vendor/\ud83d\ude01", "vendor/\uffff",
+                        "vendor/long" + "9".repeat(64),
+                        "vendor/long" + "8".repeat(64)];
+    const unicodeModels = {};
+    for (const rawId of unicodeIds.slice().reverse()) {
+      withOwnKey(unicodeModels, rawId, searchModel(rawId, "Row " + rawId,
+                                                   {context_length: 1000}));
+    }
+    const unicode = sealedSearchSnapshot(["unicode"], {
+      unicode: sealedProvider(unicodeModels, "Unicode",
+                              "https://unicode.example/v1/chat/completions")
+    });
+    const expectedOrder = unicode.providers.unicode.model_ids;
+    const unicodePage = catalog.searchModels(unicode, {limit: 200});
+    assert.deepEqual(unicodePage.endpoints.map((row) => row.model_id),
+                     expectedOrder);
+    // Independently authored natural order: text tokens compare by code point
+    // ("e"+U+0301 < "long" < "É" < "é" < U+FFFF < astral), and the two
+    // 64-digit runs keep their ORIGINAL length with a lexical 8 < 9 tie-break
+    // (a float or BigInt parse would collide them).
+    assert.deepEqual(expectedOrder, [
+      "vendor/e\u0301",
+      "vendor/long" + "8".repeat(64), "vendor/long" + "9".repeat(64),
+      "vendor/\u00c9", "vendor/\u00e9", "vendor/\uffff",
+      "vendor/\ud83d\ude00", "vendor/\ud83d\ude01"
+    ]);
+    assert.equal(expectedOrder[0], "vendor/e\u0301");
+    assert.equal(expectedOrder[2], "vendor/long" + "9".repeat(64));
+    assert.deepEqual(identities(catalog.searchModels(unicode, {
+      query: "\u00c9"})), [["unicode", "vendor/\u00c9"]]);
+    assert.deepEqual(identities(catalog.searchModels(unicode, {
+      query: "\u00e9"})), [["unicode", "vendor/\u00e9"]]);
+    // A bare combining acute is a literal code point of the NFD id, while the
+    // circumflex near-miss appears nowhere.
+    assert.deepEqual(identities(catalog.searchModels(unicode, {
+      query: "\u0301"})), [["unicode", "vendor/e\u0301"]]);
+    assert.equal(catalog.searchModels(unicode, {query: "\u0302"}).total_matches,
+                 0);
+
+    // Astral pairs are single code points: each half alone never matches, and
+    // an unpaired surrogate query matches only that same literal code unit.
+    const astral = "vendor/\ud83d\ude00";
+    assert.equal(catalog.searchModels(unicode, {
+      query: "\ud83d\ude00"}).total_matches, 1);
+    assert.equal(catalog.searchModels(unicode, {query: "\ud83d"}).total_matches,
+                 0);
+    assert.equal(catalog.searchModels(unicode, {query: "\ude00"}).total_matches,
+                 0);
+    const surrogateModels = {};
+    withOwnKey(surrogateModels, "vendor/surrogate", searchModel(
+      "vendor/surrogate", "Lone \ud800 surrogate", {
+        description: "Field with an unpaired \udfff unit",
+        context_length: 4096
+      }));
+    const surrogate = sealedSearchSnapshot(["surrogates"], {
+      surrogates: sealedProvider(surrogateModels, "Surrogates",
+                                 "https://surrogate.example/v1/chat/completions")
+    });
+    const lone = catalog.searchModels(surrogate, {query: "\ud800"});
+    assert.equal(lone.total_matches, 1);
+    assert.equal(lone.endpoints[0].model_id, "vendor/surrogate");
+    assert.equal(catalog.searchModels(surrogate,
+                                      {query: "\udfff"}).total_matches, 1);
+    assert.equal(catalog.searchModels(surrogate, {query: "\ud83d"}).total_matches,
+                 0);
+  });
+
+  it("rejects duplicate raw ids and duplicate JSON members identically", () => {
+    const models = {};
+    withOwnKey(models, "vendor/x", searchModel("vendor/x", "X"));
+    const duplicate = {
+      schema_version: 1, snapshot_id: "0".repeat(64),
+      tick_epoch: 1759200000, cadence_s: 3600,
+      provider_order: ["dup"],
+      providers: {dup: {display_name: "Dup",
+                        chat_completions_url:
+                          "https://dup.example/v1/chat/completions",
+                        api_type: "openai",
+                        model_ids: ["vendor/x", "vendor/x"],
+                        models: models, stale: false}},
+      warnings: []
+    };
+    assert.throws(() => catalog.validateSnapshot(duplicate),
+                  (error) => error instanceof catalog.CatalogError &&
+                             error.code === "invalid_snapshot");
+    const duplicateMembers =
+      '{"schema_version":1,"schema_version":1,"snapshot_id":"' +
+      "0".repeat(64) + '","tick_epoch":1759200000,"cadence_s":3600,' +
+      '"provider_order":[],"providers":{},"warnings":[]}';
+    assert.throws(() => catalog.loadJson(duplicateMembers),
+                  (error) => error instanceof catalog.CatalogError &&
+                             error.code === "invalid_json");
+  });
+
+  it("is the same implementation in the inlined classic browser script", () => {
+    const vm = require("node:vm");
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "..", "web", "catalog-query.js"), "utf8");
+    const sandbox = {};
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(source, sandbox);
+    const browserApi = sandbox.WatchdogCatalog;
+    assert.equal(typeof browserApi.searchModels, "function");
+    assert.equal(browserApi.searchModels.length, 2);
+    const lookup = readFixtureText("lookup.json");
+    const nodeSnapshot = catalog.loadSnapshot(lookup);
+    const browserSnapshot = browserApi.loadSnapshot(lookup);
+    const args = {query: "shared", min_context_length: 65536, limit: 2};
+    assert.equal(
+      browserApi.canonicalText(browserApi.searchModels(browserSnapshot, args)),
+      catalog.canonicalText(catalog.searchModels(nodeSnapshot, args)));
+    // `searchModels` closes over the same module instance in the page copy.
+    const pageResult = browserApi.searchModels(browserSnapshot, {});
+    assert.equal(pageResult.ok, true);
+    assert.equal(pageResult.total_matches, 5);
+  });
+});
+
 describe("fixture integration and export shape", () => {
   const SNAPSHOT_FIELDS = ["cadence_s", "provider_order", "providers",
                            "schema_version", "snapshot_id", "tick_epoch",
@@ -5488,7 +6254,7 @@ describe("fixture integration and export shape", () => {
       "endpointKey", "getModel", "isFloatToken", "listEndpoints",
       "listFreeModels", "loadJson", "loadSnapshot", "naturalKey",
       "normalizeCapabilities", "projectCapabilities", "projectModel",
-      "searchInputModalityPairs", "searchMinContextPairs",
+      "searchInputModalityPairs", "searchMinContextPairs", "searchModels",
       "searchSupportedParameterPairs", "searchTextProviderPairs",
       "snapshotHash", "stripFreeMarker", "validateSnapshot", "watchdogStatus"
     ]);
