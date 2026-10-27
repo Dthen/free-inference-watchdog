@@ -1008,9 +1008,32 @@
   }
 
   /**
+   * `urllib.parse._checknetloc`: a REJECTION-ONLY safety check, never a
+   * rewrite. A non-ASCII netloc is NFKC-normalized after the delimiters it
+   * already carries (`@ : # ?`) are dropped; if that changes the text and the
+   * result introduces a `/ ? # @ :` delimiter, the authority has no
+   * unambiguous hostname under the IDNA normalisation hostnames use, so the
+   * URL is refused. NFKC-neutral names and NFKC changes that introduce no
+   * delimiter stay valid, and the accepted string is preserved verbatim.
+   */
+  function _isNfkcSafeAuthority(authority) {
+    if (!/[^\x00-\x7f]/.test(authority)) {
+      return true;
+    }
+    var stripped = authority.replace(/[@:#?]/g, "");
+    var normalized = stripped.normalize("NFKC");
+    if (normalized === stripped) {
+      return true;
+    }
+    return !/[/?#@:]/.test(normalized);
+  }
+
+  /**
    * The frozen SYNTACTIC wiring predicate: a nonempty absolute http/https URL
    * with a hostname, no userinfo, no fragment and no ASCII whitespace or
    * control character. Purely syntactic -- no DNS, no allowlist, no rewriting.
+   * A non-ASCII authority whose NFKC normalization introduces a delimiter is
+   * refused (`_isNfkcSafeAuthority`), mirroring `urlsplit`'s `_checknetloc`.
    * An EMPTY fragment component (a trailing `#`) is accepted.
    */
   function _isWiringUrl(url) {
@@ -1072,6 +1095,11 @@
       }
     } else {
       hostname = authority.split(":")[0];
+    }
+    // `urlsplit` runs `_checknetloc` on the whole netloc, after the bracketed
+    // host was validated; it is rejection-only and never rewrites the URL.
+    if (!_isNfkcSafeAuthority(authority)) {
+      return false;
     }
     if (hostname.length === 0) {
       return false;

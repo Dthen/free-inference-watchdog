@@ -873,6 +873,54 @@ describe("wiring URL authority", () => {
       assertWiringAccepts(url);
     }
   });
+
+  // Python's `urlsplit` -> `_checknetloc` is a REJECTION-ONLY safety check on a
+  // non-ASCII netloc: drop the delimiters already present (`@ : # ?`), NFKC
+  // normalize, and refuse the URL when the normalization changed the text AND
+  // introduced any of `/ ? # @ :`. It never rewrites the URL and never rejects
+  // non-ASCII on its own, so NFKC-neutral names and NFKC changes that introduce
+  // no delimiter stay acceptable. The expected verdicts below were taken from
+  // the reference (Python 3.11.15 `_is_wiring_url` + `validate_snapshot`), not
+  // from this module.
+  it("rejects authorities whose NFKC normalization introduces a delimiter", () => {
+    for (const url of [
+      "http://example.com\uff0f.evil/path",     // fullwidth solidus
+      "http://example\uff0f80/path",
+      "http://ex\uff0fample.com/",
+      "http://example.com\uff1a80/path",        // fullwidth colon
+      "http://example.com:80\uff0fx/",
+      "http://example.com\uff20evil/",          // fullwidth commercial at
+      "http://example.com\uff03frag",           // fullwidth number sign
+      "http://example.com\uff1fq=1",            // fullwidth question mark
+      "http://example.com\uff20\uff1a/\uff03",  // several at once
+      "http://[v1.\uff0f]/",                   // IPvFuture host
+      "http://[vF.\uff1a]/",
+      "http://ex\u2100mple.com/",              // ACCOUNT OF normalizes to a/c
+      "http://example.com\ufe5fx/",            // small number sign -> #
+      "http://ex\u00e4mple.com\uff0fx/",       // NFKC-neutral part + confusable
+      "http://\uff0f?[",
+    ]) {
+      assertWiringRejects(url);
+    }
+  });
+
+  it("keeps NFKC-neutral and delimiter-free Unicode authorities verbatim", () => {
+    for (const url of [
+      "http://m\u00fcnchen.de/v1",                  // NFKC-neutral
+      "http://xn--m\u00fcnchen.de/",
+      "http://\u4f8b\u3048.jp/v1",                  // NFKC-neutral
+      "http://\u00e4.example.com/",
+      "http://\u00c4\u00d6\u00dc.example/",
+      "http://exa\u00a0mple.com/",                  // NBSP -> space, no delimiter
+      "http://example.com\u3000/",                  // ideographic space
+      "http://\uff45\uff58\uff41\uff4d\uff50\uff4c\uff45.com/",  // -> example
+      "http://\ufb01le.example/",                   // ligature fi
+      "http://\u2163.example/",                     // Roman numeral IV
+      "http://example.com:80/",
+    ]) {
+      assertWiringAccepts(url);
+    }
+  });
 });
 
 // --------------------------------------------------------------------------
