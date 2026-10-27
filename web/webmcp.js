@@ -63,11 +63,57 @@
  *
  * A whole-tool-unit abort is intentional: a partial registration is reported
  * honestly rather than being retried or repaired, and later tools are not
- * attempted after a failure. Lifecycle/retry/duplicate coverage belongs to the
- * next unit; annotations, `AbortSignal` registration options, page wiring and
- * native RESULT WRAPPING are also out of scope here — `execute` returns the
- * complete raw shared-core payload (including its structured invalid-argument
- * envelope) unchanged.
+ * attempted after a failure. Lifecycle/retry/duplicate-setup coverage belongs
+ * to the next unit; `AbortSignal`/`exposedTo` registration options, page
+ * wiring and auto-setup are also out of scope here.
+ *
+ * NATIVE RETURN BOUNDARY — a complete JSON TEXT result. The current documented
+ * imperative `execute` returns a string (the order-status example's "return the
+ * order data as a string"), never a bare JS object that WebIDL would coerce to
+ * `"[object Object]"`. Each callback therefore returns:
+ *
+ *     execute(args) -> <JSON text>            (never a raw payload object)
+ *
+ * The text is built by the SHARED typed canonical encoder
+ * (`catalog.canonicalText`), never by `JSON.stringify`: the engine keeps a
+ * float TOKEN distinct from an integer token (`1.0` is a `JsonFloat`, `1` is a
+ * number), `JSON.stringify` would collapse `1.0` to `1` AND would render the
+ * wrapper itself if it ever leaked, while the canonical encoder spells
+ * `1.0`/`-0.0` faithfully and never exposes a wrapper. The text is pure ASCII
+ * (escaped strings), so it travels through any transport unchanged. Decoding
+ * that text with the shared `loadJson` strict loader and removing ONLY the
+ * top-level `source` member recovers the pure query result exactly, including
+ * numeric token distinctions.
+ *
+ * `watchdog_status` can still REJECT/THROW its one existing fixed
+ * non-reflective clock error (`STATUS_CLOCK_ERROR`) when the injected clock is
+ * unusable: that is a programming-seam failure, raised before any framing, and
+ * it is deliberately NOT converted into a success payload or a new public error
+ * policy. No other failure is swallowed.
+ *
+ * EMBEDDED SOURCE — one honest, minimal attachment added by this boundary:
+ *
+ *     source: { "mode": "browser" }
+ *
+ * The tools query an ALREADY-LOADED document, so nothing more is known: this is
+ * not an HTTP refresh, not a disk-cache hit and not a new monitor tick. There
+ * is therefore no fabricated retrieval timestamp, page URL, filesystem path,
+ * network-freshness, cache or provider statement, and no re-stamped snapshot
+ * epoch. `source` is a SEPARATE top-level member (mirroring the Python
+ * `watchdog_catalog.source.with_source` attachment point), added to successful
+ * AND invalid-argument payloads without promoting `ok: false` to success,
+ * without touching any error code and without altering any other field. It is a
+ * fresh object on every invocation.
+ *
+ * ANNOTATIONS — every descriptor carries a fresh
+ * `annotations: { readOnlyHint: true, untrustedContentHint: true,
+ * consequentialHint: false }`. These are the three hints the current API
+ * documents; this tool surface only reads an immutable published snapshot
+ * (`readOnlyHint`), its payload is upstream model text and therefore untrusted
+ * data (`untrustedContentHint`), and it takes no consequential action
+ * (`consequentialHint`). Annotations are advisory metadata: they never sanitize
+ * upstream text, and upstream names/descriptions remain DATA inside the JSON
+ * text — never HTML, never executable code.
  *
  * ARGUMENT BOUNDARY: WebMCP may invoke a tool with no argument object at all.
  * `undefined` is therefore forwarded as `{}` — the documented empty-arguments
@@ -75,6 +121,14 @@
  * out-of-range numbers) is forwarded to the shared engine UNCHANGED, so the
  * engine's own success/error policy decides the outcome. Nothing is
  * destructured, coerced, filtered or defaulted here.
+ *
+ * OUTPUT SIZE: the current security guidance RECOMMENDS ~1.5K characters per
+ * tool output; it is not a protocol cap. This adapter therefore NEVER truncates,
+ * drops metadata, shortens an array or invents pagination to fit that
+ * recommendation. `list_free_models` and `list_endpoints` are explicit bulk
+ * exports and can legitimately exceed it; routine lookups belong in
+ * `search_models` with a small `limit`. Oversized bulk output is a documented
+ * usability limitation, not a hidden hard-cap violation.
  *
  * DESCRIPTOR PROVENANCE: names, descriptions and complete nested input schemas
  * are taken from the embedded `tool-contract` island (the shipped
@@ -119,12 +173,46 @@
     search_models: "searchModels"
   });
 
+  /**
+   * The other shared-engine members this adapter CALLS: the two strict loaders
+   * used once at setup and the typed canonical encoder used on every result.
+   */
+  var CORE_SEAMS = Object.freeze([
+    "loadSnapshot", "loadJson", "canonicalText"
+  ]);
+
   /** The exactly-two inert islands this adapter is allowed to read. */
   var CATALOG_ISLAND_ID = "catalog-data";
   var CONTRACT_ISLAND_ID = "tool-contract";
 
   /** The descriptor fields the adapter builds; nothing else is invented. */
   var ENTRY_FIELDS = ["name", "description", "inputSchema"];
+
+  /**
+   * The ONE honest provenance fact available at this boundary.
+   *
+   * A fresh factory, never a shared frozen literal: the attachment belongs to a
+   * single invocation, and nothing here is inferred from the page, the clock or
+   * the network.
+   */
+  function browserSource() {
+    return { mode: "browser" };
+  }
+
+  /**
+   * A fresh, explicit annotation set for one descriptor.
+   *
+   * readOnly      — the tools only read an immutable published snapshot;
+   * untrusted     — the payload is upstream model text, i.e. untrusted DATA;
+   * consequential — nothing is booked, bought, deleted or written.
+   */
+  function browserAnnotations() {
+    return {
+      readOnlyHint: true,
+      untrustedContentHint: true,
+      consequentialHint: false
+    };
+  }
 
   /** Frozen clock-failure text, mirroring the Python `_status_epoch` seam. */
   var STATUS_CLOCK_ERROR =
@@ -270,10 +358,13 @@
   }
 
   /**
-   * Shared-engine availability: the five real query functions must exist.
+   * Shared-engine availability: the five real query functions, the two strict
+   * loaders and the typed canonical encoder must exist.
    *
-   * The adapter has no query of its own, so a missing engine is a setup fault,
-   * not something to substitute for.
+   * The adapter has no query and no encoder of its own: a missing engine member
+   * is a setup fault, not something to substitute for (an ordinary JSON
+   * serializer is NOT an acceptable stand-in — it would silently lose
+   * float-token identity).
    */
   function coreAvailable(catalog) {
     if (catalog === null || catalog === undefined) {
@@ -282,6 +373,15 @@
     for (var index = 0; index < TOOL_NAMES.length; index += 1) {
       var name = CORE_FUNCTIONS[TOOL_NAMES[index]];
       if (typeof catalog[name] !== "function") {
+        return false;
+      }
+    }
+    var seam;
+    for (var seamIndex = 0;
+         seamIndex < CORE_SEAMS.length;
+         seamIndex += 1) {
+      seam = CORE_SEAMS[seamIndex];
+      if (typeof catalog[seam] !== "function") {
         return false;
       }
     }
@@ -378,31 +478,63 @@
   }
 
   /**
+   * Attach the browser source as a SEPARATE top-level member.
+   *
+   * Every existing member of `payload` is carried over by reference-identical
+   * value — no field is renamed, reordered, filtered, defaulted or dropped, and
+   * `ok`/`error` status is untouched, so an invalid-argument payload stays
+   * `ok: false` with its own code, message and parameter. The attachment is a
+   * fresh object, so no caller can mutate a later invocation through it.
+   */
+  function attachSource(payload) {
+    var attached = {};
+    var keys = Object.keys(payload);
+    for (var index = 0; index < keys.length; index += 1) {
+      attached[keys[index]] = payload[keys[index]];
+    }
+    attached.source = browserSource();
+    return attached;
+  }
+
+  /**
+   * The native return boundary: one complete JSON TEXT result.
+   *
+   * Encoded by the SHARED typed canonical encoder, never an ordinary JSON
+   * serializer: the integer/float TOKEN distinction survives (`1.0` stays
+   * `1.0`), the engine's internal float wrapper is never rendered, and the text
+   * is pure ASCII. No length cap, no truncation and no re-pagination happens
+   * here — an oversized bulk export stays complete.
+   */
+  function frame(catalog, payload) {
+    return catalog.canonicalText(attachSource(payload));
+  }
+
+  /**
    * Build the `execute` callback for one shared tool.
    *
    * `undefined` means "the native layer supplied no argument object" and is
    * forwarded as `{}`; every other value is forwarded UNCHANGED. The return
-   * value is the complete raw shared-core payload — result wrapping belongs to
-   * the unit that owns the native response boundary.
+   * value is a JSON TEXT result at the native boundary described in the header.
    */
-  function makeExecute(coreFunction, snapshot, capturesClock, clock) {
+  function makeExecute(catalog, coreFunction, snapshot, capturesClock, clock) {
     return function execute(args) {
       var forwarded = args === undefined ? {} : args;
-      if (!capturesClock) {
-        return coreFunction(snapshot, forwarded);
-      }
-      return coreFunction(snapshot, forwarded, referenceEpoch(clock()));
+      var payload = capturesClock
+        ? coreFunction(snapshot, forwarded, referenceEpoch(clock()))
+        : coreFunction(snapshot, forwarded);
+      return frame(catalog, payload);
     };
   }
 
-  /** One descriptor, with a defensive schema copy and no invented fields. */
+  /** One descriptor: defensive schema copy, fresh annotations, text result. */
   function makeDescriptor(entry, snapshot, catalog, clock) {
     var coreFunction = catalog[CORE_FUNCTIONS[entry.name]];
     return {
       name: entry.name,
       description: entry.description,
       inputSchema: copyJson(entry.inputSchema),
-      execute: makeExecute(coreFunction, snapshot,
+      annotations: browserAnnotations(),
+      execute: makeExecute(catalog, coreFunction, snapshot,
                            entry.name === "watchdog_status", clock)
     };
   }
