@@ -67,8 +67,10 @@ errors, and complete bulk output that is compared field-for-field with the
 shared Python core over the page's own snapshot. Availability is pinned as a
 SCOPE (development flag, Chrome 149+ origin trial, secure context, `tools`
 Permissions Policy) with no universal claim, the oversize-output rule is pinned
-as Chrome's RECOMMENDATION rather than a cap, the tracked page is checked
-against the "not published yet" caveat, and the retired "planned / no adapter /
+as Chrome's RECOMMENDATION rather than a cap, the publication paragraph is
+checked against the phase the tracked page is actually in (pre-publication and
+freshly inlined both pass; a deployment claim the artifact contradicts, or a
+caveat it has outgrown, does not), and the retired "planned / no adapter /
 later units" claims are planted as mutations the same predicates reject.
 """
 
@@ -228,7 +230,10 @@ def _tool_names():
 # re-worded denial is caught too, and each pattern is exercised against a
 # planted sample in the tests that use it.
 
-#: Claims the shipped source and a fresh build both contradict.
+#: Claims the shipped source and a fresh build both contradict. Publication
+#: STATE is deliberately absent here: whether the deployed page already carries
+#: the tools is a fact about the artifact, checked against that artifact below,
+#: not a claim the README may never make (unit 11c publication transition).
 _BROWSER_DENIAL_PATTERNS = (
     "no browser mcp support",
     "no webmcp registration",
@@ -240,12 +245,15 @@ _BROWSER_DENIAL_PATTERNS = (
     "browser-registration work",
     "works in every browser",
     "supported in every browser",
-    "the deployed dashboard registers",
 )
 
-#: A browser claim scoped as "later work" — the D3 regression.
+#: A browser claim scoped as "later work" — the D3 regression. The deferral
+#: terms name UNFINISHED work; a plain "the browser tools remain a progressive
+#: enhancement" is an accurate statement about the shipped design and must not
+#: be caught (10d QUALITY M2).
 _BROWSER_DEFERRAL = re.compile(
-    r"browser[^.]{0,120}(later unit|future work|not implemented|remain)", re.I)
+    r"browser[^.]{0,120}(later unit|future work|not implemented|remains? to be"
+    r"|not yet (?:implemented|shipped|available))", re.I)
 
 
 def _browser_denials(text):
@@ -260,6 +268,54 @@ def _browser_denials(text):
     for match in _BROWSER_DEFERRAL.finditer(plain):
         found.append("deferred: " + " ".join(match.group(0).split()))
     return found
+
+
+# -- publication phase (unit 11c): a fact about the artifact, not a phase to
+# -- pin in prose ------------------------------------------------------------
+#
+# The browser route is implemented in SOURCE and published as a GENERATED page.
+# Both a pre-publication checkout (the tracked page is the older two-island
+# snapshot) and a fresh-inline checkout (the tracked page carries the inlined
+# scripts, i.e. checkpoint C has published a build) are valid states of this
+# repository, so the documentation contract is bound to whichever state the
+# tracked artifact is actually in instead of hard-wiring one of them.
+
+#: The marker the builder writes around each inlined maintained page script.
+PUBLICATION_INLINE_MARKER = 'data-watchdog="webmcp"'
+
+#: Statements that are true only once the page-script build IS the published
+#: page. Before that they are a publication claim the artifact contradicts.
+_CONSEQUENTIAL_PUBLICATION_CLAIMS = (
+    "the deployed dashboard now registers",
+    "the deployed dashboard already carries",
+    "the deployed page now carries",
+    "has been published to the deployed",
+    "is already live on the deployed",
+)
+
+#: Caveats that are true only WHILE the tracked page predates the page-script
+#: build. After publication they are the stale claim instead.
+_STALE_ARTIFACT_CAVEATS = (
+    "predates the page-script build",
+    "still the older two-island snapshot",
+    "does not claim it has happened",
+)
+
+
+def _publication_claim_errors(section, tracked_html):
+    """Publication prose the artifact contradicts, in either phase.
+
+    ``section`` is the browser section; ``tracked_html`` is the page object
+    tracked at ``HEAD``. Before that page carries the inlined scripts, saying
+    the deployed dashboard already registers the tools is false; once it
+    carries them, keeping a "not published yet" caveat is the stale claim.
+    """
+    lowered = _plain(section).lower()
+    published = PUBLICATION_INLINE_MARKER in tracked_html
+    claims = () if published else _CONSEQUENTIAL_PUBLICATION_CLAIMS
+    caveats = _STALE_ARTIFACT_CAVEATS if published else ()
+    return ([claim for claim in claims if claim in lowered]
+            + [caveat for caveat in caveats if caveat in lowered])
 
 
 # -- consumer metadata, freshness and identity examples (unit 10b1) ----------
@@ -1021,29 +1077,86 @@ def test_browser_availability_is_scoped_not_universal():
         f"{_browser_denials(_readme())}")
 
 
-def test_browser_publication_is_not_claimed(browser_page):
-    """The tracked page still predates the integration, so the README must
-    distinguish implemented-and-locally-verified from published."""
-    section = _plain(_section(_readme(), BROWSER_HEADING))
-    lowered = section.lower()
-    assert "publication status" in lowered
-    assert "site/index.html" in section
-    assert "separately authorized" in lowered
-    assert "does not claim it has happened" in lowered, \
-        "the section must not imply the regenerated page was published"
-
-    # Bind the caveat to the artifact actually tracked at this commit, and to
-    # the fresh build the setup instructions were exercised against.
-    assert 'data-watchdog="webmcp"' in browser_page["html"], \
-        "a fresh build no longer carries the inlined adapter"
+def _tracked_page_html():
+    """The page object committed at HEAD, or a skip outside a Git checkout."""
     tracked = subprocess.run(
         ["git", "show", "HEAD:site/index.html"],
         cwd=str(REPO), capture_output=True, text=True)
     if tracked.returncode != 0:
         pytest.skip("not a git checkout with a tracked site/index.html")
-    assert 'data-watchdog="webmcp"' not in tracked.stdout, (
-        "the tracked page already carries the inlined page scripts — the "
-        "stale-artifact caveat in the README is now wrong")
+    return tracked.stdout
+
+
+def test_browser_publication_status_is_bound_to_the_tracked_artifact(browser_page):
+    """The publication paragraph must stay true of the artifact in THIS checkout.
+
+    Before checkpoint C publishes a build, the tracked page is the older
+    two-island snapshot, so the docs may not claim the deployed dashboard
+    already registers the tools. Once a refreshed page is committed, that same
+    caveat becomes the false statement instead. Required in both phases: the
+    publication boundary is spelled out, the artifact check that decides it is
+    documented, and a local build is never called publication.
+    """
+    section = _plain(_section(_readme(), BROWSER_HEADING))
+    lowered = " ".join(section.lower().split())
+    assert "publication status" in lowered
+    assert "site/index.html" in section
+    assert "separately authorized" in lowered
+    assert "a local build is never publication" in lowered
+    assert "data-watchdog" in section, (
+        "the section does not say how a reader can tell a published build "
+        "from an older page")
+
+    # A fresh build of this source really does carry the inlined adapter.
+    assert PUBLICATION_INLINE_MARKER in browser_page["html"], \
+        "a fresh build no longer carries the inlined adapter"
+
+    tracked = _tracked_page_html()
+    phase = ("fresh-inline" if PUBLICATION_INLINE_MARKER in tracked
+             else "pre-publication")
+    assert _publication_claim_errors(section, tracked) == [], (
+        "the publication paragraph contradicts the tracked site/index.html "
+        f"({phase} phase): {_publication_claim_errors(section, tracked)}")
+
+    # The same paragraph must stay accurate on the other side of the boundary,
+    # so publishing a refreshed page never requires rewriting this section.
+    assert _publication_claim_errors(
+        section, f'<script {PUBLICATION_INLINE_MARKER}></script>') == [], (
+        "the publication paragraph would become stale once the page-script "
+        "build is published")
+
+
+@pytest.mark.parametrize("published, prose, expected", [
+    (False,
+     "The tracked site/index.html shows the last published page; a local build "
+     "is never publication. Every build carries the data-watchdog script "
+     "islands.",
+     []),
+    (False,
+     "The deployed dashboard now registers the five tools.",
+     ["the deployed dashboard now registers"]),
+    (True,
+     "The tracked site/index.html shows the last published page; a local build "
+     "is never publication. Every build carries the data-watchdog script "
+     "islands.",
+     []),
+    (True,
+     "The tracked site/index.html is still the older two-island snapshot and "
+     "does not claim it has happened.",
+     ["still the older two-island snapshot", "does not claim it has happened"]),
+])
+def test_publication_claim_predicate_accepts_both_valid_phases(
+        published, prose, expected):
+    """Both artifact phases are supported and each direction stays sensitive.
+
+    A phase-neutral paragraph passes in both. A deployment claim fails while
+    the tracked artifact is old; the pre-publication caveat fails once that
+    artifact carries the inlined scripts. This is the planted control for the
+    transition, so neither branch is merely assumed.
+    """
+    tracked = ("<html/>" if not published
+               else f'<script {PUBLICATION_INLINE_MARKER}></script>')
+    assert _publication_claim_errors(prose, tracked) == expected
 
 
 def test_agents_documents_the_browser_surface_it_ships():

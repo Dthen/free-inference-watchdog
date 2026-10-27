@@ -444,9 +444,11 @@ documentation calls WebMCP a proposed standard under active change — see
 `document.modelContext` is absent and setup reports `unsupported`, with it five
 tools are discovered and run):
 
-1. Open the page — the dashboard at <https://models.dthen.xyz>, or a built copy
-   of `site/index.html`. The page is self-contained, so a `file://` open works
-   too; see *Publication status* below for the copy this ref tracks.
+1. Open a page built from this ref — run the builder, then open
+   `site/index.html` (a `file://` open works because the page is
+   self-contained), or a copy you published from it. The deployed dashboard at
+   <https://models.dthen.xyz> carries these tools only once the published page
+   is a build from this ref; see *Publication status* below.
 2. Enable `chrome://flags/#enable-webmcp-testing` → **Enabled** → relaunch
    Chrome.
 3. Confirm in DevTools → **Application** → **WebMCP**: *Available Tools* lists
@@ -488,13 +490,15 @@ agent that already has the page open calls these tools in that page; the only
 transport this ref ships is local stdio, and the two routes share tool
 definitions and payload semantics, not a process.
 
-**Publication status.** The tracked `site/index.html` in this ref is still the
-older two-island snapshot, written before the page scripts were inlined; a
-fresh build of this checkout carries the integration and is what the setup
-above was verified against. Regenerating and deploying that page is a separate,
-separately authorized step, and this page does not claim it has happened — so
-treat the browser route as implemented and locally verified, not as a promise
-about the currently deployed dashboard.
+**Publication status.** The tracked `site/index.html` and the deployed
+dashboard show the last page that was PUBLISHED; publishing a regenerated page
+is a separate, separately authorized step, and a local build is never
+publication. Read the copy in front of you rather than this paragraph: every
+build from this ref carries the inlined `catalog-query`, `webmcp` and bootstrap
+scripts as `data-watchdog` script islands, and with those in place DevTools →
+**Application** → **WebMCP** lists the five tools. A copy without those islands
+is an older page — open a fresh build of this checkout for the setup above
+instead, and never read that absence as this ref lacking the browser route.
 
 ---
 
