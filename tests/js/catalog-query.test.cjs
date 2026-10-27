@@ -1593,7 +1593,9 @@ describe("ordering and free-marker helpers", () => {
 // unchanged reference helper -- agreement alone is never taken as proof: the
 // committed literals remain the correctness oracle.
 
-const QUERY_CASES = readFixtureDocument("cases.json").cases;
+const QUERY_CASES_DOCUMENT = readFixtureDocument("cases.json");
+const QUERY_CASES = QUERY_CASES_DOCUMENT.cases;
+const QUERY_FIXTURE = QUERY_CASES_DOCUMENT.fixture;
 const QUERY_ARGUMENTS = readFixtureDocument("argument-cases.json");
 
 const LIST_ALL_FIELDS = ["counts", "models", "n_gateways", "ok",
@@ -1846,13 +1848,56 @@ const QUERY_REFERENCE_SCRIPT = [
   'sys.path.insert(0, ".")',
   "import watchdog_catalog.query as query_module",
   "from watchdog_catalog.catalog import load_snapshot",
+  "",
+  "def _stage_pairs(snapshot, args):",
+  "    pairs = query_module._search_text_provider_pairs(",
+  "        snapshot, query=args['query'], provider=args['provider'])",
+  "    pairs = query_module._search_min_context_pairs(",
+  "        snapshot, pairs, min_context_length=args['min_context_length'])",
+  "    pairs = query_module._search_input_modality_pairs(",
+  "        snapshot, pairs, input_modalities=args['input_modalities'])",
+  "    pairs = query_module._search_supported_parameter_pairs(",
+  "        snapshot, pairs, supported_parameters=args['supported_parameters'])",
+  "    return [[provider, raw_id] for provider, raw_id in pairs]",
+  "",
+  "def _stage_filter(snapshot, args):",
+  "    pairs = [tuple(pair) for pair in args['pairs']]",
+  "    return {",
+  "        'context': [list(pair) for pair in",
+  "                    query_module._search_min_context_pairs(",
+  "                        snapshot, pairs,",
+  "                        min_context_length=args['min_context_length'])],",
+  "        'input': [list(pair) for pair in",
+  "                  query_module._search_input_modality_pairs(",
+  "                      snapshot, pairs,",
+  "                      input_modalities=args['input_modalities'])],",
+  "        'parameters': [list(pair) for pair in",
+  "                       query_module._search_supported_parameter_pairs(",
+  "                           snapshot, pairs,",
+  "                           supported_parameters=args['supported_parameters'])],",
+  "    }",
+  "",
+  "def _load_error(snapshot_text):",
+  "    try:",
+  "        load_snapshot(snapshot_text)",
+  "    except Exception as error:",
+  "        return {'code': getattr(error, 'code', type(error).__name__)}",
+  "    return {'code': None}",
+  "",
   "payload = json.load(sys.stdin)",
   "handlers = {'list_free_models': query_module.list_free_models,",
   "            'list_endpoints': query_module.list_endpoints,",
   "            'get_model': query_module.get_model,",
-  "            'watchdog_status': query_module.watchdog_status}",
+  "            'watchdog_status': query_module.watchdog_status,",
+  "            'search_stage_pairs': _stage_pairs,",
+  "            'search_stage_filter': _stage_filter}",
   "results = []",
   "for case in payload['cases']:",
+  "    if case['tool'] == 'load_error':",
+  "        results.append(json.dumps(_load_error(case['snapshot_text']),",
+  "                                  sort_keys=True, ensure_ascii=True,",
+  "                                  separators=(',', ':'), allow_nan=False))",
+  "        continue",
   "    snapshot = load_snapshot(case['snapshot_text'])",
   "    handler = handlers[case['tool']]",
   "    extra = {} if case.get('now') is None else {'now': case['now']}",
@@ -4027,6 +4072,1232 @@ describe("pure watchdog_status query", () => {
 });
 
 // --------------------------------------------------------------------------
+// pure metadata-search pipeline stages (internal, unpaginated)
+// --------------------------------------------------------------------------
+//
+// `search_models`' INTERNAL pipeline is four pure stages: candidate selection
+// by literal text and exact provider, then INCLUSIVE minimum context, then
+// input-modality AND, then supported-parameter AND. Each filter stage narrows an
+// ALREADY selected ordered list of `[provider, model_id]` identities; none of
+// them re-derives a global selection, sorts, deduplicates or paginates. Public
+// argument decoding, success/error envelopes and pagination belong to a later
+// unit, so every expectation below is a literal identity array taken from the
+// INDEPENDENTLY authored `cases.json` goldens, a hand-authored boundary row, or
+// a live comparison against the unchanged Python reference -- agreement between
+// the two runtimes alone is never treated as proof of correctness.
+
+const SEARCH_STAGE_KEYS = new Set(["query", "provider", "min_context_length",
+                                   "input_modalities", "supported_parameters"]);
+
+/** The five stage arguments, with every omitted member resolved to `null`. */
+function stageArguments(args) {
+  const stage = {query: null, provider: null, min_context_length: null,
+                 input_modalities: null, supported_parameters: null};
+  for (const key of Object.keys(args || {})) {
+    if (SEARCH_STAGE_KEYS.has(key)) {
+      stage[key] = args[key];
+    }
+  }
+  return stage;
+}
+
+/** The `[provider, model_id]` identity of one selected pair, as a fresh array. */
+function pairIdentity(pair) {
+  return [pair[0], pair[1]];
+}
+
+function searchRows() {
+  return QUERY_CASES.filter((row) => row.tool === "search_models");
+}
+
+/**
+ * The frozen `search_models` rows usable as a COMPLETE stage oracle: their
+ * arguments are confined to the five stage keys and their whole match set fits
+ * the default page. A paginated or page-capped row stays a later public-envelope
+ * oracle and must never silently widen this set.
+ */
+function completeStageRows() {
+  return searchRows().filter((row) =>
+    Object.keys(row.args).every((key) => SEARCH_STAGE_KEYS.has(key)) &&
+    row.expect.offset === 0 &&
+    row.expect.next_offset === null &&
+    row.expect.total_matches === row.expect.endpoints.length);
+}
+
+/** The ordered `[provider, model_id]` identities of one committed golden. */
+function goldenIdentities(row) {
+  return row.expect.endpoints.map(
+    (endpoint) => [endpoint.provider, endpoint.model_id]);
+}
+
+function rowSnapshot(row) {
+  return acceptedSnapshot(row.fixture === undefined ? QUERY_FIXTURE
+                                                   : row.fixture);
+}
+
+/** Compose the four internal stages exactly as the accepted Python pipeline. */
+function composeSearchStages(snapshot, args) {
+  const stage = stageArguments(args);
+  let pairs = catalog.searchTextProviderPairs(
+    snapshot, {query: stage.query, provider: stage.provider});
+  pairs = catalog.searchMinContextPairs(snapshot, pairs,
+                                        stage.min_context_length);
+  pairs = catalog.searchInputModalityPairs(snapshot, pairs,
+                                            stage.input_modalities);
+  return catalog.searchSupportedParameterPairs(snapshot, pairs,
+                                               stage.supported_parameters);
+}
+
+/** The exact frozen goldens whose arguments are confined to text and provider. */
+const TEXT_STAGE_CASE_IDS = [
+  "search_metadata_reasoning_text_only",
+  "search_capability_defaults_both_models",
+  "search_provider_b_shared_stale_scope",
+  "search_provider_c_empty_stale_scope",
+  "search_text_unicode_upper_echo_first",
+  "search_text_unicode_lower_echo_second",
+  "search_text_literal_brackets_not_regex",
+  "search_text_metadata_array_not_searched",
+  "search_text_raw_id_unknown_flags",
+  "search_text_padded_query_not_trimmed"
+];
+
+/** (case id, fixture, stage arguments, literal expected identities). */
+const MIN_CONTEXT_GOLDENS = [
+  ["search_metadata_reasoning_min_context_inclusive",
+   "metadata-edge-cases.json",
+   {query: "reasoning", min_context_length: 65536},
+   [["synthetic-a", "vendor/known-context"]]],
+  ["search_metadata_reasoning_min_context_zero",
+   "metadata-edge-cases.json",
+   {query: "reasoning", min_context_length: 0},
+   [["synthetic-a", "vendor/known-context"],
+    ["synthetic-a", "vendor/zero-context"]]],
+  ["search_capability_min_context_zero_known_only",
+   "capability-unknown.json",
+   {min_context_length: 0},
+   [["synthetic-a", "vendor/known-empty-capabilities"]]],
+  ["search_shared_min_context_a_only",
+   "lookup.json",
+   {query: "shared", min_context_length: 65536},
+   [["synthetic-a", "vendor/shared"]]]
+];
+
+const MODALITY_GOLDENS = [
+  ["search_capability_positive_modality_yields_none",
+   "capability-unknown.json",
+   {input_modalities: ["text"]},
+   []],
+  ["search_shared_modalities_and_b_only",
+   "lookup.json",
+   {query: "shared", input_modalities: ["text", "IMAGE"]},
+   [["synthetic-b", "vendor/shared"]]],
+  // Individual predicates each match a DIFFERENT provider, so only the
+  // same-endpoint conjunction explains the empty result.
+  ["search_shared_context_and_image_neither",
+   "lookup.json",
+   {query: "shared", min_context_length: 65536,
+    input_modalities: ["image"]},
+   []]
+];
+
+const PARAMETER_GOLDENS = [
+  ["search_capability_empty_filters_no_constraint",
+   "capability-unknown.json",
+   {query: "", input_modalities: [], supported_parameters: []},
+   [["synthetic-a", "vendor/known-empty-capabilities"],
+    ["synthetic-a", "vendor/unknown-capabilities"]]],
+  ["search_capability_positive_parameter_yields_none",
+   "capability-unknown.json",
+   {supported_parameters: ["temperature"]},
+   []],
+  ["search_shared_params_and_a_only",
+   "lookup.json",
+   {query: "shared", supported_parameters: ["temperature", "MAX_TOKENS"]},
+   [["synthetic-a", "vendor/shared"]]],
+  ["search_shared_context_and_top_p_neither",
+   "lookup.json",
+   {query: "shared", min_context_length: 65536,
+    supported_parameters: ["top_p"]},
+   []],
+  ["search_text_case_extended_filters_normalize",
+   "search-text.json",
+   {query: "REASONING", min_context_length: 65536,
+    input_modalities: ["IMAGE", "text", "IMAGE"],
+    supported_parameters: ["TEMPERATURE"]},
+   [["synthetic-a", "vendor/literal[ab].*"]]]
+];
+
+/** The exact 22 complete, unsliced stage-composition goldens. */
+const COMPLETE_STAGE_CASE_IDS = [
+  "search_metadata_reasoning_text_only",
+  "search_metadata_reasoning_min_context_inclusive",
+  "search_metadata_reasoning_min_context_zero",
+  "search_capability_defaults_both_models",
+  "search_capability_empty_filters_no_constraint",
+  "search_capability_positive_modality_yields_none",
+  "search_capability_positive_parameter_yields_none",
+  "search_capability_min_context_zero_known_only",
+  "search_shared_min_context_a_only",
+  "search_shared_modalities_and_b_only",
+  "search_shared_context_and_image_neither",
+  "search_shared_params_and_a_only",
+  "search_shared_context_and_top_p_neither",
+  "search_provider_b_shared_stale_scope",
+  "search_provider_c_empty_stale_scope",
+  "search_text_case_extended_filters_normalize",
+  "search_text_unicode_upper_echo_first",
+  "search_text_unicode_lower_echo_second",
+  "search_text_literal_brackets_not_regex",
+  "search_text_metadata_array_not_searched",
+  "search_text_raw_id_unknown_flags",
+  "search_text_padded_query_not_trimmed"
+];
+
+// -- synthetic, fully-validated search registries ---------------------------
+//
+// These are CONSISTENCY controls: they are re-sealed with the canonical digest
+// of the implementation under test, so they prove the stages work over input the
+// REAL validator accepts, never that the digest itself is independent. The
+// committed literals and the live Python comparison stay the independent checks.
+
+/** Literal Unicode code-point order, as the frozen provider shape requires. */
+function codePointCompare(left, right) {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  const shared = Math.min(a.length, b.length);
+  for (let index = 0; index < shared; index += 1) {
+    const x = a[index].codePointAt(0);
+    const y = b[index].codePointAt(0);
+    if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
+  return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
+}
+
+/** One complete projected public model object (the accepted model shape). */
+function searchModel(rawId, name, options) {
+  const opts = options || {};
+  const pick = (key, fallback) => (key in opts ? opts[key] : fallback);
+  return {
+    id: rawId,
+    name: name,
+    description: pick("description", null),
+    context_length: pick("context_length", null),
+    architecture: {
+      input_modalities: pick("input_modalities", null),
+      output_modalities: pick("output_modalities", null)
+    },
+    supported_parameters: pick("supported_parameters", null),
+    pricing: pick("pricing", null)
+  };
+}
+
+/** One provider entry with its raw-ID array in the required literal order. */
+function searchProvider(models, displayName, url, options) {
+  const opts = options || {};
+  const ids = Object.keys(models).sort(codePointCompare);
+  const ordered = {};
+  for (const rawId of ids) {
+    withOwnKey(ordered, rawId, models[rawId]);
+  }
+  return {
+    display_name: displayName,
+    chat_completions_url: url,
+    api_type: opts.api_type === undefined ? "openai" : opts.api_type,
+    model_ids: ids,
+    models: ordered,
+    stale: opts.stale === undefined ? false : opts.stale
+  };
+}
+
+/** A resealed synthetic snapshot the REAL validator accepts. */
+function searchSnapshot(providerOrder, providers) {
+  const ordered = {};
+  for (const key of Object.keys(providers)) {
+    withOwnKey(ordered, key, providers[key]);
+  }
+  return resealSnapshot({
+    schema_version: 1,
+    snapshot_id: "0".repeat(64),
+    tick_epoch: 1759200000,
+    cadence_s: 3600,
+    provider_order: providerOrder.slice(),
+    providers: ordered,
+    warnings: []
+  });
+}
+
+/**
+ * The text/provider boundary registry: provider order, provider-map insertion
+ * order and literal raw-ID order are three DIFFERENT orders, so the pinned
+ * sequences can only come from `provider_order` precedence plus natural order.
+ */
+const SEARCH_ZETA_ORDER = [
+  ["zeta", "m-1"], ["zeta", "m-1a"], ["zeta", "m-2"], ["zeta", "m-9"],
+  ["zeta", "m-01"], ["zeta", "m-10"],
+  ["zeta", "m-" + "0".repeat(29) + "1"],
+  ["zeta", "m-\u00b2"], ["zeta", "m-\u0661"]
+];
+const SEARCH_ALPHA_ORDER = [
+  ["Alpha", "ascii-case"], ["Alpha", "caps-only"], ["Alpha", "fusion-left"],
+  ["Alpha", "idtoken-model"], ["Alpha", "literal-regex"],
+  ["Alpha", "name-target"], ["Alpha", "shared-id"], ["Alpha", "unicode-upper"],
+  ["Alpha", "vendor/tool:free"]
+];
+const SEARCH_ALPHA_LOWER_ORDER = [
+  ["alpha", "shared-id"], ["alpha", "unicode-lower"], ["alpha", "vendor/tool"]
+];
+const SEARCH_BULK_PAIRS = Array.from({length: 55}, (_, index) => [
+  "bulk", "bulk-" + String(index).padStart(2, "0")
+]);
+const SEARCH_ALL_PAIRS = SEARCH_ZETA_ORDER.concat(
+  SEARCH_ALPHA_ORDER, SEARCH_ALPHA_LOWER_ORDER, SEARCH_BULK_PAIRS);
+
+function searchBoundarySnapshot() {
+  const zetaModels = {};
+  const zetaRows = [
+    ["m-1", "Order A"], ["m-01", "Order B"], ["m-1a", "Order C"],
+    ["m-2", "Order D"], ["m-9", "Order E"], ["m-10", "Order F"],
+    ["m-" + "0".repeat(29) + "1", "Order G"], ["m-\u00b2", "Order H"],
+    ["m-\u0661", "Order I"]
+  ];
+  for (const [rawId, name] of zetaRows) {
+    withOwnKey(zetaModels, rawId, searchModel(rawId, name));
+  }
+  const upper = {
+    "ascii-case": searchModel("ascii-case", "MiXeD Name"),
+    "caps-only": searchModel("caps-only", "Caps Only", {
+      description: "plain synthetic prose", context_length: 7,
+      input_modalities: ["ImageToken"], output_modalities: ["OutToken"],
+      supported_parameters: ["ParamToken"],
+      pricing: {prompt: "0.123", completion: 0}
+    }),
+    "fusion-left": searchModel("fusion-left", "Alpha", {
+      description: "Beta prose body."
+    }),
+    "idtoken-model": searchModel("idtoken-model", "Alpha Display One", {
+      description: "descword one."
+    }),
+    "literal-regex": searchModel("literal-regex", "paren (test)", {
+      description: "literal [ab].* marker"
+    }),
+    "name-target": searchModel("name-target", "NameToken Display", {
+      description: "Alpha prose two."
+    }),
+    "shared-id": searchModel("shared-id", "Borrow Target"),
+    "unicode-upper": searchModel("unicode-upper", "\u00c9CHO"),
+    "vendor/tool:free": searchModel("vendor/tool:free", "Tool Free Display")
+  };
+  const lower = {
+    "shared-id": searchModel("shared-id", "Other Label", {
+      description: "Sibling prose."
+    }),
+    "unicode-lower": searchModel("unicode-lower", "\u00e9cho"),
+    "vendor/tool": searchModel("vendor/tool", "Tool Sibling")
+  };
+  const bulk = {};
+  for (let index = 0; index < 55; index += 1) {
+    const rawId = "bulk-" + String(index).padStart(2, "0");
+    withOwnKey(bulk, rawId, searchModel(rawId,
+      "Bulk row " + String(index).padStart(2, "0"), {
+        description: "Bulk synthetic row."
+      }));
+  }
+  // Insertion order here is deliberately unrelated to provider_order.
+  const providers = {
+    empty: searchProvider({}, "Empty Gateway",
+                          "https://empty.example/v1/chat/completions"),
+    bulk: searchProvider(bulk, "Bulk Gateway",
+                         "https://bulk.example/v1/chat/completions"),
+    alpha: searchProvider(lower, "Lower Alpha",
+                          "https://alpha.example/v1/chat/completions"),
+    zeta: searchProvider(zetaModels, "Zeta Order",
+                         "https://zeta.example/v1/chat/completions"),
+    Alpha: searchProvider(upper, "Upper Alpha",
+                          "https://urltoken.example/v1/chat/completions",
+                          {api_type: "apitoken"})
+  };
+  return searchSnapshot(["zeta", "Alpha", "alpha", "bulk", "empty"], providers);
+}
+
+//: Compact (query, provider, expected ordered identities) boundary rows.
+const SEARCH_TEXT_BOUNDARY_ROWS = [
+  // Omitted or empty query applies NO text constraint; whitespace is literal.
+  [null, null, SEARCH_ALL_PAIRS],
+  ["", null, SEARCH_ALL_PAIRS],
+  ["   ", null, []],
+  ["   ", "zeta", []],
+  // Per-pair text only: a shared raw ID never borrows a sibling's name or
+  // description, and provider scope ANDs with the text predicate.
+  ["borrow", null, [["Alpha", "shared-id"]]],
+  ["borrow", "Alpha", [["Alpha", "shared-id"]]],
+  ["borrow", "alpha", []],
+  ["other label", null, [["alpha", "shared-id"]]],
+  ["shared-id", null, [["Alpha", "shared-id"], ["alpha", "shared-id"]]],
+  // Each individual field matches on its own: raw ID, name, description.
+  ["idtoken", null, [["Alpha", "idtoken-model"]]],
+  ["nametoken", null, [["Alpha", "name-target"]]],
+  ["descword", null, [["Alpha", "idtoken-model"]]],
+  // A substring spanning a field boundary does not match: "Alpha" (name) and
+  // "Beta prose body." (description) are never concatenated.
+  ["Alpha Beta", null, []],
+  // ASCII-only fold: ASCII letters fold, non-ASCII case pairs stay literal.
+  ["mixed name", null, [["Alpha", "ascii-case"]]],
+  ["MIXED NAME", null, [["Alpha", "ascii-case"]]],
+  ["\u00c9CHO", null, [["Alpha", "unicode-upper"]]],
+  ["\u00e9cho", null, [["alpha", "unicode-lower"]]],
+  ["\u00e9cho", "Alpha", []],
+  // Literal regex-looking and invalid-regex queries; literal parentheses.
+  ["[ab].*", null, [["Alpha", "literal-regex"]]],
+  ["(", null, [["Alpha", "literal-regex"]]],
+  // Never trimmed and never marker-normalized.
+  ["Caps Only", null, [["Alpha", "caps-only"]]],
+  ["Caps Only ", null, []],
+  ["vendor/tool", null, [["Alpha", "vendor/tool:free"],
+                          ["alpha", "vendor/tool"]]],
+  ["vendor/tool", "alpha", [["alpha", "vendor/tool"]]],
+  ["vendor/tool:free", null, [["Alpha", "vendor/tool:free"]]],
+  // A null description is NOT a text field: neither Python's `str(None)`
+  // spelling nor the JSON spelling may match a null.
+  ["none", null, []],
+  ["null", null, []],
+  // Capability arrays, pricing, wiring URL, provider keys and object key names
+  // are never searched.
+  ["ImageToken", null, []],
+  ["ParamToken", null, []],
+  ["urltoken", null, []],
+  ["apitoken", null, []],
+  ["0.123", null, []],
+  ["https", null, []],
+  ["zeta", null, []],
+  ["pricing", null, []],
+  ["context_length", null, []],
+  ["architecture", null, []],
+  ["supported_parameters", null, []],
+  ["display_name", null, []],
+  // Exact provider scoping, including differently-cased VALID keys and a
+  // registered zero-ID provider.
+  [null, "zeta", SEARCH_ZETA_ORDER],
+  [null, "Alpha", SEARCH_ALPHA_ORDER],
+  [null, "alpha", SEARCH_ALPHA_LOWER_ORDER],
+  [null, "empty", []],
+  ["bulk", null, SEARCH_BULK_PAIRS]
+];
+
+/**
+ * The context/modality/parameter boundary registry: known 0, known high values,
+ * unknown (null) metadata, known-empty arrays, per-provider differing metadata
+ * behind a SHARED raw ID and a 210-endpoint bulk provider.
+ */
+function searchCapabilitySnapshot() {
+  const gate = {
+    both: searchModel("both", "Both Modalities", {
+      context_length: 65536, input_modalities: ["text", "image"],
+      supported_parameters: ["temperature", "top_p"]
+    }),
+    "text-only": searchModel("text-only", "Text Only", {
+      context_length: 32768, input_modalities: ["text"],
+      supported_parameters: ["temperature"]
+    }),
+    "empty-known": searchModel("empty-known", "Empty Known", {
+      context_length: 0, input_modalities: [],
+      supported_parameters: []
+    }),
+    "unknown-array": searchModel("unknown-array", "Unknown Array", {
+      context_length: null, input_modalities: null,
+      supported_parameters: null
+    }),
+    "cased-dupes": searchModel("cased-dupes", "Cased Dupes", {
+      context_length: 1, input_modalities: ["TEXT", "Image", "text", "image"],
+      supported_parameters: ["Top_P", "top_p"]
+    }),
+    padded: searchModel("padded", "Padded", {
+      context_length: 65535, input_modalities: [" text "],
+      supported_parameters: [" temperature "]
+    }),
+    "unicode-upper": searchModel("unicode-upper", "Unicode Upper", {
+      context_length: 65537, input_modalities: ["\u00c9"],
+      supported_parameters: ["\u00c9"]
+    }),
+    "output-image": searchModel("output-image", "Output Image", {
+      context_length: 65536, input_modalities: ["text"],
+      output_modalities: ["image"], supported_parameters: ["temperature"]
+    }),
+    "name-image": searchModel("name-image", "Image Name", {
+      description: "image prose", context_length: 65536,
+      input_modalities: ["text"], supported_parameters: ["temperature"]
+    }),
+    "param-image": searchModel("param-image", "Param Image", {
+      context_length: 65536, input_modalities: ["text"],
+      supported_parameters: ["image_size"]
+    }),
+    "price-image": searchModel("price-image", "Price Image", {
+      context_length: 65536, input_modalities: ["text"],
+      supported_parameters: ["temperature"],
+      pricing: {prompt: "0", completion: "0"}
+    }),
+    "raw-id-image": searchModel("raw-id-image", "Raw Id Image", {
+      context_length: 65536, input_modalities: ["text"],
+      supported_parameters: ["temperature"]
+    }),
+    "shared-id": searchModel("shared-id", "Shared A", {
+      context_length: 65536, input_modalities: ["text", "image"],
+      supported_parameters: ["temperature"]
+    }),
+    "max-context": searchModel("max-context", "Max Context", {
+      context_length: catalog.MAX_SAFE_INT, input_modalities: ["text"],
+      supported_parameters: ["temperature"]
+    })
+  };
+  const other = {
+    "shared-id": searchModel("shared-id", "Shared B", {
+      context_length: 32768, input_modalities: ["text"],
+      supported_parameters: ["top_p"]
+    })
+  };
+  const bulk = {};
+  for (let index = 0; index < 210; index += 1) {
+    const rawId = "bulk-" + String(index).padStart(3, "0");
+    withOwnKey(bulk, rawId, searchModel(rawId,
+      "Bulk " + String(index).padStart(3, "0"), {
+        context_length: 65536, input_modalities: ["text"],
+        supported_parameters: ["temperature"]
+      }));
+  }
+  return searchSnapshot(["gate", "other", "bulk", "zero-provd"], {
+    gate: searchProvider(gate, "Gate",
+                         "https://gate.example/v1/chat/completions"),
+    other: searchProvider(other, "Other",
+                          "https://other.example/v1/chat/completions"),
+    bulk: searchProvider(bulk, "Bulk",
+                         "https://bulk.example/v1/chat/completions"),
+    "zero-provd": searchProvider({}, "Zero",
+                                 "https://zero.example/v1/chat/completions")
+  });
+}
+
+/**
+ * A validated registry whose keys LOOK like prototype members, whose shared raw
+ * ID carries deliberately different metadata per provider, and which mixes a
+ * 60-digit run, non-ASCII digits, an astral id, known-empty and unknown arrays.
+ */
+function adversarialSearchSnapshot() {
+  const proto = {};
+  withOwnKey(proto, "__proto__", searchModel("__proto__", "Proto Model", {
+    context_length: 0, input_modalities: ["text"],
+    supported_parameters: ["temperature"]
+  }));
+  withOwnKey(proto, "constructor", searchModel("constructor",
+                                               "Constructor Model", {
+    description: "proto prose", input_modalities: [], supported_parameters: []
+  }));
+  withOwnKey(proto, "dup-id", searchModel("dup-id", "Proto Dup", {
+    context_length: 65536, input_modalities: ["text", "image"],
+    supported_parameters: ["temperature", "top_p"]
+  }));
+  withOwnKey(proto, "num-" + "0".repeat(59) + "9",
+             searchModel("num-" + "0".repeat(59) + "9", "Long Run", {
+               context_length: 65536, input_modalities: ["text"]
+             }));
+  withOwnKey(proto, "num-9", searchModel("num-9", "Short Run", {
+    context_length: 65536, input_modalities: ["text"]
+  }));
+  withOwnKey(proto, "\ud83c\udf1f-model",
+             searchModel("\ud83c\udf1f-model", "Astral Model", {
+               context_length: 1, input_modalities: ["text"],
+               supported_parameters: ["temperature"]
+             }));
+  const sibling = {};
+  withOwnKey(sibling, "dup-id", searchModel("dup-id", "Sibling Dup", {
+    context_length: 32768, input_modalities: ["text"],
+    supported_parameters: ["top_p"]
+  }));
+  withOwnKey(sibling, "toString", searchModel("toString", "ToString Model", {
+    context_length: null, input_modalities: null, supported_parameters: null
+  }));
+  withOwnKey(sibling, "\u00c9-model", searchModel("\u00c9-model", "\u00c9CHO", {
+    context_length: 0, input_modalities: ["image"],
+    supported_parameters: ["\u00c9"]
+  }));
+  withOwnKey(sibling, "\u00e9-model", searchModel("\u00e9-model", "\u00e9cho", {
+    context_length: 0, input_modalities: ["image"],
+    supported_parameters: ["\u00e9"]
+  }));
+  const providers = {};
+  withOwnKey(providers, "__proto__", searchProvider(
+    proto, "Proto Gateway", "https://proto.example/v1/chat/completions"));
+  withOwnKey(providers, "toString", searchProvider(
+    sibling, "ToString Gateway", "https://to-string.example/v1/chat/completions",
+    {api_type: "anthropic", stale: true}));
+  return searchSnapshot(["__proto__", "toString"], providers);
+}
+
+/** The exact document a wrong-schema loader refusal must reject. */
+function wrongSchemaSnapshotText() {
+  const body = typedClone(acceptedSnapshot("lookup.json"));
+  body.schema_version = 2;
+  body.snapshot_id = catalog.snapshotHash(body);
+  return catalog.canonicalText(body);
+}
+
+// -- stage parity against the unchanged Python reference --------------------
+
+/** One `search_stage_pairs` (composition) parity case. */
+function stagePairCase(label, snapshot, args) {
+  return {label: label, tool: "search_stage_pairs",
+          snapshot_text: catalog.canonicalText(snapshot),
+          args: stageArguments(args), now: null};
+}
+
+/** One `search_stage_filter` (supplied-selection) parity case. */
+function stageFilterCase(label, snapshot, pairs, args) {
+  const stage = stageArguments(args);
+  return {label: label, tool: "search_stage_filter",
+          snapshot_text: catalog.canonicalText(snapshot),
+          args: {pairs: pairs.map(pairIdentity),
+                 min_context_length: stage.min_context_length,
+                 input_modalities: stage.input_modalities,
+                 supported_parameters: stage.supported_parameters},
+          now: null};
+}
+
+/** The JavaScript half of one stage parity case, in the reference's shape. */
+function runJavaScriptStageCase(entry) {
+  const snapshot = catalog.loadSnapshot(entry.snapshot_text);
+  if (entry.tool === "search_stage_pairs") {
+    return composeSearchStages(snapshot, entry.args).map(pairIdentity);
+  }
+  const supplied = entry.args.pairs.map(pairIdentity);
+  return {
+    context: catalog.searchMinContextPairs(
+      snapshot, supplied, entry.args.min_context_length).map(pairIdentity),
+    input: catalog.searchInputModalityPairs(
+      snapshot, supplied, entry.args.input_modalities).map(pairIdentity),
+    parameters: catalog.searchSupportedParameterPairs(
+      snapshot, supplied, entry.args.supported_parameters).map(pairIdentity)
+  };
+}
+
+function assertStageParity(cases) {
+  const pythonResults = runQueryReference(cases.map((entry) => ({
+    tool: entry.tool, snapshot_text: entry.snapshot_text,
+    args: entry.args, now: null
+  })));
+  for (let index = 0; index < cases.length; index += 1) {
+    assert.equal(catalog.canonicalText(runJavaScriptStageCase(cases[index])),
+                 pythonResults[index],
+                 `${cases[index].label}: typed canonical payload matches Python`);
+  }
+}
+
+describe("pure metadata-search stage helpers", () => {
+  it("selects the ten frozen text/provider goldens as ordered identities", () => {
+    const rows = completeStageRows().filter((row) =>
+      Object.keys(row.args).every((key) => key === "query" || key === "provider"));
+    assert.equal(rows.length, 10, "ten text/provider goldens");
+    assert.deepEqual(rows.map((row) => row.id).sort(),
+                     TEXT_STAGE_CASE_IDS.slice().sort(),
+                     "the text/provider case set is exactly the frozen ten");
+    for (const row of rows) {
+      const snapshot = rowSnapshot(row);
+      const before = catalog.canonicalText(snapshot);
+      const result = catalog.searchTextProviderPairs(snapshot, {
+        query: row.args.query, provider: row.args.provider
+      });
+      assert.deepEqual(result.map(pairIdentity), goldenIdentities(row), row.id);
+      assert.ok(Array.isArray(result), `${row.id}: a plain array`);
+      for (const pair of result) {
+        assert.equal(Array.isArray(pair) && pair.length, 2,
+                     `${row.id}: fresh two-string pairs`);
+        assert.equal(typeof pair[0], "string", row.id);
+        assert.equal(typeof pair[1], "string", row.id);
+        // Every selected identity is a REAL tracked pair, never a borrowed row.
+        assert.ok(snapshot.provider_order.includes(pair[0]),
+                  `${row.id}: provider is registered`);
+        assert.ok(snapshot.providers[pair[0]].model_ids.includes(pair[1]),
+                  `${row.id}: raw id is tracked by that provider`);
+      }
+      assert.equal(catalog.canonicalText(snapshot), before,
+                   `${row.id}: the snapshot is never mutated`);
+    }
+  });
+
+  it("pins literal ASCII-only text and exact provider scope boundaries", () => {
+    const snapshot = searchBoundarySnapshot();
+    // The pin is meaningful: neither provider-map insertion order nor literal
+    // raw-ID order coincides with the frozen endpoint order.
+    assert.notDeepEqual(snapshot.provider_order, Object.keys(snapshot.providers),
+                        "provider order is not insertion order");
+    assert.notDeepEqual(snapshot.provider_order, snapshot.provider_order.slice()
+                                                  .sort(), "not alphabetic");
+    assert.notDeepEqual(snapshot.providers.zeta.model_ids.slice().sort(),
+                        SEARCH_ZETA_ORDER.map((pair) => pair[1]),
+                        "not literal raw-ID order");
+    const before = catalog.canonicalText(snapshot);
+    for (const [query, provider, expected] of SEARCH_TEXT_BOUNDARY_ROWS) {
+      const result = catalog.searchTextProviderPairs(
+        snapshot, {query: query, provider: provider});
+      assert.deepEqual(result.map(pairIdentity), expected,
+                       `query=${JSON.stringify(query)} provider=${provider}`);
+    }
+    // Omitted members behave exactly like explicit nulls.
+    assert.deepEqual(catalog.searchTextProviderPairs(snapshot).map(pairIdentity),
+                     SEARCH_ALL_PAIRS);
+    assert.deepEqual(catalog.searchTextProviderPairs(snapshot, {}).map(pairIdentity),
+                     SEARCH_ALL_PAIRS);
+
+    // More than the public default page (50) is returned WHOLE.
+    const bulk = catalog.searchTextProviderPairs(snapshot, {query: "bulk"});
+    assert.equal(bulk.length, 55);
+    assert.deepEqual(bulk[0], ["bulk", "bulk-00"]);
+    assert.deepEqual(bulk[54], ["bulk", "bulk-54"]);
+    // A zero-ID registered provider and an empty registry both select nothing.
+    assert.deepEqual(catalog.searchTextProviderPairs(
+      searchSnapshot(["solo"], {
+        solo: searchProvider({}, "Solo",
+                             "https://solo.example/v1/chat/completions")
+      })), []);
+    assert.deepEqual(catalog.searchTextProviderPairs(snapshot,
+                                                     {provider: "empty"}), []);
+    assert.equal(catalog.canonicalText(snapshot), before,
+                 "boundary controls never mutate the snapshot");
+  });
+
+  it("reproduces the four frozen inclusive-context goldens", () => {
+    assert.equal(MIN_CONTEXT_GOLDENS.length, 4, "four context goldens");
+    assert.equal(new Set(MIN_CONTEXT_GOLDENS.map((row) => row[0])).size, 4);
+    const byId = new Map(searchRows().map((row) => [row.id, row]));
+    for (const [id, fixture, args, expected] of MIN_CONTEXT_GOLDENS) {
+      const row = byId.get(id);
+      assert.ok(row, `${id} exists in cases.json`);
+      assert.deepEqual(row.args, args, `${id}: frozen arguments`);
+      assert.equal(row.fixture, fixture, `${id}: frozen fixture`);
+      assert.deepEqual(row.expect.filters, {
+        provider: null, min_context_length: args.min_context_length,
+        input_modalities: null, supported_parameters: null
+      }, `${id}: only the context filter is active`);
+      const snapshot = rowSnapshot(row);
+      const text = catalog.searchTextProviderPairs(
+        snapshot, {query: args.query, provider: null});
+      const composed = catalog.searchMinContextPairs(
+        snapshot, text, args.min_context_length);
+      assert.deepEqual(composed.map(pairIdentity), expected, id);
+      assert.deepEqual(composed.map(pairIdentity), goldenIdentities(row), id);
+      // A pure filter: it can only narrow the accepted selection.
+      assert.ok(composed.length <= text.length, `${id}: never expands`);
+    }
+  });
+
+  it("keeps context inclusive, unknown distinct from zero and selection order", () => {
+    const snapshot = searchCapabilitySnapshot();
+    const gate = (rawId) => ["gate", rawId];
+    const supplied = [gate("both"), gate("unknown-array"), gate("empty-known"),
+                      gate("cased-dupes"), gate("padded"),
+                      gate("unicode-upper"), gate("max-context")];
+    const rows = [
+      // A null threshold is inactive: every supplied pair, freshly.
+      [null, supplied],
+      // Zero is ACTIVE: a known 0 passes, an unknown null fails.
+      [0, [gate("both"), gate("empty-known"), gate("cased-dupes"),
+           gate("padded"), gate("unicode-upper"), gate("max-context")]],
+      // The inclusive boundary at equality, then one either side.
+      [65535, [gate("both"), gate("padded"), gate("unicode-upper"),
+               gate("max-context")]],
+      [65536, [gate("both"), gate("unicode-upper"), gate("max-context")]],
+      [65537, [gate("unicode-upper"), gate("max-context")]],
+      [catalog.MAX_SAFE_INT, [gate("max-context")]],
+      [catalog.MAX_SAFE_INT + 1, []]
+    ];
+    for (const [threshold, expected] of rows) {
+      assert.deepEqual(catalog.searchMinContextPairs(
+        snapshot, supplied, threshold).map(pairIdentity), expected,
+        `threshold=${threshold}`);
+    }
+    // Omitted threshold equals an explicit null.
+    assert.deepEqual(catalog.searchMinContextPairs(snapshot, supplied)
+                       .map(pairIdentity), supplied);
+
+    // Order and multiplicity of the SUPPLIED selection are preserved exactly:
+    // never re-derived, never sorted, never deduplicated.
+    const reversed = [gate("text-only"), gate("both"), gate("text-only"),
+                      ["other", "shared-id"], gate("both")];
+    assert.deepEqual(catalog.searchMinContextPairs(snapshot, reversed, 0)
+                       .map(pairIdentity), reversed);
+    // A shared raw ID is never resolved against another provider's metadata.
+    assert.deepEqual(catalog.searchMinContextPairs(
+      snapshot, [["other", "shared-id"]], 65536).map(pairIdentity), []);
+    assert.deepEqual(catalog.searchMinContextPairs(
+      snapshot, [gate("shared-id")], 65536).map(pairIdentity),
+      [gate("shared-id")]);
+    // An empty selection stays empty on both branches.
+    assert.deepEqual(catalog.searchMinContextPairs(snapshot, []), []);
+    assert.deepEqual(catalog.searchMinContextPairs(snapshot, [], 0), []);
+  });
+
+  it("reproduces the three frozen modality goldens with same-endpoint AND", () => {
+    assert.equal(MODALITY_GOLDENS.length, 3, "three modality goldens");
+    const byId = new Map(searchRows().map((row) => [row.id, row]));
+    for (const [id, fixture, args, expected] of MODALITY_GOLDENS) {
+      const row = byId.get(id);
+      assert.ok(row, `${id} exists in cases.json`);
+      assert.deepEqual(row.args, args, `${id}: frozen arguments`);
+      assert.equal(row.fixture, fixture, `${id}: frozen fixture`);
+      assert.deepEqual(row.expect.filters.input_modalities,
+                       args.input_modalities, id);
+      assert.equal(row.expect.filters.supported_parameters, null, id);
+      const snapshot = rowSnapshot(row);
+      let pairs = catalog.searchTextProviderPairs(
+        snapshot, {query: args.query, provider: null});
+      pairs = catalog.searchMinContextPairs(snapshot, pairs,
+                                            args.min_context_length);
+      const composed = catalog.searchInputModalityPairs(
+        snapshot, pairs, args.input_modalities);
+      assert.deepEqual(composed.map(pairIdentity), expected, id);
+      assert.deepEqual(composed.map(pairIdentity), goldenIdentities(row), id);
+    }
+  });
+
+  it("ANDs every requested input modality on the same endpoint", () => {
+    const snapshot = searchCapabilitySnapshot();
+    const gate = (rawId) => ["gate", rawId];
+    const rows = [
+      // None and [] are inactive, retaining unknown and known-empty arrays.
+      [[gate("both"), gate("unknown-array"), gate("empty-known")], null,
+       [gate("both"), gate("unknown-array"), gate("empty-known")]],
+      [[gate("both"), gate("unknown-array"), gate("empty-known")], [],
+       [gate("both"), gate("unknown-array"), gate("empty-known")]],
+      // A positive request rejects BOTH the unknown and the known-empty array.
+      [[gate("both"), gate("unknown-array"), gate("empty-known")], ["text"],
+       [gate("both")]],
+      // AND, not OR: every requested token on the SAME pair.
+      [[gate("both"), gate("text-only")], ["text"],
+       [gate("both"), gate("text-only")]],
+      [[gate("both"), gate("text-only")], ["text", "image"], [gate("both")]],
+      [[gate("both"), gate("text-only")], ["image", "text"], [gate("both")]],
+      // Duplicates are idempotent, never a multiplicity constraint.
+      [[gate("both")], ["text", "text", "TEXT"], [gate("both")]],
+      // ASCII-insensitive on BOTH sides; first-occurrence dupes harmless.
+      [[gate("cased-dupes")], ["image", "TEXT"], [gate("cased-dupes")]],
+      // Whitespace stays literal: a padded token matches only an identically
+      // padded reported token.
+      [[gate("padded")], ["text"], []],
+      [[gate("padded")], [" text "], [gate("padded")]],
+      [[gate("padded")], [" text"], []],
+      [[gate("padded")], ["text "], []],
+      // A non-ASCII case pair stays distinct (never Unicode-folded).
+      [[gate("unicode-upper")], ["\u00e9"], []],
+      [[gate("unicode-upper")], ["\u00c9"], [gate("unicode-upper")]],
+      // Output modalities are not substitutes for input modalities.
+      [[gate("output-image")], ["image"], []],
+      [[gate("output-image")], ["text"], [gate("output-image")]],
+      // No capability is inferred from name, description, raw id, provider key,
+      // pricing or supported_parameters.
+      [[gate("name-image")], ["image"], []],
+      [[gate("param-image")], ["image"], []],
+      [[gate("price-image")], ["image"], []],
+      [[gate("raw-id-image")], ["raw-id-image"], []],
+      [[gate("name-image")], ["image name"], []],
+      // Exact tokens, never substrings or wildcards.
+      [[gate("both")], ["imag"], []],
+      [[gate("both")], ["tex"], []],
+      // A supplied strict subset is never expanded; empty input stays empty.
+      [[gate("both")], ["text"], [gate("both")]],
+      [[], ["text"], []],
+      // Incoming order is preserved: never sorted, never deduplicated.
+      [[gate("text-only"), gate("both"), gate("cased-dupes")], ["text"],
+       [gate("text-only"), gate("both"), gate("cased-dupes")]],
+      // A shared raw id with disjoint per-provider capabilities: no union and
+      // no borrowing, and the incoming order still decides the output order.
+      [[gate("shared-id"), ["other", "shared-id"]], ["image"],
+       [gate("shared-id")]],
+      [[gate("shared-id"), ["other", "shared-id"]], ["text"],
+       [gate("shared-id"), ["other", "shared-id"]]],
+      [[["other", "shared-id"], gate("shared-id")], ["image"],
+       [gate("shared-id")]],
+      [[["other", "shared-id"], gate("shared-id")], ["text"],
+       [["other", "shared-id"], gate("shared-id")]],
+      [[["other", "shared-id"]], ["image"], []]
+    ];
+    for (const [pairs, request, expected] of rows) {
+      const result = catalog.searchInputModalityPairs(snapshot, pairs, request);
+      assert.deepEqual(result.map(pairIdentity), expected,
+                       `${JSON.stringify(pairs)} request=${JSON.stringify(request)}`);
+    }
+    // Same-endpoint composition: a high-context TEXT-only endpoint and a
+    // low-context IMAGE endpoint select NEITHER for `context >= 65536 AND
+    // image`, even though each predicate alone selects one of them.
+    const conflict = searchSnapshot(["ctx"], {
+      ctx: searchProvider({
+        "high-text": searchModel("high-text", "High Text", {
+          context_length: 65536, input_modalities: ["text"]
+        }),
+        "low-image": searchModel("low-image", "Low Image", {
+          context_length: 32768, input_modalities: ["text", "image"]
+        })
+      }, "Ctx", "https://ctx.example/v1/chat/completions")
+    });
+    assert.deepEqual(catalog.searchInputModalityPairs(
+      conflict,
+      catalog.searchMinContextPairs(
+        conflict, catalog.searchTextProviderPairs(conflict), 65536),
+      ["image"]).map(pairIdentity), []);
+    assert.deepEqual(catalog.searchInputModalityPairs(
+      conflict, catalog.searchTextProviderPairs(conflict), ["image"])
+        .map(pairIdentity), [["ctx", "low-image"]]);
+    assert.deepEqual(catalog.searchMinContextPairs(
+      conflict, catalog.searchTextProviderPairs(conflict), 65536)
+        .map(pairIdentity), [["ctx", "high-text"]]);
+  });
+
+  it("reproduces the five frozen parameter goldens with same-pair conjunction",
+     () => {
+    assert.equal(PARAMETER_GOLDENS.length, 5, "five parameter goldens");
+    assert.equal(new Set(PARAMETER_GOLDENS.map((row) => row[0])).size, 5);
+    const byId = new Map(searchRows().map((row) => [row.id, row]));
+    for (const [id, fixture, args, expected] of PARAMETER_GOLDENS) {
+      const row = byId.get(id);
+      assert.ok(row, `${id} exists in cases.json`);
+      assert.deepEqual(row.args, args, `${id}: frozen arguments`);
+      assert.equal(row.fixture, fixture, `${id}: frozen fixture`);
+      assert.deepEqual(row.expect.filters.supported_parameters,
+                       args.supported_parameters, id);
+      const snapshot = rowSnapshot(row);
+      assert.deepEqual(composeSearchStages(snapshot, args).map(pairIdentity),
+                       expected, id);
+      assert.deepEqual(composeSearchStages(snapshot, args).map(pairIdentity),
+                       goldenIdentities(row), id);
+    }
+  });
+
+  it("ANDs every requested supported parameter on the same endpoint", () => {
+    const snapshot = searchCapabilitySnapshot();
+    const gate = (rawId) => ["gate", rawId];
+    const rows = [
+      // None and [] are inactive, retaining unknown and known-empty arrays.
+      [[gate("both"), gate("unknown-array"), gate("empty-known")], null,
+       [gate("both"), gate("unknown-array"), gate("empty-known")]],
+      [[gate("both"), gate("unknown-array"), gate("empty-known")], [],
+       [gate("both"), gate("unknown-array"), gate("empty-known")]],
+      [[gate("both"), gate("unknown-array"), gate("empty-known")],
+       ["temperature"], [gate("both")]],
+      // ALL on one pair, in either request order, duplicates idempotent.
+      [[gate("both"), gate("text-only")], ["temperature"],
+       [gate("both"), gate("text-only")]],
+      [[gate("both"), gate("text-only")], ["temperature", "top_p"],
+       [gate("both")]],
+      [[gate("both")], ["top_p", "temperature"], [gate("both")]],
+      [[gate("both")], ["TEMPERATURE", "temperature"], [gate("both")]],
+      // ASCII-insensitive both sides; first-occurrence dupes harmless.
+      [[gate("cased-dupes")], ["TOP_P", "top_p"], [gate("cased-dupes")]],
+      // Whitespace and non-ASCII case stay literal.
+      [[gate("padded")], ["temperature"], []],
+      [[gate("padded")], [" temperature "], [gate("padded")]],
+      [[gate("unicode-upper")], ["\u00e9"], []],
+      [[gate("unicode-upper")], ["\u00c9"], [gate("unicode-upper")]],
+      // No substring and no inference from any other field.
+      [[gate("both")], ["temp"], []],
+      [[gate("param-image")], ["image"], []],
+      [[gate("param-image")], ["image_size"], [gate("param-image")]],
+      [[gate("both")], ["image"], []],
+      [[gate("output-image")], ["image"], []],
+      [[gate("price-image")], ["0"], []],
+      // No cross-provider borrowing and no union to satisfy a conjunction: the
+      // shared raw id carries temperature on one provider and top_p on the
+      // other, so the conjunction selects NEITHER.
+      [[gate("shared-id"), ["other", "shared-id"]],
+       ["temperature", "top_p"], []],
+      [[gate("shared-id")], ["temperature"], [gate("shared-id")]],
+      [[["other", "shared-id"]], ["temperature"], []],
+      [[["other", "shared-id"]], ["top_p"], [["other", "shared-id"]]],
+      [[gate("shared-id"), ["other", "shared-id"]], ["top_p"],
+       [["other", "shared-id"]]],
+      // Order and multiplicity of the supplied selection are preserved.
+      [[gate("text-only"), gate("both"), gate("text-only")], ["temperature"],
+       [gate("text-only"), gate("both"), gate("text-only")]],
+      [[], ["temperature"], []]
+    ];
+    for (const [pairs, request, expected] of rows) {
+      assert.deepEqual(
+        catalog.searchSupportedParameterPairs(snapshot, pairs, request)
+          .map(pairIdentity), expected,
+        `${JSON.stringify(pairs)} request=${JSON.stringify(request)}`);
+    }
+  });
+
+  it("composes all four stages over the twenty-two complete goldens", () => {
+    const rows = completeStageRows();
+    assert.equal(rows.length, 22, "twenty-two complete stage rows");
+    assert.deepEqual(rows.map((row) => row.id).sort(),
+                     COMPLETE_STAGE_CASE_IDS.slice().sort(),
+                     "the composition case set is exactly the frozen 22");
+    // The seven remaining search rows are page-sliced: they stay a later
+    // public-envelope oracle instead of a truncated stage oracle.
+    assert.equal(searchRows().length, 29, "twenty-nine search rows in total");
+    const sliced = searchRows().filter((row) => !COMPLETE_STAGE_CASE_IDS
+      .includes(row.id));
+    assert.equal(sliced.length, 7, "seven page-sliced rows stay for later");
+    for (const row of sliced) {
+      assert.ok(row.expect.next_offset !== null || row.args.limit !== undefined,
+                `${row.id}: is genuinely page-limited`);
+    }
+    for (const row of rows) {
+      const snapshot = rowSnapshot(row);
+      const before = catalog.canonicalText(snapshot);
+      const composed = composeSearchStages(snapshot, row.args);
+      assert.deepEqual(composed.map(pairIdentity), goldenIdentities(row), row.id);
+      assert.equal(catalog.canonicalText(snapshot), before,
+                   `${row.id}: no stage mutates the snapshot`);
+    }
+  });
+
+  it("keeps prototype-looking keys, shared ids, digit runs and Unicode honest",
+     () => {
+    const snapshot = adversarialSearchSnapshot();
+    const before = catalog.canonicalText(snapshot);
+    const longId = "num-" + "0".repeat(59) + "9";
+    // Natural order within a provider, never literal or UTF-16 unit order.
+    assert.deepEqual(
+      catalog.searchTextProviderPairs(snapshot, {provider: "__proto__"})
+        .map(pairIdentity),
+      [["__proto__", "__proto__"], ["__proto__", "constructor"],
+       ["__proto__", "dup-id"], ["__proto__", "num-9"], ["__proto__", longId],
+       ["__proto__", "\ud83c\udf1f-model"]]);
+    // A prototype-looking provider key selects exactly that provider.
+    assert.deepEqual(
+      catalog.searchTextProviderPairs(snapshot, {provider: "toString"})
+        .map(pairIdentity),
+      [["toString", "dup-id"], ["toString", "toString"],
+       ["toString", "\u00c9-model"], ["toString", "\u00e9-model"]]);
+    // Both providers are selected by default, in provider_order precedence.
+    assert.equal(catalog.searchTextProviderPairs(snapshot).length, 10);
+    // A prototype-looking raw ID is an ordinary identity, and object key names
+    // are still never searched.
+    assert.deepEqual(
+      catalog.searchTextProviderPairs(snapshot, {query: "__proto__"})
+        .map(pairIdentity), [["__proto__", "__proto__"]]);
+    assert.deepEqual(
+      catalog.searchTextProviderPairs(snapshot, {query: "constructor"})
+        .map(pairIdentity), [["__proto__", "constructor"]]);
+    assert.deepEqual(
+      catalog.searchTextProviderPairs(snapshot, {query: "toString"})
+        .map(pairIdentity), [["toString", "toString"]],
+      "the matching raw id and display name are the SAME pair");
+    // A 60-digit run is never parsed as a float: the 59-zero id sorts after
+    // the short one and both survive as literal ids.
+    assert.deepEqual(
+      catalog.searchMinContextPairs(snapshot,
+        catalog.searchTextProviderPairs(snapshot, {query: "num-"}), 65536)
+        .map(pairIdentity),
+      [["__proto__", "num-9"], ["__proto__", longId]]);
+    // The shared raw id keeps its OWN per-provider metadata.
+    assert.deepEqual(
+      catalog.searchInputModalityPairs(snapshot,
+        [["__proto__", "dup-id"], ["toString", "dup-id"]], ["image"])
+        .map(pairIdentity), [["__proto__", "dup-id"]]);
+    assert.deepEqual(
+      catalog.searchSupportedParameterPairs(snapshot,
+        [["__proto__", "dup-id"], ["toString", "dup-id"]], ["top_p"])
+        .map(pairIdentity), [["__proto__", "dup-id"], ["toString", "dup-id"]]);
+    assert.deepEqual(
+      catalog.searchSupportedParameterPairs(snapshot,
+        [["__proto__", "dup-id"], ["toString", "dup-id"]],
+        ["temperature", "top_p"]).map(pairIdentity),
+      [["__proto__", "dup-id"]]);
+    // Non-ASCII case pairs stay distinct in capability tokens as well.
+    assert.deepEqual(
+      catalog.searchSupportedParameterPairs(snapshot,
+        [["toString", "\u00c9-model"], ["toString", "\u00e9-model"]],
+        ["\u00c9"]).map(pairIdentity), [["toString", "\u00c9-model"]]);
+    // Unicode digits are TEXT, not digit runs, and survive as literal ids.
+    assert.equal(
+      catalog.searchTextProviderPairs(snapshot, {query: "m-\u0661"}).length, 0);
+    assert.equal(catalog.canonicalText(snapshot), before,
+                 "adversarial controls never mutate the snapshot");
+  });
+
+  it("isolates inputs, results and requests across interleaved calls", () => {
+    // This is interleaving, not a worker-concurrency test: repeated and
+    // overlapping calls in one thread must not share any mutable state.
+    const snapshot = searchCapabilitySnapshot();
+    const before = catalog.canonicalText(snapshot);
+    const request = ["TEXT", "image"];
+    const requestBefore = request.slice();
+    const supplied = [["gate", "both"], ["gate", "text-only"]];
+    const suppliedBefore = supplied.map(pairIdentity);
+
+    const first = catalog.searchInputModalityPairs(snapshot, supplied, request);
+    assert.deepEqual(first.map(pairIdentity), [["gate", "both"]]);
+    first[0][0] = "hijacked";
+    first[0][1] = "hijacked";
+    first.push(["gate", "injected"]);
+    first.length = 0;
+
+    const contextResult = catalog.searchMinContextPairs(snapshot, supplied, 0);
+    const parameterResult = catalog.searchSupportedParameterPairs(
+      snapshot, supplied, ["temperature", "top_p"]);
+    const textResult = catalog.searchTextProviderPairs(snapshot,
+                                                       {query: "modalities"});
+
+    assert.deepEqual(catalog.searchInputModalityPairs(snapshot, supplied,
+                                                      request)
+                       .map(pairIdentity), [["gate", "both"]],
+                     "a later call is unaffected by mutating an earlier result");
+    assert.deepEqual(catalog.searchMinContextPairs(snapshot, supplied, 0)
+                       .map(pairIdentity), suppliedBefore);
+    assert.deepEqual(catalog.searchSupportedParameterPairs(
+      snapshot, supplied, ["temperature", "top_p"]).map(pairIdentity),
+      [["gate", "both"]]);
+    assert.deepEqual(request, requestBefore, "the request list is untouched");
+    assert.deepEqual(supplied, suppliedBefore, "the selection is untouched");
+    assert.equal(contextResult.length, 2);
+    assert.equal(parameterResult.length, 1);
+    assert.ok(textResult.length >= 1);
+    assert.equal(catalog.canonicalText(snapshot), before,
+                 "no call can corrupt the snapshot");
+
+    // Every branch returns a NEW outer array of NEW pair arrays.
+    const inactiveA = catalog.searchMinContextPairs(snapshot, supplied, null);
+    const inactiveB = catalog.searchMinContextPairs(snapshot, supplied, null);
+    assert.notEqual(inactiveA, inactiveB);
+    assert.notEqual(inactiveA[0], inactiveB[0]);
+    inactiveA[0][1] = "mutated";
+    assert.deepEqual(inactiveB.map(pairIdentity), suppliedBefore);
+    const modalityInactive = catalog.searchInputModalityPairs(snapshot,
+                                                              supplied, []);
+    assert.notEqual(modalityInactive, supplied);
+    assert.notEqual(modalityInactive[0], supplied[0]);
+    const parameterInactive = catalog.searchSupportedParameterPairs(
+      snapshot, supplied, null);
+    assert.notEqual(parameterInactive, supplied);
+    assert.equal(catalog.canonicalText(snapshot), before);
+  });
+
+  it("stays complete and unpaginated well past two hundred pairs", () => {
+    const snapshot = searchCapabilitySnapshot();
+    const bulk = catalog.searchTextProviderPairs(snapshot, {provider: "bulk"});
+    assert.equal(bulk.length, 210, "every bulk endpoint is selected");
+    const composed = composeSearchStages(snapshot, {
+      provider: "bulk", min_context_length: 65536, input_modalities: ["text"],
+      supported_parameters: ["temperature"]
+    });
+    assert.equal(composed.length, 210, "no stage slices the complete set");
+    assert.deepEqual(composed[0], ["bulk", "bulk-000"]);
+    assert.deepEqual(composed[209], ["bulk", "bulk-209"]);
+    // A >200 selection survives a later filter stage with multiplicity intact.
+    const repeated = composed.concat(composed.slice(0, 5));
+    assert.equal(catalog.searchSupportedParameterPairs(
+      snapshot, repeated, ["temperature"]).length, 215);
+  });
+
+  it("refuses a wrong-schema document before any stage can see it", () => {
+    const text = wrongSchemaSnapshotText();
+    assert.throws(() => catalog.loadSnapshot(text),
+                  {name: "CatalogError",
+                   message: UNSUPPORTED_VERSION_MESSAGE},
+                  "the accepted loader refuses schema_version 2");
+    assert.deepEqual(runQueryReference([{tool: "load_error",
+                                        snapshot_text: text, args: {},
+                                        now: null}]),
+                     [catalog.canonicalText({code: "unsupported_schema_version"})],
+                     "Python refuses the same document with the same code");
+  });
+
+  it("agrees with the unchanged Python reference on every stage", () => {
+    const cases = [];
+    for (const row of completeStageRows()) {
+      cases.push(stagePairCase(row.id, rowSnapshot(row), row.args));
+    }
+    const boundary = searchBoundarySnapshot();
+    for (const [label, args] of [
+      ["boundary-none", {}],
+      ["boundary-shared-id", {query: "shared-id"}],
+      ["boundary-upper", {query: "MIXED NAME"}],
+      ["boundary-unicode", {query: "\u00c9CHO"}],
+      ["boundary-whitespace", {query: "   "}],
+      ["boundary-raw", {query: "bulk"}],
+      ["boundary-provider", {provider: "alpha"}],
+      ["boundary-provider-query", {query: "vendor/tool", provider: "Alpha"}],
+      ["boundary-context", {min_context_length: 7}],
+      ["boundary-context-zero", {min_context_length: 0}],
+      ["boundary-modality", {input_modalities: ["imagetoken"]}],
+      ["boundary-parameter", {supported_parameters: ["paramtoken"]}]
+    ]) {
+      cases.push(stagePairCase(label, boundary, args));
+    }
+    const capability = searchCapabilitySnapshot();
+    for (const [label, args] of [
+      ["capability-context-65536", {min_context_length: 65536}],
+      ["capability-context-max", {min_context_length: catalog.MAX_SAFE_INT}],
+      ["capability-modality-and", {input_modalities: ["text", "IMAGE"]}],
+      ["capability-parameter-and", {supported_parameters: ["temperature",
+                                                          "TOP_P"]}],
+      ["capability-all", {min_context_length: 65536,
+                          input_modalities: ["text"],
+                          supported_parameters: ["temperature"]}],
+      ["capability-zero", {min_context_length: 0,
+                           input_modalities: [], supported_parameters: []}]
+    ]) {
+      cases.push(stagePairCase(label, capability, args));
+    }
+    const adversarial = adversarialSearchSnapshot();
+    for (const [label, args] of [
+      ["adversarial-none", {}],
+      ["adversarial-proto", {provider: "__proto__"}],
+      ["adversarial-proto-query", {query: "__proto__", provider: "__proto__"}],
+      ["adversarial-toString", {provider: "toString"}],
+      ["adversarial-unicode", {query: "\u00c9CHO"}],
+      ["adversarial-digit-run", {query: "num-"}],
+      ["adversarial-context-zero", {min_context_length: 0}],
+      ["adversarial-modality", {input_modalities: ["image"]}],
+      ["adversarial-parameter", {supported_parameters: ["top_p"]}]
+    ]) {
+      cases.push(stagePairCase(label, adversarial, args));
+    }
+    cases.push(stagePairCase("future-epoch",
+                             resealedSnapshot("lookup.json", (body) => {
+                               body.tick_epoch = 4102444800;
+                             }), {query: "shared"}));
+    cases.push(stagePairCase("zero-epoch-and-zero-context",
+                             resealedSnapshot("lookup.json", (body) => {
+                               body.tick_epoch = 0;
+                               body.warnings = [];
+                             }), {min_context_length: 0}));
+    cases.push(stagePairCase("empty-registry",
+                             searchSnapshot([], {}), {}));
+
+    // Supplied-selection cases: reversed subsets, repeats and single pairs, so
+    // order and multiplicity are pinned against the reference too.
+    const reversed = [["gate", "text-only"], ["gate", "both"],
+                      ["gate", "text-only"], ["other", "shared-id"],
+                      ["gate", "both"]];
+    for (const [label, pairs, args] of [
+      ["filter-inactive", reversed, {}],
+      ["filter-context-zero", reversed, {min_context_length: 0}],
+      ["filter-context-high", reversed, {min_context_length: 65536}],
+      ["filter-modality", reversed, {input_modalities: ["text"]}],
+      ["filter-modality-image", reversed, {input_modalities: ["IMAGE"]}],
+      ["filter-parameter", reversed, {supported_parameters: ["top_p"]}],
+      ["filter-all", reversed,
+       {min_context_length: 65536, input_modalities: ["text"],
+        supported_parameters: ["temperature"]}],
+      ["filter-single", [["other", "shared-id"]],
+       {min_context_length: 65536, input_modalities: ["image"],
+        supported_parameters: ["temperature"]}],
+      ["filter-empty", [], {min_context_length: 0,
+                            input_modalities: ["text"]}]
+    ]) {
+      cases.push(stageFilterCase(label, capability, pairs, args));
+    }
+
+    assert.equal(cases.length, 22 + 12 + 6 + 9 + 3 + 9,
+                 "the parity case set is complete");
+    assertStageParity(cases);
+  });
+});
+
+// --------------------------------------------------------------------------
 // cross-fixture integration and the dual (browser + Node) export
 // --------------------------------------------------------------------------
 describe("fixture integration and export shape", () => {
@@ -4096,6 +5367,8 @@ describe("fixture integration and export shape", () => {
       "endpointKey", "getModel", "isFloatToken", "listEndpoints",
       "listFreeModels", "loadJson", "loadSnapshot", "naturalKey",
       "normalizeCapabilities", "projectCapabilities", "projectModel",
+      "searchInputModalityPairs", "searchMinContextPairs",
+      "searchSupportedParameterPairs", "searchTextProviderPairs",
       "snapshotHash", "stripFreeMarker", "validateSnapshot", "watchdogStatus"
     ]);
     assert.equal(catalog.MAX_SAFE_INT, 9007199254740991);

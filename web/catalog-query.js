@@ -2248,6 +2248,257 @@
     };
   }
 
+  // ---------- pure metadata-search pipeline stages -------------------------
+  //
+  // The dependency-free counterpart of the pure `_search_text_provider_pairs`,
+  // `_search_min_context_pairs`, `_search_input_modality_pairs` and
+  // `_search_supported_parameter_pairs` stages in `watchdog_catalog/query.py`.
+  // Together they are the INTERNAL pipeline of the future public `search_models`
+  // tool: candidate selection by literal text and exact provider, then an
+  // INCLUSIVE minimum context, then an input-modality AND, then a
+  // supported-parameter AND. Public argument decoding, success/error envelopes
+  // and pagination belong to a later unit, so these stages validate nothing:
+  // invalid preconditions have no newly promised error contract.
+  //
+  // Every stage takes an already-VALIDATED snapshot and never re-validates,
+  // re-hashes, or reads a clock, file, network, configuration, state or SDK. The
+  // three filter stages take an ALREADY selected ordered array of
+  // `[provider, rawId]` identities -- possibly a subset, in non-natural order or
+  // with repeated entries -- and never re-derive a global selection. Each returns
+  // a NEW outer array of NEW two-string pair arrays, so mutating a result can
+  // never corrupt the snapshot, an input sequence, a request array or an earlier
+  // or later result.
+
+  /** A fresh copy of one `[provider, rawId]` endpoint identity pair. */
+  function _copyPair(pair) {
+    return [pair[0], pair[1]];
+  }
+
+  /** A fresh copy of an ordered `[provider, rawId]` selection. */
+  function _copyPairs(pairs) {
+    var copied = [];
+    for (var index = 0; index < pairs.length; index += 1) {
+      copied.push(_copyPair(pairs[index]));
+    }
+    return copied;
+  }
+
+  /** One option member, with an omitted or `undefined` value resolved to null. */
+  function _stageOption(options, key) {
+    var value = _member(options, key);
+    return value === _MISSING || value === undefined ? null : value;
+  }
+
+  /**
+   * The OWN projected model of one supplied pair, or `_MISSING`.
+   *
+   * Endpoint identity is exactly `(provider, raw id)`: the lookup goes to that
+   * provider's own model map, so a raw id shared by two providers always reads
+   * the metadata of the provider in the pair and never a sibling's.
+   */
+  function _stageModel(snapshot, pair) {
+    var entry = _member(snapshot.providers, pair[0]);
+    if (entry === _MISSING) {
+      return _MISSING;
+    }
+    return _member(entry.models, pair[1]);
+  }
+
+  /**
+   * The pure candidate-selection stage: literal text plus exact provider.
+   *
+   * `snapshot` is an already-VALIDATED public snapshot. `options.query` is null
+   * or a string and `options.provider` is null or one exact `provider_order`
+   * key; an omitted member means null. With a provider it scopes to exactly that
+   * key, else it walks every `provider_order` key in that precedence -- never
+   * provider-map, model-map or `model_ids` insertion order and never alphabetic
+   * key order.
+   *
+   * The result is a NEW list of `[provider, rawId]` pairs in the frozen endpoint
+   * order (provider precedence, then the accepted natural raw-ID order within
+   * each provider). It is UNPAGINATED and carries no page cap, no deduplication
+   * and no metadata union, so a later sort-then-slice stage sees the complete
+   * match set: a raw ID shared by two providers stays TWO distinct pairs and a
+   * selected zero-ID provider yields `[]`.
+   *
+   * `query` is a LITERAL, UNTRIMMED substring compared separately against the
+   * pair's own raw id, `name` and non-null `description` after the shared
+   * ASCII-only fold (A-Z to a-z; every other code point -- including a non-ASCII
+   * uppercase letter -- stays literal). There is no regular expression, fuzzy
+   * alias, marker stripping or JSON/metadata serialization: capability arrays,
+   * pricing, wiring URLs, provider keys and object key names are never searched,
+   * a query spanning two separately concatenated fields never matches, and one
+   * pair's fields are never borrowed from a sibling provider. Null or `""`
+   * applies no text constraint; a whitespace-only query is a literal constraint.
+   * Matching ONE field suffices.
+   */
+  function searchTextProviderPairs(snapshot, options) {
+    var settings = options === undefined || options === null ? {} : options;
+    var query = _stageOption(settings, "query");
+    var provider = _stageOption(settings, "provider");
+    var providers = snapshot.providers;
+    var selected = provider === null ? snapshot.provider_order.slice()
+                                     : [provider];
+    var needle = query ? _asciiLower(query) : null;
+    var pairs = [];
+    for (var index = 0; index < selected.length; index += 1) {
+      var providerKey = selected[index];
+      var entry = _member(providers, providerKey);
+      if (entry === _MISSING) {
+        continue;
+      }
+      var ids = _naturalIds(entry.model_ids);
+      for (var position = 0; position < ids.length; position += 1) {
+        var rawId = ids[position];
+        if (needle !== null) {
+          var model = _member(entry.models, rawId);
+          var fields = [rawId, model.name, model.description];
+          var matched = false;
+          for (var field = 0; field < fields.length; field += 1) {
+            var value = fields[field];
+            if (value !== null && value !== undefined &&
+                _asciiLower(value).includes(needle)) {
+              matched = true;
+              break;
+            }
+          }
+          if (!matched) {
+            continue;
+          }
+        }
+        pairs.push([providerKey, rawId]);
+      }
+    }
+    return pairs;
+  }
+
+  /**
+   * The pure INCLUSIVE minimum-context stage.
+   *
+   * `pairs` is the ALREADY selected ordered selection of tracked
+   * `[provider, rawId]` identities (typically from
+   * `searchTextProviderPairs()`), never re-derived here; `minContextLength` is
+   * null or an already-normalized nonnegative SAFE integer.
+   *
+   * The result is a NEW list holding only the supplied pairs whose OWN
+   * `context_length` is known (not null) and `>=` the threshold, inclusively. A
+   * null threshold applies NO constraint and returns every supplied pair
+   * freshly; `0` is an ACTIVE threshold that retains a known zero and rejects an
+   * unknown null. There is no truthiness test of the threshold or the context, no
+   * `or 0` fallback, no inferred name/description context, no raw-ID sibling
+   * borrowing, no sort, no deduplication and no pagination: the supplied order
+   * and multiplicity are preserved exactly, the selection is never expanded, and
+   * more than the default page's worth of eligible pairs stays complete.
+   */
+  function searchMinContextPairs(snapshot, pairs, minContextLength) {
+    var threshold = minContextLength === undefined ? null : minContextLength;
+    if (threshold === null) {
+      return _copyPairs(pairs);
+    }
+    var kept = [];
+    for (var index = 0; index < pairs.length; index += 1) {
+      var model = _stageModel(snapshot, pairs[index]);
+      if (model === _MISSING) {
+        continue;
+      }
+      var context = model.context_length;
+      if (context !== null && context !== undefined && context >= threshold) {
+        kept.push(_copyPair(pairs[index]));
+      }
+    }
+    return kept;
+  }
+
+  /** The requested tokens folded by the shared ASCII-only rule, in order. */
+  function _foldRequestedTokens(tokens) {
+    var folded = [];
+    for (var index = 0; index < tokens.length; index += 1) {
+      folded.push(_asciiLower(tokens[index]));
+    }
+    return folded;
+  }
+
+  /** Whether one KNOWN normalized capability array contains every token. */
+  function _containsEveryToken(available, requested) {
+    for (var index = 0; index < requested.length; index += 1) {
+      if (available.indexOf(requested[index]) === -1) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * The shared capability AND filter behind the two public filter stages.
+   *
+   * A null or empty request is INACTIVE and returns every supplied pair freshly,
+   * unknown (null) and known-empty (`[]`) capability arrays included. A nonempty
+   * request keeps only pairs whose OWN normalized array is KNOWN and contains
+   * EVERY ASCII-folded requested token -- an AND over the requested entries on
+   * the SAME pair, never a multiplicity constraint, so a duplicate request is
+   * idempotent. Matching is exact element equality, never a substring or
+   * wildcard, and the request list is never normalized in place.
+   */
+  function _filterByCapability(snapshot, pairs, tokens, field) {
+    if (tokens === null || tokens === undefined || tokens.length === 0) {
+      return _copyPairs(pairs);
+    }
+    var requested = _foldRequestedTokens(tokens);
+    var kept = [];
+    for (var index = 0; index < pairs.length; index += 1) {
+      var model = _stageModel(snapshot, pairs[index]);
+      if (model === _MISSING) {
+        continue;
+      }
+      // The accepted projection/normalization: known arrays are ASCII-folded
+      // and first-occurrence deduplicated, null stays null and a known `[]` is
+      // NOT unknown.
+      var available = normalizeCapabilities(model)[field];
+      if (available !== null && _containsEveryToken(available, requested)) {
+        kept.push(_copyPair(pairs[index]));
+      }
+    }
+    return kept;
+  }
+
+  /**
+   * The pure input-modality AND stage.
+   *
+   * `inputModalities` is null or an already-validated list of nonempty strings.
+   * The result keeps only supplied pairs whose OWN
+   * `architecture.input_modalities` is known and contains EVERY ASCII-folded
+   * requested token. Output modalities, names, descriptions, raw ids, provider
+   * keys, pricing and supported parameters are never substitutes, and a pair's
+   * capability is never borrowed from a sibling provider sharing its raw id.
+   * See `_filterByCapability()` for the shared null/empty, known-vs-unknown,
+   * duplicate-idempotent and order/multiplicity rules.
+   */
+  function searchInputModalityPairs(snapshot, pairs, inputModalities) {
+    return _filterByCapability(
+      snapshot, pairs,
+      inputModalities === undefined ? null : inputModalities,
+      "input_modalities");
+  }
+
+  /**
+   * The pure supported-parameter AND stage.
+   *
+   * `supportedParameters` is null or an already-validated list of nonempty
+   * strings. The result keeps only supplied pairs whose OWN normalized
+   * `supported_parameters` is known and contains EVERY ASCII-folded requested
+   * token. Input and output modalities are never substitutes, a capability name
+   * is never substring-matched, and a pair can neither borrow a parameter from
+   * another provider sharing its raw id nor union such providers to satisfy a
+   * conjunction. See `_filterByCapability()` for the shared rules.
+   */
+  function searchSupportedParameterPairs(snapshot, pairs,
+                                         supportedParameters) {
+    return _filterByCapability(
+      snapshot, pairs,
+      supportedParameters === undefined ? null : supportedParameters,
+      "supported_parameters");
+  }
+
   return {
     MAX_SAFE_INT: MAX_SAFE_INT,
     MAX_JSON_DEPTH: MAX_JSON_DEPTH,
@@ -2273,6 +2524,10 @@
     listFreeModels: listFreeModels,
     listEndpoints: listEndpoints,
     getModel: getModel,
-    watchdogStatus: watchdogStatus
+    watchdogStatus: watchdogStatus,
+    searchTextProviderPairs: searchTextProviderPairs,
+    searchMinContextPairs: searchMinContextPairs,
+    searchInputModalityPairs: searchInputModalityPairs,
+    searchSupportedParameterPairs: searchSupportedParameterPairs
   };
 });
