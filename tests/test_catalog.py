@@ -9850,6 +9850,11 @@ def test_readme_freezes_shared_tool_definition_rules():
             f"shared-definitions subsection missing rule: {phrase}"
 
 
+def _retired_browser_denial(text):
+    """True when the shared-definitions subsection still denies shipped work."""
+    return "No runtime, package, SDK or browser integration is claimed here." in text
+
+
 def test_readme_separates_static_budgets_and_bulk_guidance():
     text = " ".join(_tool_defs_section_text().split())
     for phrase in (
@@ -9863,7 +9868,22 @@ def test_readme_separates_static_budgets_and_bulk_guidance():
             "explicit small `limit` **1-5** followed by `get_model`",
             "never imply a hard universal output cap or truncation",
             "**published catalogue health** only",
-            "No runtime, package, SDK or browser integration is claimed here.",
     ):
         assert phrase in text, \
             f"shared-definitions subsection missing rule: {phrase}"
+
+    # Unit 10d: the subsection now closes on what SHIPS — the packaged
+    # resource, its page embedding and the browser descriptors read from it —
+    # because the retired "nothing here is integrated" sentence contradicted
+    # the source. Pin the shipped statement, and reject the stale denial with
+    # the same predicate a planted copy proves sensitive.
+    assert "Packaging, embedding, SDK schema comparison and native browser " \
+           "registration are therefore ordinary shipped behaviour" in text
+    assert "web/webmcp.js" in text
+    assert "`tool-contract` island" in text
+    assert not _retired_browser_denial(text), \
+        "the shared-definitions subsection denies integration that ships"
+    planted = text + (
+        " No runtime, package, SDK or browser integration is claimed here.")
+    assert _retired_browser_denial(planted), \
+        "the retired-denial check is not sensitive to a planted denial"
