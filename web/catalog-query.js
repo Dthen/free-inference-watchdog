@@ -614,7 +614,10 @@
 
   function _sha256Hex(bytes) {
     var length = bytes.length;
-    var padded = (((length + 9) >> 6) + 1) << 6;
+    // `length + 9` = message + 0x80 + the 8-byte bit length. When that total is
+    // ALREADY a multiple of 64 it needs no extra block, so this is a ceiling,
+    // not "truncate then add one block".
+    var padded = Math.ceil((length + 9) / 64) * 64;
     var block = new Uint8Array(padded);
     block.set(bytes);
     block[length] = 0x80;
@@ -860,6 +863,150 @@
     return true;
   }
 
+  // ---- bracketed authority hosts -----------------------------------------
+  //
+  // Python's `urlsplit` refuses a netloc that carries only one of `[`/`]`, and
+  // its `_check_bracketed_netloc`/`_check_bracketed_host` pair allows nothing
+  // before `[`, nothing after the closing `]` except an empty or `:`-prefixed
+  // port, and a bracketed host that is either an IPvFuture literal or a real
+  // IPv6 address -- a bracketed IPv4 literal is refused. The helpers below
+  // restate that acceptance set dependency-free. They are purely syntactic.
+
+  /** ASCII decimal digits only: `str.isdigit()` would also admit Unicode. */
+  function _isAsciiDigits(text) {
+    return text.length > 0 && /^[0-9]+$/.test(text);
+  }
+
+  /** A dotted-quad IPv4 literal, with `ipaddress.IPv4Address` string rules. */
+  function _isIpv4Text(text) {
+    var octets = text.split(".");
+    if (octets.length !== 4) {
+      return false;
+    }
+    for (var index = 0; index < octets.length; index += 1) {
+      var octet = octets[index];
+      if (!_isAsciiDigits(octet) || octet.length > 3) {
+        return false;
+      }
+      if (octet.length > 1 && octet.charAt(0) === "0") {
+        return false;                      // no leading zeros
+      }
+      if (Number(octet) > 255) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function _isHextet(text) {
+    return text.length > 0 && text.length <= 4 &&
+           /^[0-9A-Fa-f]+$/.test(text);
+  }
+
+  /** `ipaddress.IPv6Address` string acceptance, scope id included. */
+  function _isIpv6Text(text) {
+    var address = text;
+    var scopeAt = address.indexOf("%");
+    if (scopeAt !== -1) {
+      var scope = address.slice(scopeAt + 1);
+      if (scope.length === 0 || scope.indexOf("%") !== -1) {
+        return false;                      // RFC 4007 scope id rules
+      }
+      address = address.slice(0, scopeAt);
+    }
+    if (address.length === 0 || address.length > 45) {
+      return false;
+    }
+    // Python splits on ':' with maxsplit=9, so a longer colon run collapses
+    // into the tenth part and is refused by the part-count check.
+    var parts = [];
+    var rest = address;
+    while (parts.length < 9) {
+      var at = rest.indexOf(":");
+      if (at === -1) {
+        break;
+      }
+      parts.push(rest.slice(0, at));
+      rest = rest.slice(at + 1);
+    }
+    parts.push(rest);
+    if (parts.length < 3) {
+      return false;
+    }
+    if (parts[parts.length - 1].indexOf(".") !== -1) {
+      // A dotted-quad tail stands in for the final two hextets. Only the LAST
+      // part is converted, exactly as the reference parser does.
+      var dotted = parts.pop();
+      if (!_isIpv4Text(dotted)) {
+        return false;
+      }
+      parts.push("0");
+      parts.push("0");
+    }
+    if (parts.length > 9) {
+      return false;
+    }
+    var skipAt = -1;
+    for (var index = 1; index < parts.length - 1; index += 1) {
+      if (parts[index] !== "") {
+        continue;
+      }
+      if (skipAt !== -1) {
+        return false;                      // at most one '::'
+      }
+      skipAt = index;
+    }
+    var high;
+    var low;
+    if (skipAt !== -1) {
+      high = skipAt;
+      low = parts.length - skipAt - 1;
+      if (parts[0] === "") {
+        high -= 1;
+        if (high !== 0) {
+          return false;                    // ':' only as part of '::'
+        }
+      }
+      if (parts[parts.length - 1] === "") {
+        low -= 1;
+        if (low !== 0) {
+          return false;
+        }
+      }
+      if (8 - (high + low) < 1) {
+        return false;                      // '::' must cover a hextet
+      }
+    } else {
+      if (parts.length !== 8) {
+        return false;
+      }
+      if (parts[0] === "" || parts[parts.length - 1] === "") {
+        return false;
+      }
+      high = parts.length;
+      low = 0;
+    }
+    for (index = 0; index < high; index += 1) {
+      if (!_isHextet(parts[index])) {
+        return false;
+      }
+    }
+    for (index = parts.length - low; index < parts.length; index += 1) {
+      if (!_isHextet(parts[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** `_check_bracketed_host`: IPvFuture literal, otherwise IPv6 only. */
+  function _isBracketedHost(hostname) {
+    if (hostname.charAt(0) === "v") {
+      return /^v[0-9A-Fa-f]+\..+$/.test(hostname);
+    }
+    return _isIpv6Text(hostname);
+  }
+
   /**
    * The frozen SYNTACTIC wiring predicate: a nonempty absolute http/https URL
    * with a hostname, no userinfo, no fragment and no ASCII whitespace or
@@ -903,12 +1050,26 @@
       return false;
     }
     var hostname;
-    if (authority.charAt(0) === "[") {
+    var hasOpen = authority.indexOf("[") !== -1;
+    var hasClose = authority.indexOf("]") !== -1;
+    if (hasOpen !== hasClose) {
+      return false;                       // Python urlsplit: Invalid IPv6 URL
+    }
+    if (hasOpen) {
+      // `_check_bracketed_netloc`: no data before the bracket, and only an
+      // empty or `:`-prefixed (never validated) port after the closing one.
+      if (authority.charAt(0) !== "[") {
+        return false;
+      }
       var closing = authority.indexOf("]");
-      if (closing === -1) {
-        return false;                       // Python urlsplit raises ValueError
+      var afterClosing = authority.slice(closing + 1);
+      if (afterClosing.length !== 0 && afterClosing.charAt(0) !== ":") {
+        return false;
       }
       hostname = authority.slice(1, closing);
+      if (!_isBracketedHost(hostname)) {
+        return false;
+      }
     } else {
       hostname = authority.split(":")[0];
     }

@@ -378,6 +378,140 @@ describe("typed canonical encoding", () => {
 });
 
 // --------------------------------------------------------------------------
+// SHA-256 padding and block boundaries
+// --------------------------------------------------------------------------
+describe("SHA-256 canonical body padding", () => {
+  const crypto = require("node:crypto");
+  const digest = (bytes) =>
+    crypto.createHash("sha256").update(bytes).digest("hex");
+
+  // An INDEPENDENTLY sealed control, not a snapshot the implementation under
+  // test produced: this canonical body text and its `snapshot_id` come from
+  // Python `hashlib` over the reference `json.dumps` encoding. The body is
+  // 1143 bytes, i.e. 55 mod 64 -- exactly the class where padding that adds a
+  // whole extra block when `length + 9` is already a multiple of 64 goes
+  // wrong. Both values are literal file content here.
+  const PYTHON_SEALED_BODY =
+    `{"cadence_s":3600,"provider_order":["synthetic-a","synthetic-b"],"providers":{"synthetic-a":{"api_type":"openai","chat_completions_url":"https://synthetic-alpha.example/v1/chat/completions","display_name":"Synthetic Alpha","model_ids":["alpha-1:free","alpha-2-free"],"models":{"alpha-1:free":{"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"context_length":32768,"description":"Synthetic model one for the contract freeze.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","id":"alpha-1:free","name":"Alpha One","pricing":{"completion":"0","prompt":"0"},"supported_parameters":["temperature","max_tokens"]},"alpha-2-free":{"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"context_length":8192,"description":null,"id":"alpha-2-free","name":"Alpha Two","pricing":{"completion":"0","prompt":"0"},"supported_parameters":["temperature"]}},"stale":false},"synthetic-b":{"api_type":"openai","chat_completions_url":"https://synthetic-beta.example/v1/chat/completions","display_name":"Synthetic Beta","model_ids":[],"models":{},"stale":false}},"schema_version":1,"tick_epoch":1759200000,"warnings":[]}`;
+  const PYTHON_SEALED_ID =
+    "61b303d4d06d4a367aec6b13223dbb21599d37794ce5a7c1d5235dec4b8fa2fb";
+  // The digest the spurious-extra-block encoder produced for that same body.
+  const SPURIOUS_BLOCK_DIGEST =
+    "b7340b0f76cd7e0d13e4be2fb2b5cb2eb6c87c7da6e62fd8d0f57f90007b1395";
+
+  function withoutId(document) {
+    const body = {};
+    for (const key of Object.keys(document)) {
+      if (key !== "snapshot_id") {
+        body[key] = document[key];
+      }
+    }
+    return body;
+  }
+
+  function skeleton(filler) {
+    return {
+      schema_version: 1,
+      tick_epoch: 1759200000,
+      cadence_s: 3600,
+      provider_order: ["synthetic-a"],
+      providers: {
+        "synthetic-a": {
+          display_name: "Synthetic Alpha",
+          chat_completions_url:
+            "https://synthetic-alpha.example/v1/chat/completions",
+          api_type: "openai",
+          model_ids: ["alpha-1:free"],
+          models: {
+            "alpha-1:free": {
+              id: "alpha-1:free",
+              name: "Alpha One",
+              description: filler,
+              context_length: 32768,
+              architecture: {
+                input_modalities: ["text"], output_modalities: ["text"]
+              },
+              supported_parameters: ["temperature"],
+              pricing: { prompt: "0", completion: "0" }
+            }
+          },
+          stale: false
+        }
+      },
+      warnings: []
+    };
+  }
+
+  const BARE_BODY_LENGTH = catalog.canonicalBytes(skeleton("")).length;
+
+  /** A snapshot whose canonical body is exactly `target` bytes, sealed with
+   * `node:crypto` -- an oracle independent of the module's own digest. */
+  function sealedAt(target) {
+    const document = skeleton("x".repeat(target - BARE_BODY_LENGTH));
+    const bytes = catalog.canonicalBytes(withoutId(document));
+    assert.equal(bytes.length, target, `${target}: canonical body length`);
+    document.snapshot_id = digest(bytes);
+    return document;
+  }
+
+  it("matches Python hashlib on an independently sealed 55-mod-64 body", () => {
+    const bodyBytes = Buffer.from(PYTHON_SEALED_BODY, "utf8");
+    assert.equal(bodyBytes.length, 1143, "the control body is 1143 bytes");
+    assert.equal(bodyBytes.length % 64, 55,
+                 "the control body is in the 55-mod-64 padding class");
+    assert.equal(digest(bodyBytes), PYTHON_SEALED_ID,
+                 "node:crypto reproduces the Python hashlib seal");
+    assert.notEqual(SPURIOUS_BLOCK_DIGEST, PYTHON_SEALED_ID,
+                    "the extra-block digest is not the Python seal");
+    const body = catalog.loadJson(PYTHON_SEALED_BODY);
+    assert.equal(catalog.canonicalText(body), PYTHON_SEALED_BODY,
+                 "the typed body re-encodes to the exact sealed text");
+    const document = Object.assign({}, body, {
+      snapshot_id: PYTHON_SEALED_ID
+    });
+    const accepted = assertAccepts(() => catalog.validateSnapshot(document),
+                                   "python-sealed 55-mod-64 body");
+    assert.equal(accepted.snapshot_id, PYTHON_SEALED_ID);
+    assert.equal(catalog.snapshotHash(accepted), PYTHON_SEALED_ID,
+                 "a valid Python-sealed snapshot is accepted, not rejected");
+  });
+
+  it("matches node:crypto across padding and block boundaries", () => {
+    // Offsets 55, 119, 183, 247 and 311 mod 64 are the lengths where
+    // `length + 9` lands exactly on a block multiple; their neighbours are
+    // the ordinary classes that were already right.
+    const block = 64;
+    const base = Math.ceil((BARE_BODY_LENGTH + 9) / block) * block;
+    const offsets = [55, 56, 63, 64, 119, 120, 183, 184, 247, 248, 311, 312];
+    const targets = offsets.map((offset) => base + offset);
+    targets.push((base * 2) + 55, (base * 2) + 119);
+    for (const target of targets) {
+      const document = sealedAt(target);
+      const expected = digest(catalog.canonicalBytes(withoutId(document)));
+      assert.equal(catalog.snapshotHash(document), expected,
+                   `${target}: the encoder reproduces the independent digest`);
+      assertAccepts(() => catalog.validateSnapshot(document),
+                    `${target}-byte canonical body`);
+    }
+  });
+
+  it("still rejects a wrong, truncated or uppercase id at those boundaries", () => {
+    const document = sealedAt(55 + Math.ceil((BARE_BODY_LENGTH + 9) / 64) * 64);
+    for (const [label, value] of [
+      ["all-zero", "0".repeat(64)],
+      ["truncated", document.snapshot_id.slice(1)],
+      ["uppercased", document.snapshot_id.toUpperCase()],
+      ["malformed", "not-a-digest"]
+    ]) {
+      const tampered = Object.assign({}, document, { snapshot_id: value });
+      assertRejects(() => catalog.validateSnapshot(tampered),
+                    "invalid_snapshot", INVALID_SNAPSHOT_MESSAGE,
+                    `${label} id at a 55-mod-64 body`);
+    }
+  });
+});
+
+// --------------------------------------------------------------------------
 // strict structural validation of a published snapshot
 // --------------------------------------------------------------------------
 describe("strict structural validation", () => {
@@ -637,6 +771,107 @@ describe("strict structural validation", () => {
     }
     assert.equal(catalog.canonicalText(first), firstText);
     assert.equal(catalog.canonicalText(second), secondText);
+  });
+});
+
+// --------------------------------------------------------------------------
+// wiring URL authority validation
+// --------------------------------------------------------------------------
+describe("wiring URL authority", () => {
+  const crypto = require("node:crypto");
+  const digest = (bytes) =>
+    crypto.createHash("sha256").update(bytes).digest("hex");
+  // 1100 + 9 is not a multiple of 64, so a URL verdict here can never be
+  // produced by the separate SHA-256 padding class.
+  const WIRING_BODY_LENGTH = 1100;
+
+  function bodyBytes(snapshot) {
+    const body = {};
+    for (const key of Object.keys(snapshot)) {
+      if (key !== "snapshot_id") {
+        body[key] = snapshot[key];
+      }
+    }
+    return catalog.canonicalBytes(body);
+  }
+
+  /** `basic.json` with one wiring URL swapped in, padded back to a fixed
+   * canonical body length and sealed with `node:crypto` -- so the only thing
+   * under test is the wiring predicate itself. */
+  function sealedWiring(url) {
+    const snapshot = catalog.loadJson(readFixtureText("basic.json"));
+    const provider = snapshot.providers["synthetic-a"];
+    provider.chat_completions_url = url;
+    const model = provider.models["alpha-1:free"];
+    model.description = "";
+    const bare = bodyBytes(snapshot).length;
+    model.description = "x".repeat(WIRING_BODY_LENGTH - bare);
+    const bytes = bodyBytes(snapshot);
+    assert.equal(bytes.length, WIRING_BODY_LENGTH,
+                 `${url}: the fixture keeps a fixed canonical body length`);
+    snapshot.snapshot_id = digest(bytes);
+    return snapshot;
+  }
+
+  function assertWiringRejects(url) {
+    const snapshot = sealedWiring(url);
+    assert.equal(catalog.snapshotHash(snapshot), snapshot.snapshot_id,
+                 `${url}: the reseal is hash-clean, so only the URL can fail`);
+    assertRejects(() => catalog.validateSnapshot(snapshot), "invalid_snapshot",
+                  INVALID_SNAPSHOT_MESSAGE, url);
+  }
+
+  function assertWiringAccepts(url) {
+    const snapshot = sealedWiring(url);
+    const accepted = assertAccepts(() => catalog.validateSnapshot(snapshot), url);
+    assert.equal(accepted.providers["synthetic-a"].chat_completions_url, url,
+                 `${url}: the original string is preserved verbatim`);
+  }
+
+  it("rejects stray, extra and misplaced brackets in the authority", () => {
+    for (const url of ["http://foo[bar", "http://foo]bar", "http://foo[bar]",
+                       "http://]", "http://[", "http://x[y]z/", "http://x[y/",
+                       "http://x]y/", "http://[[::1]/", "http://]x[",
+                       "http://a]b[c"]) {
+      assertWiringRejects(url);
+    }
+  });
+
+  it("rejects material after the closing bracket that is not a port", () => {
+    for (const url of ["http://[::1]x/", "http://[::1]]/"]) {
+      assertWiringRejects(url);
+    }
+  });
+
+  it("requires the bracketed host to be IPv6 or an IPvFuture literal", () => {
+    for (const url of ["http://[]/", "http://[::gg]/", "http://[vG.x]/",
+                       "http://[V1.x]/", "http://[v1.]/",
+                       "http://[::ffff:999.2.3.4]/", "http://[1.2.3.4]/",
+                       "http://[12345::]/", "http://[::g]/",
+                       "http://[1:2:3:4:5:6:7]/",
+                       "http://[1:2:3:4:5:6:7:8:9]/", "http://[:::1]/",
+                       "http://[1::2::3]/", "http://[1.2.3.4::]/",
+                       "http://[::1%]/", "http://[::1%a%b]/"]) {
+      assertWiringRejects(url);
+    }
+  });
+
+  it("keeps valid bracketed and near-neighbour wiring verbatim", () => {
+    for (const url of ["http://[::1]/v1", "http://[::1]:8080/v1",
+                       "http://[v1.x]/", "http://[vF.a]/", "http://[::]/",
+                       "http://[2001:db8::1]/", "http://[::ffff:1.2.3.4]/",
+                       "http://[fe80::1%25eth0]/", "http://[::1]:80x/",
+                       "http://[::1]:/x", "http://[::1]:99999/",
+                       "http://[::1]", "http://[::1]#", "HTTP://[::1]/v1",
+                       "http://example.com#", "http://example.com:bad",
+                       "http://example.com?q=1", "http://example.com./",
+                       "http://exa_mple.com/", "http://a..b/",
+                       "http://.example.com/", "http://-example.com/",
+                       "http://\u00c9XAMPLE.com/",
+                       "https://\u4f8b\u3048.\u30c6\u30b9\u30c8/",
+                       "http://example.com\\path", "http://exa%20mple.com/"]) {
+      assertWiringAccepts(url);
+    }
   });
 });
 
