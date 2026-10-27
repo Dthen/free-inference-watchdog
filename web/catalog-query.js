@@ -1651,6 +1651,285 @@
     return _compareNaturalKeys(left[1], right[1]);
   }
 
+  // ---------- pure bulk list/endpoint queries ---------------------------
+  //
+  // The dependency-free counterpart of the pure `list_free_models` and
+  // `list_endpoints` cores in `watchdog_catalog/query.py`. Both take an
+  // already-VALIDATED public snapshot -- the load/validate boundary owns raw,
+  // structural and hash checks, so nothing here re-validates, rehashes, reads a
+  // clock or performs I/O -- plus the whole DECODED argument object (never a
+  // splatted provider and never an adapter wrapper). Both return the frozen
+  // payload directly and never raise into the caller for a malformed argument.
+
+  //: The two frozen argument-error codes and their literal public messages.
+  var INVALID_ARGUMENTS = "invalid_arguments";
+  var UNKNOWN_PROVIDER = "unknown_provider";
+  var ARGUMENT_MESSAGES = {
+    invalid_arguments: "Invalid tool arguments.",
+    unknown_provider: "Unknown provider."
+  };
+
+  /**
+   * The shared frozen argument-error envelope.
+   *
+   * Top-level fields are exactly `ok` and `error`; `ok` is strictly `false`;
+   * `error` carries exactly `code`, `message` and `parameter`. `parameter` is
+   * the offending KNOWN signature parameter name, or `null` for a non-object
+   * argument or an unknown argument name, and no supplied key or hostile value
+   * is ever reflected. The envelope carries no `tool`, path, source, cache,
+   * provenance, staleness, partial-data or count field. A NEW object is
+   * returned on every call, so a caller can never mutate shared state.
+   */
+  function _argumentError(code, parameter) {
+    return {ok: false,
+            error: {code: code, message: ARGUMENT_MESSAGES[code],
+                    parameter: parameter}};
+  }
+
+  /**
+   * The frozen provider-argument boundary shared by the two bulk queries.
+   *
+   * Deterministic and in the frozen order: the argument must be a JSON object;
+   * then ANY unknown key rejects with `parameter` `null`; then a non-`null`
+   * provider that is not a string is `invalid_arguments`; then a string absent
+   * from this snapshot's exact `provider_order` is `unknown_provider`. Empty,
+   * padded and wrong-case keys are never repaired, and membership is driven by
+   * the snapshot's ordered data alone -- never a provider enum, truthiness or
+   * an object prototype member. `undefined` is this language's absent value and
+   * is treated exactly like an omitted or `null` provider.
+   */
+  function _providerSelection(snapshot, args) {
+    if (!_isPlainObject(args)) {
+      return {error: _argumentError(INVALID_ARGUMENTS, null)};
+    }
+    var keys = Object.keys(args);
+    for (var index = 0; index < keys.length; index += 1) {
+      // `limit`/`offset` are unknown here, not bulk truncation controls.
+      if (keys[index] !== "provider") {
+        return {error: _argumentError(INVALID_ARGUMENTS, null)};
+      }
+    }
+    var supplied = _member(args, "provider");
+    var provider = supplied === _MISSING || supplied === null ||
+                   supplied === undefined ? null : supplied;
+    if (provider !== null && typeof provider !== "string") {
+      return {error: _argumentError(INVALID_ARGUMENTS, "provider")};
+    }
+    if (provider !== null && snapshot.provider_order.indexOf(provider) === -1) {
+      return {error: _argumentError(UNKNOWN_PROVIDER, "provider")};
+    }
+    return {error: null, provider: provider};
+  }
+
+  /** A fresh naturally ordered copy of one provider's raw-ID array. */
+  function _naturalIds(modelIds) {
+    return modelIds.slice().sort(compareNaturalIds);
+  }
+
+  /**
+   * A fresh deep copy of one JSON-shaped value.
+   *
+   * Strings, booleans, `null` and numbers are immutable and are returned as-is;
+   * an accepted typed `JsonFloat` gets its own wrapper so a caller mutating a
+   * result can never reach the snapshot's typed representation. Arrays and
+   * plain objects are copied member by member through `_defineMember`, so an
+   * own `__proto__` member survives as data instead of becoming a prototype.
+   */
+  function _copyValue(value) {
+    if (value === null || typeof value !== "object") {
+      return value;
+    }
+    if (value instanceof JsonFloat) {
+      return new JsonFloat(value.value);
+    }
+    if (Array.isArray(value)) {
+      var items = [];
+      for (var index = 0; index < value.length; index += 1) {
+        items.push(_copyValue(value[index]));
+      }
+      return items;
+    }
+    var copy = {};
+    var keys = Object.keys(value);
+    for (var position = 0; position < keys.length; position += 1) {
+      _defineMember(copy, keys[position], _copyValue(value[keys[position]]));
+    }
+    return copy;
+  }
+
+  /**
+   * The flat `rawId -> projected public model` map for ONE provider.
+   *
+   * Members follow the provider's own `model_ids` order, exactly like the
+   * reference comprehension, and each value (with its nested architecture,
+   * parameter and pricing containers) is deep-copied verbatim -- never
+   * reprojected, re-derived from raw provider state or stringified/parsed away.
+   * Model-map key order is not semantic; the raw-ID array order is.
+   */
+  function _modelMap(entry) {
+    var models = {};
+    var ids = entry.model_ids;
+    for (var index = 0; index < ids.length; index += 1) {
+      _defineMember(models, ids[index], _copyValue(entry.models[ids[index]]));
+    }
+    return models;
+  }
+
+  /** A fresh `{provider: staleFlag}` map over the selected providers. */
+  function _staleFlags(providers, keys) {
+    var flags = {};
+    for (var index = 0; index < keys.length; index += 1) {
+      _defineMember(flags, keys[index], providers[keys[index]].stale);
+    }
+    return flags;
+  }
+
+  /**
+   * The pure core of the frozen BULK `list_free_models` tool.
+   *
+   * With `provider` omitted or `null` the all-provider export carries exactly
+   * `ok`, `providers`, `models`, `counts`, `total_ids`, `n_gateways`,
+   * `snapshot_id`, `tick_epoch` and `provider_staleness`; with one exact
+   * registered `provider` the one-provider export carries exactly `ok`,
+   * `provider`, `model_ids`, `models`, `count`, `snapshot_id`, `tick_epoch` and
+   * `provider_staleness`.
+   *
+   * `providers`/`models`/`counts`/`provider_staleness` carry the SAME provider
+   * set -- every `provider_order` key, a registered zero-ID provider included
+   * (as an empty array, an empty map and count `0`). `total_ids` is the count
+   * of distinct LITERAL raw-ID strings across the selected registry, never the
+   * endpoint-pair count and never a marker-label count, and `n_gateways` is
+   * `provider_order`'s length including zero-ID providers. Metadata stays
+   * attached to its own `(provider, rawId)` pair, so two providers sharing an
+   * ID keep their own conflicting projected objects.
+   *
+   * Every returned container, array and copied model object is freshly
+   * allocated, the inputs are never mutated, and raw-ID arrays are in the
+   * accepted natural order -- never the legacy sort and never the snapshot's
+   * literal code-point order.
+   */
+  function listFreeModels(snapshot, args) {
+    var selection = _providerSelection(snapshot, args);
+    if (selection.error) {
+      return selection.error;
+    }
+    var provider = selection.provider;
+    var order = snapshot.provider_order;
+    var providers = snapshot.providers;
+    if (provider !== null) {
+      var entry = providers[provider];
+      var modelIds = _naturalIds(entry.model_ids);
+      return {
+        ok: true,
+        provider: provider,
+        model_ids: modelIds,
+        models: _modelMap(entry),
+        count: modelIds.length,
+        snapshot_id: snapshot.snapshot_id,
+        tick_epoch: snapshot.tick_epoch,
+        provider_staleness: _staleFlags(providers, [provider])
+      };
+    }
+    var providerMap = {};
+    var models = {};
+    var counts = {};
+    var totalIds = new Set();
+    for (var index = 0; index < order.length; index += 1) {
+      var key = order[index];
+      var current = providers[key];
+      _defineMember(providerMap, key, _naturalIds(current.model_ids));
+      _defineMember(models, key, _modelMap(current));
+      _defineMember(counts, key, current.model_ids.length);
+      for (var position = 0; position < current.model_ids.length;
+           position += 1) {
+        totalIds.add(current.model_ids[position]);
+      }
+    }
+    return {
+      ok: true,
+      providers: providerMap,
+      models: models,
+      counts: counts,
+      total_ids: totalIds.size,
+      n_gateways: order.length,
+      snapshot_id: snapshot.snapshot_id,
+      tick_epoch: snapshot.tick_epoch,
+      provider_staleness: _staleFlags(providers, order)
+    };
+  }
+
+  /**
+   * The pure core of the frozen `list_endpoints` tool.
+   *
+   * BOTH variants carry exactly `ok`, `gateways`, `counts`, `provider`,
+   * `snapshot_id`, `tick_epoch` and `provider_staleness`; `provider` is `null`
+   * for the all-provider form and the exact selected key otherwise.
+   *
+   * `gateways` and `provider_staleness` contain exactly the SELECTED providers
+   * (all `provider_order` keys, or the one known selection, a registered
+   * zero-ID provider included). Each gateway entry carries exactly
+   * `chat_completions_url`, `api_type`, `model_ids` and `models`: wiring from
+   * that same snapshot provider, its complete naturally ordered raw-ID array
+   * (unchanged literal ids, never marker labels) and the complete projected
+   * metadata for each of its own endpoints.
+   *
+   * `counts` carries exactly `gateways` (selected providers), `endpoints`
+   * (selected `(provider, rawId)` pairs), `distinct_raw_ids` (selected literal
+   * raw strings), `marker_group_labels` (selected delimiter-stripped labels via
+   * the accepted `stripFreeMarker` guard) and the documented legacy `models`
+   * alias equal to `marker_group_labels` -- a label count, never a verified
+   * model identity and never the endpoint count. Counts describe the SELECTED
+   * scope: a filtered response leaks no registry-wide total, and a zero-ID
+   * single selection yields `gateways` 1 with every other count zero.
+   */
+  function listEndpoints(snapshot, args) {
+    var selection = _providerSelection(snapshot, args);
+    if (selection.error) {
+      return selection.error;
+    }
+    var provider = selection.provider;
+    var order = snapshot.provider_order;
+    var providers = snapshot.providers;
+    var selected = provider === null ? order.slice() : [provider];
+    var gateways = {};
+    var endpoints = 0;
+    var distinctRawIds = new Set();
+    var markerGroupLabels = new Set();
+    for (var index = 0; index < selected.length; index += 1) {
+      var key = selected[index];
+      var entry = providers[key];
+      _defineMember(gateways, key, {
+        chat_completions_url: entry.chat_completions_url,
+        api_type: entry.api_type,
+        model_ids: _naturalIds(entry.model_ids),
+        models: _modelMap(entry)
+      });
+      for (var position = 0; position < entry.model_ids.length;
+           position += 1) {
+        var rawId = entry.model_ids[position];
+        endpoints += 1;
+        distinctRawIds.add(rawId);
+        markerGroupLabels.add(stripFreeMarker(rawId));
+      }
+    }
+    var labels = markerGroupLabels.size;
+    return {
+      ok: true,
+      gateways: gateways,
+      counts: {
+        gateways: selected.length,
+        endpoints: endpoints,
+        distinct_raw_ids: distinctRawIds.size,
+        marker_group_labels: labels,
+        models: labels
+      },
+      provider: provider,
+      snapshot_id: snapshot.snapshot_id,
+      tick_epoch: snapshot.tick_epoch,
+      provider_staleness: _staleFlags(providers, selected)
+    };
+  }
+
   return {
     MAX_SAFE_INT: MAX_SAFE_INT,
     MAX_JSON_DEPTH: MAX_JSON_DEPTH,
@@ -1672,6 +1951,8 @@
     naturalKey: naturalKey,
     compareNaturalIds: compareNaturalIds,
     endpointKey: endpointKey,
-    compareEndpointPairs: compareEndpointPairs
+    compareEndpointPairs: compareEndpointPairs,
+    listFreeModels: listFreeModels,
+    listEndpoints: listEndpoints
   };
 });

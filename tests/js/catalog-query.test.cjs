@@ -1582,6 +1582,1032 @@ describe("ordering and free-marker helpers", () => {
 });
 
 // --------------------------------------------------------------------------
+// pure list_free_models / list_endpoints queries
+// --------------------------------------------------------------------------
+//
+// Every success payload is compared against the INDEPENDENTLY authored
+// `cases.json` golden (deep semantic equality, object key order ignored, array
+// order and scalar types retained) plus the exact frozen README field sets. The
+// small Python comparison at the end of each group is a DRIFT probe against the
+// unchanged reference helper -- agreement alone is never taken as proof: the
+// committed literals remain the correctness oracle.
+
+const QUERY_CASES = readFixtureDocument("cases.json").cases;
+const QUERY_ARGUMENTS = readFixtureDocument("argument-cases.json");
+
+const LIST_ALL_FIELDS = ["counts", "models", "n_gateways", "ok",
+                         "provider_staleness", "providers", "snapshot_id",
+                         "tick_epoch", "total_ids"];
+const LIST_ONE_FIELDS = ["count", "model_ids", "models", "ok", "provider",
+                         "provider_staleness", "snapshot_id", "tick_epoch"];
+const ENDPOINT_FIELDS = ["counts", "gateways", "ok", "provider",
+                         "provider_staleness", "snapshot_id", "tick_epoch"];
+const GATEWAY_FIELDS = ["api_type", "chat_completions_url", "model_ids",
+                        "models"];
+const ENDPOINT_COUNT_FIELDS = ["distinct_raw_ids", "endpoints", "gateways",
+                               "marker_group_labels", "models"];
+const ARGUMENT_MESSAGES = {
+  invalid_arguments: "Invalid tool arguments.",
+  unknown_provider: "Unknown provider."
+};
+
+function queryRows(tool) {
+  return QUERY_CASES.filter((row) => row.tool === tool);
+}
+
+function argumentRows(section, tool) {
+  return QUERY_ARGUMENTS[section].filter((row) => row.tool === tool);
+}
+
+/** A validated snapshot decoded straight from a committed fixture document. */
+function acceptedSnapshot(name) {
+  return catalog.loadSnapshot(readFixtureText(name));
+}
+
+/** A typed deep copy through the module's own canonical text. */
+function typedClone(value) {
+  return catalog.loadJson(catalog.canonicalText(value));
+}
+
+/** Re-seal a test-built snapshot body and prove the validator accepts it. */
+function resealSnapshot(body) {
+  body.snapshot_id = catalog.snapshotHash(body);
+  return catalog.validateSnapshot(body);
+}
+
+/** The legitimately EMPTY registry control, re-sealed from a valid fixture. */
+function emptyRegistrySnapshot() {
+  const body = typedClone(acceptedSnapshot("lookup.json"));
+  body.provider_order = [];
+  body.providers = {};
+  return resealSnapshot(body);
+}
+
+/**
+ * An explicit OWN data member. Assigning `object["__proto__"] = value` would
+ * replace the prototype instead of creating a member, so snapshots that
+ * legitimately contain prototype-looking KEYS are built this way -- never with
+ * an object literal's special `__proto__` syntax.
+ */
+function withOwnKey(target, key, value) {
+  Object.defineProperty(target, key, {
+    value: value, enumerable: true, writable: true, configurable: true
+  });
+  return target;
+}
+
+/** A `{key: boolean}` map with `key` created as an own data member. */
+function flagMap(entries) {
+  const flags = {};
+  for (const entry of entries) {
+    withOwnKey(flags, entry[0], entry[1]);
+  }
+  return flags;
+}
+
+/** A structurally valid projected model object for the lookalike fixture. */
+function lookalikeModel(rawId, name) {
+  return {
+    id: rawId,
+    name: name,
+    description: null,
+    context_length: 0,
+    architecture: {input_modalities: ["text"], output_modalities: ["text"]},
+    supported_parameters: null,
+    pricing: {prompt: "0", completion: "0"}
+  };
+}
+
+/**
+ * A WELL-FORMED snapshot whose provider keys and raw model ids are literally
+ * `__proto__`, `constructor`, `toString` and `constructor-free`. The body is
+ * re-sealed with the canonical digest and re-validated, so it is accepted input
+ * rather than a hand-waved object.
+ */
+function lookalikeKeySnapshot() {
+  const protoModels = {};
+  withOwnKey(protoModels, "__proto__", lookalikeModel("__proto__", "Proto"));
+  withOwnKey(protoModels, "constructor-free",
+             lookalikeModel("constructor-free", "Constructor Group"));
+  withOwnKey(protoModels, "shared-lookalike",
+             lookalikeModel("shared-lookalike", "Shared Lookalike"));
+  const ctorModels = {};
+  withOwnKey(ctorModels, "toString", lookalikeModel("toString", "ToString"));
+  const providers = {};
+  withOwnKey(providers, "__proto__", {
+    display_name: "Proto Gateway",
+    chat_completions_url: "https://proto.example/v1/chat/completions",
+    api_type: "openai",
+    model_ids: ["__proto__", "constructor-free", "shared-lookalike"],
+    models: protoModels,
+    stale: true
+  });
+  withOwnKey(providers, "constructor", {
+    display_name: "Constructor Gateway",
+    chat_completions_url: "https://constructor.example/v1/chat/completions",
+    api_type: "anthropic",
+    model_ids: ["toString"],
+    models: ctorModels,
+    stale: false
+  });
+  return resealSnapshot({
+    cadence_s: 300,
+    provider_order: ["__proto__", "constructor"],
+    providers: providers,
+    schema_version: 1,
+    snapshot_id: "0".repeat(64),
+    tick_epoch: null,
+    warnings: ["tick_epoch_unknown"]
+  });
+}
+
+/** The frozen literal argument-error envelope, asserted field by field. */
+function assertArgumentEnvelope(result, code, parameter, where) {
+  assert.equal(result.ok, false, `${where}: ok is strictly false`);
+  assert.deepEqual(Object.keys(result).sort(), ["error", "ok"],
+                   `${where}: top-level fields are exactly ok + error`);
+  assert.deepEqual(Object.keys(result.error).sort(),
+                   ["code", "message", "parameter"],
+                   `${where}: error fields are exactly code + message + parameter`);
+  assert.equal(result.error.code, code, `${where}: code`);
+  assert.equal(result.error.message, ARGUMENT_MESSAGES[code],
+               `${where}: literal message`);
+  assert.equal(result.error.parameter, parameter, `${where}: parameter`);
+  for (const hostile of ["tool", "state_root", "path", "source", "cache",
+                         "snapshot_id", "count", "gateways", "partial",
+                         "staleness", "provider_staleness"]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(result, hostile), false,
+                 `${where}: no ${hostile} field on an argument error`);
+    assert.equal(Object.prototype.hasOwnProperty.call(result.error, hostile),
+                 false, `${where}: no ${hostile} field inside error`);
+  }
+}
+
+// Test-owned drift probe against the UNCHANGED reference helper. It proves the
+// imported module really is this repository's copy, and compares the whole
+// semantic payload as typed canonical JSON (object keys sorted, array order and
+// scalar types preserved) -- never a re-derived "expected" value.
+const QUERY_REFERENCE_SCRIPT = [
+  "import json, sys",
+  'sys.path.insert(0, ".")',
+  "import watchdog_catalog.query as query_module",
+  "from watchdog_catalog.catalog import load_snapshot",
+  "payload = json.load(sys.stdin)",
+  "handlers = {'list_free_models': query_module.list_free_models,",
+  "            'list_endpoints': query_module.list_endpoints}",
+  "results = []",
+  "for case in payload['cases']:",
+  "    snapshot = load_snapshot(case['snapshot_text'])",
+  "    handler = handlers[case['tool']]",
+  "    results.append(json.dumps(handler(snapshot, case['args']),",
+  "                              sort_keys=True, ensure_ascii=True,",
+  "                              separators=(',', ':'), allow_nan=False))",
+  "print(json.dumps({'origin': query_module.__file__, 'results': results}))"
+].join("\n");
+
+function runQueryReference(cases) {
+  const { execFileSync } = require("node:child_process");
+  const env = Object.assign({}, process.env);
+  delete env.PYTHONPATH;
+  env.PYTHONDONTWRITEBYTECODE = "1";
+  const stdout = execFileSync(referencePython(),
+                              ["-c", QUERY_REFERENCE_SCRIPT], {
+    cwd: REPO_ROOT, env, input: JSON.stringify({cases: cases}),
+    encoding: "utf8", maxBuffer: 32 * 1024 * 1024
+  });
+  const parsed = JSON.parse(stdout);
+  assert.ok(fs.realpathSync(parsed.origin).startsWith(
+              fs.realpathSync(REPO_ROOT)),
+            `the reference module is this repository's copy: ${parsed.origin}`);
+  assert.equal(parsed.results.length, cases.length,
+               "one reference result per case");
+  return parsed.results;
+}
+
+function assertQueryParity(tool, cases, javascriptResults) {
+  const pythonResults = runQueryReference(cases.map((entry) => ({
+    tool: tool, snapshot_text: entry.snapshot_text, args: entry.args
+  })));
+  for (let index = 0; index < cases.length; index += 1) {
+    assert.equal(catalog.canonicalText(javascriptResults[index]),
+                 pythonResults[index],
+                 `${cases[index].label}: typed canonical payload matches Python`);
+  }
+}
+
+describe("pure list_free_models query", () => {
+  it("reproduces every independent success golden exactly", () => {
+    const rows = queryRows("list_free_models");
+    // Row identity is asserted so a dropped or duplicated golden cannot shrink
+    // the loop and still pass.
+    assert.equal(rows.length, 5, rows.map((row) => row.id).join(","));
+    assert.deepEqual(rows.map((row) => row.id).sort(), [
+      "list_free_extension_provider_d", "list_free_lookup_all",
+      "list_free_lookup_provider_a", "list_free_lookup_zero_provider_c",
+      "list_free_ordering_all"
+    ]);
+    const fixtures = new Set();
+    for (const row of rows) {
+      const snapshot = acceptedSnapshot(row.fixture);
+      const snapshotText = catalog.canonicalText(snapshot);
+      const args = JSON.parse(JSON.stringify(row.args));
+      const argsText = catalog.canonicalText(args);
+      const result = catalog.listFreeModels(snapshot, args);
+      // Deep semantic equality with the separately authored golden.
+      assertSameValue(result, row.expect, row.id);
+      assert.equal(result.ok, true, row.id);
+      const allForm = Object.prototype.hasOwnProperty.call(row.expect,
+                                                           "providers");
+      assert.deepEqual(Object.keys(result).sort(),
+                       allForm ? LIST_ALL_FIELDS : LIST_ONE_FIELDS, row.id);
+      // Literal provenance and untouched inputs.
+      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
+      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
+      assert.equal(catalog.canonicalText(snapshot), snapshotText,
+                   `${row.id}: the snapshot is never mutated`);
+      assert.equal(catalog.canonicalText(args), argsText,
+                   `${row.id}: the argument object is never mutated`);
+      fixtures.add(row.fixture);
+      if (allForm) {
+        assert.deepEqual(Object.keys(result.providers).sort(),
+                         snapshot.provider_order.slice().sort(), row.id);
+        for (const provider of snapshot.provider_order) {
+          const source = snapshot.providers[provider];
+          assert.ok(Number.isInteger(result.counts[provider]) &&
+                    result.counts[provider] >= 0, row.id);
+          assert.equal(result.counts[provider], source.model_ids.length,
+                       row.id);
+          assert.equal(result.provider_staleness[provider], source.stale,
+                       row.id);
+          assert.deepEqual(result.providers[provider].slice().sort(),
+                           source.model_ids.slice().sort(), row.id);
+          assert.deepEqual(Object.keys(result.models[provider]).sort(),
+                           source.model_ids.slice().sort(), row.id);
+          for (const rawId of source.model_ids) {
+            // Complete projected metadata, copied verbatim: never reprojected
+            // and never stringified/parsed away.
+            assertSameValue(result.models[provider][rawId],
+                            source.models[rawId],
+                            `${row.id}:${provider}:${rawId}`);
+          }
+        }
+      } else {
+        const source = snapshot.providers[result.provider];
+        assert.equal(result.count, result.model_ids.length, row.id);
+        assert.ok(Number.isInteger(result.count) && result.count >= 0, row.id);
+        assert.deepEqual(result.provider_staleness,
+                         flagMap([[result.provider, source.stale]]), row.id);
+        assert.deepEqual(result.model_ids.slice().sort(),
+                         source.model_ids.slice().sort(), row.id);
+        assert.deepEqual(Object.keys(result.models).sort(),
+                         source.model_ids.slice().sort(), row.id);
+        for (const rawId of source.model_ids) {
+          assertSameValue(result.models[rawId], source.models[rawId],
+                          `${row.id}:${rawId}`);
+        }
+      }
+    }
+    assert.deepEqual([...fixtures].sort(),
+                     ["lookup.json", "ordering.json", "provider-extension.json"]);
+  });
+
+  it("keeps natural raw-ID order, per-provider metadata and zero-ID registries", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const ordering = acceptedSnapshot("ordering.json");
+    const extension = acceptedSnapshot("provider-extension.json");
+
+    // An absent provider and an explicit null are the SAME all-provider form.
+    const omitted = catalog.listFreeModels(lookup, {});
+    const nulled = catalog.listFreeModels(lookup, {provider: null});
+    assertSameValue(omitted, nulled, "absent vs null provider");
+    assert.equal(omitted.provider, undefined,
+                 "the all-provider form carries no `provider` field");
+    assert.equal(omitted.ok, true);
+
+    // Natural order -- never the snapshot's frozen code-point order. The first
+    // four ids are a compact literal restatement of the digit-run rule (run
+    // length first, then the literal digit text), independent of the golden.
+    const naturalB = catalog.listFreeModels(ordering, {}).providers[
+      "synthetic-b"];
+    assert.notDeepEqual(naturalB,
+                        ordering.providers["synthetic-b"].model_ids,
+                        "the array is re-sorted, not echoed in snapshot order");
+    assert.deepEqual(naturalB.slice(0, 4), ["vendor/item1", "vendor/item2",
+                                            "vendor/item02", "vendor/item10"]);
+    assert.deepEqual(naturalB, queryRows("list_free_models").find(
+      (row) => row.id === "list_free_ordering_all").expect.providers[
+        "synthetic-b"]);
+
+    // A raw ID shared by two providers keeps its own conflicting metadata.
+    const sharedA = omitted.models["synthetic-a"]["vendor/shared"];
+    const sharedB = omitted.models["synthetic-b"]["vendor/shared"];
+    assert.notEqual(sharedA, sharedB, "shared ids are never aliased together");
+    assert.equal(sharedA.context_length, 131072);
+    assert.equal(sharedB.context_length, 32768);
+    assert.deepEqual(sharedA.architecture.input_modalities, ["text"]);
+    assert.deepEqual(sharedB.architecture.input_modalities,
+                     ["text", "image"]);
+    assert.deepEqual(sharedA.supported_parameters,
+                     ["temperature", "max_tokens"]);
+    assert.deepEqual(sharedB.supported_parameters, ["temperature", "top_p"]);
+
+    // Scoped counters: distinct literal raw ids, gateways including zero-ID.
+    assert.deepEqual(omitted.counts, {"synthetic-a": 3, "synthetic-b": 2,
+                                      "synthetic-c": 0});
+    assert.equal(omitted.total_ids, 4);
+    assert.equal(omitted.n_gateways, 3);
+    assert.deepEqual(omitted.provider_staleness,
+                     {"synthetic-a": false, "synthetic-b": false,
+                      "synthetic-c": false});
+    assert.deepEqual(catalog.listFreeModels(ordering, {}).provider_staleness,
+                     {"synthetic-b": true, "synthetic-a": false,
+                      "synthetic-c": false});
+
+    // A registered zero-ID provider is a SUCCESS with empty containers.
+    const zero = catalog.listFreeModels(lookup, {provider: "synthetic-c"});
+    assert.equal(zero.ok, true);
+    assert.deepEqual(Object.keys(zero).sort(), LIST_ONE_FIELDS);
+    assert.deepEqual(zero.model_ids, []);
+    assert.deepEqual(zero.models, {});
+    assert.equal(zero.count, 0);
+    assert.deepEqual(zero.provider_staleness, {"synthetic-c": false});
+
+    // The legitimately EMPTY registry: every container empty, no invented
+    // gateway or count.
+    const empty = catalog.listFreeModels(emptyRegistrySnapshot(), {});
+    assert.equal(empty.ok, true);
+    assert.deepEqual(Object.keys(empty).sort(), LIST_ALL_FIELDS);
+    assert.deepEqual(empty.providers, {});
+    assert.deepEqual(empty.models, {});
+    assert.deepEqual(empty.counts, {});
+    assert.deepEqual(empty.provider_staleness, {});
+    assert.equal(empty.total_ids, 0);
+    assert.equal(empty.n_gateways, 0);
+
+    // Provider membership is driven by DATA alone: provider-extension.json adds
+    // a gateway no package code names.
+    const all = catalog.listFreeModels(extension, {});
+    assert.equal(all.n_gateways, 4);
+    assert.deepEqual(Object.keys(all.providers).sort(), ["synthetic-a",
+      "synthetic-b", "synthetic-c", "synthetic-d"]);
+    assert.deepEqual(all.counts["synthetic-d"], 1);
+    assert.equal(all.total_ids, 4);
+    const onlyD = catalog.listFreeModels(extension, {provider: "synthetic-d"});
+    assert.equal(onlyD.provider, "synthetic-d");
+    assert.deepEqual(onlyD.model_ids, ["vendor/shared"]);
+    assert.deepEqual(onlyD.provider_staleness, {"synthetic-d": true});
+    assert.equal(onlyD.models["vendor/shared"].context_length, 8192);
+    assert.equal(onlyD.models["vendor/shared"].description,
+                 "Synthetic delta endpoint with its own small context.");
+  });
+
+  it("reproduces the frozen argument boundary and its precedence", () => {
+    const invalid = argumentRows("invalid_cases", "list_free_models");
+    const valid = argumentRows("valid_controls", "list_free_models");
+    assert.equal(invalid.length, 4, invalid.map((row) => row.id).join(","));
+    assert.deepEqual(invalid.map((row) => row.id).sort(), [
+      "provider_wrong_case", "provider_wrong_type",
+      "unknown_arg_list_free_models", "unknown_provider_list_free_models"
+    ]);
+    assert.equal(valid.length, 3, valid.map((row) => row.id).join(","));
+
+    for (const row of invalid) {
+      const snapshot = acceptedSnapshot(row.fixture);
+      const args = JSON.parse(JSON.stringify(row.args));
+      const before = catalog.canonicalText(args);
+      const result = catalog.listFreeModels(snapshot, args);
+      assertSameValue(result, row.expect, row.id);
+      assertArgumentEnvelope(result, row.expect.error.code,
+                             row.expect.error.parameter, row.id);
+      assert.equal(catalog.canonicalText(args), before,
+                   `${row.id}: the argument object is never mutated`);
+    }
+    for (const row of valid) {
+      const result = catalog.listFreeModels(acceptedSnapshot(row.fixture),
+                                            JSON.parse(JSON.stringify(row.args)));
+      assert.equal(result.ok, true, row.id);
+    }
+
+    const lookup = acceptedSnapshot("lookup.json");
+    // A whole argument value that is not a JSON object is invalid_arguments /
+    // null -- null, a list, a number, a string, a boolean and no value at all.
+    for (const args of [null, [], 5, "x", false, 1.5, undefined]) {
+      assertArgumentEnvelope(catalog.listFreeModels(lookup, args),
+                             "invalid_arguments", null, String(args));
+    }
+    // A non-null provider of the wrong type is invalid_arguments/provider.
+    for (const bad of [true, false, 5, 1.5, [], ["synthetic-a"], {},
+                       {a: 1}]) {
+      assertArgumentEnvelope(catalog.listFreeModels(lookup, {provider: bad}),
+                             "invalid_arguments", "provider",
+                             JSON.stringify(bad));
+    }
+    // Empty, padded and wrong-case keys are never repaired.
+    for (const bad of ["", " synthetic-a ", "synthetic-a ", " synthetic-a",
+                       "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"]) {
+      assertArgumentEnvelope(catalog.listFreeModels(lookup, {provider: bad}),
+                             "unknown_provider", "provider", bad);
+    }
+    // Unknown-key precedence: ANY unknown key rejects with parameter null
+    // BEFORE the provider type/membership check.
+    for (const args of [
+      JSON.parse('{"provider": 5, "bogus": 1}'),
+      JSON.parse('{"provider": "synthetic-z", "bogus": 1}'),
+      JSON.parse('{"bogus": 1}'),
+      JSON.parse('{"provider": "synthetic-a", "bogus": 1}'),
+      JSON.parse('{"provider": "synthetic-a", "limit": 5}'),
+      JSON.parse('{"limit": 5, "offset": 0}'),
+      // Prototype-looking unknown KEYS are ordinary own keys: rejected, never
+      // treated as registered parameters and never reflected back.
+      JSON.parse('{"__proto__": 1}'),
+      JSON.parse('{"constructor": 1}'),
+      JSON.parse('{"toString": 1}')
+    ]) {
+      assertArgumentEnvelope(catalog.listFreeModels(lookup, args),
+                             "invalid_arguments", null,
+                             JSON.stringify(args));
+    }
+
+    // The error envelope is a FRESH object on every call.
+    const first = catalog.listFreeModels(lookup, {provider: "synthetic-z"});
+    first.ok = true;
+    first.error.code = "mutated";
+    first.error.parameter = "provider";
+    const second = catalog.listFreeModels(lookup, {provider: "synthetic-z"});
+    assertArgumentEnvelope(second, "unknown_provider", "provider",
+                           "fresh envelope");
+    assert.notEqual(second, first);
+  });
+
+  it("returns fresh, deeply isolated payloads", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const before = catalog.canonicalText(lookup);
+
+    const whole = catalog.listFreeModels(lookup, {});
+    const again = catalog.listFreeModels(lookup, {});
+    assert.equal(catalog.canonicalText(lookup), before,
+                 "the snapshot is never mutated");
+    assert.equal(catalog.canonicalText(whole), catalog.canonicalText(again),
+                 "two calls agree");
+    for (const container of ["providers", "models", "counts",
+                             "provider_staleness"]) {
+      assert.notEqual(whole[container], again[container], container);
+      assert.notEqual(whole[container], lookup.providers[container],
+                      container);
+    }
+    for (const provider of lookup.provider_order) {
+      const source = lookup.providers[provider];
+      assert.notEqual(whole.providers[provider], source.model_ids, provider);
+      assert.notEqual(whole.models[provider], source.models, provider);
+      for (const rawId of source.model_ids) {
+        const got = whole.models[provider][rawId];
+        const src = source.models[rawId];
+        assert.notEqual(got, src, `${provider}:${rawId}`);
+        assert.notEqual(got.architecture, src.architecture, rawId);
+        assert.notEqual(got.supported_parameters, src.supported_parameters,
+                        rawId);
+        assert.notEqual(got.pricing, src.pricing, rawId);
+        assert.notEqual(got.architecture.input_modalities,
+                        src.architecture.input_modalities, rawId);
+        assert.notEqual(again.models[provider][rawId], got, rawId);
+      }
+    }
+
+    // Mutate the whole payload deeply; the snapshot, the earlier result and a
+    // brand-new call must all stay unchanged.
+    const shared = whole.models["synthetic-a"]["vendor/shared"];
+    shared.name = "mutated";
+    shared.architecture.input_modalities.push("vision");
+    shared.supported_parameters.push("seed");
+    shared.pricing.prompt = "999";
+    shared.context_length = 1;
+    whole.providers["synthetic-a"].push("injected");
+    whole.counts["synthetic-a"] = 99;
+    whole.provider_staleness["synthetic-a"] = true;
+    delete whole.models["synthetic-a"]["vendor/model:free"];
+    assert.equal(catalog.canonicalText(lookup), before,
+                 "mutating a result never reaches the snapshot");
+    const againShared = again.models["synthetic-a"]["vendor/shared"];
+    assert.equal(againShared.name, "Vendor Shared");
+    assert.deepEqual(againShared.architecture.input_modalities, ["text"]);
+    assert.deepEqual(againShared.supported_parameters,
+                     ["temperature", "max_tokens"]);
+    assert.deepEqual(againShared.pricing,
+                     {prompt: "0", completion: "0"});
+    assert.equal(againShared.context_length, 131072);
+    assert.deepEqual(again.providers["synthetic-a"],
+                     ["vendor/model-renamed", "vendor/model:free",
+                      "vendor/shared"]);
+    const third = catalog.listFreeModels(lookup, {});
+    assertSameValue(third, again, "a later call is unaffected by mutations");
+
+    // The one-provider and registered zero-ID containers are fresh too.
+    const single = catalog.listFreeModels(lookup, {provider: "synthetic-a"});
+    const sourceA = lookup.providers["synthetic-a"];
+    assert.notEqual(single.model_ids, sourceA.model_ids);
+    assert.notEqual(single.models, sourceA.models);
+    assert.notEqual(single.provider_staleness, lookup.providers);
+    single.model_ids.push("injected");
+    single.models["vendor/model:free"].architecture.input_modalities.push(
+      "audio");
+    single.provider_staleness["synthetic-a"] = true;
+    assert.equal(catalog.canonicalText(lookup), before,
+                 "a single-provider result is never a snapshot window");
+    const zero = catalog.listFreeModels(lookup, {provider: "synthetic-c"});
+    zero.model_ids.push("injected");
+    zero.provider_staleness["synthetic-c"] = true;
+    assert.equal(catalog.canonicalText(lookup), before);
+    assert.notEqual(zero.model_ids,
+                    catalog.listFreeModels(lookup, {provider: "synthetic-c"})
+                      .model_ids);
+
+    // Interleaved calls never share containers.
+    const mixed = catalog.listFreeModels(lookup, {});
+    catalog.listEndpoints(lookup, {});
+    const mixedAgain = catalog.listFreeModels(lookup, {});
+    assert.notEqual(mixed.models, mixedAgain.models);
+    assert.equal(catalog.canonicalText(mixed),
+                 catalog.canonicalText(mixedAgain));
+  });
+
+  it("survives prototype-looking provider and raw-ID keys", () => {
+    const snapshot = lookalikeKeySnapshot();
+    const frozen = catalog.canonicalText(snapshot);
+    const whole = catalog.listFreeModels(snapshot, {});
+
+    assert.deepEqual(Object.keys(whole.providers).sort(),
+                     ["__proto__", "constructor"]);
+    assert.deepEqual(Object.keys(whole.models).sort(),
+                     ["__proto__", "constructor"]);
+    assert.deepEqual(Object.keys(whole.counts).sort(),
+                     ["__proto__", "constructor"]);
+    // Exact own keys survive; inherited members are never mistaken for input.
+    assert.equal(Object.prototype.hasOwnProperty.call(whole.providers,
+                                                      "__proto__"), true);
+    assert.deepEqual(whole.providers["__proto__"],
+                     ["__proto__", "constructor-free", "shared-lookalike"]);
+    assert.deepEqual(whole.providers["constructor"], ["toString"]);
+    assert.deepEqual(whole.counts, flagMap([["__proto__", 3],
+                                           ["constructor", 1]]));
+    assert.equal(whole.total_ids, 4);
+    assert.equal(whole.n_gateways, 2);
+    assert.deepEqual(whole.provider_staleness,
+                     flagMap([["__proto__", true], ["constructor", false]]));
+    assert.equal(whole.tick_epoch, null,
+                 "an unknown observation epoch is echoed as null");
+    assert.equal(whole.snapshot_id, snapshot.snapshot_id);
+    // No prototype pollution anywhere.
+    assert.equal(Object.getPrototypeOf(whole.providers), Object.prototype);
+    assert.equal(Object.getPrototypeOf(whole.models), Object.prototype);
+    assert.equal({}.polluted, undefined);
+    assert.equal(Object.prototype.polluted, undefined);
+    assert.equal(typeof {}.constructor, "function",
+                 "the shared prototype is untouched");
+    assert.equal(whole.models["__proto__"]["__proto__"].name, "Proto");
+    assert.equal(whole.models["constructor"]["toString"].name, "ToString");
+
+    // An exact registered key is selectable, including a lookalike one.
+    const selected = catalog.listFreeModels(snapshot, {provider: "__proto__"});
+    assert.equal(selected.ok, true);
+    assert.equal(selected.provider, "__proto__");
+    assert.deepEqual(selected.model_ids,
+                     ["__proto__", "constructor-free", "shared-lookalike"]);
+    // `constructor` + `toString` are prototype MEMBERS of a normal object, so
+    // an unregistered lookalike string is still an unknown provider.
+    assertArgumentEnvelope(catalog.listFreeModels(snapshot,
+                                                  {provider: "toString"}),
+                           "unknown_provider", "provider", "inherited name");
+    assert.equal(catalog.canonicalText(snapshot), frozen,
+                 "the lookalike snapshot is never mutated");
+  });
+
+  it("publishes the same query functions to the browser namespace", () => {
+    const vm = require("node:vm");
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "..", "web", "catalog-query.js"), "utf8");
+    const sandbox = {};
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(source, sandbox);
+    const browserApi = sandbox.WatchdogCatalog;
+    assert.equal(typeof browserApi.listFreeModels, "function");
+    assert.equal(typeof browserApi.listEndpoints, "function");
+    const snapshot = browserApi.loadSnapshot(readFixtureText("lookup.json"));
+    const expectedAll = catalog.listFreeModels(acceptedSnapshot("lookup.json"),
+                                               {});
+    assert.equal(browserApi.canonicalText(browserApi.listFreeModels(snapshot,
+                                                                    {})),
+                 catalog.canonicalText(expectedAll),
+                 "the inlined copy answers the bulk export identically");
+    assert.equal(
+      browserApi.canonicalText(browserApi.listEndpoints(
+        snapshot, {provider: "synthetic-a"})),
+      catalog.canonicalText(catalog.listEndpoints(acceptedSnapshot(
+        "lookup.json"), {provider: "synthetic-a"})),
+      "the inlined copy scopes endpoints identically");
+  });
+
+  it("agrees with the unchanged Python reference over the selected inputs", () => {
+    const cases = queryRows("list_free_models").map((row) => ({
+      label: row.id, snapshot_text: readFixtureText(row.fixture),
+      args: JSON.parse(JSON.stringify(row.args))
+    }));
+    const lookupText = readFixtureText("lookup.json");
+    for (const entry of [
+      ["boundary-unknown-key", JSON.parse('{"provider": "synthetic-a", "bogus": 1}')],
+      ["boundary-unknown-provider", {provider: "synthetic-z"}],
+      ["boundary-wrong-type", {provider: 5}],
+      ["boundary-null", {provider: null}],
+      ["boundary-non-object", null],
+      ["boundary-omitted", {}]
+    ]) {
+      cases.push({label: entry[0], snapshot_text: lookupText, args: entry[1]});
+    }
+    const lookalike = catalog.canonicalText(lookalikeKeySnapshot());
+    cases.push({label: "lookalike-all", snapshot_text: lookalike, args: {}});
+    cases.push({label: "lookalike-proto", snapshot_text: lookalike,
+                args: {provider: "__proto__"}});
+    cases.push({label: "empty-registry",
+                snapshot_text: catalog.canonicalText(
+                  emptyRegistrySnapshot()), args: {}});
+    const results = cases.map((entry) => catalog.listFreeModels(
+      catalog.loadSnapshot(entry.snapshot_text), entry.args));
+    assertQueryParity("list_free_models", cases, results);
+  });
+});
+
+describe("pure list_endpoints query", () => {
+  it("reproduces every independent success golden exactly", () => {
+    const rows = queryRows("list_endpoints");
+    assert.equal(rows.length, 5, rows.map((row) => row.id).join(","));
+    assert.deepEqual(rows.map((row) => row.id).sort(), [
+      "endpoints_extension_all", "endpoints_lookup_all",
+      "endpoints_lookup_provider_a", "endpoints_lookup_zero_provider_c",
+      "endpoints_ordering_all"
+    ]);
+    for (const row of rows) {
+      const snapshot = acceptedSnapshot(row.fixture);
+      const snapshotText = catalog.canonicalText(snapshot);
+      const args = JSON.parse(JSON.stringify(row.args));
+      const argsText = catalog.canonicalText(args);
+      const result = catalog.listEndpoints(snapshot, args);
+      assertSameValue(result, row.expect, row.id);
+      assert.equal(result.ok, true, row.id);
+      // ONE exact top-level field set for both variants.
+      assert.deepEqual(Object.keys(result).sort(), ENDPOINT_FIELDS, row.id);
+      assert.deepEqual(Object.keys(result.counts).sort(),
+                       ENDPOINT_COUNT_FIELDS, row.id);
+      const selected = result.provider === null
+        ? snapshot.provider_order : [result.provider];
+      assert.deepEqual(Object.keys(result.gateways).sort(),
+                       selected.slice().sort(), row.id);
+      assert.deepEqual(Object.keys(result.provider_staleness).sort(),
+                       selected.slice().sort(), row.id);
+      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
+      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
+      for (const provider of selected) {
+        const source = snapshot.providers[provider];
+        const gateway = result.gateways[provider];
+        assert.deepEqual(Object.keys(gateway).sort(), GATEWAY_FIELDS,
+                         `${row.id}:${provider}`);
+        assert.equal(gateway.chat_completions_url,
+                     source.chat_completions_url, row.id);
+        assert.equal(gateway.api_type, source.api_type, row.id);
+        assert.deepEqual(gateway.model_ids.slice().sort(),
+                         source.model_ids.slice().sort(), row.id);
+        assert.deepEqual(Object.keys(gateway.models).sort(),
+                         source.model_ids.slice().sort(), row.id);
+        assert.equal(result.provider_staleness[provider], source.stale,
+                     row.id);
+        for (const rawId of source.model_ids) {
+          assertSameValue(gateway.models[rawId], source.models[rawId],
+                          `${row.id}:${provider}:${rawId}`);
+        }
+      }
+      for (const field of ["gateways", "endpoints", "distinct_raw_ids",
+                           "marker_group_labels", "models"]) {
+        assert.ok(Number.isInteger(result.counts[field]) &&
+                  result.counts[field] >= 0, `${row.id}: ${field}`);
+      }
+      assert.equal(catalog.canonicalText(snapshot), snapshotText,
+                   `${row.id}: the snapshot is never mutated`);
+      assert.equal(catalog.canonicalText(args), argsText,
+                   `${row.id}: the argument object is never mutated`);
+    }
+  });
+
+  it("scopes gateways, counts and the legacy alias to the selected providers", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const extension = acceptedSnapshot("provider-extension.json");
+
+    const omitted = catalog.listEndpoints(lookup, {});
+    const nulled = catalog.listEndpoints(lookup, {provider: null});
+    assertSameValue(omitted, nulled, "absent vs null provider");
+    assert.equal(omitted.provider, null,
+                 "the all-provider form echoes a literal null");
+    assert.deepEqual(Object.keys(omitted).sort(), ENDPOINT_FIELDS);
+    // Labels are NOT endpoint pairs: 3 gateway labels over 5 endpoints.
+    assert.deepEqual(omitted.counts, {gateways: 3, endpoints: 5,
+                                      distinct_raw_ids: 4,
+                                      marker_group_labels: 3, models: 3});
+    assert.equal(omitted.counts.models,
+                 omitted.counts.marker_group_labels,
+                 "`models` is the documented legacy alias");
+    assert.notEqual(omitted.counts.models, omitted.counts.endpoints);
+
+    // Natural order, not the frozen snapshot array.
+    const ordered = catalog.listEndpoints(acceptedSnapshot("ordering.json"),
+                                          {});
+    assert.notDeepEqual(ordered.gateways["synthetic-b"].model_ids,
+                        acceptedSnapshot("ordering.json")
+                          .providers["synthetic-b"].model_ids,
+                        "endpoint ids are re-sorted naturally");
+    assert.deepEqual(ordered.gateways["synthetic-b"].model_ids.slice(0, 4),
+                     ["vendor/item1", "vendor/item2", "vendor/item02",
+                      "vendor/item10"]);
+
+    // A filtered response carries ONLY the selected provider's gateway,
+    // staleness and counts -- no registry-wide total leaks in.
+    const onlyA = catalog.listEndpoints(lookup, {provider: "synthetic-a"});
+    assert.equal(onlyA.provider, "synthetic-a");
+    assert.deepEqual(Object.keys(onlyA.gateways), ["synthetic-a"]);
+    assert.deepEqual(Object.keys(onlyA.provider_staleness), ["synthetic-a"]);
+    assert.deepEqual(onlyA.counts, {gateways: 1, endpoints: 3,
+                                    distinct_raw_ids: 3,
+                                    marker_group_labels: 3, models: 3});
+    assert.equal(onlyA.gateways["synthetic-a"].chat_completions_url,
+                 "https://synthetic-alpha.example/v1/chat/completions");
+    assert.equal(onlyA.gateways["synthetic-a"].api_type, "openai");
+
+    // The provider-extension control: 4 gateways, 6 endpoints, 4 distinct ids
+    // but only 3 marker labels (both `model:free` and `model-free` strip to
+    // the same label), and the alias agrees with the label count.
+    const all = catalog.listEndpoints(extension, {});
+    assert.deepEqual(all.counts, {gateways: 4, endpoints: 6,
+                                  distinct_raw_ids: 4,
+                                  marker_group_labels: 3, models: 3});
+    assert.deepEqual(Object.keys(all.gateways).sort(),
+                     ["synthetic-a", "synthetic-b", "synthetic-c",
+                      "synthetic-d"]);
+    assert.deepEqual(all.provider_staleness,
+                     {"synthetic-d": true, "synthetic-a": false,
+                      "synthetic-b": false, "synthetic-c": false});
+    const onlyD = catalog.listEndpoints(extension, {provider: "synthetic-d"});
+    assert.deepEqual(onlyD.counts, {gateways: 1, endpoints: 1,
+                                    distinct_raw_ids: 1,
+                                    marker_group_labels: 1, models: 1});
+    assert.deepEqual(onlyD.gateways["synthetic-d"].model_ids,
+                     ["vendor/shared"]);
+    assert.equal(onlyD.gateways["synthetic-d"].models["vendor/shared"]
+                   .context_length, 8192);
+
+    // A registered zero-ID provider: gateways 1, every other count zero.
+    const zero = catalog.listEndpoints(lookup, {provider: "synthetic-c"});
+    assert.equal(zero.ok, true);
+    assert.deepEqual(zero.counts, {gateways: 1, endpoints: 0,
+                                   distinct_raw_ids: 0,
+                                   marker_group_labels: 0, models: 0});
+    assert.deepEqual(zero.gateways["synthetic-c"].model_ids, []);
+    assert.deepEqual(zero.gateways["synthetic-c"].models, {});
+    assert.deepEqual(zero.provider_staleness, {"synthetic-c": false});
+
+    // The legitimately EMPTY registry: all counts zero, no gateway entries.
+    const empty = catalog.listEndpoints(emptyRegistrySnapshot(), {});
+    assert.equal(empty.ok, true);
+    assert.deepEqual(Object.keys(empty).sort(), ENDPOINT_FIELDS);
+    assert.equal(empty.provider, null);
+    assert.deepEqual(empty.gateways, {});
+    assert.deepEqual(empty.provider_staleness, {});
+    assert.deepEqual(empty.counts, {gateways: 0, endpoints: 0,
+                                    distinct_raw_ids: 0,
+                                    marker_group_labels: 0, models: 0});
+  });
+
+  it("reproduces the frozen argument boundary and its precedence", () => {
+    const invalid = argumentRows("invalid_cases", "list_endpoints");
+    const valid = argumentRows("valid_controls", "list_endpoints");
+    assert.equal(invalid.length, 3, invalid.map((row) => row.id).join(","));
+    assert.deepEqual(invalid.map((row) => row.id).sort(), [
+      "provider_empty", "unknown_arg_list_endpoints",
+      "unknown_provider_list_endpoints"
+    ]);
+    assert.equal(valid.length, 2, valid.map((row) => row.id).join(","));
+
+    for (const row of invalid) {
+      const snapshot = acceptedSnapshot(row.fixture);
+      const args = JSON.parse(JSON.stringify(row.args));
+      const before = catalog.canonicalText(args);
+      const result = catalog.listEndpoints(snapshot, args);
+      assertSameValue(result, row.expect, row.id);
+      assertArgumentEnvelope(result, row.expect.error.code,
+                             row.expect.error.parameter, row.id);
+      assert.equal(catalog.canonicalText(args), before,
+                   `${row.id}: the argument object is never mutated`);
+    }
+    for (const row of valid) {
+      const result = catalog.listEndpoints(acceptedSnapshot(row.fixture),
+                                           JSON.parse(JSON.stringify(row.args)));
+      assert.equal(result.ok, true, row.id);
+    }
+
+    const lookup = acceptedSnapshot("lookup.json");
+    for (const args of [null, [], 5, "x", false, 1.5, undefined]) {
+      assertArgumentEnvelope(catalog.listEndpoints(lookup, args),
+                             "invalid_arguments", null, String(args));
+    }
+    for (const bad of [true, false, 5, 1.5, [], ["synthetic-a"], {},
+                       {a: 1}]) {
+      assertArgumentEnvelope(catalog.listEndpoints(lookup, {provider: bad}),
+                             "invalid_arguments", "provider",
+                             JSON.stringify(bad));
+    }
+    for (const bad of ["", " synthetic-a ", "synthetic-a ", " synthetic-a",
+                       "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"]) {
+      assertArgumentEnvelope(catalog.listEndpoints(lookup, {provider: bad}),
+                             "unknown_provider", "provider", bad);
+    }
+    // Unknown-key precedence, including `limit`/`offset` (NOT bulk truncation
+    // controls) and prototype-looking unknown keys.
+    for (const args of [
+      JSON.parse('{"provider": 5, "limit": 5}'),
+      JSON.parse('{"provider": "synthetic-z", "bogus": 1}'),
+      JSON.parse('{"provider": null, "limit": 5}'),
+      JSON.parse('{"provider": "synthetic-a", "limit": 5}'),
+      JSON.parse('{"__proto__": 1}'),
+      JSON.parse('{"constructor": 1}'),
+      JSON.parse('{"toString": 1}')
+    ]) {
+      assertArgumentEnvelope(catalog.listEndpoints(lookup, args),
+                             "invalid_arguments", null,
+                             JSON.stringify(args));
+    }
+    const first = catalog.listEndpoints(lookup, {provider: "synthetic-z"});
+    first.error.code = "mutated";
+    const second = catalog.listEndpoints(lookup, {provider: "synthetic-z"});
+    assertArgumentEnvelope(second, "unknown_provider", "provider",
+                           "fresh envelope");
+    assert.notEqual(second, first);
+  });
+
+  it("returns fresh, deeply isolated payloads", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const before = catalog.canonicalText(lookup);
+    const whole = catalog.listEndpoints(lookup, {});
+    const again = catalog.listEndpoints(lookup, {});
+    assert.equal(catalog.canonicalText(lookup), before,
+                 "the snapshot is never mutated");
+    assert.equal(catalog.canonicalText(whole), catalog.canonicalText(again));
+    for (const container of ["gateways", "counts", "provider_staleness"]) {
+      assert.notEqual(whole[container], again[container], container);
+      assert.notEqual(whole[container], lookup.providers[container],
+                      container);
+    }
+    for (const provider of lookup.provider_order) {
+      const source = lookup.providers[provider];
+      const gateway = whole.gateways[provider];
+      assert.notEqual(gateway, source, provider);
+      assert.notEqual(gateway.model_ids, source.model_ids, provider);
+      assert.notEqual(gateway.models, source.models, provider);
+      assert.notEqual(again.gateways[provider], gateway, provider);
+      for (const rawId of source.model_ids) {
+        const got = gateway.models[rawId];
+        const src = source.models[rawId];
+        assert.notEqual(got, src, `${provider}:${rawId}`);
+        assert.notEqual(got.architecture, src.architecture, rawId);
+        assert.notEqual(got.supported_parameters, src.supported_parameters,
+                        rawId);
+        assert.notEqual(got.pricing, src.pricing, rawId);
+        assert.notEqual(again.gateways[provider].models[rawId], got, rawId);
+      }
+    }
+
+    const shared = whole.gateways["synthetic-a"].models["vendor/shared"];
+    shared.name = "mutated";
+    shared.architecture.input_modalities.push("vision");
+    shared.supported_parameters.push("seed");
+    shared.pricing.prompt = "999";
+    whole.gateways["synthetic-a"].model_ids.push("injected");
+    whole.gateways["synthetic-a"].chat_completions_url = "https://evil.example";
+    whole.counts.endpoints = 99;
+    whole.provider_staleness["synthetic-a"] = true;
+    assert.equal(catalog.canonicalText(lookup), before,
+                 "mutating a result never reaches the snapshot");
+    const againShared = again.gateways["synthetic-a"].models["vendor/shared"];
+    assert.equal(againShared.name, "Vendor Shared");
+    assert.deepEqual(againShared.architecture.input_modalities, ["text"]);
+    assert.deepEqual(againShared.supported_parameters,
+                     ["temperature", "max_tokens"]);
+    assert.deepEqual(againShared.pricing, {prompt: "0", completion: "0"});
+    assert.deepEqual(again.gateways["synthetic-a"].model_ids,
+                     ["vendor/model-renamed", "vendor/model:free",
+                      "vendor/shared"]);
+    assert.equal(again.gateways["synthetic-a"].chat_completions_url,
+                 "https://synthetic-alpha.example/v1/chat/completions");
+    const third = catalog.listEndpoints(lookup, {});
+    assertSameValue(third, again, "a later call is unaffected by mutations");
+
+    const single = catalog.listEndpoints(lookup, {provider: "synthetic-a"});
+    const sourceA = lookup.providers["synthetic-a"];
+    assert.notEqual(single.gateways["synthetic-a"].model_ids,
+                    sourceA.model_ids);
+    assert.notEqual(single.gateways["synthetic-a"].models, sourceA.models);
+    single.gateways["synthetic-a"].model_ids.push("injected");
+    single.gateways["synthetic-a"].models["vendor/model:free"]
+      .architecture.input_modalities.push("audio");
+    single.provider_staleness["synthetic-a"] = true;
+    assert.equal(catalog.canonicalText(lookup), before);
+    const zero = catalog.listEndpoints(lookup, {provider: "synthetic-c"});
+    assert.notEqual(zero.gateways["synthetic-c"].model_ids,
+                    catalog.listEndpoints(lookup, {provider: "synthetic-c"})
+                      .gateways["synthetic-c"].model_ids);
+
+    // Interleaved calls never share containers.
+    const mixed = catalog.listEndpoints(lookup, {});
+    catalog.listFreeModels(lookup, {});
+    const mixedAgain = catalog.listEndpoints(lookup, {});
+    assert.notEqual(mixed.gateways, mixedAgain.gateways);
+    assert.equal(catalog.canonicalText(mixed),
+                 catalog.canonicalText(mixedAgain));
+  });
+
+  it("survives prototype-looking provider and raw-ID keys", () => {
+    const snapshot = lookalikeKeySnapshot();
+    const frozen = catalog.canonicalText(snapshot);
+    const whole = catalog.listEndpoints(snapshot, {});
+
+    assert.deepEqual(Object.keys(whole.gateways).sort(),
+                     ["__proto__", "constructor"]);
+    assert.deepEqual(Object.keys(whole.provider_staleness).sort(),
+                     ["__proto__", "constructor"]);
+    assert.equal(Object.prototype.hasOwnProperty.call(whole.gateways,
+                                                      "__proto__"), true);
+    assert.equal(Object.getPrototypeOf(whole.gateways), Object.prototype);
+    assert.equal(Object.getPrototypeOf(whole.counts), Object.prototype);
+    assert.deepEqual(whole.gateways["__proto__"].model_ids,
+                     ["__proto__", "constructor-free", "shared-lookalike"]);
+    assert.deepEqual(whole.gateways["__proto__"].models["__proto__"].name,
+                     "Proto");
+    assert.deepEqual(whole.gateways["constructor"].model_ids, ["toString"]);
+    // Labels count distinct STRINGS, never prototype member names conflated
+    // with each other: `constructor-free` strips to `constructor`, which is a
+    // real label here alongside the `__proto__` label.
+    assert.deepEqual(whole.counts, {gateways: 2, endpoints: 4,
+                                    distinct_raw_ids: 4,
+                                    marker_group_labels: 4, models: 4});
+    assert.deepEqual(whole.provider_staleness,
+                     flagMap([["__proto__", true], ["constructor", false]]));
+    assert.equal(whole.provider, null);
+    assert.equal(whole.tick_epoch, null);
+    assert.equal({}.polluted, undefined);
+    assert.equal(Object.prototype.polluted, undefined);
+
+    const selected = catalog.listEndpoints(snapshot, {provider: "__proto__"});
+    assert.equal(selected.provider, "__proto__");
+    assert.deepEqual(Object.keys(selected.gateways), ["__proto__"]);
+    assert.deepEqual(selected.counts, {gateways: 1, endpoints: 3,
+                                       distinct_raw_ids: 3,
+                                       marker_group_labels: 3, models: 3});
+    assertArgumentEnvelope(catalog.listEndpoints(snapshot,
+                                                 {provider: "constructor "}),
+                           "unknown_provider", "provider", "padded lookalike");
+    assertArgumentEnvelope(catalog.listEndpoints(snapshot,
+                                                 {provider: "valueOf"}),
+                           "unknown_provider", "provider", "inherited name");
+    assert.equal(catalog.canonicalText(snapshot), frozen,
+                 "the lookalike snapshot is never mutated");
+  });
+
+  it("agrees with the unchanged Python reference over the selected inputs", () => {
+    const cases = queryRows("list_endpoints").map((row) => ({
+      label: row.id, snapshot_text: readFixtureText(row.fixture),
+      args: JSON.parse(JSON.stringify(row.args))
+    }));
+    const lookupText = readFixtureText("lookup.json");
+    for (const entry of [
+      ["boundary-unknown-key", JSON.parse('{"provider": null, "limit": 5}')],
+      ["boundary-unknown-provider", {provider: "synthetic-z"}],
+      ["boundary-wrong-type", {provider: 5}],
+      ["boundary-null", {provider: null}],
+      ["boundary-omitted", {}],
+      ["boundary-non-object", null],
+      ["boundary-filtered", {provider: "synthetic-a"}]
+    ]) {
+      cases.push({label: entry[0], snapshot_text: lookupText, args: entry[1]});
+    }
+    const lookalike = catalog.canonicalText(lookalikeKeySnapshot());
+    cases.push({label: "lookalike-all", snapshot_text: lookalike, args: {}});
+    cases.push({label: "lookalike-proto", snapshot_text: lookalike,
+                args: {provider: "__proto__"}});
+    cases.push({label: "empty-registry",
+                snapshot_text: catalog.canonicalText(
+                  emptyRegistrySnapshot()), args: {}});
+    const results = cases.map((entry) => catalog.listEndpoints(
+      catalog.loadSnapshot(entry.snapshot_text), entry.args));
+    assertQueryParity("list_endpoints", cases, results);
+  });
+});
+
+// --------------------------------------------------------------------------
 // cross-fixture integration and the dual (browser + Node) export
 // --------------------------------------------------------------------------
 describe("fixture integration and export shape", () => {
@@ -1648,7 +2674,8 @@ describe("fixture integration and export shape", () => {
       "CatalogError", "JsonFloat", "MAX_JSON_DEPTH", "MAX_SAFE_INT",
       "SCHEMA_VERSION", "canonicalBytes", "canonicalText",
       "compareEndpointPairs", "compareNaturalIds", "decodeTypedJson",
-      "endpointKey", "isFloatToken", "loadJson", "loadSnapshot", "naturalKey",
+      "endpointKey", "isFloatToken", "listEndpoints", "listFreeModels",
+      "loadJson", "loadSnapshot", "naturalKey",
       "normalizeCapabilities", "projectCapabilities", "projectModel",
       "snapshotHash", "stripFreeMarker", "validateSnapshot"
     ]);
