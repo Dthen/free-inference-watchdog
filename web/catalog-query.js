@@ -1930,6 +1930,143 @@
     };
   }
 
+  // ---------- pure exact/marker lookup query ------------------------------
+  //
+  // The dependency-free counterpart of the pure `get_model` core in
+  // `watchdog_catalog/query.py`. Like the bulk queries it takes an
+  // already-VALIDATED public snapshot (nothing here re-validates, rehashes,
+  // reads a clock or performs I/O) plus the whole DECODED argument object, and
+  // returns the frozen payload directly -- never raising into the caller for a
+  // malformed argument.
+
+  //: The explicit ASCII blank set the required `model_id` predicate uses:
+  //: U+0009..U+000D (tab, LF, VT, FF, CR) and U+0020 (space). It is NEVER
+  //: widened with `String.prototype.trim` or a `\s` class: MDN defines those
+  //: over WhiteSpace plus LineTerminator, so they also strip NBSP (U+00A0),
+  //: EM SPACE (U+2003), U+2028/U+2029, U+3000 and a BOM -- every one of which
+  //: is a literal, NONBLANK query here.
+  var _ASCII_BLANKS = " \t\n\r\u000b\f";
+
+  //: The frozen absence caveat carried on EVERY `getModel` success payload --
+  //: including a no-match success. It is a labelling caution, never a proof of
+  //: cross-gateway model identity.
+  var ABSENCE_CAVEAT = "Cross-gateway ABSENCE is unreliable: gateways rename " +
+    "inconsistently, so a missing exact id does NOT prove the model is " +
+    "unavailable there.";
+
+  /** True iff every code unit belongs to the explicit ASCII blank set. */
+  function _isAsciiBlankOnly(text) {
+    for (var index = 0; index < text.length; index += 1) {
+      if (_ASCII_BLANKS.indexOf(text.charAt(index)) === -1) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * The pure core of the frozen `get_model` tool.
+   *
+   * The success payload carries exactly `ok`, `query`, `snapshot_id`,
+   * `tick_epoch`, `exact_matches`, `exact_gateways`, `provider_staleness`,
+   * `endpoints`, `caveats` and `counts`; `ok` is exactly `true` even when the
+   * lookup finds nothing, and the retained `query` is the raw argument verbatim
+   * (never trimmed, case-folded or repaired). Snapshot provenance is echoed
+   * literally, a `null` epoch included -- no current/fetch clock and no
+   * invented freshness.
+   *
+   * `exact_matches` is LITERAL raw-ID membership -- case-sensitive, unpadded,
+   * exact -- one entry per `provider_order` key including zero-ID providers;
+   * `exact_gateways` lists the true providers in that declared display order.
+   * `endpoints` is the SEPARATE marker-insensitive lookup: every tracked
+   * `(provider, rawId)` pair whose accepted `stripFreeMarker` label equals the
+   * stripped query, ordered by provider display order then the accepted natural
+   * raw-ID order, with raw strings unchanged and the complete projected
+   * metadata of its OWN pair attached. A marker match is never proof of
+   * cross-gateway identity, so it never feeds `exact_matches`.
+   *
+   * `provider_staleness` covers EVERY snapshot provider with its carried-
+   * forward snapshot stale flag (provider staleness, never tick age). `counts`
+   * describes only the returned lookup -- matching gateways, endpoint pairs,
+   * distinct literal raw ids and distinct marker labels -- and `caveats`
+   * carries the frozen absence caveat on every success. Argument validation is
+   * the frozen order: object, then ANY unknown key (parameter `null`), then the
+   * required string `model_id` with at least one character outside the explicit
+   * ASCII blank set. Every returned container, endpoint and metadata object
+   * (nested architecture/parameter/pricing containers and typed `JsonFloat`
+   * wrappers included) is freshly allocated; the inputs are never mutated.
+   */
+  function getModel(snapshot, args) {
+    if (!_isPlainObject(args)) {
+      return _argumentError(INVALID_ARGUMENTS, null);
+    }
+    var keys = Object.keys(args);
+    for (var key = 0; key < keys.length; key += 1) {
+      // `provider`/`limit`/`offset`/`query` are unknown here, not aliases.
+      if (keys[key] !== "model_id") {
+        return _argumentError(INVALID_ARGUMENTS, null);
+      }
+    }
+    var supplied = _member(args, "model_id");
+    if (supplied === _MISSING || typeof supplied !== "string" ||
+        _isAsciiBlankOnly(supplied)) {
+      return _argumentError(INVALID_ARGUMENTS, "model_id");
+    }
+    var query = supplied;
+    var order = snapshot.provider_order;
+    var providers = snapshot.providers;
+    var markerQuery = stripFreeMarker(query);
+    var exactMatches = {};
+    var exactGateways = [];
+    var endpoints = [];
+    var distinctRawIds = new Set();
+    var markerLabels = new Set();
+    for (var index = 0; index < order.length; index += 1) {
+      var provider = order[index];
+      var entry = providers[provider];
+      var matched = entry.model_ids.indexOf(query) !== -1;
+      _defineMember(exactMatches, provider, matched);
+      if (matched) {
+        exactGateways.push(provider);
+      }
+      var ids = _naturalIds(entry.model_ids);
+      for (var position = 0; position < ids.length; position += 1) {
+        var rawId = ids[position];
+        var label = stripFreeMarker(rawId);
+        if (label !== markerQuery) {
+          continue;
+        }
+        endpoints.push({
+          provider: provider,
+          model_id: rawId,
+          chat_completions_url: entry.chat_completions_url,
+          api_type: entry.api_type,
+          stale: entry.stale,
+          metadata: _copyValue(entry.models[rawId])
+        });
+        distinctRawIds.add(rawId);
+        markerLabels.add(label);
+      }
+    }
+    return {
+      ok: true,
+      query: query,
+      snapshot_id: snapshot.snapshot_id,
+      tick_epoch: snapshot.tick_epoch,
+      exact_matches: exactMatches,
+      exact_gateways: exactGateways,
+      provider_staleness: _staleFlags(providers, order),
+      endpoints: endpoints,
+      caveats: [ABSENCE_CAVEAT],
+      counts: {
+        exact_matches: exactGateways.length,
+        endpoints: endpoints.length,
+        distinct_raw_ids: distinctRawIds.size,
+        marker_group_labels: markerLabels.size
+      }
+    };
+  }
+
   return {
     MAX_SAFE_INT: MAX_SAFE_INT,
     MAX_JSON_DEPTH: MAX_JSON_DEPTH,
@@ -1953,6 +2090,7 @@
     endpointKey: endpointKey,
     compareEndpointPairs: compareEndpointPairs,
     listFreeModels: listFreeModels,
-    listEndpoints: listEndpoints
+    listEndpoints: listEndpoints,
+    getModel: getModel
   };
 });

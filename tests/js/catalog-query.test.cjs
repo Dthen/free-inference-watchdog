@@ -1606,6 +1606,17 @@ const GATEWAY_FIELDS = ["api_type", "chat_completions_url", "model_ids",
                         "models"];
 const ENDPOINT_COUNT_FIELDS = ["distinct_raw_ids", "endpoints", "gateways",
                                "marker_group_labels", "models"];
+const GET_MODEL_FIELDS = ["caveats", "counts", "endpoints", "exact_gateways",
+                          "exact_matches", "ok", "provider_staleness", "query",
+                          "snapshot_id", "tick_epoch"];
+const GET_MODEL_ENDPOINT_FIELDS = ["api_type", "chat_completions_url",
+                                   "metadata", "model_id", "provider", "stale"];
+const GET_MODEL_COUNT_FIELDS = ["distinct_raw_ids", "endpoints",
+                                "exact_matches", "marker_group_labels"];
+// The frozen absence caveat literal, copied from README's `get_model` table.
+const GET_MODEL_CAVEAT =
+  "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a " +
+  "missing exact id does NOT prove the model is unavailable there.";
 const ARGUMENT_MESSAGES = {
   invalid_arguments: "Invalid tool arguments.",
   unknown_provider: "Unknown provider."
@@ -1721,6 +1732,71 @@ function lookalikeKeySnapshot() {
   });
 }
 
+/** A validated snapshot re-sealed after one controlled body change. */
+function resealedSnapshot(name, changes) {
+  const body = typedClone(acceptedSnapshot(name));
+  changes(body);
+  return resealSnapshot(body);
+}
+
+/**
+ * A WELL-FORMED one-provider snapshot whose raw ids pin the accepted marker
+ * boundaries: a bare `free`, an all-marker `-free`, a PREFIX marker, a single
+ * final LF, a CRLF neighbour and a `-freely` separator neighbour. The raw list
+ * is in literal code-point order (as the validator requires) and its `models`
+ * map is deliberately inserted in a DIFFERENT order, so an endpoint array can
+ * only come from sorting `model_ids`, never from map iteration order.
+ */
+function markerBoundarySnapshot() {
+  const ids = ["-free", "free", "free-vendor/z", "vendor/z",
+               "vendor/z-free\n", "vendor/z-free\n\n",
+               "vendor/z-free\r\n", "vendor/z-freely"];
+  const models = {};
+  for (const rawId of ids.slice().reverse()) {
+    withOwnKey(models, rawId, lookalikeModel(rawId, `Marker ${rawId}`));
+  }
+  return resealSnapshot({
+    cadence_s: 3600,
+    provider_order: ["synthetic-z"],
+    providers: {
+      "synthetic-z": {
+        display_name: "Synthetic Marker",
+        chat_completions_url:
+          "https://synthetic-marker.example/v1/chat/completions",
+        api_type: "openai",
+        model_ids: ids,
+        models: models,
+        stale: true
+      }
+    },
+    schema_version: 1,
+    snapshot_id: "0".repeat(64),
+    tick_epoch: 1759200000,
+    warnings: []
+  });
+}
+
+/**
+ * A validated snapshot whose matched endpoint carries a typed FLOAT pricing
+ * token (`0.0`) instead of the string the shared fixtures use, re-sealed from
+ * the module's own canonical text so the accepted typed-number path is real
+ * accepted input and not a hand-waved object.
+ */
+function typedPricingSnapshot() {
+  const body = typedClone(acceptedSnapshot("lookup.json"));
+  body.providers["synthetic-a"].models["vendor/shared"].pricing.prompt =
+    new catalog.JsonFloat(0);
+  body.snapshot_id = catalog.snapshotHash(body);
+  return catalog.loadSnapshot(catalog.canonicalText(body));
+}
+
+/** A validated snapshot with a FUTURE observation epoch and nothing else new. */
+function futureTickSnapshot() {
+  return resealedSnapshot("lookup.json", (body) => {
+    body.tick_epoch = 4102444800;
+  });
+}
+
 /** The frozen literal argument-error envelope, asserted field by field. */
 function assertArgumentEnvelope(result, code, parameter, where) {
   assert.equal(result.ok, false, `${where}: ok is strictly false`);
@@ -1754,7 +1830,8 @@ const QUERY_REFERENCE_SCRIPT = [
   "from watchdog_catalog.catalog import load_snapshot",
   "payload = json.load(sys.stdin)",
   "handlers = {'list_free_models': query_module.list_free_models,",
-  "            'list_endpoints': query_module.list_endpoints}",
+  "            'list_endpoints': query_module.list_endpoints,",
+  "            'get_model': query_module.get_model}",
   "results = []",
   "for case in payload['cases']:",
   "    snapshot = load_snapshot(case['snapshot_text'])",
@@ -2608,6 +2685,699 @@ describe("pure list_endpoints query", () => {
 });
 
 // --------------------------------------------------------------------------
+// pure get_model: literal membership + separate marker endpoints
+// --------------------------------------------------------------------------
+//
+// `catalog.getModel(snapshot, args)` is the dependency-free counterpart of
+// `watchdog_catalog.query.get_model`. It takes an already-VALIDATED public
+// snapshot and the whole DECODED argument object, returns the frozen success
+// payload or the shared argument-error envelope, never raises for a malformed
+// argument and never mutates its inputs. Every expected payload below is either
+// the independently authored `cases.json` / `argument-cases.json` golden or a
+// hand-written literal from README's `get_model` contract table.
+describe("pure get_model query", () => {
+  it("reproduces every independent success golden exactly", () => {
+    const rows = queryRows("get_model");
+    assert.equal(rows.length, 13, rows.map((row) => row.id).join(","));
+    assert.equal(new Set(rows.map((row) => row.id)).size, 13,
+                 "every golden id is unique");
+    assert.deepEqual(rows.map((row) => row.id).sort(), [
+      "get_model_capability_known_empty_lists",
+      "get_model_capability_unknown_all_null",
+      "get_model_exact_id_alpha_with_marker_endpoints",
+      "get_model_marker_base_no_exact",
+      "get_model_metadata_known_context_inclusive_boundary",
+      "get_model_metadata_unknown_context_null",
+      "get_model_metadata_unknown_description_null",
+      "get_model_metadata_zero_context_known_zero",
+      "get_model_ordering_identical_raw_id_provider_precedence",
+      "get_model_padded_query_not_trimmed",
+      "get_model_shared_raw_id_two_endpoints",
+      "get_model_unknown_id_empty_success",
+      "get_model_unrelated_renamed_model_exact_only"
+    ]);
+    for (const row of rows) {
+      // Per-row fixture override with the documented `lookup.json` default --
+      // never a wrong-fixture fallback.
+      const snapshot = acceptedSnapshot(row.fixture || "lookup.json");
+      const snapshotText = catalog.canonicalText(snapshot);
+      const args = JSON.parse(JSON.stringify(row.args));
+      const argsText = catalog.canonicalText(args);
+      const result = catalog.getModel(snapshot, args);
+      assertSameValue(result, row.expect, row.id);
+      assert.equal(result.ok, true, row.id);
+      assert.deepEqual(Object.keys(result).sort(), GET_MODEL_FIELDS, row.id);
+      // Strict scalar types and literal provenance.
+      assert.equal(typeof result.query, "string", row.id);
+      assert.equal(result.query, args.model_id, row.id);
+      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
+      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
+      // exact_matches / provider_staleness carry ONE entry per provider_order
+      // provider -- the registered zero-ID provider included.
+      assert.deepEqual(Object.keys(result.exact_matches).sort(),
+                       snapshot.provider_order.slice().sort(), row.id);
+      assert.deepEqual(Object.keys(result.provider_staleness).sort(),
+                       snapshot.provider_order.slice().sort(), row.id);
+      for (const provider of snapshot.provider_order) {
+        assert.equal(typeof result.exact_matches[provider], "boolean", row.id);
+        assert.equal(result.provider_staleness[provider],
+                     snapshot.providers[provider].stale, row.id);
+      }
+      assert.deepEqual(
+        result.exact_gateways,
+        snapshot.provider_order.filter(
+          (provider) => result.exact_matches[provider]),
+        row.id);
+      for (const endpoint of result.endpoints) {
+        assert.deepEqual(Object.keys(endpoint).sort(),
+                         GET_MODEL_ENDPOINT_FIELDS, row.id);
+        assert.equal(typeof endpoint.stale, "boolean", row.id);
+        assert.equal(endpoint.stale,
+                     result.provider_staleness[endpoint.provider], row.id);
+        const source = snapshot.providers[endpoint.provider];
+        assert.equal(endpoint.chat_completions_url,
+                     source.chat_completions_url, row.id);
+        assert.equal(endpoint.api_type, source.api_type, row.id);
+        // Complete projected public model object of ITS OWN pair.
+        assertSameValue(endpoint.metadata, source.models[endpoint.model_id],
+                        `${row.id}:${endpoint.model_id}`);
+      }
+      assert.deepEqual(Object.keys(result.counts).sort(),
+                       GET_MODEL_COUNT_FIELDS, row.id);
+      for (const field of GET_MODEL_COUNT_FIELDS) {
+        assert.ok(Number.isInteger(result.counts[field]) &&
+                  result.counts[field] >= 0,
+                  `${row.id}: ${field} is a non-negative integer`);
+      }
+      // Count identities -- structural restatements, the golden literal above
+      // remains the correctness oracle.
+      assert.equal(result.counts.exact_matches, result.exact_gateways.length,
+                   row.id);
+      assert.equal(result.counts.endpoints, result.endpoints.length, row.id);
+      assert.equal(result.counts.distinct_raw_ids,
+                   new Set(result.endpoints.map((e) => e.model_id)).size,
+                   row.id);
+      assert.equal(
+        result.counts.marker_group_labels,
+        new Set(result.endpoints.map(
+          (e) => catalog.stripFreeMarker(e.model_id))).size,
+        row.id);
+      assert.deepEqual(result.caveats, [GET_MODEL_CAVEAT], row.id);
+      assert.equal(catalog.canonicalText(snapshot), snapshotText,
+                   `${row.id}: the snapshot is never mutated`);
+      assert.equal(catalog.canonicalText(args), argsText,
+                   `${row.id}: the argument object is never mutated`);
+    }
+  });
+
+  it("keeps literal membership separate from the marker-insensitive endpoints",
+     () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const ordering = acceptedSnapshot("ordering.json");
+
+    // Exact membership is LITERAL; the endpoint lookup is a separate marker
+    // comparison. The bare label matches two endpoints and no gateway.
+    const base = catalog.getModel(lookup, {model_id: "vendor/model"});
+    assert.deepEqual(base.exact_matches,
+                     {"synthetic-a": false, "synthetic-b": false,
+                      "synthetic-c": false});
+    assert.deepEqual(base.exact_gateways, []);
+    assert.deepEqual(base.endpoints.map((e) => [e.provider, e.model_id]),
+                     [["synthetic-a", "vendor/model:free"],
+                      ["synthetic-b", "vendor/model-free"]]);
+    assert.deepEqual(base.counts, {exact_matches: 0, endpoints: 2,
+                                   distinct_raw_ids: 2,
+                                   marker_group_labels: 1});
+
+    // An EXACT id is not the marker lookup: it matches only its own gateway,
+    // while the marker endpoints still return both spellings.
+    const exact = catalog.getModel(lookup, {model_id: "vendor/model:free"});
+    assert.deepEqual(exact.exact_matches,
+                     {"synthetic-a": true, "synthetic-b": false,
+                      "synthetic-c": false});
+    assert.deepEqual(exact.exact_gateways, ["synthetic-a"]);
+    assert.deepEqual(exact.endpoints.map((e) => e.model_id),
+                     ["vendor/model:free", "vendor/model-free"]);
+    assert.deepEqual(exact.counts, {exact_matches: 1, endpoints: 2,
+                                    distinct_raw_ids: 2,
+                                    marker_group_labels: 1});
+    assert.notEqual(exact.counts.endpoints, exact.counts.exact_matches);
+
+    // The other spelling is the mirror image: exact membership never uses the
+    // marker label, and the unrelated renamed id is EXACT only.
+    const other = catalog.getModel(lookup, {model_id: "vendor/model-free"});
+    assert.deepEqual(other.exact_gateways, ["synthetic-b"]);
+    assert.deepEqual(other.endpoints.map((e) => e.model_id),
+                     ["vendor/model:free", "vendor/model-free"]);
+    const renamed = catalog.getModel(lookup,
+                                     {model_id: "vendor/model-renamed"});
+    assert.deepEqual(renamed.exact_gateways, ["synthetic-a"]);
+    assert.deepEqual(renamed.endpoints.map((e) => [e.provider, e.model_id]),
+                     [["synthetic-a", "vendor/model-renamed"]]);
+    assert.deepEqual(renamed.counts, {exact_matches: 1, endpoints: 1,
+                                      distinct_raw_ids: 1,
+                                      marker_group_labels: 1});
+
+    // One raw id on two gateways is two endpoints but ONE distinct raw id, and
+    // result-scoped counts never report the registry-wide totals (the whole
+    // fixture has 5 endpoint pairs, 4 distinct ids and 3 labels).
+    const shared = catalog.getModel(lookup, {model_id: "vendor/shared"});
+    assert.deepEqual(shared.endpoints.map((e) => [e.provider, e.model_id]),
+                     [["synthetic-a", "vendor/shared"],
+                      ["synthetic-b", "vendor/shared"]]);
+    assert.deepEqual(shared.counts, {exact_matches: 2, endpoints: 2,
+                                     distinct_raw_ids: 1,
+                                     marker_group_labels: 1});
+
+    // The padded and case-changed queries are literal: no trimming, no case
+    // repair, and therefore no match at all.
+    for (const query of [" vendor/shared", "vendor/shared ",
+                         "VENDOR/SHARED", "Vendor/Shared"]) {
+      const result = catalog.getModel(lookup, {model_id: query});
+      assert.equal(result.ok, true, query);
+      assert.equal(result.query, query, query);
+      assert.deepEqual(result.exact_gateways, [], query);
+      assert.deepEqual(result.endpoints, [], query);
+      assert.deepEqual(result.counts, {exact_matches: 0, endpoints: 0,
+                                       distinct_raw_ids: 0,
+                                       marker_group_labels: 0}, query);
+      assert.deepEqual(result.caveats, [GET_MODEL_CAVEAT], query);
+    }
+
+    // Declared display order beats alphabetic and physical provider-map order:
+    // ordering.json declares b, a, c and its providers map is written a, b, c.
+    const ordered = catalog.getModel(ordering, {model_id: "vendor/item2"});
+    assert.deepEqual(ordered.exact_matches,
+                     {"synthetic-b": true, "synthetic-a": true,
+                      "synthetic-c": false});
+    assert.deepEqual(ordered.exact_gateways, ["synthetic-b", "synthetic-a"]);
+    assert.deepEqual(ordered.endpoints.map((e) => [e.provider, e.model_id]),
+                     [["synthetic-b", "vendor/item2"],
+                      ["synthetic-a", "vendor/item2"]]);
+    assert.deepEqual(ordered.provider_staleness,
+                     {"synthetic-b": true, "synthetic-a": false,
+                      "synthetic-c": false});
+    // The shared pair keeps its OWN metadata: same raw id, different gateways.
+    assert.equal(ordered.endpoints[0].metadata.name, "Order B Item Two");
+    assert.equal(ordered.endpoints[1].metadata.name, "Order A Item Two");
+    assert.equal(ordered.endpoints[0].metadata.context_length, 131072);
+    assert.equal(ordered.endpoints[1].metadata.context_length, 65536);
+    assert.notEqual(ordered.endpoints[0].metadata,
+                    ordered.endpoints[1].metadata);
+
+    // A huge numeric ID run and non-ASCII ids survive exact membership and
+    // arrive unchanged in the endpoint list.
+    const longId = ordering.providers["synthetic-b"].model_ids.find(
+      (rawId) => rawId.startsWith("vendor/long"));
+    assert.ok(longId && longId.length > 60, longId);
+    for (const query of [longId, "vendor/item\u0661", "vendor/\uff21",
+                         "vendor/\ud83d\ude00"]) {
+      const result = catalog.getModel(ordering, {model_id: query});
+      assert.equal(result.ok, true, query);
+      assert.deepEqual(result.exact_gateways, ["synthetic-b"], query);
+      assert.deepEqual(result.endpoints.map((e) => e.model_id), [query], query);
+      assert.deepEqual(result.counts, {exact_matches: 1, endpoints: 1,
+                                       distinct_raw_ids: 1,
+                                       marker_group_labels: 1}, query);
+      assert.equal(result.snapshot_id, ordering.snapshot_id, query);
+      assert.equal(result.tick_epoch, ordering.tick_epoch, query);
+    }
+
+    // A registered zero-ID provider still gets its exact_matches and staleness
+    // entries, and a no-match success is a success.
+    const missing = catalog.getModel(lookup,
+                                     {model_id: "vendor/does-not-exist"});
+    assert.equal(missing.ok, true);
+    assert.deepEqual(missing.exact_matches,
+                     {"synthetic-a": false, "synthetic-b": false,
+                      "synthetic-c": false});
+    assert.deepEqual(missing.exact_gateways, []);
+    assert.deepEqual(missing.endpoints, []);
+    assert.deepEqual(missing.provider_staleness,
+                     {"synthetic-a": false, "synthetic-b": false,
+                      "synthetic-c": false});
+    assert.deepEqual(missing.counts, {exact_matches: 0, endpoints: 0,
+                                      distinct_raw_ids: 0,
+                                      marker_group_labels: 0});
+    assert.deepEqual(missing.caveats, [GET_MODEL_CAVEAT]);
+
+    // The legitimately EMPTY registry: every map empty, every count zero.
+    const empty = catalog.getModel(emptyRegistrySnapshot(),
+                                   {model_id: "vendor/shared"});
+    assert.equal(empty.ok, true);
+    assert.deepEqual(Object.keys(empty).sort(), GET_MODEL_FIELDS);
+    assert.deepEqual(empty.exact_matches, {});
+    assert.deepEqual(empty.exact_gateways, []);
+    assert.deepEqual(empty.provider_staleness, {});
+    assert.deepEqual(empty.endpoints, []);
+    assert.deepEqual(empty.counts, {exact_matches: 0, endpoints: 0,
+                                    distinct_raw_ids: 0,
+                                    marker_group_labels: 0});
+    assert.deepEqual(empty.caveats, [GET_MODEL_CAVEAT]);
+
+    // Observation provenance is echoed, never derived: an unknown epoch stays
+    // null and a future epoch is not "fresh" or clamped.
+    const unknownTick = catalog.getModel(
+      acceptedSnapshot("status-unknown-time.json"),
+      {model_id: "vendor/unknown-capabilities"});
+    assert.equal(unknownTick.ok, true);
+    assert.equal(unknownTick.tick_epoch, null);
+    assert.deepEqual(unknownTick.exact_gateways, ["synthetic-a"]);
+    assert.deepEqual(unknownTick.provider_staleness,
+                     {"synthetic-a": false, "synthetic-b": true});
+    assert.deepEqual(Object.keys(unknownTick.exact_matches).sort(),
+                     ["synthetic-a", "synthetic-b"]);
+    const futureTick = catalog.getModel(futureTickSnapshot(),
+                                        {model_id: "vendor/shared"});
+    assert.equal(futureTick.tick_epoch, 4102444800);
+    assert.equal(futureTick.snapshot_id,
+                 futureTickSnapshot().snapshot_id,
+                 "the same body content is the same snapshot");
+  });
+
+  it("pins the accepted marker boundaries and their natural endpoint order",
+     () => {
+    const snapshot = markerBoundarySnapshot();
+    const frozen = catalog.canonicalText(snapshot);
+
+    // One suffix pass then one prefix pass, with the reference's own `$`
+    // semantics: a bare `free` is not a marker, an all-marker `-free` falls
+    // back to itself, the prefix marker strips, and a `-freely` neighbour is
+    // not a delimiter-bounded marker.
+    const base = catalog.getModel(snapshot, {model_id: "vendor/z"});
+    assert.deepEqual(base.exact_gateways, ["synthetic-z"]);
+    assert.deepEqual(base.endpoints.map((e) => e.model_id),
+                     ["free-vendor/z", "vendor/z"]);
+    assert.deepEqual(base.counts, {exact_matches: 1, endpoints: 2,
+                                   distinct_raw_ids: 2,
+                                   marker_group_labels: 1});
+    const bare = catalog.getModel(snapshot, {model_id: "free"});
+    assert.deepEqual(bare.endpoints.map((e) => e.model_id), ["free"]);
+    assert.deepEqual(bare.counts, {exact_matches: 1, endpoints: 1,
+                                   distinct_raw_ids: 1,
+                                   marker_group_labels: 1});
+    const allMarker = catalog.getModel(snapshot, {model_id: "-free"});
+    assert.deepEqual(allMarker.endpoints.map((e) => e.model_id), ["-free"]);
+
+    // Python's `$` also matches before ONE final LF, so a `-free\n` id strips
+    // the marker and KEEPS the LF in the label; a DOUBLE LF or a CRLF pair is
+    // not a single trailing LF, so those ids keep their `free` segment. The
+    // query must carry the same label, never the trimmed id.
+    assert.equal(catalog.stripFreeMarker("vendor/z-free\n"), "vendor/z\n");
+    assert.equal(catalog.stripFreeMarker("vendor/z-free\n\n"),
+                 "vendor/z-free\n\n");
+    assert.equal(catalog.stripFreeMarker("vendor/z-free\r\n"),
+                 "vendor/z-free\r\n");
+    const lf = catalog.getModel(snapshot, {model_id: "vendor/z\n"});
+    assert.deepEqual(lf.exact_matches, {"synthetic-z": false});
+    assert.deepEqual(lf.endpoints.map((e) => e.model_id),
+                     ["vendor/z-free\n"]);
+    assert.deepEqual(lf.counts, {exact_matches: 0, endpoints: 1,
+                                 distinct_raw_ids: 1,
+                                 marker_group_labels: 1});
+    const doubleLf = catalog.getModel(snapshot,
+                                      {model_id: "vendor/z-free\n\n"});
+    assert.deepEqual(doubleLf.exact_gateways, ["synthetic-z"]);
+    assert.deepEqual(doubleLf.endpoints.map((e) => e.model_id),
+                     ["vendor/z-free\n\n"]);
+    const bareDoubleLf = catalog.getModel(snapshot, {model_id: "vendor/z\n\n"});
+    assert.deepEqual(bareDoubleLf.endpoints, []);
+    const crlf = catalog.getModel(snapshot, {model_id: "vendor/z-free\r\n"});
+    assert.deepEqual(crlf.exact_gateways, ["synthetic-z"]);
+    assert.deepEqual(crlf.endpoints.map((e) => e.model_id),
+                     ["vendor/z-free\r\n"]);
+    const neighbour = catalog.getModel(snapshot, {model_id: "vendor/z-freely"});
+    assert.deepEqual(neighbour.endpoints.map((e) => e.model_id),
+                     ["vendor/z-freely"]);
+
+    // Endpoint order is the accepted natural raw-ID order, NOT the order the
+    // `models` map happens to be inserted in (it is reversed here).
+    const mapOrder = Object.keys(snapshot.providers["synthetic-z"].models);
+    assert.deepEqual(mapOrder,
+                     snapshot.providers["synthetic-z"].model_ids.slice()
+                       .reverse(),
+                     "the models map is inserted in reverse raw-ID order");
+    assert.notDeepEqual(
+      base.endpoints.map((e) => e.model_id),
+      mapOrder.filter((rawId) => base.endpoints.some(
+        (e) => e.model_id === rawId)),
+      "endpoints follow the natural raw-ID order, never map order");
+    assert.equal(catalog.canonicalText(snapshot), frozen,
+                 "the marker snapshot is never mutated");
+  });
+
+  it("reproduces the frozen required model_id argument boundary", () => {
+    const invalid = argumentRows("invalid_cases", "get_model");
+    const valid = argumentRows("valid_controls", "get_model");
+    assert.equal(invalid.length, 8, invalid.map((row) => row.id).join(","));
+    assert.equal(new Set(invalid.map((row) => row.id)).size, 8);
+    assert.deepEqual(invalid.map((row) => row.id).sort(), [
+      "args_number_not_object", "model_id_ascii_blank", "model_id_empty",
+      "model_id_missing", "model_id_null", "model_id_number",
+      "precedence_unknown_key_before_required", "unknown_arg_get_model"
+    ]);
+    assert.equal(valid.length, 2, valid.map((row) => row.id).join(","));
+
+    for (const row of invalid) {
+      const snapshot = acceptedSnapshot(row.fixture);
+      const args = JSON.parse(JSON.stringify(row.args));
+      const before = catalog.canonicalText(args);
+      const result = catalog.getModel(snapshot, args);
+      assertSameValue(result, row.expect, row.id);
+      assertArgumentEnvelope(result, row.expect.error.code,
+                             row.expect.error.parameter, row.id);
+      assert.equal(catalog.canonicalText(args), before,
+                   `${row.id}: the argument object is never mutated`);
+    }
+    // Acceptance-only controls: the complete oracles are the thirteen success
+    // goldens above, so this pins acceptance and the retained literal query.
+    for (const row of valid) {
+      const result = catalog.getModel(acceptedSnapshot(row.fixture),
+                                      JSON.parse(JSON.stringify(row.args)));
+      assert.equal(result.ok, true, row.id);
+      assert.equal(result.query, row.args.model_id, row.id);
+    }
+
+    const lookup = acceptedSnapshot("lookup.json");
+
+    // A whole argument value that is not a JSON object: parameter is null.
+    for (const args of [null, [], 5, "x", false, true, 1.5, undefined]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, args),
+                             "invalid_arguments", null, String(args));
+    }
+    // A missing or wrong-typed required model_id -- never coerced.
+    for (const bad of [null, true, false, 5, 1.5, [], ["vendor/shared"], {},
+                       {a: 1}, new String("vendor/shared")]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, {model_id: bad}),
+                             "invalid_arguments", "model_id",
+                             JSON.stringify(String(bad)));
+    }
+    assertArgumentEnvelope(catalog.getModel(lookup, {model_id: undefined}),
+                           "invalid_arguments", "model_id", "undefined");
+    // Empty and ASCII-blank-only strings: every member of the explicit
+    // U+0009..U+000D + U+0020 set, alone and combined.
+    for (const blank of ["", " ", "\t", "\n", "\r", "\v", "\f",
+                         " \t\n\r\v\f", "\t \n", "  ", "\f\v"]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, {model_id: blank}),
+                             "invalid_arguments", "model_id",
+                             JSON.stringify(blank));
+    }
+    // The ASCII blank set is never widened: non-ASCII blank-LOOKING code points
+    // are literal nonblank queries -- accepted, no match, zero counts, caveat.
+    for (const query of ["\u00a0", "\u2003", "\u2028", "\u2029", "\u3000",
+                         "\u001c", "\u0000", "\ufeff", "\u00a0\u2003"]) {
+      const result = catalog.getModel(lookup, {model_id: query});
+      assert.equal(result.ok, true, JSON.stringify(query));
+      assert.equal(result.query, query, JSON.stringify(query));
+      assert.deepEqual(result.exact_gateways, [], JSON.stringify(query));
+      assert.deepEqual(result.endpoints, [], JSON.stringify(query));
+      assert.deepEqual(result.counts, {exact_matches: 0, endpoints: 0,
+                                       distinct_raw_ids: 0,
+                                       marker_group_labels: 0},
+                       JSON.stringify(query));
+      assert.deepEqual(result.caveats, [GET_MODEL_CAVEAT],
+                       JSON.stringify(query));
+    }
+    // Unknown-key precedence: ANY unknown key rejects with parameter null
+    // BEFORE the required model_id check. `provider`, `limit`, `offset` and
+    // `query` are unknown here, not selection/truncation aliases.
+    for (const args of [
+      JSON.parse("{\"bogus\":1}"),
+      JSON.parse("{\"model_id\":5,\"bogus\":1}"),
+      JSON.parse("{\"model_id\":\"\",\"bogus\":1}"),
+      JSON.parse("{\"provider\":\"synthetic-a\"}"),
+      JSON.parse("{\"model_id\":\"vendor/shared\",\"provider\":\"synthetic-a\"}"),
+      JSON.parse("{\"model_id\":\"vendor/shared\",\"limit\":5}"),
+      JSON.parse("{\"model_id\":\"vendor/shared\",\"offset\":0}"),
+      JSON.parse("{\"model_id\":\"vendor/shared\",\"query\":\"x\"}"),
+      JSON.parse("{\"__proto__\":1}"),
+      JSON.parse("{\"constructor\":1}"),
+      JSON.parse("{\"toString\":1}"),
+      JSON.parse("{\"model_id\":\"vendor/shared\",\"__proto__\":1}")
+    ]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, args),
+                             "invalid_arguments", null,
+                             JSON.stringify(args));
+    }
+    // The retained identifier is never trimmed, folded or repaired.
+    for (const query of [" vendor/shared ", "VENDOR/SHARED", "Vendor/Shared"]) {
+      const result = catalog.getModel(lookup, {model_id: query});
+      assert.equal(result.ok, true, query);
+      assert.equal(result.query, query, query);
+    }
+    // A fresh, non-reflecting envelope on every call.
+    const first = catalog.getModel(lookup, {model_id: ""});
+    first.error.code = "mutated";
+    first.ok = true;
+    const second = catalog.getModel(lookup, {model_id: ""});
+    assertArgumentEnvelope(second, "invalid_arguments", "model_id",
+                           "fresh envelope");
+    assert.notEqual(second, first);
+    assert.notEqual(second.error, first.error);
+  });
+
+  it("returns fresh, deeply isolated payloads", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const before = catalog.canonicalText(lookup);
+    const first = catalog.getModel(lookup, {model_id: "vendor/shared"});
+    const second = catalog.getModel(lookup, {model_id: "vendor/shared"});
+    assert.equal(catalog.canonicalText(lookup), before,
+                 "the snapshot is never mutated");
+    assertSameValue(first, second, "repeated call");
+    for (const field of ["exact_matches", "exact_gateways",
+                         "provider_staleness", "endpoints", "counts",
+                         "caveats"]) {
+      assert.notEqual(first[field], second[field], field);
+    }
+    assert.notEqual(first.endpoints[0], second.endpoints[0], "endpoint object");
+    for (let index = 0; index < first.endpoints.length; index += 1) {
+      const endpoint = first.endpoints[index];
+      const source = lookup.providers[endpoint.provider].models[endpoint.model_id];
+      const other = second.endpoints[index].metadata;
+      assert.notEqual(endpoint.metadata, source, endpoint.model_id);
+      assert.notEqual(endpoint.metadata, other, endpoint.model_id);
+      assert.notEqual(endpoint.metadata.architecture, source.architecture,
+                      endpoint.model_id);
+      assert.notEqual(endpoint.metadata.supported_parameters,
+                      source.supported_parameters, endpoint.model_id);
+      assert.notEqual(endpoint.metadata.pricing, source.pricing,
+                      endpoint.model_id);
+      assert.notEqual(endpoint.metadata.architecture, other.architecture,
+                      endpoint.model_id);
+    }
+    // Mutating the returned payload deeply leaves the snapshot, the earlier
+    // independent result and a brand-new call untouched.
+    const sharedA = first.endpoints[0].metadata;
+    sharedA.name = "mutated";
+    sharedA.architecture.input_modalities.push("vision");
+    sharedA.supported_parameters.push("seed");
+    sharedA.pricing.prompt = "999";
+    first.exact_matches["synthetic-a"] = false;
+    first.exact_gateways.push("injected");
+    first.provider_staleness["synthetic-a"] = true;
+    first.endpoints.push("injected");
+    first.counts.endpoints = 99;
+    first.caveats.push("injected");
+    assert.equal(catalog.canonicalText(lookup), before,
+                 "mutating a result never reaches the snapshot");
+    const kept = second.endpoints[0].metadata;
+    assert.equal(kept.name, "Vendor Shared");
+    assert.deepEqual(kept.architecture.input_modalities, ["text"]);
+    assert.deepEqual(kept.supported_parameters,
+                     ["temperature", "max_tokens"]);
+    assert.deepEqual(kept.pricing, {prompt: "0", completion: "0"});
+    assert.deepEqual(second.exact_matches,
+                     {"synthetic-a": true, "synthetic-b": true,
+                      "synthetic-c": false});
+    assert.equal(second.counts.endpoints, 2);
+    assert.deepEqual(second.caveats, [GET_MODEL_CAVEAT]);
+    const third = catalog.getModel(lookup, {model_id: "vendor/shared"});
+    assertSameValue(third, second, "a later call is unaffected");
+
+    // The marker-endpoint metadata of two gateways sharing a label is
+    // independent, and a no-match success still owns fresh containers.
+    const base = catalog.getModel(lookup, {model_id: "vendor/model"});
+    const aMeta = base.endpoints[0].metadata;
+    const bMeta = base.endpoints[1].metadata;
+    assert.notEqual(aMeta, bMeta);
+    aMeta.architecture.input_modalities.push("audio");
+    assert.deepEqual(bMeta.architecture.input_modalities, ["text"]);
+    const noMatch = catalog.getModel(lookup, {model_id: "vendor/nope"});
+    noMatch.exact_matches["synthetic-a"] = true;
+    noMatch.exact_gateways.push("injected");
+    noMatch.endpoints.push("injected");
+    noMatch.counts.endpoints = 7;
+    noMatch.caveats.push("injected");
+    const freshNoMatch = catalog.getModel(lookup, {model_id: "vendor/nope"});
+    assert.deepEqual(freshNoMatch.exact_matches,
+                     {"synthetic-a": false, "synthetic-b": false,
+                      "synthetic-c": false});
+    assert.deepEqual(freshNoMatch.exact_gateways, []);
+    assert.deepEqual(freshNoMatch.endpoints, []);
+    assert.deepEqual(freshNoMatch.caveats, [GET_MODEL_CAVEAT]);
+
+    // A typed float pricing token keeps its `JsonFloat` wrapper: semantic
+    // equality alone would not prove the accepted typed representation was
+    // preserved. The returned wrapper is a fresh object, so mutating it can
+    // never reach the snapshot or another result.
+    const typed = typedPricingSnapshot();
+    const typedFrozen = catalog.canonicalText(typed);
+    const typedFirst = catalog.getModel(typed, {model_id: "vendor/shared"});
+    const typedSecond = catalog.getModel(typed, {model_id: "vendor/shared"});
+    const sourceWrapper =
+      typed.providers["synthetic-a"].models["vendor/shared"].pricing.prompt;
+    assert.ok(catalog.isFloatToken(sourceWrapper),
+              "the re-sealed snapshot carries a typed float token");
+    assert.ok(catalog.isFloatToken(typedFirst.endpoints[0].metadata.pricing
+                                     .prompt),
+              "the returned endpoint metadata keeps the float wrapper");
+    assert.equal(typedFirst.endpoints[0].metadata.pricing.prompt.value, 0);
+    assert.notEqual(typedFirst.endpoints[0].metadata.pricing.prompt,
+                    sourceWrapper, "the wrapper is freshly allocated");
+    assert.notEqual(typedFirst.endpoints[0].metadata.pricing.prompt,
+                    typedSecond.endpoints[0].metadata.pricing.prompt,
+                    "two results never share a wrapper");
+    typedFirst.endpoints[0].metadata.pricing.prompt.value = 5;
+    assert.equal(sourceWrapper.value, 0,
+                 "mutating the result wrapper never reaches the snapshot");
+    assert.equal(typedSecond.endpoints[0].metadata.pricing.prompt.value, 0);
+    assert.equal(catalog.canonicalText(typed), typedFrozen,
+                 "the typed snapshot is never mutated");
+
+    // Interleaved calls never share containers.
+    const mixed = catalog.getModel(lookup, {model_id: "vendor/shared"});
+    catalog.listEndpoints(lookup, {});
+    catalog.listFreeModels(lookup, {});
+    const mixedAgain = catalog.getModel(lookup, {model_id: "vendor/shared"});
+    assert.notEqual(mixed.endpoints, mixedAgain.endpoints);
+    assert.notEqual(mixed.endpoints[0].metadata,
+                    mixedAgain.endpoints[0].metadata);
+    assert.equal(catalog.canonicalText(mixed),
+                 catalog.canonicalText(mixedAgain));
+  });
+
+  it("survives prototype-looking provider and raw-ID keys", () => {
+    const snapshot = lookalikeKeySnapshot();
+    const frozen = catalog.canonicalText(snapshot);
+
+    const shared = catalog.getModel(snapshot, {model_id: "shared-lookalike"});
+    assert.deepEqual(Object.keys(shared.exact_matches).sort(),
+                     ["__proto__", "constructor"]);
+    assert.equal(Object.prototype.hasOwnProperty.call(shared.exact_matches,
+                                                      "__proto__"), true);
+    assert.equal(Object.getPrototypeOf(shared.exact_matches),
+                 Object.prototype);
+    assert.equal(shared.exact_matches["__proto__"], true);
+    assert.equal(shared.exact_matches["constructor"], false);
+    assert.deepEqual(shared.exact_gateways, ["__proto__"]);
+    assert.deepEqual(shared.provider_staleness,
+                     flagMap([["__proto__", true], ["constructor", false]]));
+    assert.deepEqual(shared.endpoints.map((e) => [e.provider, e.model_id]),
+                     [["__proto__", "shared-lookalike"]]);
+    assert.equal(shared.endpoints[0].metadata.name, "Shared Lookalike");
+    assert.deepEqual(shared.counts, {exact_matches: 1, endpoints: 1,
+                                     distinct_raw_ids: 1,
+                                     marker_group_labels: 1});
+
+    // A prototype-looking QUERY is literal membership, never an inherited
+    // member of a result map.
+    const proto = catalog.getModel(snapshot, {model_id: "__proto__"});
+    assert.equal(proto.exact_matches["__proto__"], true);
+    assert.deepEqual(proto.endpoints.map((e) => e.model_id), ["__proto__"]);
+    const inherited = catalog.getModel(snapshot, {model_id: "valueOf"});
+    assert.equal(inherited.ok, true);
+    assert.deepEqual(inherited.exact_gateways, []);
+    assert.deepEqual(inherited.endpoints, []);
+
+    // `constructor` is a real marker LABEL here (from `constructor-free`) but
+    // not an exact id: the two lookups stay separate and no prototype member
+    // is ever treated as tracked.
+    const ctor = catalog.getModel(snapshot, {model_id: "constructor"});
+    assert.deepEqual(ctor.exact_gateways, []);
+    assert.deepEqual(ctor.endpoints.map((e) => [e.provider, e.model_id]),
+                     [["__proto__", "constructor-free"]]);
+    assert.deepEqual(ctor.counts, {exact_matches: 0, endpoints: 1,
+                                   distinct_raw_ids: 1,
+                                   marker_group_labels: 1});
+    const tostring = catalog.getModel(snapshot, {model_id: "toString"});
+    assert.deepEqual(tostring.exact_gateways, ["constructor"]);
+    assert.deepEqual(tostring.endpoints.map((e) => e.model_id), ["toString"]);
+
+    assert.equal({}.polluted, undefined);
+    assert.equal(Object.prototype.polluted, undefined);
+    // Prototype-looking ARGUMENT keys are unknown keys, rejected before the
+    // required id.
+    assertArgumentEnvelope(catalog.getModel(snapshot,
+                                            JSON.parse("{\"__proto__\":1}")),
+                           "invalid_arguments", null, "proto argument");
+    assertArgumentEnvelope(
+      catalog.getModel(snapshot,
+                       JSON.parse("{\"model_id\":\"__proto__\"," +
+                                  "\"constructor\":1}")),
+      "invalid_arguments", null, "constructor argument");
+    assert.equal(catalog.canonicalText(snapshot), frozen,
+                 "the lookalike snapshot is never mutated");
+  });
+
+  it("agrees with the unchanged Python reference over the selected inputs",
+     () => {
+    const cases = queryRows("get_model").map((row) => ({
+      label: row.id,
+      snapshot_text: readFixtureText(row.fixture || "lookup.json"),
+      args: JSON.parse(JSON.stringify(row.args))
+    }));
+    const lookupText = readFixtureText("lookup.json");
+    for (const entry of [
+      ["boundary-unknown-key",
+       JSON.parse("{\"model_id\":\"vendor/shared\",\"bogus\":1}")],
+      ["boundary-non-object", 5],
+      ["boundary-missing", {}],
+      ["boundary-empty", {model_id: ""}],
+      ["boundary-ascii-blank", {model_id: " \t\n\r\v\f"}],
+      ["boundary-nbsp", {model_id: "\u00a0"}],
+      ["boundary-em-space", {model_id: "\u2003"}],
+      ["boundary-line-separator", {model_id: "\u2028"}],
+      ["boundary-nul", {model_id: "\u0000"}],
+      ["boundary-padded", {model_id: " vendor/shared "}],
+      ["boundary-case", {model_id: "VENDOR/SHARED"}],
+      ["boundary-marker", {model_id: "vendor/model"}],
+      ["boundary-exact-with-marker", {model_id: "vendor/model:free"}],
+      ["boundary-no-match", {model_id: "vendor/does-not-exist"}]
+    ]) {
+      cases.push({label: entry[0], snapshot_text: lookupText, args: entry[1]});
+    }
+    cases.push({label: "empty-registry",
+                snapshot_text: catalog.canonicalText(emptyRegistrySnapshot()),
+                args: {model_id: "vendor/shared"}});
+    cases.push({label: "null-tick",
+                snapshot_text: readFixtureText("status-unknown-time.json"),
+                args: {model_id: "vendor/unknown-capabilities"}});
+    cases.push({label: "future-tick",
+                snapshot_text: catalog.canonicalText(futureTickSnapshot()),
+                args: {model_id: "vendor/shared"}});
+    cases.push({label: "typed-pricing",
+                snapshot_text: catalog.canonicalText(typedPricingSnapshot()),
+                args: {model_id: "vendor/shared"}});
+    const markerText = catalog.canonicalText(markerBoundarySnapshot());
+    for (const query of ["vendor/z", "free", "-free", "vendor/z\n",
+                         "vendor/z\n\n", "vendor/z-free\n\n",
+                         "vendor/z-free\r\n", "vendor/z-freely"]) {
+      cases.push({label: `marker-${JSON.stringify(query)}`,
+                  snapshot_text: markerText, args: {model_id: query}});
+    }
+    const lookalikeText = catalog.canonicalText(lookalikeKeySnapshot());
+    for (const query of ["__proto__", "shared-lookalike", "constructor",
+                         "toString"]) {
+      cases.push({label: `lookalike-${query}`, snapshot_text: lookalikeText,
+                  args: {model_id: query}});
+    }
+    const results = cases.map((entry) => catalog.getModel(
+      catalog.loadSnapshot(entry.snapshot_text), entry.args));
+    assertQueryParity("get_model", cases, results);
+  });
+});
+
+// --------------------------------------------------------------------------
 // cross-fixture integration and the dual (browser + Node) export
 // --------------------------------------------------------------------------
 describe("fixture integration and export shape", () => {
@@ -2674,8 +3444,8 @@ describe("fixture integration and export shape", () => {
       "CatalogError", "JsonFloat", "MAX_JSON_DEPTH", "MAX_SAFE_INT",
       "SCHEMA_VERSION", "canonicalBytes", "canonicalText",
       "compareEndpointPairs", "compareNaturalIds", "decodeTypedJson",
-      "endpointKey", "isFloatToken", "listEndpoints", "listFreeModels",
-      "loadJson", "loadSnapshot", "naturalKey",
+      "endpointKey", "getModel", "isFloatToken", "listEndpoints",
+      "listFreeModels", "loadJson", "loadSnapshot", "naturalKey",
       "normalizeCapabilities", "projectCapabilities", "projectModel",
       "snapshotHash", "stripFreeMarker", "validateSnapshot"
     ]);
