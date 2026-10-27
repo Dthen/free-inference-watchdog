@@ -7,8 +7,18 @@
  * Built-in modules only (no runtime package). It is a TRANSPORT and DISPATCH
  * layer: every operation below calls the real exported implementation from
  * `../../web/catalog-query.js` and never re-implements validation, selection,
- * ordering, encoding or pagination. A `require()` of this file is inert; only
- * command execution owns stdin/stdout.
+ * ordering, encoding or pagination. A `require()`/`import()` of this file is
+ * inert; only command execution owns stdin/stdout. That is enforced at the very
+ * bottom of the file by an explicit entry-point guard (`require.main ===
+ * module`), so loading the module neither reads stdin, nor writes a protocol
+ * document, nor changes the process exit status.
+ *
+ * Raw stdin is bounded WHILE it is read, not after it has been accumulated: it
+ * is consumed in fixed `STDIN_CHUNK_BYTES` reads and the first byte past
+ * `MAX_STDIN_BYTES` rejects the document immediately (one bounded detection
+ * read of allowance, never an unbounded read-to-EOF). The accumulated buffer
+ * therefore never exceeds the bound, and the bytes are decoded once at the end
+ * so a multi-byte UTF-8 sequence split across two reads stays intact.
  *
  * Protocol v1 -- one deterministic JSON document in, one out.
  *
@@ -68,6 +78,13 @@ const catalog = require("../../web/catalog-query.js");
 
 const PROTOCOL = 1;
 const MAX_STDIN_BYTES = 32 * 1024 * 1024;
+//: Fixed read size for raw stdin. It is also the overflow-detection allowance:
+//: the bound is noticed within one chunk of the limit, never after EOF.
+const STDIN_CHUNK_BYTES = 64 * 1024;
+//: A stdin descriptor that libuv made non-blocking (see nodejs/node#42826) can
+//: answer `readSync` with EAGAIN instead of data; retry that for a bounded
+//: wall-clock budget rather than spinning or giving up immediately.
+const EAGAIN_MAX_WAIT_MS = 60000;
 const FIXTURES_DIR = path.join(__dirname, "..", "fixtures", "catalog");
 const MODULE_PATH = path.join(__dirname, "..", "..", "web", "catalog-query.js");
 
@@ -274,14 +291,63 @@ const OPS = {
   }
 };
 
+function sleepMs(milliseconds) {
+  // A bounded blocking wait that owns no timer handle: the main thread parks on
+  // a private zeroed cell for at most `milliseconds`.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
 function readStdin() {
-  // `fs.readFileSync(0)` reads the whole pipe until EOF (Node's documented
-  // synchronous stdin form); the size bound is enforced on the result.
-  const text = fs.readFileSync(0, "utf8");
-  if (Buffer.byteLength(text, "utf8") > MAX_STDIN_BYTES) {
-    throw new Error("stdin exceeds the " + MAX_STDIN_BYTES + " byte bound");
+  // Incremental, bounded raw reads. `fs.readFileSync(0)` would materialize the
+  // WHOLE stream before any bound could be applied, which is not enforcement
+  // while consuming: a 4 GiB document would be allocated first.
+  const chunks = [];
+  const buffer = Buffer.allocUnsafe(STDIN_CHUNK_BYTES);
+  let total = 0;
+  let reads = 0;
+  let largest = 0;
+  let waitedMs = 0;
+  for (;;) {
+    let bytesRead;
+    try {
+      bytesRead = fs.readSync(0, buffer, 0, buffer.length, null);
+    } catch (error) {
+      if (error && (error.code === "EAGAIN" || error.code === "EWOULDBLOCK")) {
+        if (waitedMs >= EAGAIN_MAX_WAIT_MS) {
+          throw new Error("stdin stayed unreadable (EAGAIN) for " +
+                          waitedMs + " ms");
+        }
+        sleepMs(5);
+        waitedMs += 5;
+        continue;
+      }
+      if (error && error.code === "EOF") {
+        break;                       // older Node raises EOF at end of input
+      }
+      throw error;
+    }
+    if (bytesRead === 0) {
+      break;                         // EOF
+    }
+    reads += 1;
+    if (bytesRead > largest) {
+      largest = bytesRead;
+    }
+    total += bytesRead;
+    if (total > MAX_STDIN_BYTES) {
+      // Reject the FIRST byte past the bound: no wait for EOF, no assembled
+      // string and no JSON.parse for an oversized document.
+      throw new Error(
+        "stdin exceeds the " + MAX_STDIN_BYTES + " byte bound: rejected at " +
+        total + " bytes after " + reads + " bounded reads of at most " +
+        buffer.length + " bytes (largest read " + largest + ")");
+    }
+    chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
   }
-  return text;
+  // Decode ONCE over the concatenated bytes, so a multi-byte UTF-8 sequence
+  // that straddles a read boundary is still decoded correctly. `total` never
+  // exceeds MAX_STDIN_BYTES, so this assembly is bounded by the same limit.
+  return Buffer.concat(chunks, total).toString("utf8");
 }
 
 function main() {
@@ -305,10 +371,21 @@ function main() {
     {protocol: PROTOCOL, responses: responses}));
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write("run-contract.cjs: " + (error && error.stack
-    ? error.stack : String(error)) + "\n");
-  process.exitCode = 1;
+function runCli() {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write("run-contract.cjs: " + (error && error.stack
+      ? error.stack : String(error)) + "\n");
+    process.exitCode = 1;
+  }
+}
+
+// The entry-point guard: a plain `require()`/dynamic `import()` of this file
+// returns here and stays inert (Node modules docs, "Accessing the main module";
+// for a non-CommonJS entry point `require.main` is `undefined`, so the guard is
+// false there too). Only `node run-contract.cjs` owns stdin/stdout and the exit
+// status.
+if (require.main === module) {
+  runCli();
 }

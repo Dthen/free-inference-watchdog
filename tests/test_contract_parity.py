@@ -33,6 +33,16 @@ so no parity test is skipped there.
 The Node child always runs with an explicit argv/cwd, a timeout, captured
 stdout/stderr and a minimal allowlisted environment (no inherited PYTHONPATH /
 PYTHONHOME / tool overrides).
+
+Transport bounds are enforced WHILE the bytes move. `subprocess.run(...)`/
+`communicate()` buffer a whole stream in memory and only then compare its
+length (Python docs: "The data read is buffered in memory, so do not use this
+method if the data size is large or unlimited"), so the parity lane drives
+every child through `_bounded_child`: one thread per pipe direction, a finite
+cap per stream checked on each bounded chunk read, a bounded stdin writer and an
+explicit timeout/kill/wait lifecycle that reaps the child. The runner's own
+stdin bound is enforced the same way, on incremental fixed-size reads, with the
+entry point made explicit so that `require()`/`import()` of the runner is inert.
 """
 
 from __future__ import annotations
@@ -42,9 +52,13 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -58,6 +72,17 @@ SHARED_MODULE = REPO_ROOT / "web" / "catalog-query.js"
 
 CHILD_TIMEOUT_S = 120
 MAX_CHILD_OUTPUT_BYTES = 64 * 1024 * 1024
+#: The runner's documented raw-stdin bound (32 MiB) and the fixed read size it
+#: uses to enforce it incrementally; the detection allowance is one read.
+RUNNER_STDIN_BOUND_BYTES = 32 * 1024 * 1024
+RUNNER_READ_CHUNK_BYTES = 64 * 1024
+#: One bounded chunk for every child pipe. A capture can therefore add at most
+#: one chunk beyond its cap, never a whole stream.
+PIPE_CHUNK_BYTES = 64 * 1024
+#: How long a drained pipe thread may take to finish after the child is gone.
+PIPE_THREAD_JOIN_S = 30
+#: Small caps for the transport controls, so no test has to hold a 64 MiB blob.
+CONTROL_CAP_BYTES = 256 * 1024
 #: One frozen clock for every case that needs `now`; never the real clock.
 FIXED_NOW = 1759200000
 
@@ -247,13 +272,185 @@ def test_python_and_shared_origins_are_this_worktree(node):
     assert response["node"] == f"v{_node_version(node)}"
 
 
+class ChildRun(NamedTuple):
+    """One bounded child execution and its explicit failure classification.
+
+    `failure` is `None` for a child that terminated on its own within the
+    timeout without crossing a stream cap; otherwise it names the transport
+    bound that ended the run ("output-limit" or "timeout"). A non-zero exit of a
+    child that stayed inside its caps is NOT a transport failure: the caller
+    distinguishes child-nonzero and malformed-response outcomes itself.
+    """
+
+    returncode: int | None
+    stdout: bytes
+    stderr: bytes
+    failure: str | None
+    elapsed_s: float
+
+
+def _kill_and_reap(process: subprocess.Popen) -> int | None:
+    """Terminate a live child and reap it, so no transport path leaks a zombie."""
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:                    # already reaped by someone else
+            pass
+    try:
+        return process.wait(timeout=PIPE_THREAD_JOIN_S)
+    except subprocess.TimeoutExpired:      # pragma: no cover - defensive
+        return process.poll()
+
+
+def _close_pipes(process: subprocess.Popen) -> None:
+    """Close every pipe we opened, swallowing the errors a dead child implies."""
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _bounded_child(argv, *, payload=None, stdout_cap: int = MAX_CHILD_OUTPUT_BYTES,
+                   stderr_cap: int = MAX_CHILD_OUTPUT_BYTES,
+                   timeout: float = CHILD_TIMEOUT_S, cwd=REPO_ROOT,
+                   env=None) -> ChildRun:
+    """Run one real child, bounding both output streams WHILE they arrive.
+
+    Why not `subprocess.run(..., capture_output=True)`: it funnels everything
+    through `communicate()`, which buffers each stream in memory and hands the
+    bytes over only at EOF (Python docs: "The data read is buffered in memory,
+    so do not use this method if the data size is large or unlimited"). Checking
+    `len(stdout)` afterwards therefore detects an oversized stream only after it
+    has already been allocated -- it does not bound the consumption.
+
+    This helper instead gives each pipe direction its own thread:
+
+    * stdout and stderr are read in chunks of at most `PIPE_CHUNK_BYTES` and
+      each stream has its OWN finite cap. The chunk that would cross a cap is
+      truncated at the cap, the run is marked "output-limit" and the child is
+      killed, so a capture never exceeds `cap` bytes (no disk spool, no
+      unbounded growth).
+    * stdin is written from a third thread in bounded chunks, so a child that
+      emits on its pipes BEFORE it consumes its input cannot deadlock the
+      parent on a full pipe (the documented hazard of interleaved
+      `.stdin.write()`/`.stdout.read()`).
+    * the wait loop enforces the timeout, kills and reaps the child, then joins
+      and closes every helper thread and pipe. Normal runs keep their exact
+      bytes, native return code and empty-stderr expectation.
+
+    Everything here is portable stdlib. POSIX-only process/resource calls are
+    deliberately absent: native RSS/`resource` measurement lives in the
+    out-of-tree evidence probes, never in the committed transport path.
+    """
+    if not isinstance(argv, list) or not argv:
+        raise ValueError("argv must be a nonempty argument list")
+    feeds_stdin = payload is not None
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE if feeds_stdin else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=str(cwd), env=_child_env() if env is None else env)
+    started = time.monotonic()
+    stop = threading.Event()
+    lock = threading.Lock()
+    capture = {"stdout": [], "stderr": []}
+    seen = {"stdout": 0, "stderr": 0}
+    overflow = {"stdout": False, "stderr": False}
+
+    def drain(stream, name: str, cap: int) -> None:
+        sink = capture[name]
+        reader = getattr(stream, "read1", stream.read)
+        try:
+            while not stop.is_set():
+                chunk = reader(PIPE_CHUNK_BYTES)
+                if not chunk:
+                    return
+                with lock:
+                    room = cap - seen[name]
+                    if len(chunk) > room:
+                        if room > 0:
+                            sink.append(chunk[:room])
+                            seen[name] += room
+                        overflow[name] = True
+                        stop.set()
+                        return
+                    sink.append(chunk)
+                    seen[name] += len(chunk)
+        except (OSError, ValueError):      # the child is gone / the pipe was closed
+            return
+
+    def feed() -> None:
+        assert process.stdin is not None       # PIPE was requested above
+        try:
+            view = memoryview(payload)
+            for start in range(0, len(view), PIPE_CHUNK_BYTES):
+                if stop.is_set():
+                    return
+                process.stdin.write(view[start:start + PIPE_CHUNK_BYTES])
+                process.stdin.flush()
+        except (OSError, ValueError):      # BrokenPipe: the child stopped reading
+            return
+        finally:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    threads = [
+        threading.Thread(target=drain, args=(process.stdout, "stdout", stdout_cap),
+                         name="contract-stdout", daemon=True),
+        threading.Thread(target=drain, args=(process.stderr, "stderr", stderr_cap),
+                         name="contract-stderr", daemon=True),
+    ]
+    if feeds_stdin:
+        threads.append(threading.Thread(target=feed, name="contract-stdin",
+                                        daemon=True))
+    for thread in threads:
+        thread.start()
+
+    deadline = started + timeout
+    timed_out = False
+    returncode = process.poll()
+    while returncode is None:
+        if stop.is_set():
+            returncode = _kill_and_reap(process)
+            break
+        if time.monotonic() >= deadline:
+            timed_out = True
+            returncode = _kill_and_reap(process)
+            break
+        time.sleep(0.002)
+        returncode = process.poll()
+
+    for thread in threads:
+        thread.join(timeout=PIPE_THREAD_JOIN_S)
+    stuck = any(thread.is_alive() for thread in threads)
+    _close_pipes(process)
+    elapsed = time.monotonic() - started
+
+    if timed_out:
+        failure: str | None = "timeout"
+    elif overflow["stdout"] or overflow["stderr"]:
+        failure = "output-limit"
+    elif stuck:                            # pragma: no cover - defensive
+        failure = "pipe-thread-stuck"
+    else:
+        failure = None
+    return ChildRun(returncode=returncode,
+                    stdout=b"".join(capture["stdout"]),
+                    stderr=b"".join(capture["stderr"]),
+                    failure=failure, elapsed_s=elapsed)
+
+
 def _node_version(node: str) -> str:
-    completed = subprocess.run(
-        [node, "--version"], capture_output=True, text=True,
-        cwd=str(REPO_ROOT), env=_child_env(), timeout=CHILD_TIMEOUT_S,
-        check=False)
-    assert completed.returncode == 0, completed.stderr
-    return completed.stdout.strip().lstrip("v")
+    run = _bounded_child([node, "--version"], stdout_cap=CONTROL_CAP_BYTES,
+                         stderr_cap=CONTROL_CAP_BYTES)
+    assert run.failure is None, f"node --version: {run.failure}"
+    assert run.returncode == 0, run.stderr
+    return run.stdout.decode("utf-8").strip().lstrip("v")
 
 
 def test_broken_override_fails_instead_of_skipping(monkeypatch):
@@ -268,13 +465,14 @@ def test_broken_override_fails_instead_of_skipping(monkeypatch):
 
 def test_runner_protocol_fault_is_a_visible_nonzero_exit(node):
     """A malformed request document must never look like a passing child."""
-    completed = subprocess.run(
-        [node, str(RUNNER)], input='{"protocol":2,"requests":[]}',
-        capture_output=True, text=True, cwd=str(REPO_ROOT), env=_child_env(),
-        timeout=CHILD_TIMEOUT_S, check=False)
-    assert completed.returncode != 0
-    assert completed.stdout == ""
-    assert "run-contract.cjs" in completed.stderr
+    run = _bounded_child([node, str(RUNNER)],
+                         payload=b'{"protocol":2,"requests":[]}',
+                         stdout_cap=CONTROL_CAP_BYTES,
+                         stderr_cap=CONTROL_CAP_BYTES)
+    assert run.failure is None, f"the fault probe hit a transport bound: {run.failure}"
+    assert run.returncode != 0
+    assert run.stdout == b""
+    assert "run-contract.cjs" in run.stderr.decode("utf-8", "replace")
 
 
 # ---------------------------------------------------------------------------
@@ -282,21 +480,23 @@ def test_runner_protocol_fault_is_a_visible_nonzero_exit(node):
 # ---------------------------------------------------------------------------
 
 
-def _run(node: str, requests):
+def _run(node: str, requests, *, timeout: float = CHILD_TIMEOUT_S):
     """Execute one real Node child and validate its framing exactly."""
     payload = json.dumps({"protocol": 1, "requests": requests},
                          ensure_ascii=True).encode("utf-8")
-    completed = subprocess.run(
-        [node, str(RUNNER)], input=payload, cwd=str(REPO_ROOT),
-        env=_child_env(), timeout=CHILD_TIMEOUT_S, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False)
-    assert completed.returncode == 0, (
+    run = _bounded_child([node, str(RUNNER)], payload=payload, timeout=timeout)
+    assert run.failure is None, (
+        "the parity child crossed a transport bound ("
+        f"{run.failure}) after {run.elapsed_s:.2f}s: stdout "
+        f"{len(run.stdout)} B, stderr {len(run.stderr)} B")
+    assert run.returncode == 0, (
         "run-contract.cjs failed with exit "
-        f"{completed.returncode}: {completed.stderr.decode('utf-8', 'replace')}")
-    assert len(completed.stdout) <= MAX_CHILD_OUTPUT_BYTES
-    assert len(completed.stderr) == 0, completed.stderr.decode("utf-8",
-                                                               "replace")
-    document = json.loads(completed.stdout.decode("utf-8"))
+        f"{run.returncode}: {run.stderr.decode('utf-8', 'replace')}")
+    # `_bounded_child` truncates at the cap, so this is a structural guarantee
+    # as well as an assertion about this run.
+    assert len(run.stdout) <= MAX_CHILD_OUTPUT_BYTES
+    assert len(run.stderr) == 0, run.stderr.decode("utf-8", "replace")
+    document = json.loads(run.stdout.decode("utf-8"))
     assert set(document) == {"protocol", "responses"}
     assert document["protocol"] == 1
     responses = document["responses"]
@@ -1558,3 +1758,348 @@ def test_concurrent_children_and_one_batched_request_set(node):
         result = catalog_query.search_models(
             snapshot, {"limit": 1 + index % 5, "offset": index})
         assert response["canonical"] == canonical(result), index
+
+
+# ---------------------------------------------------------------------------
+# G1 -- requiring/importing the runner is inert; only the CLI owns stdio
+# ---------------------------------------------------------------------------
+
+
+REQUIRE_DRIVER = "require(process.argv[1]);"
+DYNAMIC_IMPORT_DRIVER = (
+    'import { pathToFileURL } from "node:url";'
+    " await import(pathToFileURL(process.argv[1]).href);")
+
+
+def _import_run(node: str, driver: str, payload: bytes) -> ChildRun:
+    """Load the real runner from another Node entry point and watch its stdio."""
+    if driver is REQUIRE_DRIVER:
+        argv = [node, "-e", driver, str(RUNNER)]
+    else:
+        argv = [node, "--input-type=module", "-e", driver, str(RUNNER)]
+    return _bounded_child(argv, payload=payload, stdout_cap=CONTROL_CAP_BYTES,
+                         stderr_cap=CONTROL_CAP_BYTES, timeout=60)
+
+
+@pytest.mark.parametrize("driver", [REQUIRE_DRIVER, DYNAMIC_IMPORT_DRIVER])
+def test_runner_import_is_inert_for_empty_and_valid_stdin(node, driver):
+    """Loading the runner must not read stdin, write protocol stdout or fail.
+
+    A require/import is inert: only command execution owns stdin/stdout. Both a
+    real `require()` and a real dynamic `import()` of the same CommonJS file are
+    exercised, each with an EMPTY stdin (the historical SyntaxError path) and
+    with a perfectly valid protocol document that the module must not consume.
+    """
+    empty = _import_run(node, driver, b"")
+    assert empty.failure is None, empty
+    assert empty.returncode == 0, (
+        "importing run-contract.cjs failed with exit "
+        f"{empty.returncode}: {empty.stderr.decode('utf-8', 'replace')}")
+    assert empty.stdout == b"", (
+        "importing run-contract.cjs wrote to stdout: "
+        f"{empty.stdout[:200]!r}")
+    assert empty.stderr == b"", (
+        "importing run-contract.cjs wrote a diagnostic: "
+        f"{empty.stderr[:400]!r}")
+
+    document = json.dumps(
+        {"protocol": 1, "requests": [{"id": "inert", "op": "hello"}]}
+    ).encode("utf-8")
+    supplied = _import_run(node, driver, document)
+    assert supplied.failure is None, supplied
+    assert supplied.returncode == 0, supplied.stderr.decode("utf-8", "replace")
+    assert supplied.stdout == b"", (
+        "an import ran the protocol against the supplied stdin: "
+        f"{supplied.stdout[:200]!r}")
+    assert supplied.stderr == b"", supplied.stderr[:400]
+
+
+def test_runner_import_returns_while_stdin_stays_open(node):
+    """An import must not wait for stdin EOF: the pipe is never closed here."""
+    process = subprocess.Popen(
+        [node, "-e", REQUIRE_DRIVER, str(RUNNER)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=str(REPO_ROOT), env=_child_env())
+    assert process.stdin is not None and process.stdout is not None
+    assert process.stderr is not None
+    returncode: int | None = None
+    try:
+        try:
+            # stdin is deliberately left open and empty for the whole wait.
+            returncode = process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                "requiring run-contract.cjs blocked for 20s while stdin stayed "
+                "open: the module reads stdin at load time instead of only when "
+                "it is the command entry point")
+        stdout = process.stdout.read()
+        stderr = process.stderr.read()
+    finally:
+        _kill_and_reap(process)
+        _close_pipes(process)
+    assert returncode == 0, stderr.decode("utf-8", "replace")
+    assert stdout == b"", stdout[:200]
+    assert stderr == b"", stderr[:400]
+
+
+def test_runner_command_line_entry_point_still_owns_stdio(node):
+    """POSITIVE CONTROL: the actual CLI path must still run the protocol.
+
+    A guard that suppressed the entry point everywhere would satisfy the
+    inertness tests, so this control pins the visible behaviour of real command
+    execution: one protocol document, requests echoed in order, and a nonzero
+    exit with a stderr diagnostic for a malformed document.
+    """
+    requests = [{"id": "cli-1", "op": "hello"},
+                {"id": "cli-2", "op": "canonical_vector",
+                 "text": '{"b":1.0,"a":true}'}]
+    payload = json.dumps({"protocol": 1, "requests": requests}).encode("utf-8")
+    good = _bounded_child([node, str(RUNNER)], payload=payload,
+                          stdout_cap=CONTROL_CAP_BYTES,
+                          stderr_cap=CONTROL_CAP_BYTES, timeout=60)
+    assert good.failure is None, good
+    assert good.returncode == 0, good.stderr.decode("utf-8", "replace")
+    assert good.stderr == b"", good.stderr[:400]
+    document = json.loads(good.stdout.decode("utf-8"))
+    assert document["protocol"] == 1
+    assert [row["id"] for row in document["responses"]] == ["cli-1", "cli-2"]
+    assert [row["op"] for row in document["responses"]] == ["hello",
+                                                            "canonical_vector"]
+    # An independent literal: keys canonicalized, the typed float token kept.
+    assert document["responses"][1]["canonical"] == '{"a":true,"b":1.0}'
+    assert document["responses"][0]["status"] == "ok"
+    assert document["responses"][0]["protocol"] == 1
+
+    malformed = _bounded_child([node, str(RUNNER)],
+                               payload=b'{"protocol":1,"requests":[{"id":1}]}',
+                               stdout_cap=CONTROL_CAP_BYTES,
+                               stderr_cap=CONTROL_CAP_BYTES, timeout=60)
+    assert malformed.failure is None, malformed
+    assert malformed.returncode != 0
+    assert malformed.stdout == b"", malformed.stdout[:200]
+    assert b"run-contract.cjs" in malformed.stderr
+
+
+# ---------------------------------------------------------------------------
+# G2 -- the runner's stdin bound is enforced DURING the read
+# ---------------------------------------------------------------------------
+
+
+def _request_document(request_id: str = "pad") -> bytes:
+    """The smallest valid protocol document for one `hello` request."""
+    return json.dumps(
+        {"protocol": 1, "requests": [{"id": request_id, "op": "hello"}]}
+    ).encode("utf-8")
+
+
+def _padded_to(total: int, *, request_id: str = "pad") -> bytes:
+    """A valid protocol document padded with harmless spaces to EXACTLY `total`."""
+    document = _request_document(request_id)
+    assert total >= len(document), (total, len(document))
+    return document + b" " * (total - len(document))
+
+
+def test_runner_stdin_overflow_is_rejected_before_eof(node):
+    """The 32 MiB bound must be enforced while reading, not after EOF.
+
+    stdin is never closed: the child has to reject the first byte past the bound
+    on its own. A read-everything-then-measure implementation instead blocks
+    until EOF and consumes the whole oversized stream, which is what the
+    `written < total` and timeout assertions catch.
+    """
+    prefix = _request_document("overflow")
+    total = RUNNER_STDIN_BOUND_BYTES + (4 * 1024 * 1024)
+    filler = b" " * (1024 * 1024)
+    process = subprocess.Popen(
+        [node, str(RUNNER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, cwd=str(REPO_ROOT), env=_child_env())
+    assert process.stdin is not None and process.stdout is not None
+    assert process.stderr is not None
+    started = time.monotonic()
+    written = 0
+    returncode: int | None = None
+    try:
+        try:
+            process.stdin.write(prefix)
+            process.stdin.flush()
+            while written < total:
+                process.stdin.write(filler)
+                process.stdin.flush()
+                written += len(filler)
+        except (BrokenPipeError, OSError):
+            pass                      # the child closed stdin: exactly the point
+        try:
+            returncode = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                "run-contract.cjs still waited for stdin EOF after "
+                f"{RUNNER_STDIN_BOUND_BYTES} bytes: the bound is checked on the "
+                "accumulated document instead of during the read")
+        elapsed = time.monotonic() - started
+        stdout = process.stdout.read()
+        stderr = process.stderr.read()
+    finally:
+        _kill_and_reap(process)
+        _close_pipes(process)
+
+    assert returncode != 0
+    assert stdout == b"", stdout[:200]
+    assert b"stdin exceeds" in stderr, stderr[:400]
+    assert written < total, (
+        "the runner consumed the entire oversized stream, so the bound was "
+        "applied after EOF rather than to the first over-limit byte")
+    assert elapsed < 30
+    match = re.search(
+        rb"rejected at (\d+) bytes after (\d+) bounded reads of at most (\d+)",
+        stderr)
+    assert match, stderr[:400]
+    rejected_at, reads, read_size = (int(group) for group in match.groups())
+    assert rejected_at > RUNNER_STDIN_BOUND_BYTES
+    # One bounded detection read, not an arbitrarily oversized buffer.
+    assert rejected_at <= RUNNER_STDIN_BOUND_BYTES + (1024 * 1024)
+    assert read_size <= 1024 * 1024
+    assert reads >= RUNNER_STDIN_BOUND_BYTES // read_size
+
+
+def test_runner_accepts_exact_limit_payload_and_split_utf8(node):
+    """Positive controls: the exact bound is accepted and UTF-8 survives chunking."""
+    exact = _padded_to(RUNNER_STDIN_BOUND_BYTES)
+    assert len(exact) == RUNNER_STDIN_BOUND_BYTES
+    run = _bounded_child([node, str(RUNNER)], payload=exact, timeout=120)
+    assert run.failure is None, run
+    assert run.returncode == 0, run.stderr.decode("utf-8", "replace")
+    assert run.stderr == b"", run.stderr[:400]
+    assert [row["id"] for row in json.loads(run.stdout)["responses"]] == ["pad"]
+
+    # A three-byte character placed so that it straddles the runner's fixed
+    # 64 KiB read boundary: a decoder applied per chunk would corrupt it.
+    inner = '{"k":"\u20ac\u20ac"}'
+    body = json.dumps({"protocol": 1, "requests": [
+        {"id": "utf8", "op": "canonical_vector", "text": inner}]},
+        ensure_ascii=False).encode("utf-8")
+    marker = "\u20ac".encode("utf-8")
+    start = body.index(marker)
+    padding = (RUNNER_READ_CHUNK_BYTES - 1) - start
+    assert padding > 0
+    assert start + padding == RUNNER_READ_CHUNK_BYTES - 1
+    split = _bounded_child([node, str(RUNNER)], payload=b" " * padding + body,
+                           timeout=60)
+    assert split.failure is None, split
+    assert split.returncode == 0, split.stderr.decode("utf-8", "replace")
+    row = json.loads(split.stdout)["responses"][0]
+    expected = canonical(json.loads(inner))
+    assert row["canonical"] == expected
+    assert row["sha256"] == hashlib.sha256(expected.encode("ascii")).hexdigest()
+
+    # The same claim over a payload whose multibyte text spans many chunks.
+    wide_inner = json.dumps({"k": "\u00e9\u20ac\u4e2d" * 60000},
+                            ensure_ascii=False)
+    wide = json.dumps({"protocol": 1, "requests": [
+        {"id": "wide", "op": "canonical_vector", "text": wide_inner}]},
+        ensure_ascii=False).encode("utf-8")
+    assert len(wide) > 4 * RUNNER_READ_CHUNK_BYTES
+    wide_run = _bounded_child([node, str(RUNNER)], payload=wide, timeout=120)
+    assert wide_run.failure is None, wide_run
+    assert wide_run.returncode == 0, wide_run.stderr.decode("utf-8", "replace")
+    wide_row = json.loads(wide_run.stdout)["responses"][0]
+    wide_expected = canonical(json.loads(wide_inner))
+    assert wide_row["canonical"] == wide_expected
+
+
+def test_runner_rejects_one_byte_over_bound_on_closed_pipe(node):
+    """CONTROL (passes before and after the fix): the bound itself is unchanged."""
+    over = _padded_to(RUNNER_STDIN_BOUND_BYTES + 1)
+    assert len(over) == RUNNER_STDIN_BOUND_BYTES + 1
+    run = _bounded_child([node, str(RUNNER)], payload=over, timeout=120)
+    assert run.failure is None, run
+    assert run.returncode != 0
+    assert run.stdout == b"", run.stdout[:200]
+    assert b"stdin exceeds" in run.stderr
+
+
+# ---------------------------------------------------------------------------
+# G2 -- the wrapped child transport: independent caps and lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_bounded_child_keeps_exact_bytes_and_native_status(node):
+    """CONTROL: a child inside its caps keeps exact bytes and its own exit code."""
+    code = ('process.stdout.write("out-bytes");'
+            'process.stderr.write("err-bytes");'
+            'process.exit(3);')
+    run = _bounded_child([node, "-e", code], stdout_cap=CONTROL_CAP_BYTES,
+                         stderr_cap=CONTROL_CAP_BYTES, timeout=60)
+    assert run.failure is None, run
+    assert run.returncode == 3
+    assert run.stdout == b"out-bytes"
+    assert run.stderr == b"err-bytes"
+
+
+def test_bounded_child_stdout_flood_stops_before_producer_eof(node):
+    """stdout is capped during the read; the still-running producer is killed."""
+    cap = CONTROL_CAP_BYTES
+    code = ("const cap = Number(process.argv[1]);"
+            "const chunk = Buffer.alloc(65536, 0x61);"
+            "for (let written = 0; written <= cap + 262144; ) {"
+            "  process.stdout.write(chunk); written += chunk.length; }"
+            'setTimeout(() => { process.stdout.write("TAIL-SENTINEL");'
+            " process.exit(0); }, 30000);")
+    run = _bounded_child([node, "-e", code, str(cap)], stdout_cap=cap,
+                         stderr_cap=cap, timeout=60)
+    assert run.failure == "output-limit"
+    assert len(run.stdout) <= cap, "the capture grew past its cap"
+    assert b"TAIL-SENTINEL" not in run.stdout
+    assert run.elapsed_s < 20, "the overflow waited for the producer to finish"
+    assert run.returncode is not None
+    assert run.returncode < 0, (
+        "the producer exited on its own instead of being terminated: "
+        f"returncode {run.returncode}")
+
+
+def test_bounded_child_stderr_flood_has_its_own_cap(node):
+    """stderr is bounded independently, so a quiet stdout stays intact."""
+    cap = CONTROL_CAP_BYTES
+    code = ("const cap = Number(process.argv[1]);"
+            'process.stdout.write("ok");'
+            "const chunk = Buffer.alloc(65536, 0x62);"
+            "for (let written = 0; written <= cap + 262144; ) {"
+            "  process.stderr.write(chunk); written += chunk.length; }"
+            "setTimeout(() => { process.exit(0); }, 30000);")
+    run = _bounded_child([node, "-e", code, str(cap)], stdout_cap=cap,
+                         stderr_cap=cap, timeout=60)
+    assert run.failure == "output-limit"
+    assert run.stdout == b"ok"
+    assert len(run.stderr) <= cap, "the capture grew past its cap"
+    assert run.returncode is not None and run.returncode < 0
+
+
+def test_bounded_child_timeout_kills_and_reaps(node):
+    """A child that never exits is killed, reaped and reported as a timeout."""
+    code = "setInterval(() => {}, 1000);"
+    run = _bounded_child([node, "-e", code], stdout_cap=CONTROL_CAP_BYTES,
+                         stderr_cap=CONTROL_CAP_BYTES, timeout=1.0)
+    assert run.failure == "timeout"
+    assert run.elapsed_s < 20
+    assert run.returncode is not None, "the timed-out child was not reaped"
+    assert run.returncode < 0
+
+
+def test_bounded_child_simultaneous_io_does_not_deadlock(node):
+    """Output emitted before stdin is consumed must not deadlock the transport."""
+    size = 512 * 1024
+    code = ("const size = Number(process.argv[1]);"
+            "const out = Buffer.alloc(size, 0x61);"
+            "const err = Buffer.alloc(size, 0x62);"
+            "process.stdout.write(out, () => {"
+            "  process.stderr.write(err, () => { process.exit(0); });"
+            "});")
+    payload = b"z" * size
+    run = _bounded_child([node, "-e", code, str(size)], payload=payload,
+                         stdout_cap=8 * 1024 * 1024,
+                         stderr_cap=8 * 1024 * 1024, timeout=60)
+    assert run.failure is None, run
+    assert run.returncode == 0
+    assert len(run.stdout) == size
+    assert len(run.stderr) == size
+    assert run.stdout == b"a" * size
+    assert run.stderr == b"b" * size
