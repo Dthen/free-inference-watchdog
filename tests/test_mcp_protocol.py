@@ -13,7 +13,9 @@ Six unparametrized groups:
    proves the description comparator keeps an altered and a missing parameter
    description, and runs a fresh interpreter to show that the package/core
    import graph still excludes the transport, SDK, producer, provider, config,
-   state and site modules.
+   state and site modules. ``test_repository_carries_one_python_mcp_server``
+   widens that to the whole checkout: the retired root server is gone and exactly
+   one shipped module imports the SDK.
 
 2. ``test_direct_sdk_calls_and_raw_argument_boundary`` calls every tool through
    the real ``MCPServer.call_tool`` and compares the payload with the pure core
@@ -36,20 +38,17 @@ Six unparametrized groups:
    factory, and a real coroutine probe is awaited exactly once by the real
    ``asyncio.run`` on the main thread, with no acquisition or cache write.
 
-4. ``test_fresh_process_cli_help_launch_and_legacy_root_preservation`` runs real
+4. ``test_fresh_process_cli_help_launch_isolation`` runs real
    ``python -m watchdog_catalog`` subprocesses from a neutral owned cwd with an
    empty HOME: ``--help`` under blocked SDK/legacy imports on this interpreter
    and on the Python 3.11 floor, parse/configuration failures (exit 2, empty
-   stdout, no cache or cwd effects), and a real fixture-file launch whose
-   immediate stdin EOF exits 0 with empty stdout and no cache directory. The
-   floor itself is DISCOVERED portably and probed for CPython identity/version
-   (an explicit ``FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON`` is authoritative, then
-   an ordinary ``python3.11``, then the current interpreter when it really is
-   3.11); a controlled double proves a path that exists is not enough. It then
-   loads the UNCHANGED root ``mcp_server.py`` in a fresh interpreter with an
-   explicitly synthetic no-auth ``config_loader`` and proves ``--root`` is still
-   accepted and defaulted, forwarded once to the local ``build_server``, awaited
-   once, and never replaced by the published transport or remote feed.
+   stdout, no cache or cwd effects, including the retired ``--root`` flag being
+   unrecognized), and a real fixture-file launch whose immediate stdin EOF exits
+   0 with empty stdout and no cache directory. The floor itself is DISCOVERED
+   portably and probed for CPython identity/version (an explicit
+   ``FREE_INFERENCE_WATCHDOG_FLOOR_PYTHON`` is authoritative, then an ordinary
+   ``python3.11``, then the current interpreter when it really is 3.11); a
+   controlled double proves that a path which exists is not enough.
 
 5. ``test_file_source_stdio_discovery_calls_and_invalid_requests`` runs the real
    installed ``ClientSession`` against an owned ``python -B -m watchdog_catalog``
@@ -410,6 +409,91 @@ def test_typed_registration_discovery_contract():
     assert probe.returncode == 0, probe.stderr[-4000:]
     assert probe.stdout == "" and probe.stderr == "", (
         "the package/core import graph stays silent outside the transport")
+
+
+#: The ONE shipped Python module allowed to import the MCP SDK/Pydantic. Tests
+#: may import the SDK to speak the protocol; no other shipped module may.
+SDK_TRANSPORT_MODULE = "watchdog_catalog/server.py"
+
+#: Roots that hold no shipped application Python: the suite itself, local-only
+#: caches and the untracked agent/plan notes.
+NON_SHIPPED_TREES = frozenset({".git", ".hermes", ".pytest_cache", "__pycache__",
+                               "site", "state", "tests"})
+
+#: Names the retirement replaced. A reintroduced root server, forwarding shim or
+#: deprecated variant under one of these names is a second launch path.
+RETIRED_ROOT_SERVERS = ("mcp_server.py",)
+
+
+def _sdk_transport_audit(root):
+    """Every shipped SDK importer and retired-root-server path under ``root``.
+
+    The scan is syntax, not a claim about a spelling: every ``import``/``from``
+    in the file is walked, including function-scoped guarded imports, so a
+    lazily imported second transport is found too.
+    """
+    import ast
+
+    root = Path(root)
+    importers = set()
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if NON_SHIPPED_TREES.intersection(relative.parts[:-1]):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                modules = [node.module or ""]
+            else:
+                continue
+            if any(name.split(".")[0] in ("mcp", "pydantic")
+                   for name in modules):
+                importers.add(relative.as_posix())
+                break
+    retired = sorted(name for name in RETIRED_ROOT_SERVERS
+                     if (root / name).exists())
+    return sorted(importers), retired
+
+
+def test_repository_carries_one_python_mcp_server(tmp_path):
+    """The legacy local server is REPLACED, not kept beside the canonical one.
+
+    Retirement means one shipped registration path: the root ``mcp_server.py``,
+    its forwarding shims and any deprecated second server are gone, so exactly
+    one shipped module imports the MCP SDK. The predicate is sensitivity-proved
+    on a planted tree, so a scan that quietly stopped finding SDK imports could
+    not pass by finding nothing.
+    """
+    importers, retired = _sdk_transport_audit(REPO)
+    assert retired == [], (
+        f"a retired root server is back under {retired}; the canonical server "
+        f"is {SDK_TRANSPORT_MODULE} only")
+    assert importers == [SDK_TRANSPORT_MODULE], (
+        "shipped modules importing mcp/pydantic must be exactly the one "
+        f"canonical transport, found {importers}")
+
+    planted = tmp_path / "root"
+    (planted / "watchdog_catalog").mkdir(parents=True)
+    (planted / "tests").mkdir()
+    (planted / "watchdog_catalog" / "server.py").write_text(
+        "from mcp.server.mcpserver import MCPServer\n", encoding="utf-8")
+    (planted / "legacy_shim.py").write_text(
+        "def main():\n    import mcp\n    return mcp\n", encoding="utf-8")
+    (planted / "mcp_server.py").write_text(
+        "from pydantic import BaseModel\n", encoding="utf-8")
+    (planted / "tests" / "test_protocol.py").write_text(
+        "import mcp\n", encoding="utf-8")
+    planted_importers, planted_retired = _sdk_transport_audit(planted)
+    assert planted_importers == ["legacy_shim.py", "mcp_server.py",
+                                "watchdog_catalog/server.py"], (
+        "the audit must find a second transport and a guarded import, count a "
+        f"reintroduced retired server as an importer too, and ignore the suite, "
+        f"found {planted_importers}")
+    assert planted_retired == ["mcp_server.py"], (
+        "the audit must detect a reintroduced retired root server, found "
+        f"{planted_retired}")
 
 
 # --------------------------------------------------------------------------
@@ -882,7 +966,7 @@ def test_cli_source_selection_and_awaited_launch(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# group 4: fresh-process help/launch isolation and legacy root preservation
+# group 4: fresh-process help and launch isolation
 # --------------------------------------------------------------------------
 #: Owned probe hook: refuses the named modules from a scratch ``sitecustomize``
 #: so a real ``python -m watchdog_catalog`` run proves the import graph, rather
@@ -995,77 +1079,7 @@ def _floor_python():
         f"{FLOOR_ENVIRONMENT}=/path/to/python3.11.")
 
 
-_LEGACY_LAUNCH_PROBE = '''\
-"""Owned probe: load the UNCHANGED root mcp_server.py with synthetic config.
-
-The real ``config_loader`` resolves provider auth at module scope, so this
-probe installs an explicitly synthetic no-auth module first: no provider file,
-``.env``, HOME token or production state is ever read.
-"""
-import contextlib
-import importlib.util
-import io
-import json
-import sys
-import types
-from pathlib import Path
-
-repo = Path(sys.argv[1])
-explicit = None if sys.argv[2] == "-" else sys.argv[2]
-
-synthetic = types.ModuleType("config_loader")
-synthetic.PROVIDERS = {"synthetic-a": False, "synthetic-b": False}
-synthetic.GATEWAY_WIRING = {"synthetic-a": {}, "synthetic-b": {}}
-sys.modules["config_loader"] = synthetic
-
-sys.path.insert(0, str(repo))
-spec = importlib.util.spec_from_file_location("legacy_mcp_server",
-                                             repo / "mcp_server.py")
-module = importlib.util.module_from_spec(spec)
-sys.modules["legacy_mcp_server"] = module
-spec.loader.exec_module(module)
-
-observed = {"roots": [], "body_runs": 0, "loop_runs": 0}
-
-
-class ProbeServer:
-    async def run_stdio_async(self):
-        import asyncio
-        asyncio.get_running_loop()
-        observed["loop_runs"] += 1
-        observed["body_runs"] += 1
-
-
-probe = ProbeServer()
-
-
-def build_server(root=None):
-    observed["roots"].append(None if root is None else str(root))
-    return probe
-
-
-module.build_server = build_server
-
-help_buffer = io.StringIO()
-with contextlib.redirect_stdout(help_buffer):
-    try:
-        module.main(["--help"])
-    except SystemExit as exit_code:
-        observed["help_code"] = exit_code.code
-observed["help_text"] = help_buffer.getvalue()
-
-observed["code"] = module.main([] if explicit is None else ["--root", explicit])
-observed["repo"] = str(module.REPO)
-observed["cwd"] = str(Path.cwd())
-observed["published"] = sorted(
-    name for name in ("watchdog_catalog.__main__", "watchdog_catalog.server",
-                      "watchdog_catalog.source")
-    if name in sys.modules)
-print(json.dumps(observed))
-'''
-
-
-def test_fresh_process_cli_help_launch_and_legacy_root_preservation(
+def test_fresh_process_cli_help_launch_isolation(
         tmp_path, monkeypatch):
     import json as json_module
     import os
@@ -1233,41 +1247,6 @@ def test_fresh_process_cli_help_launch_and_legacy_root_preservation(
     assert not cache.exists(), "an EOF-only run acquires and caches nothing"
     assert_no_effects()
 
-    # -- the unchanged root script keeps its LOCAL compatibility route ------
-    script = scratch / "legacy_launch_probe.py"
-    script.write_text(_LEGACY_LAUNCH_PROBE, encoding="utf-8")
-    explicit_root = scratch / "owned-legacy-root"
-    explicit_root.mkdir()
-
-    def legacy(*args):
-        return subprocess.run(
-            [sys.executable, "-I", "-B", str(script), str(REPO), *args],
-            cwd=str(neutral),
-            env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                 "HOME": str(home)},
-            capture_output=True, text=True, timeout=180)
-
-    for argument, expected_root in (("-", str(REPO)),
-                                    (str(explicit_root), str(explicit_root))):
-        result = legacy(argument)
-        assert result.returncode == 0, result.stderr[-4000:]
-        assert result.stderr == "", result.stderr[-4000:]
-        observed = json_module.loads(result.stdout)
-        assert observed["code"] == 0
-        assert observed["roots"] == [expected_root], (
-            "the root script forwards exactly one root to its LOCAL build_server")
-        assert observed["body_runs"] == 1 and observed["loop_runs"] == 1, (
-            "the root script still awaits its own stdio coroutine exactly once")
-        assert observed["repo"] == str(REPO)
-        assert observed["published"] == [], (
-            "the local route must not import the published transport: "
-            f"{observed['published']}")
-        assert observed["help_code"] == 0
-        assert "--root" in observed["help_text"]
-        assert "--catalog-url" not in observed["help_text"] and \
-            "--cache-dir" not in observed["help_text"], (
-            "the root script's CLI surface stays --root only")
-    assert_no_effects()
 
 
 # --------------------------------------------------------------------------

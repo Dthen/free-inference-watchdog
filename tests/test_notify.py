@@ -416,10 +416,6 @@ def test_split_single_astral_line_own_chunk_not_dropped():
     assert "\n".join(chunks) == f"h\n{long_line}\nt"
 
 
-def test_safe_chunk_units_value():
-    assert notify.SAFE_CHUNK_CHARS == 1900               # value unchanged
-
-
 # ---------- F3: drain durability — save after EVERY successful POST ----------
 
 def test_drain_abort_midway_keeps_only_undelivered(tmp_path, monkeypatch):

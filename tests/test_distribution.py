@@ -2,7 +2,8 @@
 
 This module pins the PEP 621 metadata contract, proves the ACTUAL wheel payload
 rather than a spelling of the configuration, and then exercises that wheel as an
-INSTALLED console command. It has exactly three unparametrized groups.
+INSTALLED console command. It has exactly three unparametrized groups, plus one
+small check of the scratch filesystem lifetime described below.
 
 The first two are the preserved unit-6a archive/core checks:
 
@@ -79,7 +80,20 @@ The first two are the preserved unit-6a archive/core checks:
    proving that last guard), since the live unit-6d audit cannot speak for a
    saved record. The manifest keeps the declared backend's own build transcript
    for the exact installed wheel (the ``uv build`` frontend transcript stays
-   separately labelled), plus SHA-256 of both executed test files.
+   separately labelled), plus SHA-256 of both executed test files. Every one of
+   those reports, transcripts and the manifest itself lives INSIDE this test's
+   owned scratch root: they are readable for every assertion above and are
+   removed with that root when the test finishes, so ``retained`` here means
+   saved for the rest of THIS run, never published as a durable artifact.
+
+4. ``test_scratch_roots_outlive_neither_success_nor_failure`` pins the FILESYSTEM
+   lifetime of the three groups above. Every ``_scratch_directory`` root lives
+   under the caller's temporary root and stays readable until its test's last
+   assertion, then is removed -- after a passing test and after a failing one
+   alike -- by the autouse ``_owned_scratch_lifetime`` fixture, never by an
+   ``atexit`` handler and never by deleting anything else in that root. The rows
+   run a real child interpreter, because a root that outlives its test cannot be
+   observed from inside the test that allocated it.
 
 Honest scope of group 3: this is a LOCAL wheel-only clean installation. Published
 Git-source ``uvx --from git+...`` evidence is deliberately absent because no
@@ -105,10 +119,13 @@ the reason instead of silently selecting another one. The ``uv`` override is
 simply tried first, with an ordinary ``uv`` on ``PATH`` as the existing
 fallback when it is absent or unusable. Owned temporary artifacts live under the
 caller's ``TMPDIR`` when set and under the standard temporary root otherwise; an
-unset ``TMPDIR`` never creates a Hermes directory. A missing prerequisite is an
-actionable failure with the exact preparation command, never a skip.
+unset ``TMPDIR`` never creates a Hermes directory, and every root allocated that
+way is removed when the test that allocated it finishes rather than left for a
+later sweep. A missing prerequisite is an actionable failure with the exact
+preparation command, never a skip.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -278,16 +295,59 @@ def _clean_environment():
     return environment
 
 
+#: Scratch roots allocated by ``_scratch_directory`` and not yet torn down.
+#: Allocation order matters: a test's own roots are a contiguous tail slice.
+_OWNED_SCRATCH = []
+
+
 def _scratch_directory(prefix):
     """An owned scratch directory under the CALLER's configured temp root.
 
     An explicit ``TMPDIR`` always owns the artifacts; otherwise this is the
     ordinary platform temporary directory. No application cache (and in
     particular no Hermes directory) is invented when ``TMPDIR`` is unset.
+
+    The root is recorded in ``_OWNED_SCRATCH`` so the autouse
+    ``_owned_scratch_lifetime`` fixture can remove it once the allocating test
+    finishes; every caller keeps the plain path it always got back.
     """
     base = Path(os.environ.get("TMPDIR") or tempfile.gettempdir())
     base.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=str(base)))
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(base)))
+    _OWNED_SCRATCH.append(path)
+    return path
+
+
+@contextlib.contextmanager
+def _owned_scratch_roots():
+    """Remove every scratch root allocated inside this context, however it ends.
+
+    Only the roots recorded while the context was open are removed, in reverse
+    allocation order: the caller's temporary root and anything else in it --
+    another run's output, an unrelated sibling -- is never touched, and an
+    enclosing context keeps its own roots. Removal runs in ``finally``, so a
+    failing or erroring test tears its roots down exactly like a passing one.
+    """
+    first = len(_OWNED_SCRATCH)
+    try:
+        yield
+    finally:
+        for path in reversed(_OWNED_SCRATCH[first:]):
+            shutil.rmtree(path, ignore_errors=True)
+        del _OWNED_SCRATCH[first:]
+
+
+@pytest.fixture(autouse=True)
+def _owned_scratch_lifetime():
+    """Tie ``_scratch_directory`` roots to the lifetime of the owning test.
+
+    A pytest fixture finalizer runs after a passing, a failing and an erroring
+    test alike, so no owned root outlives the test that asked for it. Evidence
+    a test builds inside its own root stays readable until its last assertion
+    has run; nothing outside those roots is deleted.
+    """
+    with _owned_scratch_roots():
+        yield
 
 
 def _floor_python():
@@ -2474,3 +2534,99 @@ def test_installed_console_clean_install_and_stdio_isolation():
             assert record[field] == summary[field], (label, field)
         assert record["forced_cleanup"] is False, label
         assert record["protocol_violations"] == [], label
+
+
+# --------------------------------------------------------------------------
+# scratch lifetime: no owned root outlives the test that allocated it
+#
+# ``_scratch_directory`` roots belong to the test that asked for them. A root
+# that outlives its test cannot be observed from inside that same test, so the
+# rows split in two: the context manager the fixture is built from is driven
+# directly (passing and raising lifetimes, roots asserted ALIVE inside so the
+# afterwards check cannot pass vacuously), and this module's real metadata
+# contract test is run in a child interpreter twice -- passing and failing
+# late -- to prove the pytest finalizer wiring end to end. An unrelated sibling
+# in the same temporary root must survive every row byte for byte: the teardown
+# is owned by the allocations, never a blanket delete of the caller's root.
+# --------------------------------------------------------------------------
+def _run_isolated_pytest(targets, scratch_root, basetemp, extra_environment=None):
+    """Run one focused pytest target in a child bound to an owned TMPDIR."""
+    environment = _clean_environment()
+    environment.pop("PYTEST_ADDOPTS", None)
+    environment["TMPDIR"] = str(scratch_root)
+    environment.pop(INSTALLED_PYTHON_ENVIRONMENT, None)
+    environment.update(extra_environment or {})
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+               f"--basetemp={basetemp}", *targets]
+    return subprocess.run(command, cwd=str(REPO), capture_output=True,
+                          text=True, timeout=600, env=environment)
+
+
+def test_scratch_roots_outlive_neither_success_nor_failure(tmp_path, monkeypatch):
+    scratch_root = tmp_path / "caller-tmp"
+    scratch_root.mkdir()
+    sibling = scratch_root / "unrelated-sibling"
+    sibling.mkdir()
+    sentinel = sibling / "keep.txt"
+    sentinel.write_text("unrelated caller evidence\n", encoding="utf-8")
+    monkeypatch.setenv("TMPDIR", str(scratch_root))
+
+    def leftovers():
+        return sorted(entry.name for entry in scratch_root.iterdir()
+                      if entry.name != sibling.name)
+
+    def assert_sibling_intact():
+        assert sentinel.read_text(encoding="utf-8") == "unrelated caller evidence\n"
+        assert [entry.name for entry in sibling.iterdir()] == [sentinel.name]
+
+    # 1. A lifetime that ends normally removes exactly the roots it owns, and
+    #    keeps them alive (with evidence inside) until it ends.
+    with _owned_scratch_roots():
+        owned = [_scratch_directory("unit-a-lifetime-") for _ in range(2)]
+        for root in owned:
+            assert root.parent == scratch_root, root.parent
+            assert root.is_dir()
+        (owned[0] / "evidence.json").write_text("{}", encoding="utf-8")
+        assert (owned[0] / "evidence.json").is_file(), (
+            "evidence must stay readable until the owning lifetime ends")
+    assert [root.exists() for root in owned] == [False, False]
+    assert leftovers() == [], leftovers()
+    assert_sibling_intact()
+
+    # 2. A lifetime that ends by raising removes its roots too -- the path a
+    #    failing test takes -- and leaves an enclosing lifetime's roots alone.
+    with _owned_scratch_roots():
+        outer = _scratch_directory("unit-a-outer-")
+        with pytest.raises(RuntimeError):
+            with _owned_scratch_roots():
+                failing = _scratch_directory("unit-a-failing-")
+                assert failing.is_dir()
+                raise RuntimeError("intentional failure inside the lifetime")
+        assert not failing.exists()
+        assert outer.is_dir(), "an enclosing lifetime's root was removed"
+        assert_sibling_intact()
+    assert not outer.exists()
+    assert leftovers() == [], leftovers()
+    assert_sibling_intact()
+
+    # 3 and 4. This module's own metadata contract test allocates three roots
+    #    through the real code path. It passes in one child and fails LATE
+    #    (its authoritative installed-floor override is unusable) in another:
+    #    both native exits must leave nothing behind.
+    rows = [
+        ({}, 0, "1 passed"),
+        ({INSTALLED_PYTHON_ENVIRONMENT: "/nonexistent/python3.11"},
+         1, "1 failed"),
+    ]
+    for index, (extra_environment, exit_code, summary) in enumerate(rows):
+        run = _run_isolated_pytest(
+            ["tests/test_distribution.py::test_packaging_metadata_contract"],
+            scratch_root, tmp_path / f"basetemp-metadata-{index}",
+            extra_environment)
+        output = run.stdout + run.stderr
+        assert run.returncode == exit_code, output
+        assert summary in run.stdout, output
+        assert leftovers() == [], (
+            f"the child run ({summary}) left owned scratch roots "
+            "behind: " + repr(leftovers()))
+        assert_sibling_intact()

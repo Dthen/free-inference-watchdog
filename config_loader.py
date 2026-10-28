@@ -253,8 +253,8 @@ def load_configs():
     existing dir that yields no readable *.json (Path.glob swallows
     PermissionError internally, so a chmod-000 dir looks empty). This
     function must never raise for file/dir problems: PROVIDERS is built at
-    import time, and inference_watchdog/build_site/mcp_server all crash
-    before doing anything if the import raises, silently every hour.
+    import time, and inference_watchdog/build_site both crash before doing
+    anything if the import raises, silently every hour.
     """
     configs = []
     providers_dir = REPO / "providers"

@@ -2178,12 +2178,14 @@ def test_agents_names_only_code_paths_that_exist():
     )
 
     # The two publication-gate scripts and the standalone package root are the
-    # names a reader is most likely to act on, so require them explicitly.
+    # names a reader is most likely to act on, so require them explicitly. The
+    # retired root local-state server is deliberately NOT required: naming it
+    # would fail the stale-name check above, because the file is gone.
     for required in ("scripts/publish_site.sh", "scripts/validate_site.py",
                      "watchdog_catalog/__init__.py", "watchdog_catalog/query.py",
                      "watchdog_catalog/source.py", "watchdog_catalog/server.py",
                      "watchdog_catalog/__main__.py", "catalog_export.py",
-                     "build_site.py", "mcp_server.py"):
+                     "build_site.py"):
         assert required in named, f"AGENTS.md no longer names {required}"
 
     planted = "watchdog_catalog/proposed_stale_module.py"

@@ -38,12 +38,14 @@ dump, help is a deliberate explicit stdout response, and every diagnostic goes
 to stderr. Normal shutdown follows the client's stdin EOF and a completed run
 returns 0.
 
-Scope boundary: the root ``python3 mcp_server.py [--root ...]`` script remains
-the separate LOCAL compatibility route over local state and raw-metadata
-diagnostics. This module is the installed projected public-catalogue route and
-never imports, patches, replaces or defaults to that local graph, and no
-``--root`` or per-tool path/URL/cadence/provider/auth configuration system is
-introduced for the installed command. ``mcp``/Pydantic stay consumer
+Scope boundary: this is the ONLY Python MCP server. The former root
+``python3 mcp_server.py [--root ...]`` local-state route is RETIRED rather than
+kept as a compatibility mode, so no ``--root`` flag, local-state fallback,
+raw-metadata restoration or second registration path exists here or elsewhere
+in the checkout. This module is the installed projected public-catalogue route
+and never imports, patches, replaces or defaults to a producer graph, and no
+per-tool path/URL/cadence/provider/auth configuration system is introduced for
+the installed command. ``mcp``/Pydantic stay consumer
 dependencies of the command: importing ``watchdog_catalog`` itself stays
 stdlib-only.
 """

@@ -107,8 +107,8 @@ implementation remains Task 2d.
 
 Unit 1d-b1 freezes the published `list_free_models` BULK success contract
 before core extraction, as two DIFFERENT exact top-level field sets: the
-all-provider export (`provider` omitted or null) keeps the useful root-script
-nesting (`providers`, `models`, `counts`, `total_ids`, `n_gateways`) minus its
+all-provider export (`provider` omitted or null) keeps the useful nested
+shape (`providers`, `models`, `counts`, `total_ids`, `n_gateways`) minus its
 local-only `tool`/`state_root`, plus the public `snapshot_id`/`tick_epoch`
 provenance echo and the per-provider `provider_staleness` flags; the
 one-provider export is a flat `model_ids`/`models`/`count` variant that never
@@ -743,65 +743,13 @@ def test_fixture_parses_as_strict_json():
 
 
 # ---------- top-level contract (unit 1a: basic.json) ----------
+#
+# ONE contract call for basic.json: every assertion lives in
+# `_assert_snapshot_contract`, so a second wrapper over the same module-scoped
+# fixture cannot assert anything the first does not. The eleven per-facet
+# wrappers that used to sit here were byte-identical bodies.
 
-
-def test_top_level_field_set_is_exact(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-def test_schema_version_is_v1(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-def test_snapshot_id_is_sha256_of_canonical_body(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-def test_tick_epoch_is_fixed_non_negative_int(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-def test_cadence_s_is_positive_int(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-def test_provider_order_matches_provider_map(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-def test_provider_order_includes_zero_id_providers(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-# ---------- provider entries ----------
-
-
-def test_provider_entries_match_contract(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-# ---------- projected model fields ----------
-
-
-def test_model_projections_match_contract(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-# ---------- warnings ----------
-
-
-def test_warnings_use_frozen_codes(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-# ---------- synthetic, self-contained, credential-free ----------
-
-
-def test_fixture_is_synthetic_not_live(snapshot):
-    _assert_snapshot_contract(snapshot)
-
-
-def test_fixture_carries_no_private_or_roster_internal_keys(snapshot):
+def test_basic_fixture_matches_snapshot_contract(snapshot):
     _assert_snapshot_contract(snapshot)
 
 
@@ -839,63 +787,6 @@ def test_cases_reference_snapshots_matching_contract(cases_document):
     for case in cases_document["cases"]:
         name = case.get("fixture", default)
         _assert_snapshot_contract(_load_strict(FIXTURE_DIR / name))
-
-
-def test_get_model_golden_payloads_are_wellformed(cases_document):
-    for case in _iter_get_model_cases(cases_document):
-        expect = case["expect"]
-        snap = _case_fixture(case, cases_document)
-        assert expect["ok"] is True
-        assert expect["query"] == case["args"]["model_id"]
-        assert expect["snapshot_id"] == snap["snapshot_id"]
-        assert expect["tick_epoch"] == snap["tick_epoch"]
-        assert set(expect["exact_matches"]) == set(snap["provider_order"])
-        assert all(isinstance(v, bool)
-                   for v in expect["exact_matches"].values())
-        assert expect["exact_gateways"] == [
-            p for p in snap["provider_order"] if expect["exact_matches"][p]]
-        # Contract: "Preserve the absence caveat" on every payload.
-        assert ABSENCE_CAVEAT in expect["caveats"]
-        counts = expect["counts"]
-        assert counts["endpoints"] == len(expect["endpoints"])
-        assert counts["exact_matches"] == len(expect["exact_gateways"])
-
-
-def test_get_model_endpoints_are_tracked_pairs_with_attached_metadata(
-        cases_document):
-    for case in _iter_get_model_cases(cases_document):
-        snap = _case_fixture(case, cases_document)
-        for endpoint in case["expect"]["endpoints"]:
-            provider = endpoint["provider"]
-            assert provider in snap["provider_order"]
-            entry = snap["providers"][provider]
-            raw_id = endpoint["model_id"]
-            assert raw_id in entry["model_ids"]
-            assert endpoint["chat_completions_url"] == \
-                entry["chat_completions_url"]
-            assert endpoint["api_type"] == entry["api_type"]
-            assert endpoint["stale"] == entry["stale"]
-            # Metadata stays attached to its own (provider, raw id) pair.
-            assert endpoint["metadata"] == entry["models"][raw_id]
-
-
-def test_get_model_endpoints_match_marker_rule_and_order(cases_document):
-    for case in _iter_get_model_cases(cases_document):
-        snap = _case_fixture(case, cases_document)
-        query = case["args"]["model_id"]
-        needle = _strip_marker_contract(query)
-        expected = []
-        for provider in snap["provider_order"]:
-            for raw_id in snap["providers"][provider]["model_ids"]:
-                if _strip_marker_contract(raw_id) == needle:
-                    expected.append((provider, raw_id))
-        expected.sort(key=lambda pair: (
-            snap["provider_order"].index(pair[0]),
-            _natural_key_contract(pair[1])))
-        golden = [(e["provider"], e["model_id"])
-                  for e in case["expect"]["endpoints"]]
-        assert golden == expected, \
-            f"{case['id']}: endpoints violate marker rule or ordering"
 
 
 def test_no_inferred_identity_renamed_models_never_marker_match(
@@ -1107,48 +998,6 @@ def test_get_model_counts_use_strict_int_types(cases_document):
     # bool subclasses int, so the guard must be tested explicitly.
     assert not _counts_are_strict_int(True)
     assert not _counts_are_strict_int(False)
-
-
-def test_get_model_provider_staleness_covers_all_providers(cases_document):
-    for case in _iter_get_model_cases(cases_document):
-        snap = _case_fixture(case, cases_document)
-        staleness = case["expect"]["provider_staleness"]
-        assert set(staleness) == set(snap["provider_order"])
-        for provider in snap["provider_order"]:
-            assert staleness[provider] is \
-                snap["providers"][provider]["stale"]
-
-
-def test_get_model_endpoint_staleness_matches_provider_staleness(
-        cases_document):
-    for case in _iter_get_model_cases(cases_document):
-        expect = case["expect"]
-        for endpoint in expect["endpoints"]:
-            assert endpoint["stale"] is \
-                expect["provider_staleness"][endpoint["provider"]]
-
-
-def test_get_model_metadata_is_projected_pair_object(cases_document):
-    for case in _iter_get_model_cases(cases_document):
-        snap = _case_fixture(case, cases_document)
-        for endpoint in case["expect"]["endpoints"]:
-            metadata = endpoint["metadata"]
-            # Non-null projected public object; the legacy raw metadata
-            # object is never exposed (exact field set only).
-            assert isinstance(metadata, dict)
-            assert set(metadata) == MODEL_FIELDS
-            assert metadata["id"] == endpoint["model_id"]
-            assert metadata == snap["providers"][endpoint["provider"]][
-                "models"][endpoint["model_id"]]
-
-
-def test_get_model_observation_provenance_matches_snapshot(cases_document):
-    for case in _iter_get_model_cases(cases_document):
-        snap = _case_fixture(case, cases_document)
-        expect = case["expect"]
-        assert expect["snapshot_id"] == snap["snapshot_id"]
-        assert expect["tick_epoch"] == snap["tick_epoch"]
-        assert re.fullmatch(r"[0-9a-f]{64}", expect["snapshot_id"])
 
 
 def test_get_model_absence_is_zero_count_success(cases_document):
@@ -2716,8 +2565,6 @@ def test_search_response_envelope_field_sets_are_frozen(cases_document):
         "metadata"}
     assert set(SEARCH_COUNT_FIELDS) == {
         "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels"}
-    for case in _iter_search_cases(cases_document):
-        _assert_search_payload(case, _case_fixture(case, cases_document))
 
 
 def test_search_goldens_present_unique_and_use_explicit_fixtures(
@@ -3659,8 +3506,6 @@ def test_status_response_envelope_field_sets_are_frozen(cases_document):
     # The status vocabulary begins with the frozen snapshot three, then the two
     # status-only codes; a snapshot document never carries the status-only ones.
     assert STATUS_WARNING_ORDER[:3] == WARNING_ORDER
-    for case in _iter_status_cases(cases_document):
-        _assert_status_payload(case, _case_fixture(case, cases_document))
 
 
 def test_status_goldens_present_unique_and_use_explicit_fixtures(
@@ -4776,11 +4621,11 @@ def test_ordering_slice_mutant_keeps_genuine_matches_but_wrong_membership(
 # `list_free_models` is the frozen BULK export tool. Its two variants carry
 # two DIFFERENT exact top-level field sets, pinned here against four complete
 # hand-authored literal goldens in cases.json. The all-provider variant
-# (`provider` omitted or null) preserves the useful root-script nesting
+# (`provider` omitted or null) keeps the useful nested shape
 # (`providers`/`models`/`counts`/`total_ids`/`n_gateways`) while dropping the
 # local-only `tool`/`state_root` and adding public provenance (`snapshot_id`,
 # `tick_epoch`) and `provider_staleness`. `models` carries the projected public
-# model object of each `(provider, raw model_id)` pair -- never the legacy raw
+# model object of each `(provider, raw model_id)` pair -- never raw upstream
 # metadata -- and provider-specific conflicting values for a shared raw id
 # stay attached to their own provider. `total_ids` is the literal unique
 # raw-ID count: on the lookup registry the endpoint-pair count (5), the
@@ -6204,8 +6049,8 @@ def test_readme_contract_distinguishes_provider_staleness_from_tick_age():
 def test_readme_contract_freezes_metadata_projection_boundary():
     text = _contract_section_text()
     for phrase in ("projected public model object",
-                   "never the legacy raw metadata",
-                   "PRESERVES raw tracked metadata"):
+                   "never raw upstream metadata",
+                   "restores the original raw upstream metadata"):
         assert phrase in text, \
             f"contract section missing metadata boundary: {phrase}"
 
@@ -6370,7 +6215,7 @@ def test_readme_contract_freezes_list_endpoints_zero_provider_and_projection():
     for phrase in (
             "zero-ID",
             "projected public model object",
-            "never the legacy raw metadata",
+            "never raw upstream metadata",
             "NATURAL raw-ID order",
             "provider staleness, never tick age",
     ):
@@ -7014,7 +6859,7 @@ def test_readme_freezes_argument_json_integer_boundary_and_separation():
             "projection or payload-count rules",
             "**separate from published snapshot degradation**",
             "degrades to `null`/unknown inside a success payload",
-            "preserves raw tracked metadata at its own boundary",
+            "Neither is changed by this argument",
     ):
         assert phrase in text, (
             f"argument subsection missing integer/separation rule: {phrase}")

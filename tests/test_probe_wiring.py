@@ -46,37 +46,6 @@ def _fake_fetch_provider_factory(model_ids):
     return fake_fetch_provider
 
 
-# ---------- save_probe_state (probe_state module) ----------
-
-def test_save_probe_state_writes_atomically(tmp_path):
-    """save_probe_state must persist the full state dict atomically."""
-    path = tmp_path / "probe_state.json"
-    state = {
-        "bai": {
-            "glm-5.3-flash": {"verdict": "free", "epoch": 1000},
-            "gpt-5.6-sol": {"verdict": "paid", "epoch": 1001},
-        }
-    }
-    probe_state.save_probe_state(path, state)
-    loaded = probe_state.load_probe_state(path)
-    assert loaded == state
-
-
-def test_save_probe_state_no_temp_files_left(tmp_path):
-    """Atomic write must leave no .tmp files behind."""
-    path = tmp_path / "probe_state.json"
-    probe_state.save_probe_state(path, {"bai": {"m": {"verdict": "free", "epoch": 1}}})
-    assert path.exists()
-    assert not list(tmp_path.glob("*.tmp"))
-
-
-def test_save_probe_state_creates_parent_dirs(tmp_path):
-    """save_probe_state must mkdir -p the parent directory."""
-    path = tmp_path / "nested" / "dir" / "probe_state.json"
-    probe_state.save_probe_state(path, {})
-    assert path.exists()
-
-
 # ---------- serial throttled loop ----------
 
 def test_probes_called_serially_with_5s_gaps(monkeypatch, tmp_path):

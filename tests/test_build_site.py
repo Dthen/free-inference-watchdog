@@ -558,22 +558,16 @@ def test_strip_free_marker_no_marker_unchanged():
     assert strip_free_marker("vendor-z/zero-priced-model") == "vendor-z/zero-priced-model"
 
 
-def test_strip_free_marker_bare_free_is_not_a_marker():
-    """Bare 'free' is the non-marker CONTROL, not an empty-result case.
-
-    It carries no delimiter, so NEITHER delimiter-bounded regex matches and
-    the id is returned untouched. Deliberately kept separate from the
-    empty-result guard: it never reaches the `s or model_id` fallback, so it
-    cannot detect a regression in that fallback.
-    """
-    from build_site import strip_free_marker
-    assert strip_free_marker("free") == "free"
-
-
 # Delimiter-only inputs: a "free" marker WITH its delimiter, but with nothing
 # else in the id. Each is matched by exactly one of the two delimiter-bounded
 # regexes, so stripping alone would leave "" — these are the inputs the
 # helper's empty-result guard exists for.
+#
+# The guard's exact non-empty results and the bare-"free" non-marker control are
+# pinned by their owner test — `watchdog_catalog.query` owns the helper, and
+# `tests/test_catalog_queries.py::test_strip_free_marker_matches_literal_corpus_and_compat_edges`
+# asserts every one of these literals against `MARKER_FALLBACK_CONTROLS`. This
+# site-builder block keeps only the re-export identity and idempotence invariants.
 EMPTY_RESULT_GUARD_INPUTS = [
     ":free",  # trailing colon-delimited marker, nothing before it
     "-free",  # trailing dash-delimited marker, nothing before it
@@ -621,21 +615,6 @@ def test_strip_free_marker_idempotent_on_synthetic_ids():
         once = strip_free_marker(mid)
         twice = strip_free_marker(once)
         assert once == twice, f"not idempotent for {mid!r}: {once!r} vs {twice!r}"
-
-
-@pytest.mark.parametrize("model_id", EMPTY_RESULT_GUARD_INPUTS)
-def test_strip_free_marker_never_returns_empty(model_id):
-    """Empty-result guard: a delimiter-only input returns its exact original.
-
-    Idempotence alone CANNOT pin this — with the guard removed f(x) == "" and
-    f("") == "" is still idempotent. Only the exact non-empty string returned
-    distinguishes the guarded helper from a fallback-less one.
-    """
-    from build_site import strip_free_marker
-    stripped = strip_free_marker(model_id)
-    assert stripped == model_id, (
-        f"empty-result guard returned {stripped!r}, want {model_id!r}"
-    )
 
 
 # ---------- Task 3: matrix rows grouped by display name ----------

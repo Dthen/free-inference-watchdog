@@ -368,8 +368,8 @@ vocabulary and error shapes — are frozen in *Published catalogue snapshot (v1)
 - **Operator state is not observable here.** `watchdog_status()` reports
   `pending_alerts`, `site_published` and `site_publish_age_s` as `null`: a
   published or browser source cannot see the operator's alert queue or site,
-  and the published payload never guesses. A local adapter may add explicitly
-  labelled local diagnostics outside this payload. `metadata_coverage` counts
+  and the published payload never guesses. A wrapper may add explicitly
+  labelled diagnostics outside this payload. `metadata_coverage` counts
   stated metadata fields only, never provider health.
 
 ### Public JSON feed
@@ -829,104 +829,25 @@ container is `metadata_missing`; a non-null, non-object container is
   expectations): `NaN`/`Infinity`, unreasonable nesting, unsafe integers.
 - **Never serialized:** config dicts, `_token`, auth blocks, token-file
   paths, local env, pending alerts, ratelimit headers, probe internals,
-  untracked IDs, and unknown/disabled provider entries. The root-script
-  local compatibility adapter still **PRESERVES raw tracked metadata**
-  (including unknown upstream fields) for tracked IDs in its legacy `models`
-  and endpoint `metadata` objects — that local boundary is unchanged and
-  never weakened. Those raw objects never appear in the public JSON,
-  embedded page, consumer package, or parity fixtures: in the frozen public
-  payload the name `metadata` carries **only the projected public model
-  object** of the exact `(provider, raw model_id)` pair, **never the legacy
-  raw metadata**.
+  untracked IDs, and unknown/disabled provider entries. No shipped path
+  restores the original raw upstream metadata: the retired root local-state
+  server was the only one that did. In the frozen public payload the name
+  `metadata` carries **only the projected public model object** of the exact
+  `(provider, raw model_id)` pair, **never raw upstream metadata**.
 
-**Local `list_free_models` compatibility (corrected selection, preserved raw metadata).**
-The *unchanged and never weakened* claim in the preceding paragraph is scoped
-strictly to **RAW-METADATA PRESERVATION**: the root-script `list_free_models`
-still returns the original raw tracked metadata dictionaries — unknown upstream
-fields included — for the tracked `(provider, raw model_id)` pairs it selects.
-Its **selection, ordering, count and epoch** semantics are deliberately
-*corrected* rather than preserved: empty and non-string IDs are dropped,
-duplicate IDs collapse, each ID array is in natural raw-ID order (never the
-legacy integer-split sort), and `tick_epoch` is a strict non-negative integer —
-a float or negative epoch becomes `null` and adds `tick_epoch_unknown`. The
-additive `snapshot_id`, `provider_staleness` and `warnings` fields come from the
-validated local snapshot; the `snapshot_id` hash binds that **local sanitized
-public projection**, not the raw metadata dictionaries or any filesystem
-diagnostic, so it can differ from the strictly published feed for the same tick,
-and a structurally invalid raw source can prevent strict publication while this
-local compatibility view still answers. `list_free_models`, `get_model`,
-`list_endpoints` and `watchdog_status` all delegate to the pure query here.
-
-**Local `get_model` compatibility (literal membership, restored raw metadata).**
-The root-script `get_model` delegates exact membership, the separate
-marker-insensitive endpoint lookup, ordering and counts to that same pure query
-module while keeping the local interface. Every result keeps the absence caveat,
-and `exact_matches`/`exact_gateways` stay strictly literal — case-sensitive,
-untrimmed and never grouped. `endpoints` use the legacy `gateway` name and each
-carries the **ORIGINAL raw metadata dictionary** for exactly the selected
-`(gateway, raw id)` pair (unknown upstream fields included; `{}` when the roster
-carries none or the hierarchy is malformed), plus the core `stale` flag. The
-required `model_id` must contain at least one character outside the six ASCII
-blanks (`U+0009`..`U+000D` and `U+0020`): empty and ASCII-blank-only queries fail
-with the flat local `model_id must be a non-empty string` **before** any state
-read, while NBSP, EM SPACE and other non-ASCII whitespace stay literal query
-characters — a successful no-match, or a real match when that exact id is
-tracked. Surrounding padding is never trimmed. Additive core provenance
-(`snapshot_id`, strict `tick_epoch`, `provider_staleness`, `warnings` and all
-four count definitions) is carried through, and `snapshot_id` binds the same
-local sanitized public projection described above — never the restored raw
-metadata dictionaries or a filesystem diagnostic.
-
-**Local `list_endpoints` compatibility (selected-provider counts, raw nested metadata).**
-The root-script `list_endpoints` delegates provider selection, raw-ID ordering
-and every count to that same pure query module while keeping the local
-interface. Each selected gateway entry keeps exactly its four fields
-(`chat_completions_url`, `api_type`, `model_ids`, `models`), and `models`
-restores the **ORIGINAL raw metadata dictionaries** for exactly the selected
-`(gateway, raw id)` pairs — unknown and nested upstream fields included, `{}`
-when the roster carries none, and no entry for a missing or non-dict value.
-`counts.gateways` is the number of **selected** providers including a zero-ID
-provider (never the full registry), `counts.endpoints` the selected
-`(gateway, raw id)` pairs, `counts.distinct_raw_ids` the selected literal raw
-strings and `counts.marker_group_labels` the selected delimiter-stripped labels;
-the legacy `counts.models` is the documented alias of that label count, never a
-verified underlying model identity, so a provider filter never leaks the
-registry-wide totals. Additive core provenance (`snapshot_id`, strict
-`tick_epoch`, `provider_staleness` over exactly the selected gateways, and
-snapshot-wide `warnings`) is carried through; `snapshot_id` binds the same local
-sanitized public projection described above — never the restored raw metadata
-dictionaries or a filesystem diagnostic.
-
-**Local `watchdog_status` compatibility (core catalogue health, local operator diagnostics).**
-The root-script `watchdog_status` delegates catalogue health — tick age (core
-field `last_tick_age_s`), freshness, provider staleness, per-gateway counts, the
-whole-catalogue cardinalities and the projected metadata coverage — to that same
-pure query module while keeping the local interface. Freshness is strict: a null
-or future roster `tick_epoch` yields `last_tick_age_s` null and `tick_fresh`
-false, never a negative age or a healthy clamp, and an age exactly equal to
-`cadence_s` still counts as fresh. Its legacy `now=None` parameter is a LOCAL
-test clock, not a public tool argument: `None` reads `time.time()` once, an
-explicit native int or finite non-negative float within `2**53 - 1` is used
-literally (`0` never falls back to the wall clock), and bool, non-numeric,
-NaN/Infinity, negative (including a negative fraction) or unsafe values fail
-with the flat `now must be a finite non-negative safe number` before any state
-read, while the pure core only ever receives one normalized integer clock. The
-counts are the corrected **deduplicated** ones (duplicate ids collapse, empty
-and non-string ids are dropped), so a provider's count is its distinct selected
-raw ids. Two metadata measures are deliberately kept apart: `metadata_summary`
-is the legacy **raw dictionary-presence** pair count over the selected
-`(gateway, raw id)` scope (an empty raw dict counts; a missing or non-dict value
-does not), while `metadata_coverage` reports **projected-field** knowledge and is
-not an alias. `stale_providers` (the roster's carried names, original order and
-duplicates, inactive names included), `pending_alerts` and
-`site_published`/`site_publish_age_s` remain LOCAL observations — the direct
-public core reports those three as `null` — and the site age uses the raw
-validated clock, so fractional file mtimes keep their sub-second contribution.
-`warnings` is the core **union** of snapshot warnings with the derived
-`tick_epoch_unknown`, `tick_epoch_future` and `tick_stale` codes in their frozen
-order, and `snapshot_id` binds the same local sanitized public projection
-described above — never the raw metadata dictionaries, the pending queue or a
-filesystem diagnostic.
+**The local compatibility surface is retired, not preserved.**
+The former root `python3 mcp_server.py [--root ...]` script is gone. Its
+raw-metadata restoration, its local `models`/`gateway` nesting diagnostics and
+its local `watchdog_status` observations (pending-alert depth, site mtime,
+roster stale-provider names, an injectable `now`) are gone with it, because
+they were private-state views no published consumer can serve. There is no
+second Python MCP server, forwarding shim, deprecated variant or local-state
+fallback: the installed command and `python -m watchdog_catalog` are the only
+Python surfaces, and both answer from ONE selected published snapshot using the
+frozen public payload documented here. A client configuration that still
+launches the old root script now fails with a missing file instead of being
+silently served a compatibility view; switching such a client to the installed
+command is a separate, explicitly authorized operator action.
 
 ### Structural validation of published snapshots (frozen rules)
 
@@ -1164,9 +1085,8 @@ source precedence are separate concerns.
 
 These argument errors are **separate from published snapshot degradation**:
 missing or malformed OPTIONAL upstream metadata still degrades to
-`null`/unknown inside a success payload, and the root-script local
-compatibility adapter still preserves raw tracked metadata at its own
-boundary. Neither is changed by this argument contract.
+`null`/unknown inside a success payload. Neither is changed by this argument
+contract.
 
 ### Shared tool definitions (frozen resource)
 
@@ -1440,7 +1360,7 @@ operator health. It is the **whole-catalogue** status of the consumed
 snapshot: like `get_model` and `search_models` the pure payload exposes no
 local filesystem path, no `state_root`/tool path, no source retrieval/cache
 timestamp and no operator diagnostics — those belong to a separate,
-explicitly labelled local adapter OUTSIDE this payload. `ok: true` means the
+explicitly labelled wrapper OUTSIDE this payload. `ok: true` means the
 valid snapshot was queried successfully — **not** that its observations are
 fresh or that every provider is healthy. The fixed test clock is a case-level
 `now` epoch injected into the core; it is **never** a tool argument and never a
@@ -1555,9 +1475,8 @@ surface bound returned **rows, not characters**: there is no truncation and no
 browser-only semantics anywhere in it. Like the other pure payloads this
 object exposes no local filesystem path, no `tool`/`state_root` field and no
 source retrieval/cache data (a source layer adds a separate `source` object
-OUTSIDE it). It preserves the useful root-script nesting (`providers`,
-`models`, `counts`, `total_ids`, `n_gateways`) while dropping the root
-script's local-only fields.
+OUTSIDE it). It keeps the nested shape (`providers`, `models`, `counts`,
+`total_ids`, `n_gateways`) and carries no local-only fields.
 
 Two **different** exact top-level field sets, one per variant.
 
@@ -1612,8 +1531,7 @@ use it — direct those to `search_models` with a small explicit `limit` (e.g.
 difference anywhere in it. Like the other pure payloads this object exposes no
 local filesystem path, no `tool`/`state_root` field and no source
 retrieval/cache data (a source layer adds a separate `source` object OUTSIDE
-it). It preserves the useful root-script nesting while publishing only projected
-data.
+it). It keeps the nested shape while publishing only projected data.
 
 One **exact** top-level field set for BOTH the all-provider and the
 provider-filtered variant:

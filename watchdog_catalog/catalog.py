@@ -3,11 +3,11 @@ strict public-snapshot structural validation.
 
 This module is the RAW and STRUCTURAL boundary of the published catalogue
 snapshot. It deliberately knows nothing about query selection, the marker
-helper, ordering or the root-script local-to-public compatibility adapter:
-those arrive in later units and must EXTEND this module rather than be assumed
-here. Nothing in this module imports the operator SDK, provider configuration,
-the roster/state layer, the page renderer or any local adapter; there is no
-file, environment, network or clock access at import time or at call time.
+helper or ordering: those arrive in later units and must EXTEND this module
+rather than be assumed here. Nothing in this module imports the operator SDK,
+provider configuration, the roster/state layer, the page renderer or any local
+adapter; there is no file, environment, network or clock access at import time
+or at call time.
 
 The public names this unit fixes are:
 

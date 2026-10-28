@@ -2,9 +2,8 @@
 
 This module is the single source of truth for the marker-insensitive free-marker
 stripper: it imports only :mod:`re` and performs no I/O, configuration loading,
-credential resolution or SDK import. ``build_site.strip_free_marker`` and
-``mcp_server.strip_free_marker`` re-export this exact function object rather
-than carrying a second copy.
+credential resolution or SDK import. ``build_site.strip_free_marker``
+re-exports this exact function object rather than carrying a second copy.
 """
 
 import copy
