@@ -680,18 +680,26 @@ def _assert_workflow_gate(text):
     Returns the two executed gate commands (pair validation, source freshness)
     so the caller can run exactly what the workflow runs.
     """
-    steps = _workflow_steps(text)
+    workflow_top, jobs_block = text.split("\njobs:\n", 1)
+    assert re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs_block) == [
+        "prepare", "deploy",
+    ]
+    prepare = _workflow_job(jobs_block, "prepare")
+    deployment = _workflow_job(jobs_block, "deploy")
+    assert re.findall(r"(?m)^    needs: *(.*)$", deployment) == ["prepare"], \
+        "deployment must depend on successful preparation"
+
+    steps = _workflow_steps(prepare)
+    deploy_steps = _workflow_steps(deployment)
     uses = [_pin(_step_key(step, "uses")) for step in steps]
     runs = [_step_key(step, "run") or "" for step in steps]
 
     upload = [index for index, use in enumerate(uses)
               if use.startswith("actions/upload-pages-artifact@")]
-    deploy = [index for index, use in enumerate(uses)
-              if use.startswith("actions/deploy-pages@")]
     assert len(upload) == 1, "exactly one artifact upload"
-    assert len(deploy) == 1, "exactly one Pages deployment"
     assert uses[upload[0]] == "actions/upload-pages-artifact@v3"
-    assert uses[deploy[0]] == "actions/deploy-pages@v4"
+    assert len(deploy_steps) == 1, "deployment only runs the Pages action"
+    assert _pin(_step_key(deploy_steps[0], "uses")) == "actions/deploy-pages@v4"
 
     validators = [index for index, run in enumerate(runs)
                   if "scripts/validate_site.py" in run]
@@ -700,7 +708,7 @@ def _assert_workflow_gate(text):
     assert len(validators) == 1, "exactly one pair-validation step"
     assert len(fresh) == 1, "exactly one source-freshness step"
     validate_index, fresh_index = validators[0], fresh[0]
-    assert validate_index < fresh_index < upload[0] < deploy[0], \
+    assert validate_index < fresh_index < upload[0], \
         "both gates must precede upload, pair validation first"
 
     # A managed CPython 3.11 is set up before both gates and bound BY VALUE.
@@ -763,21 +771,26 @@ def _assert_workflow_gate(text):
         assert required in paths, required
     assert "branches: [master]" in text
     assert re.search(r"(?m)^  workflow_dispatch:", text)
-    for preserved in ("  contents: read", "  pages: write", "  id-token: write",
-                      "      name: github-pages", "  group: pages",
-                      "  cancel-in-progress: true"):
-        assert preserved in text, preserved
-    assert "steps.deployment.outputs.page_url" in text
+    assert re.search(r"(?m)^permissions:\n  contents: read$", workflow_top)
+    assert not re.search(r"(?m)^    (permissions|environment):", prepare)
+    assert re.search(r"(?m)^    permissions:\n      pages: write\n      id-token: write$", deployment)
+    assert text.count("pages: write") == text.count("id-token: write") == 1
+    for preserved in ("      name: github-pages", "steps.deployment.outputs.page_url"):
+        assert preserved in deployment, preserved
+    for preserved in ("  group: pages", "  cancel-in-progress: true"):
+        assert preserved in workflow_top, preserved
 
-    # One job only: no second uploader/deployer can bypass the gate.
-    jobs_block = text.split("\njobs:\n", 1)[1]
-    assert re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs_block) == ["deploy"]
     assert text.count("actions/upload-pages-artifact@") == 1
     assert text.count("actions/deploy-pages@") == 1
 
-    # No bypass anywhere: no skipped step, no swallowed command, no rebuild.
+    # Only the deploy job may be conditional. Its ref check leaves GitHub's
+    # implicit success() in place; always() would bypass the validators.
     assert re.search(r"(?m)^\s+continue-on-error:", text) is None
-    assert re.search(r"(?m)^\s+if:", text) is None
+    conditions = re.findall(r"(?m)^([ ]+)if: *(.*)$", text)
+    deploy_condition = "github.ref == 'refs/heads/master'"
+    assert conditions == [("    ", deploy_condition)] and (
+        "    if: " + deploy_condition in deployment.splitlines()
+    ), "only the deploy job may be conditional, and only on master"
     for run_text in runs:
         for swallowed in ("|| true", "|| echo", "set +e"):
             assert swallowed not in run_text, swallowed
@@ -795,7 +808,7 @@ def _gate_run(text, root, *, sentinel, home, tmpdir):
     it is reached only when every executed gate exits 0, exactly as a GitHub
     step failure stops the rest of the job.
     """
-    selected = [step for step in _workflow_steps(text)
+    selected = [step for step in _workflow_steps(_workflow_job(text, "prepare"))
                 if any(script in (_step_key(step, "run") or "")
                        for script in GATE_SCRIPTS)]
     assert len(selected) == 2, "both gates must be present to execute the job"
@@ -853,6 +866,13 @@ def test_pages_workflow_gates_upload_on_the_real_validator(tmp_path):
     # -- (a) the checked-in wiring satisfies the contract ------------------
     validate_run, freshness_run = _assert_workflow_gate(workflow_text)
     assert "check_page_sources.py" in (freshness_run or "")
+    for original, replacement, reason in (
+        ("    needs: prepare\n", "", "successful preparation"),
+        ("if: github.ref", "if: always() && github.ref", "only on master"),
+    ):
+        assert workflow_text.count(original) == 1
+        with pytest.raises(AssertionError, match=reason):
+            _assert_workflow_gate(workflow_text.replace(original, replacement, 1))
 
     # -- (b) execute the ACTUAL extracted commands, then the sentinel ------
     # One owned checkout-shaped root per run: the workflow's relative
