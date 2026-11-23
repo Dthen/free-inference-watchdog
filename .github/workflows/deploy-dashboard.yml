@@ -27,18 +27,14 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  prepare:
+    name: Validate and upload dashboard
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -92,6 +88,19 @@ jobs:
         with:
           path: 'site'
 
+  # A deploy-only retry reuses the artifact from this workflow run, without
+  # re-running validation or uploading a second artifact with the same name.
+  deploy:
+    needs: prepare
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
