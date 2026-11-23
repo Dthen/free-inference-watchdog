@@ -1454,9 +1454,10 @@ def test_installed_console_clean_install_and_stdio_isolation(primary_wheel,
     help_stdout = help_run.stdout
     assert help_stdout.splitlines()[0].startswith(
         f"usage: {CONSOLE_COMMAND}"), help_stdout[:400]
+    help_words = " ".join(help_stdout.split())
     for fragment in ("--catalog-url URL | --catalog-file PATH",
                      "--cache-dir DIR", DEFAULT_CATALOG_URL):
-        assert fragment in help_stdout, (fragment, help_stdout[:1200])
+        assert fragment in help_words, (fragment, help_stdout[:1200])
     assert "--root" not in help_stdout, "the installed command has no --root"
     assert sorted(neutral.iterdir()) == [], "help wrote into its cwd"
     assert sorted(home.iterdir()) == [], "help created HOME state"

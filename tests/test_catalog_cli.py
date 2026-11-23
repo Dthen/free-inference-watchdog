@@ -186,10 +186,12 @@ def test_help_is_deliberate_text_and_touches_no_source(monkeypatch, capsys):
     assert sub.value.code == 0
     search_text = capsys.readouterr().out
     assert search_text.startswith("usage: free-inference-watchdog search")
+    # argparse may wrap inside the mutually exclusive group on newer Python.
+    help_words = " ".join(search_text.split())
     for fragment in ("--catalog-url URL | --catalog-file PATH", "--cache-dir DIR",
                      "--json", "--input-modality VALUE",
                      "--supported-parameter VALUE", "--min-context-length N"):
-        assert fragment in search_text, (fragment, search_text[:1600])
+        assert fragment in help_words, (fragment, search_text[:1600])
 
 
 def test_search_forwards_every_supplied_option_to_the_core(recorded, owner,
