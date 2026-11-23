@@ -1,57 +1,24 @@
 [
   {
-    "name": "list_free_models",
-    "description": "BULK export of the published free-model catalogue: every tracked raw model id grouped per gateway, each raw-ID array in natural raw-ID order, including gateways that track zero ids. There is no hard universal output cap and never any truncation, so bulk output may exceed the guidance below. For routine lookups prefer search_models with an explicit small limit of 1-5 rows, then get_model for details of one raw id. Optional provider narrows the export to one exact registered key.",
+    "name": "get_model",
+    "description": "Exact lookup of one raw model id on one registered provider: returns that endpoint's flat details (display name, description, context length, modalities, supported parameters, chat-completions URL and API type). The raw id is never trimmed, case-folded or marker-stripped, and there is no cross-provider or marker-insensitive lookup. A known provider with an absent exact id returns not_found.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "provider": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null,
-          "description": "Exact registered gateway key. Absent or null covers every gateway; an empty, padded or wrong-case string is rejected as unknown, never repaired."
-        }
-      },
-      "required": [],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "get_model",
-    "description": "Literal and marker lookup for one raw model id: returns every (provider, raw model_id) endpoint whose raw id is an exact literal match, plus endpoints reachable only by stripping a single delimiter-bounded free marker. A marker match is not proof of cross-gateway identity. Exact ids are never trimmed, case-folded or repaired, and a missing id is a successful empty result, not an error.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
+          "type": "string",
+          "description": "Required exact registered gateway key, never trimmed or case-folded."
+        },
         "model_id": {
           "type": "string",
           "pattern": "[^\\u0009-\\u000D\\u0020]",
-          "description": "Required raw model id. Must contain at least one character outside ASCII blank U+0009..U+000D and U+0020; never trimmed or repaired."
+          "description": "Required exact raw model id. Must contain at least one character outside ASCII blank U+0009..U+000D and U+0020; never trimmed or repaired."
         }
       },
       "required": [
+        "provider",
         "model_id"
       ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "list_endpoints",
-    "description": "BULK export of published endpoints: for each selected gateway, its chat-completions wiring plus every tracked raw model id with its projected public metadata, grouped per gateway with each raw-ID array in natural raw-ID order, including gateways tracking zero ids. There is no hard universal output cap and never any truncation. For routine use prefer search_models with an explicit small limit of 1-5 rows, then get_model. Optional provider narrows to one exact registered key.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "provider": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null,
-          "description": "Exact registered gateway key. Absent or null covers every gateway; an empty, padded or wrong-case string is rejected as unknown, never repaired."
-        }
-      },
-      "required": [],
       "additionalProperties": false
     }
   },
@@ -67,7 +34,7 @@
   },
   {
     "name": "search_models",
-    "description": "Search published metadata: a sorted, paginated endpoint page. Filters are a literal substring query over ids, names and descriptions, an exact registered provider, a minimum context length and capability arrays. An unknown provider errors; an unmatched capability value or unknown endpoint metadata yields no matches. Sorted then sliced, so totals are unpaginated. Optional arguments: query, provider, min_context_length, input_modalities and supported_parameters default null; limit 50, offset 0.",
+    "description": "Search metadata: a compact, sorted, paginated endpoint page. Filters are a literal substring query over ids, names and descriptions, an exact registered provider, a minimum context length and capability arrays. An unknown provider errors; unmatched capabilities match nothing. Sorted, then sliced: totals are unpaginated. Rows omit descriptions and wiring; get_model details returns them. Optional: query, provider, min_context_length, input_modalities, supported_parameters; limit 5, offset 0.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -125,8 +92,8 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 200,
-          "default": 50,
-          "description": "Maximum rows in the returned page as an integer 1..200. Omitted defaults to 50; null is rejected."
+          "default": 5,
+          "description": "Maximum rows in the returned page as an integer 1..200. Omitted defaults to 5; null is rejected."
         },
         "offset": {
           "type": "integer",

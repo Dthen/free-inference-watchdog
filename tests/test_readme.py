@@ -4,14 +4,15 @@ Two audiences, both pinned here.
 
 Consumer route (unit 10a): the README opens with purpose, the dashboard and the
 standalone MCP quick start, and only THEN hands off to operator setup. The
-documented install uses the immutable commit the examples were verified against
-(never a branch), the generic stdio client block is a real `command`/`args`
-vector that is actually launched over MCP stdio below, and the worked example's
-stable values are re-derived from the pinned synthetic fixture rather than
-trusted. The MCP route is pinned as catalogue QUERYING — no provider
+documented install builds the UNRELEASED 0.2.0 candidate from this checkout
+(never a branch), while the published 0.1.0 pin is isolated as legacy with its
+own five-tool surface. The generic stdio client block is a real
+`command`/`args` vector that is actually launched over MCP stdio below, and the
+worked example's stable values are re-derived from the synthetic fixture rather
+than trusted. The MCP route is pinned as catalogue QUERYING — no provider
 credentials, no cron, no local roster — and it must keep saying that the
 published JSON feed is the DEFAULT source (its raw GitHub URL, with the Pages
-copy documented as a mirror) and that WebMCP is planned, never a remotely
+copy documented as a mirror) and that WebMCP is an in-page API, never a remotely
 connectable MCP HTTP URL. The obsolete "feed is not live yet" wording is
 reproduced as a mutation the same predicate rejects, so the correction cannot
 silently regress. That hand-off must not cost existing readers
@@ -27,12 +28,12 @@ filters must still answer differently (a wrong documented argument or result
 would make them collide), `min_context_length` is exercised at its inclusive
 boundary and against unknown metadata, the three freshness shapes are bound to
 the fixture clock, and a real last-known-good replay must NOT be documented as
-an identical `source` block (the 10a cache finding). Count scopes, the operator
-fields a published snapshot cannot observe and the documented marker claims
-are pinned the same way: the caveat sentence is bound to the tools that
-actually return `caveats`, and the documented strip/no-strip ids, the "one
-label" result and the both-ends clause are read out of the guidance and
-checked against the shipped stripper's real output.
+an identical `source` block (the 10a cache finding). Unknown-versus-zero
+metadata, the operator fields a published snapshot cannot observe and the
+documented marker-label claims are pinned the same way: no tool payload reports
+an `unknown_fields` list or a caveat, and the documented label ids and the "one
+label" result are checked against the shipped stripper and the whole-catalogue
+status count.
 
 Operator route (F-R2-4, unit 10b2): delivery topology (operator decision,
 2026-08-26) is unchanged — the Discord webhook in the project-local `.env` is
@@ -61,13 +62,12 @@ Browser route (unit 10d): the README's WebMCP section documents a GENERATED
 artifact, so it is executed rather than read. A synthetic roster is built into a
 real page by the real builder, the two inert islands and the three inlined
 classic scripts are read back out of that HTML, and the scripts are run in a
-Node realm against a fake in-page host: five registrations, the three documented
+Node realm against a fake in-page host: three registrations, the three documented
 annotations, `source: {mode: "browser"}` provenance on success AND argument
-errors, and complete bulk output that is compared field-for-field with the
+errors, and a real search page that is compared field-for-field with the
 shared Python core over the page's own snapshot. Availability is pinned as a
 SCOPE (development flag, Chrome 149+ origin trial, secure context, `tools`
-Permissions Policy) with no universal claim, the oversize-output rule is pinned
-as Chrome's RECOMMENDATION rather than a cap, the publication paragraph is
+Permissions Policy) with no universal claim, the publication paragraph is
 checked against the phase the tracked page is actually in (pre-publication and
 freshly inlined both pass; a deployment claim the artifact contradicts, or a
 caveat it has outgrown, does not), and the retired "planned / no adapter /
@@ -79,6 +79,7 @@ import itertools
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -95,12 +96,9 @@ CONSUMER_HEADING = "## Query the catalogue over MCP"
 OPERATOR_HEADING = "## Self-hosting the watchdog"
 DASHBOARD_URL = "https://models.dthen.xyz"
 
-#: The immutable commit this README's install and example commands were verified
-#: against. A branch name is a moving target, so a floating ref is a regression.
+#: The published 0.1.0 release commit. The README names it only to isolate that
+#: legacy surface; the current examples build this checkout instead.
 PINNED_REF = "bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc"
-PINNED_FIXTURE_URL = (
-    "https://raw.githubusercontent.com/Dthen/free-inference-watchdog/"
-    f"{PINNED_REF}/tests/fixtures/catalog/lookup.json")
 INSTALL_REF_PATTERN = re.compile(
     r"git\+https://github\.com/Dthen/free-inference-watchdog\.git"
     r"@([0-9A-Za-z._-]+)")
@@ -205,10 +203,10 @@ def _documented_default_server():
 
 
 def _documented_preview_server():
-    """The explicitly pinned SYNTHETIC-preview stdio block, if documented."""
+    """The explicitly labelled SYNTHETIC-preview stdio block, if documented."""
     for document in _client_configs()[1:]:
         entry = _server_entry(document)
-        if entry["args"][:1] == ["--catalog-url"]:
+        if entry["args"][:1] == ["--catalog-file"]:
             return entry
     raise AssertionError("README has no pinned synthetic-preview stdio block")
 
@@ -417,7 +415,7 @@ def _bullets(heading):
 def _paged_example():
     """The documented paged search response, parsed."""
     for language, body in _fenced_languages(_readme()):
-        if language == "json" and '"next_offset"' in body:
+        if language == "json" and '"total_matches": 3' in body:
             return json.loads(body)
     raise AssertionError("README has no paged search example")
 
@@ -466,21 +464,33 @@ def test_consumer_section_scopes_queries_away_from_inference():
     assert "--init" not in section, "consumer path must not mention --init"
 
 
-def test_install_examples_use_the_pinned_immutable_commit():
-    """Install examples must pin a real commit — the one the examples were
-    exercised against — never a branch, a placeholder or an unpublished sha."""
+def test_install_documents_the_unreleased_v2_checkout():
+    """The examples describe the uncommitted 0.2.0 candidate, so the install
+    path must build THIS checkout. A floating ref is a regression, and the
+    published 0.1.0 release is isolated as legacy with its own tool surface
+    rather than presented as implementing the examples."""
     text = _readme()
-    refs = INSTALL_REF_PATTERN.findall(text)
-    assert refs, "no git install reference documented"
-    assert set(refs) == {PINNED_REF}, f"install refs drifted: {sorted(set(refs))}"
-    assert re.fullmatch(r"[0-9a-f]{40}", PINNED_REF), "pinned ref is not a full sha"
-    assert f"free-inference-watchdog-mcp @ git+https://github.com/" \
-           f"Dthen/free-inference-watchdog.git@{PINNED_REF}" in text, \
-        "the pip direct-reference spelling lost the pinned ref"
+    section = _section(text, CONSUMER_HEADING)
+    lowered = _plain(section).lower()
 
-    lowered = _plain(_section(text, CONSUMER_HEADING)).lower()
     for floating in ("@master", "@main", "@latest", "<sha>", "commit_sha"):
         assert floating not in lowered, f"floating install ref {floating!r} is back"
+
+    assert "unreleased" in lowered and "0.2.0" in lowered, \
+        "the install section never says which candidate it documents"
+    install_blocks = [body for language, body in _fenced_languages(section)
+                      if language == "bash"]
+    assert install_blocks, "no install example"
+    assert any("pip install ." in body for body in install_blocks), \
+        "the documented install does not build this checkout"
+    assert not INSTALL_REF_PATTERN.findall(section), \
+        "the current-checkout path is presented as a published git ref"
+
+    legacy = _paragraph_with(_plain(section), "legacy release")
+    assert PINNED_REF in legacy, "the legacy release pin disappeared"
+    for marker in ("0.1.0", "five", "different"):
+        assert marker in legacy.lower(), \
+            f"the legacy release is not scoped by {marker!r}: {legacy}"
 
 
 #: The one documented Pages mirror of the catalogue JSON. It is a mirror only:
@@ -528,23 +538,43 @@ def test_documented_default_stdio_block_is_the_live_published_feed():
         f"{_raw_catalog_urls(section)}")
     assert PAGES_MIRROR_URL in section, "the Pages mirror URL is undocumented"
 
+    caution = _paragraph_with(_plain(section), "version caution").lower()
+    assert "v1" in caution and "source_unavailable" in caution, (
+        "the v1 feed / v2 candidate limitation is pinned as a generic source "
+        "error, not a validator code")
+    assert "unsupported_schema_version" in caution and "validator" in caution, \
+        "the validator code is not distinguished from the acquisition error"
+    assert section.index("Version caution") < section.index('"args": []'), \
+        "the version limitation must precede the default-source client vector"
 
-def test_documented_synthetic_preview_block_is_pinned_and_labelled():
-    """The reproducible preview may stay — but only as an explicitly pinned,
-    explicitly synthetic alternative, never as the only working route."""
+
+def test_documented_preview_block_reads_the_checkout_v2_fixture():
+    """The reproducible preview may stay — but it must read THIS checkout's v2
+    fixture by literal path, not a published URL whose bytes the 0.2 candidate
+    rejects, and it must stay an explicitly synthetic alternative."""
     from watchdog_catalog.__main__ import build_parser, select_source
 
     entry = _documented_preview_server()
     args = list(entry["args"])
-    assert args == ["--catalog-url", PINNED_FIXTURE_URL], args
+    assert args[:1] == ["--catalog-file"], args
+    assert len(args) == 2, args
+    path = args[1]
+    assert path.startswith("/"), "the documented preview path is not absolute"
+    assert path.endswith("tests/fixtures/catalog/lookup.json"), path
 
     kind, location = select_source(build_parser().parse_args(args))
-    assert (kind, location) == ("url", PINNED_FIXTURE_URL), (kind, location)
+    assert (kind, location) == ("file", path), (kind, location)
+
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert fixture["schema_version"] == 2, \
+        "the documented preview fixture is not a v2 snapshot"
 
     section = _section(_readme(), CONSUMER_HEADING)
     assert "synthetic" in section.lower(), "the fixture preview is not labelled"
     assert "not live data" in section.lower(), (
         "the preview is not distinguished from live catalogue data")
+    assert "absolute path" in section.lower(), (
+        "the literal-path replacement instruction is missing")
     # The preview must be presented as an OPTION next to the default, not as a
     # replacement for it: the default block comes first in the document.
     assert _documented_default_server()["args"] == []
@@ -565,9 +595,9 @@ def test_documented_stdio_arguments_launch_a_real_mcp_session(tmp_path):
     """The documented argument vector is EXERCISED, not parsed: the same flags
     are launched over real MCP stdio and a metadata search is answered.
 
-    The one substitution is the documented ``--catalog-url`` + pinned fixture URL
-    pair, replaced by ``--catalog-file`` and the repository copy of that same
-    fixture, so the check stays offline. Everything else — console name, flag
+    The one substitution is the documented absolute-path placeholder, replaced
+    by this checkout's real ``tests/fixtures/catalog/lookup.json`` path — the
+    replacement the README instructs. Everything else — console name, flag
     spelling, argument order, stdio transport — is the documented vector.
     """
     pytest.importorskip("mcp")
@@ -575,11 +605,8 @@ def test_documented_stdio_arguments_launch_a_real_mcp_session(tmp_path):
     from mcp.client.stdio import stdio_client
 
     args = _documented_args()
-    index = args.index("--catalog-url")
-    assert args[index + 1] == PINNED_FIXTURE_URL
-    offline_args = list(args)
-    offline_args[index] = "--catalog-file"
-    offline_args[index + 1] = str(FIXTURE)
+    assert args[0] == "--catalog-file", args
+    offline_args = [args[0], str(FIXTURE), *args[2:]]
     offline_args += ["--cache-dir", str(tmp_path / "cache")]
 
     environment = {
@@ -613,36 +640,33 @@ def test_documented_stdio_arguments_launch_a_real_mcp_session(tmp_path):
     assert [tool.name for tool in listed.tools] == _tool_names()
     assert payload["ok"] is True, payload
     assert payload["source"]["mode"] == "file", payload["source"]
-    assert payload["query"] == "shared"
-    assert payload["returned_count"] == 2
     assert payload["total_matches"] == 2
-    assert payload["counts"] == {"gateways": 2, "endpoints": 2,
-                                 "distinct_raw_ids": 1,
-                                 "marker_group_labels": 1}
+    assert payload["next_offset"] is None
     assert [row["provider"] for row in payload["endpoints"]] \
         == ["synthetic-a", "synthetic-b"]
     assert {row["model_id"] for row in payload["endpoints"]} == {"vendor/shared"}
+    assert "counts" not in payload and "returned_count" not in payload
 
 
 def test_worked_example_values_re_derive_from_the_pinned_fixture():
     """The worked example must be real output: its stable fields are re-derived
-    from the synthetic fixture through the pure core, and its staleness claim is
-    checked against the fixture's own frozen tick."""
+    from the synthetic v2 fixture through the pure core, its staleness claim is
+    checked against the fixture's own frozen tick, and its selected-field label
+    and file-mode provenance are stated honestly."""
     from watchdog_catalog import catalog, query
 
     example = None
     for language, body in _fenced_languages(_readme()):
-        if language == "json" and '"returned_count"' in body:
+        if language == "json" and '"total_matches"' in body and \
+                '"source"' in body:
             example = json.loads(body)
             break
     assert example is not None, "no worked-example JSON block found"
 
     snapshot = catalog.load_snapshot(FIXTURE.read_text(encoding="utf-8"))
-    real = query.search_models(snapshot, {"query": example["query"],
-                                          "limit": example["limit"]
-                                          if "limit" in example else 5})
-    for key in ("ok", "query", "returned_count", "total_matches", "counts",
-                "provider_staleness"):
+    real = query.search_models(snapshot, {"query": "shared"})
+    for key in ("ok", "total_matches", "next_offset", "provider_staleness",
+                "endpoints"):
         assert example[key] == real[key], f"example {key} is not real output"
 
     status = query.watchdog_status(snapshot, {}, now=int(time.time()))
@@ -650,7 +674,12 @@ def test_worked_example_values_re_derive_from_the_pinned_fixture():
     assert "tick_stale" in status["warnings"]
     assert example["source"]["warnings"] == ["tick_stale"]
     assert example["source"]["observation_fresh"] is False
-    assert example["source"]["mode"] == "url"
+    assert example["source"]["mode"] == "file", (
+        "the documented preview reads a file source")
+
+    section = _plain(_section(_readme(), CONSUMER_HEADING)).lower()
+    assert "selected fields, not a complete document" in section, (
+        "the trimmed example is presented as a complete document")
 
 
 #: The obsolete "the feed does not exist yet" wording. The catalogue has been
@@ -746,7 +775,7 @@ def test_consumer_section_keeps_webmcp_distinct_from_a_remote_url():
 # the real page from a synthetic roster through the real builder, read the two
 # inert islands and the three inlined classic scripts out of the generated
 # HTML, and RUN those scripts in a Node realm with a fake `document`. What the
-# README says about setup — the native API it feature-detects, the five
+# README says about setup — the native API it feature-detects, the three
 # registered tools, the annotation hints, the browser provenance and the
 # "never truncate to fit the recommendation" rule — is bound to what the page
 # actually does, and the payload is compared against the shared Python core
@@ -761,7 +790,6 @@ BROWSER_PAGE_SCRIPT_MARKERS = ("catalog-query", "webmcp", "boot")
 #: Chrome's security guidance RECOMMENDATION — not a protocol limit, and not
 #: this project's cap (browser contract 4.6).
 RECOMMENDED_OUTPUT_CHARS = 1500
-
 #: Synthetic roster: three gateways (one tracking zero ids), a ~6K-character
 #: upstream description, and ids that sort differently from insertion order.
 BROWSER_ROSTER_PROVIDERS = {
@@ -782,7 +810,6 @@ def _browser_model(name, description=None):
         "architecture": {"input_modalities": ["text"],
                          "output_modalities": ["text"]},
         "supported_parameters": ["temperature"],
-        "pricing": {"prompt": 0.5, "completion": 1.5},
     }
 
 
@@ -840,22 +867,23 @@ def _build_browser_page(root):
     return (root / "site" / "index.html").read_text(encoding="utf-8")
 
 
-def _browser_page_parts(html):
-    """The page's two inert islands and its three classic scripts, in order."""
-    def _island(island_id):
-        match = re.search(
-            r'<script type="application/json" id="'
-            + re.escape(island_id) + r'">(.*?)</script>', html, re.S)
-        assert match, f"the generated page has no {island_id} island"
-        return match.group(1)
+def _browser_page_parts(scripts):
+    """The page's two inert islands and its three classic scripts, in order.
 
-    scripts = dict(re.findall(
-        r'<script data-watchdog="([a-z-]+)">(.*?)</script>', html, re.S))
-    return {
-        "islands": {"catalog-data": _island("catalog-data"),
-                    "tool-contract": _island("tool-contract")},
-        "scripts": scripts,
-    }
+    Pure selection over the shared ``script_elements`` parse; first occurrence
+    wins, as the rendered page is expected to carry each once.
+    """
+    islands = {}
+    page_scripts = {}
+    for attrs, body in scripts:
+        if attrs.get("type", "").strip().lower() == "application/json":
+            islands.setdefault(attrs.get("id"), body)
+        elif attrs.get("type") is None and attrs.get("data-watchdog"):
+            page_scripts.setdefault(attrs["data-watchdog"], body)
+
+    for island_id in ("catalog-data", "tool-contract"):
+        assert island_id in islands, f"the generated page has no {island_id} island"
+    return {"islands": islands, "scripts": page_scripts}
 
 
 #: Executes the page's own classic scripts against a fake in-page WebMCP host —
@@ -906,19 +934,20 @@ for (const body of spec.scripts) { vm.runInContext(body, sandbox); }
 BROWSER_CALLS = (
     {"label": "paged", "tool": "search_models",
      "args": {"query": "browser", "limit": 2}},
-    {"label": "bulk", "tool": "list_free_models", "args": {}},
+    {"label": "details", "tool": "get_model",
+     "args": {"provider": "nous", "model_id": "vendor-a/browser-huge:free"}},
     {"label": "bad_provider", "tool": "search_models",
      "args": {"provider": "not-a-gateway"}},
 )
 
 
 @pytest.fixture(scope="module")
-def browser_page(tmp_path_factory):
+def browser_page(tmp_path_factory, script_elements):
     """One real build, then one real execution of the page's own scripts."""
     node = _page_node_binary()
     root = tmp_path_factory.mktemp("browser-page")
     html = _build_browser_page(root)
-    parts = _browser_page_parts(html)
+    parts = _browser_page_parts(script_elements(html))
     assert sorted(parts["scripts"]) == sorted(BROWSER_PAGE_SCRIPT_MARKERS), (
         "the generated page does not carry the three maintained page scripts")
 
@@ -946,11 +975,11 @@ def browser_page(tmp_path_factory):
         "parts": parts,
         "execution": execution,
         "snapshot": snapshot,
-        "bulk_expected": query.list_free_models(snapshot, {}),
         "paged_expected": query.search_models(
             snapshot, {"query": "browser", "limit": 2}),
-        "total_ids": len({raw for ids in BROWSER_ROSTER_PROVIDERS.values()
-                          for raw in ids}),
+        "details_expected": query.get_model(
+            snapshot, {"provider": "nous",
+                       "model_id": "vendor-a/browser-huge:free"}),
     }
 
 
@@ -966,7 +995,7 @@ def _json_result(browser_page, label):
 
 def test_documented_browser_setup_registers_the_page_tools(browser_page):
     """The README's setup claim is executed, not read: the built page's own
-    scripts register exactly the five shared tools, from the embedded contract,
+    scripts register exactly the three shared tools, from the embedded contract,
     with the three documented annotations."""
     execution = browser_page["execution"]
     assert execution["setup"]["status"] == "registered", execution["setup"]
@@ -995,25 +1024,28 @@ def test_documented_browser_setup_registers_the_page_tools(browser_page):
 
 def test_documented_browser_payloads_match_the_embedded_snapshot(browser_page):
     """Browser results are `source: {mode: browser}` wrapped PURE payloads over
-    the page's own snapshot: complete bulk output, a real page with a truthful
-    `next_offset`, and no browser-only truncation or dropped metadata."""
+    the page's own snapshot: a real page with a truthful `next_offset`, a flat
+    details endpoint that keeps the oversized description whole, and no
+    browser-only truncation or dropped metadata."""
     paged = _json_result(browser_page, "paged")
     assert paged["source"] == {"mode": "browser"}
     expected = browser_page["paged_expected"]
     paged_core = {key: value for key, value in paged.items() if key != "source"}
     assert paged_core == expected, "the page answered differently from the core"
+    assert all("description" not in row for row in paged["endpoints"]), (
+        "compact search rows must not carry descriptions")
 
-    bulk = _json_result(browser_page, "bulk")
-    assert bulk["source"] == {"mode": "browser"}
-    bulk_core = {key: value for key, value in bulk.items() if key != "source"}
-    assert bulk_core == browser_page["bulk_expected"], (
-        "bulk output is not the complete core payload")
-    assert bulk["total_ids"] == browser_page["total_ids"]
-    assert sorted(bulk["providers"]) == sorted(
-        browser_page["snapshot"]["provider_order"]), (
-        "every snapshot gateway must survive the browser boundary")
-    assert any(not ids for ids in bulk["providers"].values()), (
-        "the fixture no longer carries a zero-id gateway")
+    details = _json_result(browser_page, "details")
+    assert details["source"] == {"mode": "browser"}
+    details_core = {key: value for key, value in details.items()
+                    if key != "source"}
+    assert details_core == browser_page["details_expected"]
+    details_text = browser_page["execution"]["results"]["details"]["text"]
+    assert len(details_text) > RECOMMENDED_OUTPUT_CHARS, (
+        "the fixture no longer exercises the oversize details payload")
+    assert details["endpoint"]["description"].endswith(
+        "Synthetic long upstream description. "), (
+        "the oversized description must never be truncated to fit a budget")
 
     bad = _json_result(browser_page, "bad_provider")
     assert bad["ok"] is False and bad["error"]["code"] == "unknown_provider"
@@ -1025,36 +1057,14 @@ def test_documented_browser_payloads_match_the_embedded_snapshot(browser_page):
         "the documented browser provenance is not the shipped one"
     assert "no browser-only truncation" in section, \
         "the section dropped the no-truncation promise"
-
-
-def test_bulk_output_is_documented_as_a_recommendation_not_a_cap(browser_page):
-    """Chrome RECOMMENDS ~1.5K characters per output; the page must not truncate
-    to fit it, and the README must say so and route routine lookups to
-    `search_models`."""
-    paged_text = browser_page["execution"]["results"]["paged"]["text"]
-    bulk_text = browser_page["execution"]["results"]["bulk"]["text"]
-    assert len(paged_text) > RECOMMENDED_OUTPUT_CHARS, (
-        "the fixture no longer exercises the oversize case")
-    assert len(bulk_text) > RECOMMENDED_OUTPUT_CHARS
-
-    section = _plain(_section(_readme(), BROWSER_HEADING))
     lowered = section.lower()
-    assert "recommendation, not a cap" in lowered
-    assert "1.5k" in lowered
-    assert "no browser-only truncation" in lowered
+    assert "recommendation, not a cap" in lowered, \
+        "the output-size rule is no longer documented as a recommendation"
+    assert "1.5k" in lowered, "the documented recommendation size is gone"
     assert "search_models" in section and "limit" in section, \
         "the section no longer routes routine lookups to a bounded search"
     assert "get_model" in section, \
         "the section no longer routes detail lookups to get_model"
-
-    # Same guidance in the shipped descriptions the page registers.
-    contract = {entry["name"]: entry["description"]
-                for entry in json.loads(TOOL_CONTRACT.read_text(encoding="utf-8"))}
-    for bulk_tool in ("list_free_models", "list_endpoints"):
-        description = contract[bulk_tool]
-        assert "search_models" in description
-        assert "1-5" in description
-        assert "no hard universal output cap" in description
 
 
 def test_browser_availability_is_scoped_not_universal():
@@ -1135,7 +1145,7 @@ def test_browser_publication_status_is_bound_to_the_tracked_artifact(browser_pag
      "islands.",
      []),
     (False,
-     "The deployed dashboard now registers the five tools.",
+     "The deployed dashboard now registers the three tools.",
      ["the deployed dashboard now registers"]),
     (True,
      "The tracked site/index.html shows the last published page; a local build "
@@ -1149,7 +1159,7 @@ def test_browser_publication_status_is_bound_to_the_tracked_artifact(browser_pag
     # Hard-wrapped prose is the ordinary README case, so a claim split across a
     # newline must be read as the same sentence it is on one line.
     (False,
-     "The deployed dashboard now\nregisters the five tools.",
+     "The deployed dashboard now\nregisters the three tools.",
      ["the deployed dashboard now registers"]),
     (True,
      "The tracked site/index.html is still the older\ntwo-island snapshot and "
@@ -1307,47 +1317,41 @@ def test_metadata_filter_table_matches_real_query_results():
             "a one-token threshold change did not change the documented result")
 
 
-def test_paged_search_example_re_derives_with_page_scoped_counts():
+def test_paged_search_example_re_derives_as_a_real_compact_page():
     """The paged example is real output, and paging narrows the page only.
 
-    ``total_matches`` is the unpaginated cardinality and ``counts`` describes
-    the page, so the same query without a limit must still match
-    ``total_matches`` endpoints while the page carries one row. The documented
-    beyond-end offset is exercised too: still a success, empty page.
+    ``total_matches`` is the unpaginated cardinality while the page carries one
+    compact row; the documented beyond-end offset is exercised too: still a
+    success with an empty page. The default page is bounded at five rows.
     """
     from watchdog_catalog import query
 
     snapshot = _snapshot()
     example = _paged_example()
-    arguments = {"query": example["query"], "limit": example["limit"],
-                 "offset": example["offset"]}
-    real = query.search_models(snapshot, arguments)
-    for key in ("ok", "query", "limit", "offset", "total_matches",
-                "returned_count", "next_offset", "counts", "caveats"):
+    real = query.search_models(snapshot, {"query": "model", "limit": 1,
+                                          "offset": 1})
+    for key in ("ok", "total_matches", "next_offset", "endpoints"):
         assert example[key] == real[key], f"example {key} is not real output"
-    assert example["returned_count"] == len(example["endpoints"]) == 1, example
+    assert len(example["endpoints"]) == 1, example
     for documented, actual in zip(example["endpoints"], real["endpoints"]):
         for key, value in documented.items():
             assert actual[key] == value, \
                 f"example endpoint {key} is not real output"
+    assert "description" not in example["endpoints"][0]
 
-    unpaged = query.search_models(snapshot, {"query": example["query"]})
+    unpaged = query.search_models(snapshot, {"query": "model"})
     assert unpaged["total_matches"] == example["total_matches"]
-    assert unpaged["returned_count"] == unpaged["total_matches"]
-    assert example["returned_count"] < unpaged["returned_count"]
-    assert example["counts"]["endpoints"] == example["returned_count"]
-    assert example["counts"]["endpoints"] < unpaged["counts"]["endpoints"]
+    assert len(unpaged["endpoints"]) == 3
+    assert len(unpaged["endpoints"]) <= 5, "the default page must stay small"
 
     section = _section(_readme(), METADATA_HEADING)
     beyond_offset = re.search(r"`offset: (\d+)`", section)
     assert beyond_offset, "the beyond-end page example is gone"
-    beyond = query.search_models(snapshot, {"query": example["query"],
+    beyond = query.search_models(snapshot, {"query": "model",
                                            "offset": int(beyond_offset.group(1))})
     assert beyond["ok"] is True and beyond["endpoints"] == [], beyond
-    assert beyond["returned_count"] == 0 and beyond["next_offset"] is None
+    assert beyond["next_offset"] is None
     assert beyond["total_matches"] == example["total_matches"]
-    assert beyond["counts"] == {"gateways": 0, "endpoints": 0,
-                                "distinct_raw_ids": 0, "marker_group_labels": 0}
 
 
 def test_min_context_is_inclusive_and_rejects_unknown_metadata():
@@ -1453,49 +1457,6 @@ def test_cached_replay_is_not_documented_as_an_identical_source_block(tmp_path):
     assert "source.cached" in paragraph and "cache_fallback" in paragraph
 
 
-def test_absence_caveat_is_scoped_to_the_tools_that_carry_it():
-    """The caveat ships on ``get_model`` and ``search_models`` only.
-
-    QUALITY 10b1 finding 1: "every payload carries the absence caveat" was
-    false — ``list_endpoints``, ``list_free_models`` and ``watchdog_status``
-    return no ``caveats`` key. The claim is bound to the real payloads here, so
-    widening it back to a universal claim fails.
-    """
-    from watchdog_catalog import query
-
-    snapshot = _snapshot()
-    payloads = {
-        "get_model": query.get_model(snapshot, {"model_id": "vendor/shared"}),
-        "search_models": query.search_models(snapshot, {}),
-        "list_endpoints": query.list_endpoints(snapshot, {}),
-        "list_free_models": query.list_free_models(snapshot, {}),
-        "watchdog_status": query.watchdog_status(snapshot, {}, now=1759200000),
-    }
-    carriers = {name for name, payload in payloads.items() if "caveats" in payload}
-    assert carriers == {"get_model", "search_models"}, carriers
-    caveat = payloads["get_model"]["caveats"]
-    assert caveat and caveat == payloads["search_models"]["caveats"]
-
-    consumer = _section(_readme(), CONSUMER_HEADING)
-    mentions = [p for p in _paragraphs(_plain(consumer))
-                if "absence caveat" in p.lower() and not p.startswith("- ")]
-    mentions += [item for item in _bullets(CANNOT_HEADING)
-                 if "caveat" in item.lower()]
-    assert len(mentions) >= 2, f"the absence-caveat guidance is gone: {mentions}"
-
-    named = set()
-    for paragraph in mentions:
-        lowered = paragraph.lower()
-        for universal in ("every payload", "every result"):
-            assert universal not in lowered, (
-                f"the false universal caveat claim is back: {paragraph}")
-        tools = {name for name in payloads if name in paragraph}
-        assert tools and tools <= carriers, (
-            f"a caveat claim names a tool that carries no caveats: {paragraph}")
-        named |= tools
-    assert named == carriers, "both caveat-carrying tools must be named explicitly"
-
-
 def test_published_operator_fields_are_documented_as_unobservable():
     """Operator state a published snapshot cannot see stays documented as null."""
     from watchdog_catalog import query
@@ -1513,36 +1474,9 @@ def test_published_operator_fields_are_documented_as_unobservable():
         "the operator fields are no longer documented as null"
 
 
-def test_count_scopes_are_documented_as_distinct():
-    """A page count, a whole-catalogue count and a raw-ID count are not the same
-    number, and the guidance must not let a reader conflate them."""
-    from watchdog_catalog import query
-
-    snapshot = _snapshot()
-    page = query.search_models(snapshot, {"query": "model", "limit": 1})
-    whole = query.watchdog_status(snapshot, {}, now=1759200000)
-    endpoints = query.list_endpoints(snapshot, {})
-    exported = query.list_free_models(snapshot, {})
-
-    assert page["counts"]["endpoints"] == page["returned_count"] == 1
-    assert whole["counts"]["endpoints"] > page["counts"]["endpoints"]
-    assert whole["counts"]["gateways"] == 3, "the zero-ID gateway is excluded"
-    assert endpoints["counts"]["models"] == endpoints["counts"]["marker_group_labels"]
-    distinct_raw_ids = {raw for provider in snapshot["provider_order"]
-                        for raw in snapshot["providers"][provider]["model_ids"]}
-    assert exported["total_ids"] == len(distinct_raw_ids)
-    assert exported["total_ids"] < whole["counts"]["endpoints"], \
-        "raw ids and endpoint pairs must not be the same number here"
-
-    bullet = [p for p in _bullets(CANNOT_HEADING) if "total_ids" in p]
-    assert bullet, "the count-scope guidance is gone"
-    for token in ("page-scoped", "whole-catalogue", "total_ids"):
-        assert token in bullet[0], token
-
-
-def test_unknown_metadata_is_documented_as_distinct_from_known_zero_and_empty():
-    """A known ``0``/``[]`` is data; ``null`` is silence, and ``unknown_fields``
-    says which fields are silent."""
+def test_unknown_metadata_is_documented_without_an_unknown_field_list():
+    """A known ``0``/``[]`` is data; ``null`` is silence. The value itself is
+    the signal — neither payload reports an ``unknown_fields`` list."""
     from watchdog_catalog import query
 
     snapshot = _snapshot("capability-unknown.json")
@@ -1552,26 +1486,21 @@ def test_unknown_metadata_is_documented_as_distinct_from_known_zero_and_empty():
     unknown = rows["vendor/unknown-capabilities"]
 
     assert known["context_length"] == 0 and known["input_modalities"] == []
-    assert known["unknown_fields"] == [], "a known zero/[] must not read as unknown"
+    assert "unknown_fields" not in known
     assert unknown["context_length"] is None and unknown["input_modalities"] is None
-    assert unknown["unknown_fields"] == ["context_length", "input_modalities",
-                                         "output_modalities",
-                                         "supported_parameters"]
+    assert "unknown_fields" not in unknown
 
-    bullet = [p for p in _bullets(CANNOT_HEADING) if "unknown_fields" in p]
+    bullet = [p for p in _bullets(CANNOT_HEADING) if "unknown is not zero" in
+              p.lower()]
     assert bullet, "the unknown-versus-zero guidance is gone"
-    assert "unknown is not zero" in bullet[0].lower()
+    assert "unknown_fields" in bullet[0], \
+        "the guidance must say the payload does NOT add an unknown list"
 
 
-def test_documented_marker_examples_match_the_real_stripper():
-    """The documented strip examples are stated results, so they are executed.
-
-    SPEC 10b1 R3: running the shipped stripper is not the same as pinning what
-    the README says it does. The documented ids, the ``contribute one label``
-    result and the retained ``both ends strip`` clause are read out of the
-    guidance and checked against real ``strip_free_marker`` output, so
-    "contribute two labels" or "only the start strips" cannot stay green.
-    """
+def test_documented_marker_labels_match_the_real_stripper():
+    """The documented marker-label example is a stated result, so it is
+    executed: the two ids, the ``contribute one label`` result and the real
+    whole-catalogue ``marker_group_labels`` count must agree."""
     from watchdog_catalog import query
 
     strip = query.strip_free_marker
@@ -1585,10 +1514,7 @@ def test_documented_marker_examples_match_the_real_stripper():
     served = {model_id for provider in snapshot["provider_order"]
               for model_id in snapshot["providers"][provider]["model_ids"]}
 
-    # The documented one-label example is a stated result, not just an
-    # executed one: read its ids and its count out of the metadata guidance and
-    # let the stripper that ``counts.marker_group_labels`` uses answer it.
-    label_bullets = [item for item in _bullets(METADATA_HEADING)
+    label_bullets = [item for item in _bullets(CANNOT_HEADING)
                      if "marker_group_labels" in item]
     assert len(label_bullets) == 1, label_bullets
     label_claim = label_bullets[0]
@@ -1607,44 +1533,17 @@ def test_documented_marker_examples_match_the_real_stripper():
         f"README says {documented_result.group(0)!r} for {documented_ids}, " \
         f"which strip to {sorted(labels)}"
 
-    rows = query.search_models(snapshot, {"query": "model", "limit": 200})
-    page_labels = {strip(row["model_id"]) for row in rows["endpoints"]}
-    assert {"vendor/model", "vendor/model-renamed"} <= page_labels
-    assert rows["counts"]["marker_group_labels"] == len(page_labels)
-    assert set(documented_ids) <= {row["model_id"] for row in rows["endpoints"]}
+    # The status count is whole-catalogue, matching the served label set.
+    all_labels = {strip(model_id) for model_id in served}
+    status = query.watchdog_status(snapshot, {}, now=1759200000)
+    assert status["counts"]["marker_group_labels"] == len(all_labels)
+    assert set(documented_ids) <= served
 
-    # The guidance must still name those ids and say which of them strip; the
-    # short clause pin catches an inverted "does not", with no whole-sentence
-    # wording pin.
-    marker_bullets = [item for item in _bullets(CANNOT_HEADING)
-                      if "Marker lookups" in item]
-    assert len(marker_bullets) == 1, marker_bullets
-    marker = marker_bullets[0]
-    examples = marker.split("\u2014", 1)[1]
-    assert "vendor/model:free and free-vendor-model strip" in examples
-    assert "vendor/freetier does not" in examples
-
-    # The retained "both ends strip" clause is a stated result too. Build its
-    # id from the two documented examples — the start-marked id plus the end
-    # marker the other one carries — and require the README's claim to agree
-    # with what ONE strip of that id actually does.
-    both = re.match(r"\s*(\S+) and (\S+) strip", examples)
-    assert both, "the documented strip examples are gone"
-    end_marked, start_marked = both.group(1), both.group(2)
-    end_marker = end_marked[len(strip(end_marked)):]
-    assert end_marker, end_marked
-    both_ends = start_marked + end_marker
-    both_stripped = strip(both_ends)
-    start_only = strip(start_marked) + end_marker
-    claims_both = "both ends strip" in marker.lower()
-    assert claims_both or "only the start" in marker.lower(), \
-        "the documented both-ends result is gone"
-    assert claims_both == (both_stripped != start_only), \
-        f"README claims both ends strip={claims_both}, but " \
-        f"{both_ends!r} strips to {both_stripped!r}"
-    assert both_stripped == strip(start_marked), \
-        f"{both_ends!r} must land in the same label group as " \
-        f"{start_marked!r}"
+    # No tool payload resolves a label back to endpoints: identity is exact.
+    identity = [item for item in _bullets(CANNOT_HEADING)
+                if "Identity is exact" in item]
+    assert len(identity) == 1, identity
+    assert "no marker stripping" in identity[0].lower()
 
 
 def test_quick_start_anchor_keeps_the_baseline_deep_link():
@@ -1689,6 +1588,96 @@ def test_readme_json_blocks_are_valid_json():
     assert blocks, "README lost its fenced JSON examples"
     for body in blocks:
         json.loads(body)
+
+
+def test_documented_native_json_command_runs_on_the_pinned_fixture(tmp_path):
+    """The documented one-shot command is EXECUTED, not spell-checked.
+
+    The README's native-CLI block is the only place the command form is
+    taught, so both documented argv lines are run against the pinned synthetic
+    fixture: the human default and the explicit ``--json`` document. The
+    decoded operation result is the oracle for the JSON form; no prose wording
+    is asserted here.
+    """
+    commands = [line.strip() for _, body in _fenced_languages(_readme())
+                for line in body.splitlines()
+                if line.strip().startswith("python3 -m watchdog_catalog.cli ")
+                and "--help" not in line]
+    assert len(commands) == 2, commands
+
+    def run(command):
+        argv = shlex.split(command)
+        assert argv[:3] == ["python3", "-m", "watchdog_catalog.cli"], argv
+        argv[0] = sys.executable
+        return subprocess.run(
+            argv + ["--cache-dir", str(tmp_path / "cache")],
+            cwd=str(REPO), capture_output=True, text=True, timeout=120,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
+                 "TMPDIR": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1",
+                 "PYTHONNOUSERSITE": "1"})
+
+    human = run(commands[0])
+    assert human.returncode == 0, human.stderr[-3000:]
+    assert human.stderr == ""
+    assert human.stdout.startswith("search:")
+    assert "model_id=vendor/literal[ab].*" in human.stdout
+    assert "name=ÉCHO TEXT" in human.stdout
+
+    completed = run(commands[1])
+    assert completed.returncode == 0, completed.stderr[-3000:]
+    assert completed.stderr == ""
+    document = json.loads(completed.stdout)
+    assert document["ok"] is True
+    assert document["total_matches"] == 1
+    assert document["endpoints"][0]["model_id"] == "vendor/literal[ab].*"
+
+
+def test_documented_native_refresh_is_an_attempt_not_an_offline_read():
+    """Each fresh native invocation ATTEMPTS a refresh before any fallback.
+
+    A URL command with a last-good cache is not an offline read: the attempt can
+    block on the existing socket-operation timeout, and that timeout bounds the
+    individual blocking operations rather than the whole command. The documented
+    number is bound to the shipped constant instead of being restated blind.
+    """
+    from watchdog_catalog import source
+
+    section = _section(_readme(), "### Native command")
+    paragraph = _paragraph_with(_plain(section), "socket-operation timeout")
+    lowered = paragraph.lower()
+
+    assert "attempt" in lowered and "refresh" in lowered, paragraph
+    assert "last-good fallback" in lowered or "last good fallback" in lowered, \
+        paragraph
+    assert "refresh_failed" in paragraph and "cache_fallback" in paragraph, \
+        paragraph
+    assert "not a guaranteed offline read" in lowered, paragraph
+    assert f"{source.DEFAULT_TIMEOUT_S} seconds" in paragraph, (
+        "the documented timeout drifted from DEFAULT_TIMEOUT_S: " + paragraph)
+    assert "not the whole command" in lowered, paragraph
+
+
+def test_install_section_scopes_the_legacy_release_to_its_own_surface():
+    """The legacy release stays isolated: its five-tool, marker-group API and
+    v1 snapshots are named as a different surface, not taught as this one. The
+    current console commands stay bound to the shipped pyproject."""
+    import tomllib
+
+    text = _readme()
+    section = _section(text, CONSUMER_HEADING)
+    legacy = _paragraph_with(_plain(section), "legacy release").lower()
+
+    for marker in ("0.1.0", "five", "get_model(model_id)", "default page",
+                   "v1 snapshots", "different"):
+        assert marker in legacy, f"the legacy release is not scoped by {marker!r}"
+
+    with (REPO / "pyproject.toml").open("rb") as handle:
+        scripts = tomllib.load(handle)["project"]["scripts"]
+    assert scripts == {
+        "free-inference-watchdog-mcp": "watchdog_catalog.__main__:main",
+        "free-inference-watchdog": "watchdog_catalog.cli:main",
+    }, scripts
+    assert "free-inference-watchdog" in section
 
 
 def test_every_shell_example_parses():
@@ -2345,3 +2334,42 @@ def test_agents_documents_the_deployed_default_feed_and_its_mirror():
         planted = f"{text}\n- {claim}.\n"
         assert _obsolete_feed_claims(planted), (
             f"the obsolete-feed-claim check misses {claim!r}")
+
+
+# ---------- provider config seam documentation (P1) ----------
+
+def test_provider_config_documents_the_catalogue_seam_accurately():
+    """The config table and detection list name the members the code accepts.
+
+    Rows, defaults and the new detection key are read out of the README table
+    and checked against the shipped registry, so documentation cannot drift
+    from `config_loader`/`catalog_adapters` without this test failing.
+    """
+    import catalog_adapters as adapters
+
+    text = README.read_text(encoding="utf-8")
+    rows = {}
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 4 and cells[0].startswith("`"):
+            rows[cells[0].strip("`")] = cells
+    assert "catalog_url" in rows, "catalog_url must be documented as a config field"
+    assert "catalog_format" in rows, "catalog_format must be documented"
+    assert rows["catalog_url"][2] == "no", "catalog_url is optional"
+    assert rows["catalog_format"][2] == "no", "catalog_format is optional"
+    assert "https" in rows["catalog_url"][3].lower()
+    assert adapters.LEGACY_FORMAT in rows["catalog_format"][3]
+    assert "catalog-pricing" in text
+    for fmt in adapters.REGISTERED_FORMATS:
+        assert f"`{fmt}`" in text, f"{fmt} must be documented as implemented"
+    # The five shipped gateway configs select exactly the implemented nonlegacy
+    # families. These are public JSON reads for a schema/docs check: no loader,
+    # registry inventory or credential resolution runs here.
+    formatted = {}
+    for name in ("vercel.json", "felo.json", "tokenra.json", "infron.json",
+                 "aimlapi.json"):
+        config = json.loads((REPO / "providers" / name).read_text(
+            encoding="utf-8"))
+        formatted[name] = config.get("catalog_format")
+    assert set(formatted.values()) == (
+        set(adapters.REGISTERED_FORMATS) - {adapters.LEGACY_FORMAT})

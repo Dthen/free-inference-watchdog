@@ -178,43 +178,60 @@ def test_load_configs_unreadable_providers_dir_degrades(tmp_path, monkeypatch, c
 
 
 def test_build_providers_degrades_to_valid_subset(tmp_path, monkeypatch, capsys):
-    """PROVIDERS (via build_providers) inherits the per-file skip: a broken
-    file costs exactly its own provider key; healthy keys survive intact."""
+    """The resolved registry inherits the per-file skip: a broken file costs
+    exactly its own provider key; healthy keys survive intact."""
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()
     (providers_dir / "nous.json").write_text(json.dumps(_minimal_config("Nous Portal", 0)))
     (providers_dir / "kilo.json").write_text("{ broken")
     (providers_dir / "amd.json").write_text(json.dumps(_minimal_config("AMD Radeon", 1)))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    providers = config_loader.build_providers()
+    providers = config_loader.build_providers(config_loader.load_configs())
     assert set(providers) == {"nous", "amd"}
     assert "kilo" not in providers, "the broken file must cost only kilo"
 
 
-def test_import_never_raises_with_a_broken_config(tmp_path):
-    """End-to-end proof of the locked contract: importing config_loader with
-    one invalid providers/*.json on disk succeeds, exposing only the valid
-    subset in PROVIDERS. A subprocess gives a genuinely fresh import, so the
-    module-level build is what runs."""
+def test_import_and_help_never_acquire_configuration(tmp_path):
+    """Importing the three entry points — and either CLI's ``--help`` — must
+    touch no provider file, resolve no credential and print no config warning.
+
+    The copied checkout's ``providers/`` is a REGULAR FILE, so any call into
+    the loader would fail its ``Path.glob`` / ``is_dir`` guard and emit
+    ``config: skipping ...`` on stderr. A subprocess gives a genuinely fresh
+    import, so what these assertions pin is the import-time and pre-argparse
+    contract; the per-file degradation path itself is covered by the
+    ``load_configs`` tests around this one.
+    """
     repo = Path(config_loader.__file__).resolve().parent
     src = tmp_path / "src"
     src.mkdir()
-    shutil.copy(repo / "config_loader.py", src)
-    shutil.copy(repo / "envfile.py", src)
-    providers_dir = src / "providers"
-    providers_dir.mkdir()
-    (providers_dir / "good.json").write_text(json.dumps(_minimal_config("Good")))
-    (providers_dir / "bad.json").write_text("}{ not json")
-    proc = subprocess.run(
+    for path in repo.glob("*.py"):
+        shutil.copy(path, src)
+    shutil.copytree(repo / "watchdog_catalog", src / "watchdog_catalog")
+    shutil.copytree(repo / "web", src / "web")
+    (src / "providers").write_text("not a directory", encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(src)}
+
+    imported = subprocess.run(
         [sys.executable, "-c",
-         "import config_loader, json; "
-         "print(json.dumps(sorted(config_loader.PROVIDERS)))"],
-        cwd=src, capture_output=True, text=True, timeout=60,
-        env={**os.environ, "PYTHONPATH": str(src)},
+         "import config_loader, inference_watchdog, build_site"],
+        cwd=src, capture_output=True, text=True, timeout=60, env=env,
     )
-    assert proc.returncode == 0, f"import raised: {proc.stderr}"
-    assert json.loads(proc.stdout.strip()) == ["good"]
-    assert "bad.json" in proc.stderr
+    assert imported.returncode == 0, f"import raised: {imported.stderr}"
+    assert imported.stdout == "" and imported.stderr == "", (
+        "importing an entry point must not acquire configuration: "
+        f"{imported.stdout!r} / {imported.stderr!r}")
+
+    for module in ("inference_watchdog", "build_site"):
+        helped = subprocess.run(
+            [sys.executable, "-c",
+             f"import {module}; {module}.main(['--help'])"],
+            cwd=src, capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert helped.returncode == 0, f"{module} --help failed: {helped.stderr}"
+        assert "usage:" in helped.stdout, f"{module} --help printed no usage"
+        assert helped.stderr == "", (
+            f"{module} --help acquired configuration: {helped.stderr!r}")
 
 
 # ---------- token_file auth via path_env (Nous path-pointer design) ----------
@@ -449,13 +466,15 @@ def test_provider_key_slug_fallback_for_hand_built_dicts():
 
 
 def test_real_configs_keys_unchanged_by_stem_migration():
-    """Migration safety net: the 7 shipped configs resolve to the SAME
-    roster keys as before the _PROVIDER_KEY_MAP deletion. nim.json is
-    still ON DISK but carries enabled:false, so it is absent from the
-    registry — 6 tracked. Update when a gateway is legitimately
-    added/removed OR enabled/disabled."""
-    expected = {"nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"}
-    assert set(config_loader.PROVIDERS) == expected
+    """Migration safety net: the shipped configs resolve to the SAME roster
+    keys as before the _PROVIDER_KEY_MAP deletion. nim.json is still ON DISK
+    but carries enabled:false, so it is absent from the registry. Update the
+    expected keys when a gateway is legitimately added/removed OR
+    enabled/disabled."""
+    expected = {"nous", "tokenrouter", "kilo", "openrouter", "amd", "bai",
+                "vercel", "felo", "tokenra", "infron", "aimlapi"}
+    registry = config_loader.build_providers(config_loader.load_configs())
+    assert set(registry) == expected
 
 
 def test_disabled_provider_config_file_survives_on_disk():
@@ -497,7 +516,8 @@ def test_provider_key_falls_back_to_file_stem(tmp_path, monkeypatch):
            "detection": "all-free", "auth": {"method": "none"}, "display": 0}
     (providers_dir / "nvidia-nim.json").write_text(json.dumps(cfg))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    assert "nvidia-nim" in config_loader.build_providers()
+    assert "nvidia-nim" in config_loader.build_providers(
+        config_loader.load_configs())
 
 
 def test_roster_key_overrides_stem(tmp_path, monkeypatch):
@@ -509,7 +529,8 @@ def test_roster_key_overrides_stem(tmp_path, monkeypatch):
     providers_dir.mkdir()
     (providers_dir / "nvidia-nim.json").write_text(json.dumps(cfg))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    assert set(config_loader.build_providers()) == {"nim"}
+    assert set(config_loader.build_providers(
+        config_loader.load_configs())) == {"nim"}
 
 
 def test_roster_key_used_verbatim(tmp_path, monkeypatch):
@@ -523,7 +544,8 @@ def test_roster_key_used_verbatim(tmp_path, monkeypatch):
            "roster_key": "my key"}
     (providers_dir / "weird.json").write_text(json.dumps(cfg))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    assert set(config_loader.build_providers()) == {"my key"}
+    assert set(config_loader.build_providers(
+        config_loader.load_configs())) == {"my key"}
 
 
 # ---------- probe: optional per-provider zero-credit-probe dialect ----------
@@ -622,7 +644,8 @@ def test_bai_config_carries_its_probe_dialect():
     lives in providers/bai.json, not only in probe_zero_credit.py defaults —
     the config is its real home and the DEFAULT_* constants are just the
     generic fallback for configs that omit the block."""
-    bai = config_loader.PROVIDERS["bai"]
+    registry = config_loader.build_providers(config_loader.load_configs())
+    bai = registry["bai"]
     assert bai["probe"]["max_tokens"] == 3
     assert len(bai["probe"]["paid_signals"]) == 3
 
@@ -636,7 +659,7 @@ def test_duplicate_provider_keys_warn(tmp_path, monkeypatch, capsys):
     (d / "b.json").write_text(json.dumps({**base, "name": "B", "display": 1,
                                           "roster_key": "a"}))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    providers = config_loader.build_providers()
+    providers = config_loader.build_providers(config_loader.load_configs())
     assert set(providers) == {"a"} and providers["a"]["name"] == "B"
     assert "duplicate provider key" in capsys.readouterr().err
 
@@ -790,8 +813,10 @@ def test_real_configs_include_nim_last_display():
     """providers/nim.json exists in the real repo config dir: all-free
     detection against https://integrate.api.nvidia.com/v1 with NVIDIA_API_KEY
     env_var auth, and display 6. The file survives being disabled, but
-    enabled:false keeps it out of load_configs(), so bai now sorts last
-    in every user-visible surface."""
+    enabled:false keeps it out of load_configs(), so the enabled configs sort
+    by their own display values and aimlapi (display 11) sorts last. This is a
+    REAL-registry inventory test, so the offline P4 witness source-inspects it
+    rather than executing it."""
     repo = Path(config_loader.__file__).resolve().parent
     cfg = json.loads((repo / "providers" / "nim.json").read_text(encoding="utf-8"))
     assert cfg["name"] == "NVIDIA NIM"
@@ -800,16 +825,19 @@ def test_real_configs_include_nim_last_display():
     assert cfg["auth"] == {"method": "env_var", "env_key": "NVIDIA_API_KEY"}
     assert cfg["display"] == 6
     configs = config_loader.load_configs()
-    assert len(configs) == 6, "real providers/ dir must hold six enabled configs"
+    assert len(configs) == 11, "real providers/ dir must hold eleven enabled configs"
+    assert configs[-1]["name"] == "AI/ML API"
+    assert configs[-1]["display"] == 11
 
 
 def test_build_gateway_wiring_shape_excludes_disabled():
-    """GATEWAY_WIRING has one entry per gateway; the 'auth' field is GONE
+    """The wiring map has one entry per gateway; the 'auth' field is GONE
     (operator: 'Bearer <your API key>' read the same for every gateway — it
     was dropped from all site/MCP surfaces), and only the two remaining
     fields survive. nim.json is on disk but enabled:false, so it must
     leave no dangling wiring entry."""
-    wiring = config_loader.build_gateway_wiring()
+    registry = config_loader.build_providers(config_loader.load_configs())
+    wiring = config_loader.build_gateway_wiring(registry)
     assert "nim" not in wiring
     for gw, w in wiring.items():
         assert set(w) == {"chat_completions_url", "api_type"}, f"{gw} wiring fields drifted"
@@ -989,9 +1017,10 @@ def test_removal_hold_accessor():
 
 def test_amd_ships_removal_hold():
     """Decision 8: real AMD config carries the 30-min hold; nous stays None."""
-    from config_loader import PROVIDERS, removal_hold
-    assert removal_hold(PROVIDERS["amd"]) == 1800
-    assert removal_hold(PROVIDERS["nous"]) is None
+    from config_loader import removal_hold
+    registry = config_loader.build_providers(config_loader.load_configs())
+    assert removal_hold(registry["amd"]) == 1800
+    assert removal_hold(registry["nous"]) is None
 
 
 # ---------- enabled: optional, strict bool, present-means-valid ----------
@@ -1068,8 +1097,8 @@ def test_enabled_false_is_valid_but_not_yet_gated(tmp_path, monkeypatch, capsys)
 
 
 def test_disabled_provider_excluded_from_registry(tmp_path, monkeypatch, capsys):
-    """enabled:false drops the provider from load_configs() -> PROVIDERS
-    and GATEWAY_WIRING, so the tick never fetches it, the dashboard
+    """enabled:false drops the provider from load_configs() -> the registry
+    and its wiring map, so the tick never fetches it, the dashboard
     never renders a column, and the MCP server never lists it. The
     config FILE stays on disk, so re-enabling is a one-character edit."""
     providers_dir = tmp_path / "providers"
@@ -1081,10 +1110,11 @@ def test_disabled_provider_excluded_from_registry(tmp_path, monkeypatch, capsys)
         {"name": "Off", "base_url": "https://off.com/v1", "detection": "all-free",
          "auth": {"method": "none"}, "display": 1, "enabled": False}))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    assert set(config_loader.build_providers()) == {"on"}
-    # GATEWAY_WIRING is gated by the same load_configs() call — a
+    registry = config_loader.build_providers(config_loader.load_configs())
+    assert set(registry) == {"on"}
+    # The wiring projection is gated by the same load_configs() call — a
     # disabled provider must not leave a dangling wiring entry.
-    assert set(config_loader.build_gateway_wiring()) == {"on"}
+    assert set(config_loader.build_gateway_wiring(registry)) == {"on"}
     assert "off" in capsys.readouterr().err       # visible, not silent
 
 
@@ -1098,7 +1128,8 @@ def test_absent_enabled_defaults_to_on(tmp_path, monkeypatch):
         {"name": "Legacy", "base_url": "https://l.com/v1",
          "detection": "all-free", "auth": {"method": "none"}, "display": 0}))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    assert set(config_loader.build_providers()) == {"legacy"}
+    assert set(config_loader.build_providers(
+        config_loader.load_configs())) == {"legacy"}
 
 
 def test_disabling_is_silent_no_mass_removal(tmp_path, monkeypatch):
@@ -1113,7 +1144,8 @@ def test_disabling_is_silent_no_mass_removal(tmp_path, monkeypatch):
         {"name": "On", "base_url": "https://on.com/v1", "detection": "all-free",
          "auth": {"method": "none"}, "display": 0}))
     monkeypatch.setattr(config_loader, "REPO", tmp_path)
-    reg = config_loader.build_providers()            # only "on"
+    reg = config_loader.build_providers(
+        config_loader.load_configs())                # only "on"
     roster = {"tick_epoch": 0, "providers": {"on": ["a"], "off": ["x", "y"]}}
     roster_path = tmp_path / "roster.json"
     roster_path.write_text(json.dumps(roster), encoding="utf-8")
@@ -1123,3 +1155,413 @@ def test_disabling_is_silent_no_mass_removal(tmp_path, monkeypatch):
     new_map, stale = diffing.apply_sticky(loaded["providers"], {"on": ["a"]})
     events, first_run = diffing.compute_events(loaded, new_map, registry=set(reg))
     assert events == {} and stale == [] and first_run is False
+
+
+# ---------- catalogue seam fields: catalog_url / catalog_format (P1) ----------
+
+CATALOG_BASE = {"name": "Catalog", "base_url": "https://api.example.com/v1",
+                "detection": "all-free", "auth": {"method": "none"},
+                "display": 0}
+
+
+def _write_catalog_provider(tmp_path, monkeypatch, fname, config):
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir(parents=True, exist_ok=True)
+    (providers_dir / fname).write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+
+
+def _load_one(tmp_path, monkeypatch, **overrides):
+    config = dict(CATALOG_BASE)
+    config.update(overrides)
+    _write_catalog_provider(tmp_path, monkeypatch, "catalog.json", config)
+    return config_loader.load_configs()
+
+
+def test_absent_catalog_fields_keep_the_legacy_config(tmp_path, monkeypatch):
+    configs = _load_one(tmp_path, monkeypatch)
+    assert len(configs) == 1
+    assert "catalog_url" not in configs[0]
+    assert "catalog_format" not in configs[0]
+
+
+def test_catalog_url_and_format_are_accepted_and_bytes_preserved(
+        tmp_path, monkeypatch):
+    literal = ("https://API.example.com/v1/models"
+               "?include=pricing%2Cmodalities&type=openai/chat-completions")
+    configs = _load_one(tmp_path, monkeypatch,
+                        detection="catalog-pricing",
+                        catalog_url=literal,
+                        catalog_format="input-output-models")
+    assert len(configs) == 1
+    assert configs[0]["catalog_url"] == literal, "URL bytes must not be normalised"
+    assert configs[0]["catalog_format"] == "input-output-models"
+
+
+def test_url_only_override_with_the_legacy_shape_is_allowed(
+        tmp_path, monkeypatch):
+    configs = _load_one(tmp_path, monkeypatch, detection="api-pricing",
+                        catalog_url="https://mirror.example.net/models?page=1")
+    assert len(configs) == 1
+    assert configs[0]["catalog_url"] == "https://mirror.example.net/models?page=1"
+
+
+def test_explicit_legacy_format_keeps_legacy_detection_choices(
+        tmp_path, monkeypatch):
+    configs = _load_one(tmp_path, monkeypatch, detection="id-suffix",
+                        catalog_format="openai-models")
+    assert len(configs) == 1
+    assert configs[0]["catalog_format"] == "openai-models"
+
+
+def test_anonymous_cross_origin_override_is_allowed(tmp_path, monkeypatch):
+    configs = _load_one(tmp_path, monkeypatch, detection="catalog-pricing",
+                        catalog_url="https://mirror.example.net/v1/models",
+                        catalog_format="input-output-models")
+    assert len(configs) == 1
+
+
+def test_percent_encoded_hash_stays_literal_url_data(tmp_path, monkeypatch):
+    """Only a literal `#` is a fragment delimiter; `%23` is URL data.
+
+    Paired positive control for the empty-fragment rejection: the encoded form
+    survives validation byte for byte in both path and query.
+    """
+    literal = "https://api.example.com/v1/mo%23dels?filter=a%23b"
+    configs = _load_one(tmp_path, monkeypatch, detection="catalog-pricing",
+                        catalog_url=literal,
+                        catalog_format="input-output-models")
+    assert len(configs) == 1
+    assert configs[0]["catalog_url"] == literal
+
+
+def test_same_origin_credential_bearing_override_keeps_existing_auth(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("CATALOG_TEST_KEY", "env-token")
+    configs = _load_one(
+        tmp_path, monkeypatch, detection="catalog-pricing",
+        auth={"method": "env_var", "env_key": "CATALOG_TEST_KEY"},
+        catalog_url="https://api.example.com/v2/models",
+        catalog_format="input-output-models")
+    assert len(configs) == 1
+    assert configs[0]["_token"] == "env-token"
+
+
+def test_build_gateway_wiring_reads_base_url_not_catalog_url():
+    config = dict(CATALOG_BASE, detection="catalog-pricing",
+                  catalog_url="https://mirror.example.net/v1/models",
+                  catalog_format="input-output-models")
+    wiring = config_loader.build_gateway_wiring({"catalog": config})
+    assert wiring["catalog"]["chat_completions_url"] == (
+        "https://api.example.com/v1/chat/completions")
+
+
+BAD_CATALOG_FIELDS = [
+    ("url-null", {"catalog_url": None}),
+    ("url-int", {"catalog_url": 7}),
+    ("url-list", {"catalog_url": ["https://api.example.com/v1/models"]}),
+    ("url-blank", {"catalog_url": ""}),
+    ("url-padded", {"catalog_url": " https://api.example.com/v1/models"}),
+    ("url-trailing-space", {"catalog_url": "https://api.example.com/v1/models "}),
+    ("url-http", {"catalog_url": "http://api.example.com/v1/models"}),
+    ("url-relative", {"catalog_url": "//api.example.com/v1/models"}),
+    ("url-no-host", {"catalog_url": "https:///v1/models"}),
+    ("url-userinfo", {"catalog_url": "https://u:p@api.example.com/v1/models"}),
+    ("url-fragment", {"catalog_url": "https://api.example.com/v1/models#frag"}),
+    ("url-empty-fragment",
+     {"catalog_url": "https://api.example.com/v1/models#"}),
+    ("url-empty-fragment-after-query",
+     {"catalog_url": "https://api.example.com/v1/models?a=1#"}),
+    ("url-control", {"catalog_url": "https://api.example.com/v1/mo\u0000dels"}),
+    ("url-inner-space", {"catalog_url": "https://api.example.com/v1/a b"}),
+    ("url-bad-port", {"catalog_url": "https://api.example.com:nope/v1/models"}),
+    ("format-null", {"catalog_format": None}),
+    ("format-int", {"catalog_format": 1}),
+    ("format-blank", {"catalog_format": ""}),
+    ("format-padded", {"catalog_format": " input-output-models"}),
+    # Deliberately bogus, not a roadmap name: `provider-models` is P4's family
+    # and must not be spent as an "unknown" negative here (P3 SPEC F1).
+    ("format-unknown", {"catalog_format": "not-a-catalog-format"}),
+    ("format-legacy-case", {"catalog_format": "OpenAI-Models"}),
+    ("pair-missing-format", {"detection": "catalog-pricing"}),
+    ("pair-legacy-format", {"detection": "catalog-pricing",
+                            "catalog_format": "openai-models"}),
+    ("pair-wrong-detection", {"detection": "api-pricing",
+                              "catalog_format": "input-output-models"}),
+    ("pair-all-free", {"detection": "all-free",
+                       "catalog_format": "input-output-models"}),
+    ("cred-env-cross-origin",
+     {"detection": "catalog-pricing",
+      "catalog_format": "input-output-models",
+      "auth": {"method": "env_var", "env_key": "CATALOG_TEST_KEY"},
+      "catalog_url": "https://mirror.example.net/v1/models"}),
+    ("cred-token-file-cross-origin",
+     {"detection": "catalog-pricing",
+      "catalog_format": "input-output-models",
+      "auth": {"method": "token_file", "path": "/nonexistent/token.json",
+               "key": "token"},
+      "catalog_url": "https://mirror.example.net/v1/models"}),
+]
+
+
+@pytest.mark.parametrize("case,overrides", BAD_CATALOG_FIELDS,
+                         ids=[case for case, _ in BAD_CATALOG_FIELDS])
+def test_bad_catalog_field_skips_only_that_file(
+        tmp_path, monkeypatch, capsys, case, overrides):
+    """Every rejection class costs exactly one file; a healthy sibling loads.
+
+    The credential-bearing cases also prove the rejection happens BEFORE the
+    credential lookup: no `auth degraded` line and no token file read.
+    """
+    bad = dict(CATALOG_BASE, **overrides)
+    _write_catalog_provider(tmp_path, monkeypatch, "bad.json", bad)
+    _write_catalog_provider(tmp_path, monkeypatch, "good.json",
+                    dict(CATALOG_BASE, name="Good"))
+    configs = config_loader.load_configs()  # must not raise
+    assert [c["name"] for c in configs] == ["Good"], case
+    stderr = capsys.readouterr().err
+    assert "skipping" in stderr.lower() and "bad.json" in stderr, case
+    assert "degraded" not in stderr, (
+        f"{case}: rejected before any credential resolution")
+    if case == "format-unknown":
+        # This case pins the UNKNOWN-FORMAT branch itself. A registered family
+        # here (e.g. `newapi-pricing`) would still be skipped, but only because
+        # `all-free` is an incompatible detection — the PAIRING rule, not the
+        # registration check — so asserting the rejection phrase is what keeps
+        # the case honest (P3 SPEC F1).
+        assert "unknown catalog_format" in stderr, (
+            f"{case}: expected the unknown-format branch, got: {stderr!r}")
+
+
+# ---------- shipped Felo config (P2) ----------
+
+def test_channel_catalog_format_pairs_with_catalog_pricing(tmp_path, monkeypatch):
+    configs = _load_one(
+        tmp_path, monkeypatch, detection="catalog-pricing",
+        catalog_url="https://openapi.felo.ai/api/platform/model-catalog",
+        catalog_format="channel-catalog")
+    assert len(configs) == 1
+    assert configs[0]["catalog_format"] == "channel-catalog"
+
+
+def test_shipped_felo_config_loads_from_a_one_file_directory(
+        tmp_path, monkeypatch, capsys):
+    """The real shipped config, copied verbatim, through the real loader.
+
+    A one-file synthetic providers dir keeps the run off the real registry and
+    resolves no credential: `auth: none` must leave `_token` None.
+    """
+    import shutil
+
+    shipped = Path(config_loader.__file__).resolve().parent / "providers" / "felo.json"
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    shutil.copy2(shipped, providers_dir / "felo.json")
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+
+    configs = config_loader.load_configs()
+    assert [c["name"] for c in configs] == ["Felo"]
+    cfg = configs[0]
+    assert cfg["base_url"] == "https://openapi.felo.ai/api/v1"
+    assert cfg["catalog_url"] == (
+        "https://openapi.felo.ai/api/platform/model-catalog")
+    assert cfg["catalog_format"] == "channel-catalog"
+    assert cfg["detection"] == "catalog-pricing"
+    assert cfg["auth"] == {"method": "none"}
+    assert cfg["display"] == 8
+    assert cfg["signup_url"] == "https://openapi.felo.ai/console/api-keys"
+    assert cfg["_stem"] == "felo"
+    assert cfg["_token"] is None, "anonymous auth resolves no credential"
+    assert "skipping" not in capsys.readouterr().err
+
+    wiring = config_loader.build_gateway_wiring(
+        config_loader.build_providers(configs))
+    assert wiring["felo"] == {
+        "chat_completions_url": "https://openapi.felo.ai/api/v1/chat/completions",
+        "api_type": "openai_compatible",
+    }
+
+
+# ---------- shipped TokenRA config (P3) ----------
+
+def test_newapi_pricing_format_pairs_with_catalog_pricing(tmp_path, monkeypatch):
+    configs = _load_one(
+        tmp_path, monkeypatch, detection="catalog-pricing",
+        catalog_url="https://tokenra.io/api/pricing",
+        catalog_format="newapi-pricing")
+    assert len(configs) == 1
+    assert configs[0]["catalog_format"] == "newapi-pricing"
+
+
+def test_shipped_tokenra_config_loads_from_a_one_file_directory(
+        tmp_path, monkeypatch, capsys):
+    """The real shipped config, copied verbatim, through the real loader.
+
+    A one-file synthetic providers dir keeps the run off the real registry and
+    resolves no credential: `auth: none` must leave `_token` None. The
+    published inference URL is still derived from `base_url`, never from
+    `catalog_url`.
+    """
+    import shutil
+
+    shipped = (Path(config_loader.__file__).resolve().parent
+               / "providers" / "tokenra.json")
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    shutil.copy2(shipped, providers_dir / "tokenra.json")
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+
+    configs = config_loader.load_configs()
+    assert [c["name"] for c in configs] == ["TokenRA"]
+    cfg = configs[0]
+    assert cfg["base_url"] == "https://tokenra.io/v1"
+    assert cfg["catalog_url"] == "https://tokenra.io/api/pricing"
+    assert cfg["catalog_format"] == "newapi-pricing"
+    assert cfg["detection"] == "catalog-pricing"
+    assert cfg["auth"] == {"method": "none"}
+    assert cfg["display"] == 9
+    assert cfg["signup_url"] == "https://tokenra.io/register"
+    assert cfg["_stem"] == "tokenra"
+    assert cfg["_token"] is None, "anonymous auth resolves no credential"
+    assert "skipping" not in capsys.readouterr().err
+
+    wiring = config_loader.build_gateway_wiring(
+        config_loader.build_providers(configs))
+    assert wiring["tokenra"] == {
+        "chat_completions_url": "https://tokenra.io/v1/chat/completions",
+        "api_type": "openai_compatible",
+    }
+
+
+# ---------- shipped Infron config (P4) ----------
+
+def test_provider_models_format_pairs_with_catalog_pricing(
+        tmp_path, monkeypatch):
+    configs = _load_one(
+        tmp_path, monkeypatch, detection="catalog-pricing",
+        catalog_url="https://llm.onerouter.pro/v1/models",
+        catalog_format="provider-models")
+    assert len(configs) == 1
+    assert configs[0]["catalog_format"] == "provider-models"
+
+
+def test_shipped_infron_config_loads_from_a_one_file_directory(
+        tmp_path, monkeypatch, capsys):
+    """The real shipped config, copied verbatim, through the real loader.
+
+    A one-file synthetic providers dir keeps the run off the real registry and
+    resolves no credential: `auth: none` must leave `_token` None. The published
+    inference URL is still derived from `base_url`, never from `catalog_url`,
+    and the literal discovery URL is preserved byte for byte.
+    """
+    import shutil
+
+    shipped = (Path(config_loader.__file__).resolve().parent
+               / "providers" / "infron.json")
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    shutil.copy2(shipped, providers_dir / "infron.json")
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+
+    configs = config_loader.load_configs()
+    assert [c["name"] for c in configs] == ["Infron"]
+    cfg = configs[0]
+    assert cfg["base_url"] == "https://llm.onerouter.pro/v1"
+    assert cfg["catalog_url"] == "https://llm.onerouter.pro/v1/models"
+    assert cfg["catalog_format"] == "provider-models"
+    assert cfg["detection"] == "catalog-pricing"
+    assert cfg["auth"] == {"method": "none"}
+    assert cfg["display"] == 10
+    assert cfg["signup_url"] == "https://infron.ai/login"
+    assert "2026-11-22" in cfg["limits_note"]
+    assert cfg["_stem"] == "infron"
+    assert cfg["_token"] is None, "anonymous auth resolves no credential"
+    assert "skipping" not in capsys.readouterr().err
+
+    wiring = config_loader.build_gateway_wiring(
+        config_loader.build_providers(configs))
+    assert wiring["infron"] == {
+        "chat_completions_url": "https://llm.onerouter.pro/v1/chat/completions",
+        "api_type": "openai_compatible",
+    }
+
+
+# ---------- shipped AI/ML API config (P5) ----------
+
+def test_typed_unit_models_format_pairs_with_catalog_pricing(
+        tmp_path, monkeypatch):
+    configs = _load_one(
+        tmp_path, monkeypatch, detection="catalog-pricing",
+        catalog_url=("https://api.aimlapi.com/v1/models?include=pricing,"
+                     "modalities&type=openai/chat-completions"),
+        catalog_format="typed-unit-models")
+    assert len(configs) == 1
+    assert configs[0]["catalog_format"] == "typed-unit-models"
+
+
+def test_shipped_aimlapi_config_loads_from_a_one_file_directory(
+        tmp_path, monkeypatch, capsys):
+    """The real shipped config, copied verbatim, through the real loader.
+
+    A one-file synthetic providers dir keeps the run off the real registry and
+    resolves no credential: `auth: none` must leave `_token` None. The literal
+    discovery URL, including its exact query and pair order, is preserved byte
+    for byte; the published inference URL is still derived from `base_url`.
+    """
+    import shutil
+
+    shipped = (Path(config_loader.__file__).resolve().parent
+               / "providers" / "aimlapi.json")
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    shutil.copy2(shipped, providers_dir / "aimlapi.json")
+    monkeypatch.setattr(config_loader, "REPO", tmp_path)
+
+    configs = config_loader.load_configs()
+    assert [c["name"] for c in configs] == ["AI/ML API"]
+    cfg = configs[0]
+    assert cfg["base_url"] == "https://api.aimlapi.com/v1"
+    assert cfg["catalog_url"] == (
+        "https://api.aimlapi.com/v1/models?include=pricing,modalities"
+        "&type=openai/chat-completions")
+    assert cfg["catalog_format"] == "typed-unit-models"
+    assert cfg["detection"] == "catalog-pricing"
+    assert cfg["auth"] == {"method": "none"}
+    assert cfg["display"] == 11
+    assert cfg["signup_url"] == "https://aimlapi.com/app/sign-up"
+    assert "2026-11-22" in cfg["limits_note"]
+    assert cfg.get("enabled", True) is not False, "shipped gateway stays enabled"
+    assert cfg["_stem"] == "aimlapi"
+    assert cfg["_token"] is None, "anonymous auth resolves no credential"
+    assert "skipping" not in capsys.readouterr().err
+
+    wiring = config_loader.build_gateway_wiring(
+        config_loader.build_providers(configs))
+    assert wiring["aimlapi"] == {
+        "chat_completions_url": "https://api.aimlapi.com/v1/chat/completions",
+        "api_type": "openai_compatible",
+    }
+
+
+def test_every_shipped_config_declares_a_distinct_display_and_a_registered_format():
+    """Public JSON reads only: no loader, credential or registry execution.
+
+    L2's metadata-only display oracle is not universal, so this checks the
+    ACTUAL shipped config files rather than an inventory subset.
+    """
+    import catalog_adapters
+
+    repo = Path(config_loader.__file__).resolve().parent
+    displays = {}
+    formats = {}
+    for path in sorted((repo / "providers").glob("*.json")):
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        key = cfg.get("roster_key") or path.stem
+        displays[key] = cfg.get("display", 0)
+        formats[key] = cfg.get("catalog_format")
+        if cfg.get("catalog_format") is not None:
+            assert catalog_adapters.is_registered_format(
+                cfg["catalog_format"]), path.name
+    assert len(set(displays.values())) == len(displays), displays
+    assert formats["infron"] == catalog_adapters.PROVIDER_MODELS_FORMAT
+    assert formats["aimlapi"] == catalog_adapters.TYPED_UNIT_MODELS_FORMAT

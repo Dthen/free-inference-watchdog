@@ -7,7 +7,6 @@ This module exercises only the small source/cache boundary:
     watchdog_catalog.source.DEFAULT_TIMEOUT_S
     watchdog_catalog.source.SourceError
     watchdog_catalog.source.load_catalog_file   (unit 5a)
-    watchdog_catalog.source.load_catalog_url    (unit 5b)
     watchdog_catalog.source.DiskCache           (unit 5c)
     watchdog_catalog.source.fetch_catalog_url   (unit 5d)
     watchdog_catalog.source.CatalogSource       (unit 5e)
@@ -19,31 +18,33 @@ This module exercises only the small source/cache boundary:
 `load_catalog_file` is one explicit, byte-bounded binary read of an
 operator-selected path whose bytes are decoded as strict UTF-8 and then handed
 EXACTLY ONCE to the accepted ``watchdog_catalog.catalog.load_snapshot``
-validator. `load_catalog_url` is one explicit, byte-bounded, credential-free
-HTTP GET of an operator-selected URL, with the same single delegation. The
-accepted validator -- not these layers -- owns JSON, schema and hash truth, so
-a malformed document keeps its frozen core ``CatalogError`` code/message. Only
-transport-shaped faults (open/read/close failure, oversize, invalid
-path/URL/byte-limit/timeout configuration) become the fixed, non-reflective
-``SourceError`` with code ``source_unavailable``.
+validator. The HTTP boundary is one explicit, byte-bounded, credential-free
+HTTP GET of an operator-selected URL: an accepted 200 body goes through that
+same core validator, while a 304 reuses the already-validated candidate instead
+of loading a document. The accepted validator -- not these layers -- owns JSON,
+schema and hash truth, so a malformed document keeps its frozen core
+``CatalogError`` code/message. Only transport-shaped faults (open/read/close
+failure, oversize, invalid path/URL/byte-limit/timeout configuration) become
+the fixed, non-reflective ``SourceError`` with code ``source_unavailable``.
 
 Two unparametrized local-file behavioural groups cover accepted scratch-file
-loading and stable failures/import isolation. Two further unparametrized HTTP
-groups cover one accepted 200 document (framing, byte bounds, defaults through
-a network-free double) and every non-200 / malformed / timed-out / disconnected
-/ misconfigured case. Every socket is a numeric-loopback stdlib server on an
-ephemeral port; no test resolves a public host, and the production default URL
-is only exercised through a request/response double.
+loading and stable failures/import isolation. The HTTP boundary is exercised by
+two unparametrized live fetch groups: the accepted 200 flow with conditional 304
+reuse, validator capture and rejection, candidate detachment, DiskCache
+compatibility and the private opener; then every invalid or oversized candidate,
+unsolicited or contradictory 304, unread 304 body, status family, encoding and
+length framing, raw byte cap, read/close/timeout/disconnect fault and
+configuration that never dials. Those groups use a numeric-loopback stdlib
+server on an ephemeral port for live sockets and scoped response doubles for
+transport faults; no test resolves a public host, and the published default URL
+is never dialled.
 
 ``DiskCache`` (unit 5c) is implemented and exercised here. ``fetch_catalog_url``
 (unit 5d) is ONE synchronous conditional revalidation of ONE literal URL: it
 may send a single ``If-None-Match`` (preferred) or ``If-Modified-Since`` header
 derived only from a detached, fully re-validated same-source candidate entry,
-and it accepts a 304 only when it sent such a header. Two further
-unparametrized groups cover that primitive: the accepted 200/304/changed-200
-flow, validator capture and rejection, candidate detachment and DiskCache
-compatibility; then every invalid candidate, unsolicited or contradictory 304,
-unread 304 body, framing fault and fallback-free failure.
+and it accepts a 304 only when it sent such a header. The two live fetch groups
+above cover that primitive end to end, including every fallback-free failure.
 
 ``CatalogSource`` and ``with_source`` (unit 5e) are implemented and exercised
 here too. ``CatalogSource`` is the synchronous acquisition/state layer over
@@ -108,7 +109,7 @@ FIXTURE_DIR = REPO / "tests" / "fixtures" / "catalog"
 #: Representative committed accepted snapshots: a plain two-provider document,
 #: a deliberately non-alphabetical ordering document (astral/fullwidth/Unicode
 #: ids included) and the optional-metadata edge document (null/zero/typed
-#: pricing rows).
+#: capability rows).
 ACCEPTED_FIXTURES = ("basic.json", "ordering.json", "metadata-edge-cases.json")
 
 SOURCE_CODE = "source_unavailable"
@@ -203,16 +204,11 @@ def test_catalog_file_source_reads_one_explicit_bounded_file(
     known = metadata["vendor/known-context"]
     assert known["context_length"] == 65536
     assert type(known["context_length"]) is int
-    assert known["pricing"] == {"prompt": "0", "completion": 0}
-    assert type(known["pricing"]["prompt"]) is str
-    assert type(known["pricing"]["completion"]) is int
     unknown = metadata["vendor/unknown-context"]
     assert unknown["context_length"] is None
-    assert unknown["pricing"] is None
     zero = metadata["vendor/zero-context"]
     assert zero["context_length"] == 0
     assert type(zero["context_length"]) is int
-    assert zero["pricing"] == {"prompt": None, "completion": "0"}
 
     # -- (b) a LEGITIMATELY empty catalogue is a success, not a failure -------
     empty_doc = json.loads((FIXTURE_DIR / "basic.json").read_text("utf-8"))
@@ -411,17 +407,17 @@ def test_catalog_source_failures_types_and_imports_stay_stable(
 
     # -- (c) accepted core errors survive the file boundary untouched ---------
     invalid_utf8 = tmp_path / "invalid-utf8.json"
-    invalid_utf8.write_bytes(b'{"schema_version": 1, "snapshot_id": "\xff\xfe"}')
+    invalid_utf8.write_bytes(b'{"schema_version": 2, "snapshot_id": "\xff\xfe"}')
     bom = tmp_path / "bom.json"
     bom.write_bytes(b"\xef\xbb\xbf" + raw)
     malformed = tmp_path / "malformed.json"
-    malformed.write_bytes(b'{"schema_version": 1, "snapshot_id": ')
+    malformed.write_bytes(b'{"schema_version": 2, "snapshot_id": ')
     tampered = json.loads(raw.decode("utf-8"))
     tampered["snapshot_id"] = "0" * 64
     tampered_path = tmp_path / "tampered.json"
     tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
     future_version = json.loads(raw.decode("utf-8"))
-    future_version["schema_version"] = 2
+    future_version["schema_version"] = 3
     future_path = tmp_path / "future-schema.json"
     future_path.write_text(json.dumps(future_version), encoding="utf-8")
 
@@ -531,13 +527,13 @@ sys.stdout.write(json.dumps(report))
 
 
 # ---------------------------------------------------------------------------
-# Unit 5b: one bounded, credential-free HTTP 200 catalogue document
+# Unit 5b shared doubles: loopback HTTP server, response double, headers
 # ---------------------------------------------------------------------------
 #
-# The two behavioral groups below cover ONE synchronous GET of ONE explicit
-# URL. Every socket is a numeric-loopback stdlib server on an ephemeral port;
-# nothing here resolves a public host, and the published default URL is only
-# ever exercised through a network-free ``OpenerDirector.open`` double.
+# These compact helpers serve the LIVE fetch groups below: the accepted 200/304
+# flow and its transport/framing failure group. Every socket is a numeric-
+# loopback stdlib server on an ephemeral port; nothing here resolves a public
+# host, and the published default URL is never dialled.
 
 ACCEPT_HEADER = "application/json"
 ENCODING_HEADER = "identity"
@@ -732,484 +728,6 @@ def loopback():
 
 def _sent_headers(request):
     return {name.lower(): value for name, value in request["headers"].items()}
-
-
-def test_catalog_url_source_loads_one_bounded_http_document(
-        loopback, tmp_path, monkeypatch):
-    # -- (a) the published defaults are fixed literals ------------------------
-    assert source.DEFAULT_CATALOG_URL == (
-        "https://raw.githubusercontent.com/Dthen/free-inference-watchdog/"
-        "master/site/catalog.json")
-    assert source.DEFAULT_TIMEOUT_S == 10
-    assert source.MAX_SOURCE_BYTES == 8 * 1024 * 1024
-
-    basic_raw = (FIXTURE_DIR / "basic.json").read_bytes()
-    basic_doc = json.loads(basic_raw.decode("utf-8"))
-
-    # -- (b) ONE literal GET of a 200 document; accepted snapshot and hash ----
-    loopback.serve(basic_raw)
-    url = loopback.url("/catalog.json")
-    snapshot = source.load_catalog_url(url)
-    assert snapshot == basic_doc
-    assert snapshot["snapshot_id"] == basic_doc["snapshot_id"]
-    assert catalog.snapshot_hash(snapshot) == basic_doc["snapshot_id"]
-    assert len(loopback.requests) == 1
-    request = loopback.requests[0]
-    assert request["method"] == "GET"
-    assert request["path"] == "/catalog.json"
-    sent = _sent_headers(request)
-    assert sent["accept"] == ACCEPT_HEADER
-    assert sent["accept-encoding"] == ENCODING_HEADER
-    for credential in ("authorization", "cookie", "proxy-authorization"):
-        assert credential not in sent
-
-    # -- (c) the selected URL reaches the request literally -------------------
-    loopback.serve(basic_raw)
-    literal = "/catalog.json?source=./literal&mirror=none"
-    assert source.load_catalog_url(loopback.url(literal))["snapshot_id"] == \
-        basic_doc["snapshot_id"]
-    assert loopback.requests[-1]["path"] == literal
-
-    # -- (d) a legitimately EMPTY catalogue is a 200 success ------------------
-    empty_doc = json.loads(basic_raw.decode("utf-8"))
-    empty_doc["provider_order"] = []
-    empty_doc["providers"] = {}
-    _reseal(empty_doc)
-    loopback.serve(json.dumps(empty_doc, indent=2).encode("utf-8"))
-    empty = source.load_catalog_url(loopback.url("/empty.json"))
-    assert empty["provider_order"] == [] and empty["providers"] == {}
-    assert empty["snapshot_id"] == empty_doc["snapshot_id"] == \
-        catalog.snapshot_hash(empty)
-
-    # -- (e) typed optional metadata survives the HTTP boundary ---------------
-    loopback.serve((FIXTURE_DIR / "metadata-edge-cases.json").read_bytes())
-    metadata = source.load_catalog_url(
-        loopback.url("/metadata.json"))["providers"]["synthetic-a"]["models"]
-    known = metadata["vendor/known-context"]
-    assert known["context_length"] == 65536
-    assert type(known["context_length"]) is int
-    assert known["pricing"] == {"prompt": "0", "completion": 0}
-    assert type(known["pricing"]["prompt"]) is str
-    assert type(known["pricing"]["completion"]) is int
-    assert metadata["vendor/unknown-context"]["context_length"] is None
-    assert metadata["vendor/unknown-context"]["pricing"] is None
-    assert metadata["vendor/zero-context"]["context_length"] == 0
-
-    # -- (f) exactly ONE core delegation; the returned object is forwarded ----
-    calls, forwarded = [], []
-    accepted_load_snapshot = catalog.load_snapshot
-
-    def spy(text):
-        calls.append(text)
-        result = accepted_load_snapshot(text)
-        forwarded.append(result)
-        return result
-
-    loopback.serve(basic_raw)
-    monkeypatch.setattr(catalog, "load_snapshot", spy)
-    delegated = source.load_catalog_url(loopback.url("/delegated.json"))
-    monkeypatch.undo()
-    assert len(calls) == 1
-    assert calls[0] == basic_raw.decode("utf-8")
-    assert delegated is forwarded[0]
-
-    # -- (g) byte bounds count RAW BYTES, exactly ----------------------------
-    loopback.serve(basic_raw)
-    bounded = loopback.url("/bounded.json")
-    assert source.load_catalog_url(
-        bounded, max_bytes=len(basic_raw))["snapshot_id"] == \
-        basic_doc["snapshot_id"]
-    _fixed_source_error(
-        lambda: source.load_catalog_url(
-            bounded, max_bytes=len(basic_raw) - 1),
-        ("127.0.0.1", "bounded.json",
-         basic_raw[:16].decode("utf-8", "replace")))
-
-    multibyte = json.loads(basic_raw.decode("utf-8"))
-    alpha = multibyte["providers"]["synthetic-a"]
-    alpha["display_name"] = "Café 東京"
-    alpha["models"]["alpha-1:free"]["name"] = "Alpha Ünïcode 東京"
-    _reseal(multibyte)
-    multibyte_raw = json.dumps(
-        multibyte, indent=2, ensure_ascii=False).encode("utf-8")
-    character_count = len(multibyte_raw.decode("utf-8"))
-    assert len(multibyte_raw) > character_count
-    loopback.serve(multibyte_raw)
-    _fixed_source_error(
-        lambda: source.load_catalog_url(
-            loopback.url("/multibyte.json"), max_bytes=character_count),
-        ("127.0.0.1", "multibyte.json", "Café 東京"))
-    loaded = source.load_catalog_url(
-        loopback.url("/multibyte.json"), max_bytes=len(multibyte_raw))
-    assert loaded["providers"]["synthetic-a"]["display_name"] == "Café 東京"
-    assert loaded["snapshot_id"] == multibyte["snapshot_id"]
-
-    # -- (h) framing variants: no Content-Length, chunked, identity encoding --
-    loopback.serve(basic_raw, length=False)
-    assert source.load_catalog_url(
-        loopback.url("/no-length"))["snapshot_id"] == \
-        basic_doc["snapshot_id"]
-    loopback.serve(basic_raw, chunked=True)
-    assert source.load_catalog_url(
-        loopback.url("/chunked"))["snapshot_id"] == basic_doc["snapshot_id"]
-    loopback.serve(basic_raw, headers=[("Content-Encoding", "identity")])
-    assert source.load_catalog_url(
-        loopback.url("/identity"))["snapshot_id"] == basic_doc["snapshot_id"]
-    # a non-JSON Content-Type is NOT a reason to reject a valid document
-    loopback.serve(basic_raw,
-                   headers=[("Content-Type", "text/plain; charset=utf-8")])
-    assert source.load_catalog_url(
-        loopback.url("/plain"))["snapshot_id"] == basic_doc["snapshot_id"]
-
-    # -- (i) the READ cap, not a declaration, bounds a body ------------------
-    loopback.serve(basic_raw + b" ", length=False)
-    _fixed_source_error(
-        lambda: source.load_catalog_url(
-            loopback.url("/no-length-oversize"), max_bytes=len(basic_raw)),
-        ("127.0.0.1", "no-length-oversize"))
-
-    # a CHUNKED body has its OWN http.client reader, so it gets the same cap:
-    # one raw byte over fails, exactly at the cap the body is accepted.
-    loopback.serve(basic_raw + b" ", chunked=True)
-    _fixed_source_error(
-        lambda: source.load_catalog_url(
-            loopback.url("/chunked-oversize"), max_bytes=len(basic_raw)),
-        ("127.0.0.1", "chunked-oversize"))
-    loopback.serve(basic_raw, chunked=True)
-    assert source.load_catalog_url(
-        loopback.url("/chunked-at-cap"),
-        max_bytes=len(basic_raw))["snapshot_id"] == basic_doc["snapshot_id"]
-
-    # oversize is rejected BEFORE any UTF-8 decode or catalogue validation.
-    loopback.serve(b"\xff" * 64)
-    _fixed_source_error(
-        lambda: source.load_catalog_url(
-            loopback.url("/oversize-binary"), max_bytes=32),
-        ("127.0.0.1", "oversize-binary"))
-
-    # a declared over-limit length fails without trusting the socket
-    loopback.serve(basic_raw,
-                   headers=[("Content-Length", str(len(basic_raw) + 1))],
-                   length=False)
-    _fixed_source_error(
-        lambda: source.load_catalog_url(
-            loopback.url("/declared"), max_bytes=len(basic_raw)),
-        ("127.0.0.1", "declared"))
-
-    # a COMPLETE valid snapshot followed by early EOF is still a failure
-    loopback.serve(basic_raw,
-                   headers=[("Content-Length", str(len(basic_raw) + 10))],
-                   length=False)
-    _fixed_source_error(
-        lambda: source.load_catalog_url(loopback.url("/promised")),
-        ("127.0.0.1", "promised", basic_raw[:16].decode("utf-8", "replace")))
-
-    # -- (j) defaults (URL, timeout, cap) through a network-free double ------
-    opened = []
-
-    def install(response):
-        def open_with(self, fullurl, data=None, timeout=None):
-            opened.append((fullurl, data, timeout))
-            return response
-        monkeypatch.setattr(urllib.request.OpenerDirector, "open", open_with)
-
-    # a declared default-cap overflow is rejected before any body read
-    big = b"x" * (source.MAX_SOURCE_BYTES + 1)
-    oversized = _FakeResponse(
-        big, headers=[("Content-Length", str(len(big)))])
-    install(oversized)
-    _fixed_source_error(
-        lambda: source.load_catalog_url(),
-        ("raw.githubusercontent.com", "master/site", "http://", "https://"))
-    request, data, timeout = opened[0]
-    assert request.full_url == source.DEFAULT_CATALOG_URL
-    assert request.get_method() == "GET"
-    assert data is None
-    assert timeout == source.DEFAULT_TIMEOUT_S == 10
-    assert request.get_header("Accept") == ACCEPT_HEADER
-    sent_default = {name.lower(): value
-                    for name, value in request.header_items()}
-    assert sent_default["accept-encoding"] == ENCODING_HEADER
-    assert oversized.closed == 1
-    assert oversized.reads == []
-
-    # with no declaration the READ cap itself is the default bound
-    undeclared = _FakeResponse(b" " * (source.MAX_SOURCE_BYTES + 1))
-    install(undeclared)
-    _fixed_source_error(
-        lambda: source.load_catalog_url(), ("raw.githubusercontent.com",))
-    assert sum(undeclared.reads) == source.MAX_SOURCE_BYTES + 1
-    assert all(amount > 0 for amount in undeclared.reads)
-    assert undeclared.closed == 1
-
-    # an exactly-at-limit body reaches core validation (not a size failure)
-    at_limit = _FakeResponse(b" " * source.MAX_SOURCE_BYTES)
-    install(at_limit)
-    with pytest.raises(catalog.CatalogError) as excinfo:
-        source.load_catalog_url()
-    assert excinfo.value.code == catalog.INVALID_JSON
-    assert at_limit.closed == 1
-
-    # a successful default call forwards the default-capped snapshot
-    ok_response = _FakeResponse(
-        basic_raw, headers=[("Content-Length", str(len(basic_raw)))])
-    install(ok_response)
-    opened.clear()
-    assert source.load_catalog_url()["snapshot_id"] == \
-        basic_doc["snapshot_id"]
-    assert len(opened) == 1
-    assert opened[0][0].full_url == source.DEFAULT_CATALOG_URL
-    assert ok_response.closed == 1
-
-
-def test_catalog_url_source_failures_stay_stable_and_non_reflective(
-        loopback, tmp_path, monkeypatch):
-    basic_raw = (FIXTURE_DIR / "basic.json").read_bytes()
-
-    # -- (a) EVERY non-200 status is one fixed failure, one GET, no redirect --
-    for status in (204, 206, 301, 302, 304, 307, 308, 404, 429, 500, 503):
-        redirect = 300 <= status < 400
-        loopback.serve(
-            b"", status=status,
-            headers=[("Location", "/elsewhere")] if redirect else ())
-        target = loopback.url("/status-%d" % status)
-        before = len(loopback.requests)
-        _fixed_source_error(
-            lambda: source.load_catalog_url(target),
-            ("127.0.0.1", "/status-%d" % status, str(status), "elsewhere",
-             "Moved", "Not Found", "Too Many", "Internal", "Unavailable"))
-        assert len(loopback.requests) == before + 1
-    assert loopback.hits.get("/elsewhere", 0) == 0
-
-    # -- (b) unsupported encodings and ambiguous/invalid lengths -------------
-    framing_cases = (
-        ("content-encoding", [("Content-Encoding", "gzip")]),
-        ("content-encoding-list",
-         [("Content-Encoding", "identity, gzip")]),
-        ("length-nondigit", [("Content-Length", "12x")]),
-        ("length-negative", [("Content-Length", "-5")]),
-        ("length-duplicated",
-         [("Content-Length", str(len(basic_raw))),
-          ("Content-Length", str(len(basic_raw)))]),
-        ("length-empty", [("Content-Length", "")]),
-    )
-    for label, headers in framing_cases:
-        loopback.serve(basic_raw, headers=headers, length=False)
-        _fixed_source_error(
-            lambda: source.load_catalog_url(loopback.url("/" + label)),
-            ("127.0.0.1", label, "gzip", "12x", "-5", "Content-Length"))
-
-    # -- (c) accepted core errors survive the HTTP boundary untouched --------
-    tampered = json.loads(basic_raw.decode("utf-8"))
-    tampered["snapshot_id"] = "0" * 64
-    future_version = json.loads(basic_raw.decode("utf-8"))
-    future_version["schema_version"] = 2
-    core_cases = (
-        ("malformed", b'{"schema_version": 1, "snapshot_id": ',
-         catalog.INVALID_JSON, "Invalid catalogue JSON."),
-        ("invalid-utf8", b'{"schema_version": 1, "snapshot_id": "\xff\xfe"}',
-         catalog.INVALID_JSON, "Invalid catalogue JSON."),
-        ("tampered", json.dumps(tampered).encode("utf-8"),
-         catalog.INVALID_SNAPSHOT, "Invalid catalogue snapshot."),
-        ("future-schema", json.dumps(future_version).encode("utf-8"),
-         catalog.UNSUPPORTED_SCHEMA_VERSION,
-         "Unsupported catalogue schema version."),
-    )
-    for label, body, code, message in core_cases:
-        loopback.serve(body)
-        with pytest.raises(catalog.CatalogError) as excinfo:
-            source.load_catalog_url(loopback.url("/" + label))
-        error = excinfo.value
-        assert not isinstance(error, source.SourceError)
-        assert (error.code, error.message, str(error)) == (
-            code, message, message)
-        assert error.to_payload() == {
-            "ok": False, "error": {"code": code, "message": message}}
-        assert "127.0.0.1" not in str(error)
-        assert label not in str(error)
-        assert "codec" not in str(error)
-
-    # -- (d) a stalled body is a bounded socket-operation timeout ------------
-    loopback.serve_stall(b"x" * 4, declared=4096)
-    started = time.monotonic()
-    _fixed_source_error(
-        lambda: source.load_catalog_url(
-            loopback.url("/stalled"), timeout_s=0.3),
-        ("127.0.0.1", "stalled", "timed out", "timeout"))
-    assert time.monotonic() - started < 5.0
-    loopback.release.set()
-
-    # -- (e) a mid-body disconnect is the same fixed failure -----------------
-    loopback.serve_disconnect(basic_raw[:24], declared=len(basic_raw))
-    _fixed_source_error(
-        lambda: source.load_catalog_url(loopback.url("/disconnect")),
-        ("127.0.0.1", "disconnect", "400"))
-
-    # -- (f) invalid URL / limit / timeout configuration never dials ---------
-    opened = []
-
-    def forbidden_open(self, *args, **kwargs):
-        opened.append(args)
-        raise AssertionError(
-            "invalid configuration must not reach the network")
-
-    monkeypatch.setattr(urllib.request.OpenerDirector, "open", forbidden_open)
-
-    type_cases = (None, b"https://example.test/catalog.json", 3, True, 3.5,
-                  object(), ["https://example.test/x"])
-    for bad in type_cases:
-        with pytest.raises(TypeError) as excinfo:
-            source.load_catalog_url(bad)
-        assert type(excinfo.value) is TypeError
-        assert str(excinfo.value) == URL_TYPE_ERROR
-        assert "example.test" not in str(excinfo.value)
-
-    value_cases = (
-        "", "https://", "https:///catalog.json",
-        "ftp://example.test/catalog.json", "catalog.json",
-        "//example.test/catalog.json",
-        "https://user:pw@example.test/catalog.json",
-        "https://example.test/catalog.json#fragment",
-        "https://example.test/c a talog.json",
-        "https://example.test/catalog.json\tx",
-        "https://example.test/catalog.json\x00",
-        "https://example.test:99999/catalog.json",
-        "https://example.test:abc/catalog.json",
-        "https://example.test:/catalog.json",
-    )
-    for bad in value_cases:
-        with pytest.raises(ValueError) as excinfo:
-            source.load_catalog_url(bad)
-        assert type(excinfo.value) is ValueError
-        assert str(excinfo.value) == URL_VALUE_ERROR
-        assert "example.test" not in str(excinfo.value)
-
-    for bad_limit in (0, -1, True, 1.0, "8388608", None):
-        with pytest.raises(ValueError) as excinfo:
-            source.load_catalog_url(
-                "http://127.0.0.1:1/catalog.json", max_bytes=bad_limit)
-        assert type(excinfo.value) is ValueError
-        assert str(excinfo.value) == HTTP_BYTE_LIMIT_ERROR
-
-    for bad_timeout in (0, -0.5, True, float("nan"), float("inf"), "10",
-                        None):
-        with pytest.raises(ValueError) as excinfo:
-            source.load_catalog_url(
-                "http://127.0.0.1:1/catalog.json", timeout_s=bad_timeout)
-        assert type(excinfo.value) is ValueError
-        assert str(excinfo.value) == TIMEOUT_ERROR
-    assert opened == []
-    monkeypatch.undo()
-
-    # -- (g) scoped fault doubles: HTTPError and read/close cleanup ----------
-    class _TrackingHTTPError(_HTTPError):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.close_calls = 0
-
-        def close(self):
-            self.close_calls += 1
-            super().close()
-
-    http_error = _TrackingHTTPError(
-        "http://127.0.0.1:1/catalogue", 500, "Internal Server Error",
-        _headers_message([("X-Secret", "s3cr3t")]),
-        io.BytesIO(b"secret-body"))
-
-    def raise_http_error(self, fullurl, data=None, timeout=None):
-        raise http_error
-
-    monkeypatch.setattr(urllib.request.OpenerDirector, "open",
-                        raise_http_error)
-    _fixed_source_error(
-        lambda: source.load_catalog_url("http://127.0.0.1:1/catalogue"),
-        ("127.0.0.1:1", "catalogue", "500", "Internal", "secret", "s3cr3t"))
-    assert http_error.close_calls == 1
-
-    read_failures = (
-        ("oserror", OSError(104, "Connection reset by peer")),
-        ("incomplete", http.client.IncompleteRead(b"s3cr3t-partial", 512)),
-        ("protocol", http.client.BadStatusLine("\x00junk")),
-    )
-    for label, fault in read_failures:
-        response = _FakeResponse(b"", read_error=fault)
-        monkeypatch.setattr(
-            urllib.request.OpenerDirector, "open",
-            lambda self, fullurl, data=None, timeout=None, _r=response: _r)
-        _fixed_source_error(
-            lambda: source.load_catalog_url(
-                "http://127.0.0.1:1/" + label),
-            ("127.0.0.1:1", label, "s3cr3t", "junk", "reset", "peer"))
-        assert response.closed == 1
-
-    close_fault = _FakeResponse(
-        basic_raw, headers=[("Content-Length", str(len(basic_raw)))],
-        close_error=OSError(5, "close failed s3cr3t"))
-    monkeypatch.setattr(
-        urllib.request.OpenerDirector, "open",
-        lambda self, fullurl, data=None, timeout=None: close_fault)
-    _fixed_source_error(
-        lambda: source.load_catalog_url("http://127.0.0.1:1/close"),
-        ("127.0.0.1:1", "close", "s3cr3t", "failed"))
-    assert close_fault.closed == 1
-
-    both = _FakeResponse(
-        b"", read_error=OSError(104, "boom"),
-        close_error=OSError(5, "s3cr3t close"))
-    monkeypatch.setattr(
-        urllib.request.OpenerDirector, "open",
-        lambda self, fullurl, data=None, timeout=None: both)
-    _fixed_source_error(
-        lambda: source.load_catalog_url("http://127.0.0.1:1/both"),
-        ("127.0.0.1:1", "both", "s3cr3t", "boom"))
-    assert both.closed == 1
-    monkeypatch.undo()
-
-    # -- (h) private opener/TLS, hostile global settings, no writes ----------
-    home = tmp_path / "empty-home"
-    home.mkdir()
-    neutral = tmp_path / "neutral-cwd"
-    neutral.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.chdir(neutral)
-    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
-                 "all_proxy", "ALL_PROXY"):
-        monkeypatch.setenv(name, "http://127.0.0.1:9")
-    monkeypatch.delenv("no_proxy", raising=False)
-    monkeypatch.delenv("NO_PROXY", raising=False)
-
-    global_hits = []
-
-    class _GlobalHandler(urllib.request.BaseHandler):
-        def http_open(self, request):
-            global_hits.append(request.full_url)
-            raise AssertionError("the global opener must never be used")
-
-    installed = urllib.request.build_opener(_GlobalHandler())
-    monkeypatch.setattr(urllib.request, "_opener", installed)
-
-    contexts = []
-    real_create_default_context = ssl.create_default_context
-
-    def create_default_context(*args, **kwargs):
-        contexts.append((args, kwargs))
-        return real_create_default_context(*args, **kwargs)
-
-    monkeypatch.setattr(ssl, "create_default_context", create_default_context)
-
-    loopback.serve(basic_raw)
-    loaded = source.load_catalog_url(loopback.url("/private"))
-    assert loaded["snapshot_id"] == \
-        json.loads(basic_raw.decode("utf-8"))["snapshot_id"]
-    assert global_hits == []
-    assert urllib.request._opener is installed
-    assert contexts == [((), {})]
-    assert loopback.hits["/private"] == 1
-    assert list(home.iterdir()) == []
-    assert list(neutral.iterdir()) == []
-    assert sorted(entry.name for entry in tmp_path.iterdir()) == [
-        "empty-home", "neutral-cwd"]
-    monkeypatch.undo()
 
 
 # ---------------------------------------------------------------------------
@@ -1634,7 +1152,7 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
         tampered = json.loads(json.dumps(basic))
         tampered["snapshot_id"] = "0" * 64
         future = json.loads(json.dumps(basic))
-        future["schema_version"] = 2
+        future["schema_version"] = 3
         for bad_snapshot in (None, {}, [], "text", 3, tampered, future):
             with pytest.raises(catalog.CatalogError) as excinfo:
                 inert.store(bad_snapshot, fetched_at=1)
@@ -1712,7 +1230,7 @@ def test_catalog_disk_cache_misses_and_write_faults_stay_contained(tmp_path):
     text_time = _cache_document(basic, identity=identity, fetched_at="1")
     bad_etag = _cache_document(basic, identity=identity, etag="a\r\nb")
     newer_schema = _scratch_snapshot()
-    newer_schema["schema_version"] = 2
+    newer_schema["schema_version"] = 3
     bad_hash = json.loads(json.dumps(basic))
     bad_hash["snapshot_id"] = "0" * 64
 
@@ -2346,7 +1864,47 @@ def test_catalog_revalidation_conditional_get_and_304_reuse(loopback,
     assert replay["etag"] == 'W/"v1"'
     _only_conditional(loopback.requests[0], "if-none-match", 'W/"v1"')
 
-    # -- (i) the returned snapshot and the DiskCache record are compatible:
+    # -- (i) the private opener ignores hostile global urllib/proxy state, uses
+    # the platform default TLS factory and writes nothing --------------------
+    before_private = loopback.hits.get("/private", 0)
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setenv("HOME", str(tmp_path))
+        scope.chdir(tmp_path)
+        for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+                     "all_proxy", "ALL_PROXY"):
+            scope.setenv(name, "http://127.0.0.1:9")
+        scope.delenv("no_proxy", raising=False)
+        scope.delenv("NO_PROXY", raising=False)
+        global_hits = []
+
+        class _GlobalHandler(urllib.request.BaseHandler):
+            def http_open(self, request):
+                global_hits.append(request.full_url)
+                raise AssertionError("the global opener must never be used")
+
+        installed = urllib.request.build_opener(_GlobalHandler())
+        scope.setattr(urllib.request, "_opener", installed)
+        contexts = []
+        real_create_default_context = ssl.create_default_context
+
+        def create_default_context(*args, **kwargs):
+            contexts.append((args, kwargs))
+            return real_create_default_context(*args, **kwargs)
+
+        scope.setattr(ssl, "create_default_context", create_default_context)
+        loopback.requests.clear()
+        _script(loopback, (200, basic_raw, [], True, False))
+        private = source.fetch_catalog_url(loopback.url("/private"))
+        # inside the scope: the production fetch must not REPLACE the hostile
+        # global opener while it is installed
+        assert getattr(urllib.request, "_opener") is installed
+    assert private["snapshot"] == basic
+    assert global_hits == []
+    assert contexts == [((), {})]
+    assert loopback.hits["/private"] == before_private + 1
+    assert list(tmp_path.iterdir()) == []
+
+    # -- (j) the returned snapshot and the DiskCache record are compatible:
     # one stored result loads back as an accepted candidate, and the fetch
     # itself never reads or writes the cache ---------------------------------
     root = tmp_path / "cache-root"
@@ -2386,7 +1944,7 @@ def test_catalog_revalidation_invalid_304_and_stale_candidates_fail_closed(
     tampered = json.loads(json.dumps(basic))
     tampered["snapshot_id"] = "0" * 64
     future_schema = json.loads(json.dumps(basic))
-    future_schema["schema_version"] = 2
+    future_schema["schema_version"] = 3
 
     # -- (a) an unsolicited 304 with no candidate is one fixed failure --------
     loopback.requests.clear()
@@ -2396,8 +1954,10 @@ def test_catalog_revalidation_invalid_304_and_stale_candidates_fail_closed(
     assert len(loopback.requests) == 1
     _no_conditional(loopback.requests[0])
 
-    # -- (b) every invalid candidate is a MISS: NO conditional header, a 200
-    # still recovers, and a 304 stays one fixed failure in ONE GET ------------
+    # -- (b) a representative boundary set of invalid candidates is a MISS: NO
+    # conditional header, a 200 still recovers, and a 304 stays one fixed
+    # failure in ONE GET. The full field-by-field cache-record matrix is owned
+    # by the DiskCache load test above, over the SAME shared predicate --------
     def candidate(snapshot=basic, identity_value=None, **overrides):
         document = _cache_document(
             snapshot,
@@ -2406,34 +1966,13 @@ def test_catalog_revalidation_invalid_304_and_stale_candidates_fail_closed(
         document.update(overrides)
         return document
 
-    def without_pairs(pairs, field):
-        document = dict(pairs)
-        del document[field]
-        return document
-
     bad_entries = (
         ("no-candidate", None),
-        ("json-list", [basic]),
-        ("scalar", 17),
         ("empty-dict", {}),
         ("foreign-source", candidate(identity_value=_identity(
             "url", url + "?mirror=none"))),
-        ("file-mode", candidate(identity_value=_identity(
-            "file", "/tmp/some/catalog.json"))),
-        ("extra-identity", candidate(identity_value={
-            "kind": "url", "location": url, "extra": 1})),
         ("wrong-version", candidate(cache_version=2)),
-        ("string-version", candidate(cache_version="1")),
-        ("bool-version", candidate(cache_version=True)),
-        ("missing-field", without_pairs(candidate(), "last_modified")),
-        ("extra-field", candidate(extra="field")),
-        ("negative-fetch-time", candidate(fetched_at=-1)),
-        ("bool-fetch-time", candidate(fetched_at=True)),
-        ("nan-fetch-time", candidate(fetched_at=float("nan"))),
-        ("int-etag", candidate(etag=12345)),
-        ("control-etag", candidate(etag='"a\tb"')),
         ("bad-hash", candidate(snapshot=tampered)),
-        ("future-schema", candidate(snapshot=future_schema)),
     )
     for label, bad in bad_entries:
         loopback.requests.clear()
@@ -2533,7 +2072,7 @@ def test_catalog_revalidation_invalid_304_and_stale_candidates_fail_closed(
             super().close()
 
     with pytest.MonkeyPatch.context() as scope:
-        body = _PoisonBody(b'{"schema_version": 1}')
+        body = _PoisonBody(b'{"schema_version": 2}')
         not_modified = _TrackingHTTPError(
             url, 304, "Not Modified",
             _headers_message([("ETag", 'W/"v1"'),
@@ -2580,7 +2119,9 @@ def test_catalog_revalidation_invalid_304_and_stale_candidates_fail_closed(
     # -- (f) an invalid 200 body keeps its accepted core error even with a
     # valid last-good entry: this function never falls back ------------------
     invalid_bodies = (
-        ("malformed", b'{"schema_version": 1, "snapshot_id": ',
+        ("malformed", b'{"schema_version": 2, "snapshot_id": ',
+         catalog.INVALID_JSON, "Invalid catalogue JSON."),
+        ("invalid-utf8", b'{"schema_version": 2, "snapshot_id": "\xff\xfe"}',
          catalog.INVALID_JSON, "Invalid catalogue JSON."),
         ("tampered", json.dumps(tampered).encode("utf-8"),
          catalog.INVALID_SNAPSHOT, "Invalid catalogue snapshot."),
@@ -2603,32 +2144,174 @@ def test_catalog_revalidation_invalid_304_and_stale_candidates_fail_closed(
         assert valid == pristine
 
     # -- (g) transport and framing failures stay fixed and non-reflective ----
-    loopback.requests.clear()
-    _script(loopback, (500, b"", [], False, False))
-    _fixed_source_error(
-        lambda: source.fetch_catalog_url(url, cached_entry=valid),
-        ("127.0.0.1", "500", "Internal", "Unavailable"))
-    assert len(loopback.requests) == 1
-    assert valid == pristine
-
-    loopback.requests.clear()
-    _script(loopback, (200, basic_raw + b" ", [], False, False))
-    _fixed_source_error(
-        lambda: source.fetch_catalog_url(url, cached_entry=valid,
-                                         max_bytes=len(basic_raw)),
-        ("127.0.0.1",))
-    assert len(loopback.requests) == 1
-    assert valid == pristine
-
-    with pytest.MonkeyPatch.context() as scope:
-        broken = _FakeResponse(b"", read_error=OSError(104,
-                                                       "Connection reset"))
-        _opener_double(scope, response=broken)
+    # a representative status family is one fixed failure and ONE GET; a
+    # redirect target is never requested
+    for status in (204, 206, 301, 404, 429):
+        loopback.requests.clear()
+        headers = [("Location", "/elsewhere")] if status == 301 else []
+        _script(loopback, (status, b"", headers, False, False))
         _fixed_source_error(
             lambda: source.fetch_catalog_url(url, cached_entry=valid),
-            ("reset", "peer"))
-        assert broken.closed == 1
+            ("127.0.0.1", "catalog.json", str(status), "elsewhere",
+             "Moved", "Not Found", "Too Many", "Internal"))
+        assert len(loopback.requests) == 1, status
+        assert loopback.requests[0]["path"] == "/catalog.json", status
         assert valid == pristine
+    assert loopback.hits.get("/elsewhere", 0) == 0
+
+    # a non-304 HTTPError is closed exactly once and reflects nothing
+    with pytest.MonkeyPatch.context() as scope:
+        failure = _TrackingHTTPError(
+            url, 500, "Internal Server Error",
+            _headers_message([("X-Secret", "s3cr3t")]),
+            io.BytesIO(b"secret-body"))
+        _opener_double(scope, error=failure)
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=valid),
+            ("127.0.0.1", "500", "Internal", "s3cr3t", "secret"))
+        assert failure.close_calls == 1
+        assert valid == pristine
+
+    # unsupported encodings and ambiguous/invalid lengths are fixed failures;
+    # the no-length, chunked and identity framings stay accepted
+    framing_rows = (
+        ("gzip", [("Content-Encoding", "gzip")]),
+        ("encoding-list", [("Content-Encoding", "identity, gzip")]),
+        ("length-nondigit", [("Content-Length", "12x")]),
+        ("length-negative", [("Content-Length", "-5")]),
+        ("length-empty", [("Content-Length", "")]),
+        ("length-duplicated", [("Content-Length", str(len(basic_raw))),
+                               ("Content-Length", str(len(basic_raw)))]),
+    )
+    for label, headers in framing_rows:
+        loopback.requests.clear()
+        _script(loopback, (200, basic_raw, headers, False, False))
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=valid),
+            ("127.0.0.1", label, "gzip", "12x", "-5", "Content-Length"))
+        assert len(loopback.requests) == 1, label
+    for label, headers, length, chunked in (
+            ("no-length", [], False, False),
+            ("chunked", [], True, True),
+            ("identity", [("Content-Encoding", "identity")], True, False)):
+        loopback.requests.clear()
+        _script(loopback, (200, basic_raw, headers, length, chunked))
+        assert source.fetch_catalog_url(
+            url, cached_entry=valid)["snapshot"] == basic, label
+
+    # the RAW byte cap is the bound: exactly at it passes, one byte over fails
+    # for both the length-delimited and the chunked reader, and an oversized
+    # binary body never reaches UTF-8 decode or catalogue validation
+    loopback.requests.clear()
+    _script(loopback, (200, basic_raw, [], True, False))
+    assert source.fetch_catalog_url(
+        url, cached_entry=valid, max_bytes=len(basic_raw))["snapshot"] == basic
+    for label, body, chunked in (("over-length", basic_raw + b" ", False),
+                                 ("over-chunked", basic_raw + b" ", True)):
+        loopback.requests.clear()
+        _script(loopback, (200, body, [], False, chunked))
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=valid,
+                                             max_bytes=len(basic_raw)),
+            ("127.0.0.1",))
+        assert len(loopback.requests) == 1, label
+    loopback.requests.clear()
+    _script(loopback, (200, b"\xff" * 64, [], False, False))
+    _fixed_source_error(
+        lambda: source.fetch_catalog_url(url, cached_entry=valid, max_bytes=32),
+        ("127.0.0.1",))
+
+    # the cap counts BYTES, not characters: a document that fits in characters
+    # but not bytes fails, and the same bytes at the real cap load
+    multibyte = json.loads(basic_raw.decode("utf-8"))
+    multibyte["providers"]["synthetic-a"]["display_name"] = "Café 東京"
+    _reseal(multibyte)
+    multibyte_raw = json.dumps(
+        multibyte, indent=2, ensure_ascii=False).encode("utf-8")
+    characters = len(multibyte_raw.decode("utf-8"))
+    assert len(multibyte_raw) > characters
+    loopback.requests.clear()
+    _script(loopback, (200, multibyte_raw, [], True, False))
+    _fixed_source_error(
+        lambda: source.fetch_catalog_url(url, cached_entry=valid,
+                                         max_bytes=characters),
+        ("127.0.0.1",))
+    loopback.requests.clear()
+    _script(loopback, (200, multibyte_raw, [], True, False))
+    assert source.fetch_catalog_url(
+        url, cached_entry=valid, max_bytes=len(multibyte_raw))[
+            "snapshot"]["providers"]["synthetic-a"][
+                "display_name"] == "Café 東京"
+
+    # a declared over-limit length fails BEFORE the body is trusted, and a
+    # complete valid prefix followed by an early EOF still fails
+    with pytest.MonkeyPatch.context() as scope:
+        declared = _FakeResponse(
+            basic_raw, headers=[("Content-Length", str(len(basic_raw) + 1))])
+        _opener_double(scope, response=declared)
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=valid,
+                                             max_bytes=len(basic_raw)),
+            ("Content-Length",))
+        assert declared.reads == []
+        assert declared.closed == 1
+    with pytest.MonkeyPatch.context() as scope:
+        short = _FakeResponse(
+            basic_raw, headers=[("Content-Length", str(len(basic_raw) + 10))])
+        _opener_double(scope, response=short)
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(url, cached_entry=valid),
+            ("127.0.0.1", basic_raw[:16].decode("utf-8", "replace")))
+        assert short.closed == 1
+
+    # a stalled body is bounded by the socket-operation timeout (the release
+    # event is always set so loopback cleanup can never wedge) and a mid-body
+    # disconnect is the same fixed failure
+    try:
+        loopback.serve_stall(b"x" * 4, declared=4096)
+        started = time.monotonic()
+        _fixed_source_error(
+            lambda: source.fetch_catalog_url(
+                url, cached_entry=valid, timeout_s=0.3),
+            ("127.0.0.1", "timed out", "timeout"))
+        assert time.monotonic() - started < 5.0
+    finally:
+        loopback.release.set()
+    loopback.requests.clear()
+    loopback.serve_disconnect(basic_raw[:24], declared=len(basic_raw))
+    _fixed_source_error(
+        lambda: source.fetch_catalog_url(url, cached_entry=valid),
+        ("127.0.0.1", "400"))
+
+    # read faults (OSError and HTTPException) and read/close cleanup faults
+    # stay fixed and non-reflective, and every owned response closes once
+    for fault in (OSError(104, "Connection reset"),
+                  http.client.IncompleteRead(b"s3cr3t-partial", 512)):
+        with pytest.MonkeyPatch.context() as scope:
+            broken = _FakeResponse(b"", read_error=fault)
+            _opener_double(scope, response=broken)
+            _fixed_source_error(
+                lambda: source.fetch_catalog_url(url, cached_entry=valid),
+                ("s3cr3t", "junk", "reset", "peer"))
+            assert broken.closed == 1
+            assert valid == pristine
+    for shape in ("close", "read-and-close"):
+        with pytest.MonkeyPatch.context() as scope:
+            if shape == "close":
+                faulted = _FakeResponse(
+                    basic_raw,
+                    headers=[("Content-Length", str(len(basic_raw)))],
+                    close_error=OSError(5, "close failed s3cr3t"))
+            else:
+                faulted = _FakeResponse(
+                    b"", read_error=OSError(104, "boom"),
+                    close_error=OSError(5, "s3cr3t close"))
+            _opener_double(scope, response=faulted)
+            _fixed_source_error(
+                lambda: source.fetch_catalog_url(url, cached_entry=valid),
+                ("s3cr3t", "boom", "failed"))
+            assert faulted.closed == 1
+            assert valid == pristine
 
     # -- (h) configuration reuse: fixed exceptions, before any network -------
     with pytest.MonkeyPatch.context() as scope:
@@ -2918,15 +2601,12 @@ def test_catalog_source_refresh_fallback_and_freshness(loopback, tmp_path,
     assert metadata["warnings"] == ["tick_stale"]
     assert healing.current(now=61)["source"]["warnings"] == ["tick_stale"]
 
-    # -- (j) all five pure tools + with_source expose the SAME warnings -------
+    # -- (j) all three pure tools + with_source expose the SAME warnings ------
     tools = (
-        ("list_free_models",
-         lambda snapshot: query.list_free_models(snapshot, {})),
         ("get_model",
          lambda snapshot: query.get_model(
-             snapshot, {"model_id": "alpha-1:free"})),
-        ("list_endpoints",
-         lambda snapshot: query.list_endpoints(snapshot, {})),
+             snapshot, {"provider": "synthetic-a",
+                        "model_id": "alpha-1:free"})),
         ("watchdog_status",
          lambda snapshot: query.watchdog_status(snapshot, {}, now=200)),
         ("search_models",
@@ -2945,14 +2625,14 @@ def test_catalog_source_refresh_fallback_and_freshness(loopback, tmp_path,
                 "refresh_failed", "cache_fallback", "tick_stale"], label
             assert call(newer) == base, label  # the core payload is untouched
     # An argument-error result keeps its shape and still gains provenance.
-    argument_error = query.get_model(newer, {"model_id": 3})
+    argument_error = query.get_model(newer, {"provider": "synthetic-a", "model_id": 3})
     assert argument_error["ok"] is False
     attached_error = source.with_source(argument_error, exposed)
     assert attached_error["ok"] is False
     assert attached_error["error"] == argument_error["error"]
     assert attached_error["source"]["warnings"] == [
         "refresh_failed", "cache_fallback", "tick_stale"]
-    assert query.get_model(newer, {"model_id": 3}) == argument_error
+    assert query.get_model(newer, {"provider": "synthetic-a", "model_id": 3}) == argument_error
     # A FAILED acquisition attaches as its own structured error, never an ok.
     missing = source.CatalogSource("url", loopback.url("/absent.json"),
                                    cache_dir=tmp_path / "absent-cache")
@@ -2961,7 +2641,8 @@ def test_catalog_source_refresh_fallback_and_freshness(loopback, tmp_path,
     failure = missing.refresh(now=10)
     assert failure == _error_envelope()
     attached_failure = source.with_source(
-        query.list_free_models(newer, {}), failure)
+        query.get_model(newer, {"provider": "synthetic-a",
+                                "model_id": "alpha-1:free"}), failure)
     assert attached_failure == _error_envelope()
     assert attached_failure is not failure
     for bad in (None, [], "payload", 3, True):
@@ -3023,16 +2704,12 @@ def test_catalog_source_failures_and_io_discipline(loopback, tmp_path,
     fresh_path.write_bytes(fresh_raw)
 
     # -- (a) failure without a valid capture is a STRUCTURED source error -----
-    tampered = _scratch_snapshot()
-    tampered["snapshot_id"] = "0" * 64
+    # One transport fault and one invalid body are representative: the
+    # status family, the unsolicited 304 and the parse/hash/schema variants
+    # belong to the fetch_catalog_url and load_catalog_file groups above.
     failure_rows = (
-        ("404", (404, b"", [], False, False)),
-        ("429", (429, b"", [], False, False)),
         ("500", (500, b"", [], True, False)),
-        ("unsolicited-304", (304, b"", [], False, False)),
-        ("invalid-json", (200, b'{"schema_version": 1, ', [], True, False)),
-        ("tampered-body", (200, json.dumps(tampered).encode("utf-8"),
-                           [], True, False)),
+        ("invalid-json", (200, b'{"schema_version": 2, ', [], True, False)),
     )
     for label, response in failure_rows:
         client = source.CatalogSource(
@@ -3044,42 +2721,30 @@ def test_catalog_source_failures_and_io_discipline(loopback, tmp_path,
         assert client.current(now=1) == _error_envelope(), label
         assert not (tmp_path / ("failure-" + label)).exists(), label
 
-    # -- (b) a corrupt/foreign/old DISK record is a MISS, never an empty ok ---
-    old_schema = _scratch_snapshot()
-    old_schema["schema_version"] = 2
-    record_rows = (
-        ("corrupt", b"{not json"),
-        ("foreign", catalog.canonical_bytes(_cache_document(
-            _scratch_snapshot(),
-            identity=_identity("url", "https://other.test/catalog.json")))),
-        ("old-version", catalog.canonical_bytes(_cache_document(
-            _scratch_snapshot(), identity=_identity("url", url), version=0))),
-        ("old-schema", catalog.canonical_bytes(_cache_document(
-            old_schema, identity=_identity("url", url)))),
-        ("tampered-record", catalog.canonical_bytes(_cache_document(
-            tampered, identity=_identity("url", url)))),
-    )
-    for label, payload in record_rows:
-        root = tmp_path / ("record-" + label)
-        entry = source.DiskCache("url", url, cache_dir=root)
-        entry.path.parent.mkdir(parents=True)
-        entry.path.write_bytes(payload)
-        client = source.CatalogSource("url", url, cache_dir=root)
-        loopback.requests.clear()
-        _script(loopback, (500, b"", [], True, False))
-        assert client.refresh(now=1) == _error_envelope(), label
-        assert entry.path.read_bytes() == payload, label   # never repaired
-        assert _temp_leftovers(root) == [], label
+    # -- (b) an unusable DISK record is a MISS, never an empty ok -------------
+    # The field-by-field corrupt-record matrix is owned by the DiskCache load
+    # test above over the SAME shared entry predicate; one representative
+    # unreadable record proves this layer simply starts cold.
+    root = tmp_path / "record-corrupt"
+    entry = source.DiskCache("url", url, cache_dir=root)
+    entry.path.parent.mkdir(parents=True)
+    entry.path.write_bytes(b"{not json")
+    client = source.CatalogSource("url", url, cache_dir=root)
+    loopback.requests.clear()
+    _script(loopback, (500, b"", [], True, False))
+    assert client.refresh(now=1) == _error_envelope()
+    assert entry.path.read_bytes() == b"{not json"      # never repaired
+    assert _temp_leftovers(root) == []
 
     # -- (c) failed FILE selection stays a structured error -------------------
     corrupt_file = tmp_path / "corrupt.json"
     corrupt_file.write_bytes(b"not a catalogue")
-    as_directory = tmp_path / "as-directory"
-    as_directory.mkdir()
+    # One I/O failure and one invalid body are representative here too; the
+    # missing/directory/permission variants are owned by the
+    # load_catalog_file failure group above.
     file_rows = (
         ("missing", tmp_path / "missing.json"),
         ("corrupt", corrupt_file),
-        ("directory", as_directory),
     )
     for label, selected in file_rows:
         client = source.CatalogSource(
@@ -3121,6 +2786,24 @@ def test_catalog_source_failures_and_io_discipline(loopback, tmp_path,
     metadata = _acquisition_metadata(explicit_result, snapshot=fresh)
     assert metadata["warnings"] == ["cache_write_failed"]
 
+    # -- (e2) UNBOUNDED memory retention: with the cache-entry bound squeezed
+    # to one byte, NO record can be persisted -- yet a fresh body is still a
+    # usable observation and only reports cache_write_failed. This is the
+    # counterpart to the bounded HTTP candidate gate, where an over-bound
+    # candidate is a MISS (asserted in the revalidation test).
+    with pytest.MonkeyPatch.context() as scope:
+        scope.setattr(source, "_MAX_CACHE_BYTES", 1)
+        bounded_cache = tmp_path / "bounded-cache"
+        bounded = source.CatalogSource(
+            "file", fresh_path, cache_dir=bounded_cache)
+        bounded_result = bounded.refresh(now=5)
+        assert _acquisition_metadata(
+            bounded_result, snapshot=fresh)["warnings"] == [
+                "cache_write_failed"]
+        assert bounded._cache.path is not None
+        assert not bounded._cache.path.exists()
+        assert bounded.current(now=6)["snapshot"] == fresh
+
     # -- (f) invalid `now` and configuration fail BEFORE any I/O --------------
     calls = []
 
@@ -3142,29 +2825,41 @@ def test_catalog_source_failures_and_io_discipline(loopback, tmp_path,
                     invoke(now=bad)
                 assert type(excinfo.value) is ValueError, (label, bad)
                 assert str(excinfo.value) == NOW_ERROR, (label, bad)
+        # This constructor FORWARDS kind/location/timeout/byte-limit to the
+        # accepted validators, whose full rejection matrices are owned by the
+        # DiskCache, fetch_catalog_url and load_catalog_file groups. One
+        # representative rejection per branch proves the wiring.
+        forwarded = source.CatalogSource(
+            "url", url, cache_dir=tmp_path / "guard", timeout_s=7.5,
+            max_bytes=4096)
+        assert forwarded._timeout_s == 7.5 and forwarded._max_bytes == 4096
+        assert source.CatalogSource(
+            "file", fresh_path, cache_dir=tmp_path / "guard",
+            max_bytes=4096)._max_bytes == 4096
         with pytest.raises(TypeError) as excinfo:
             source.CatalogSource(None, url)
-        assert type(excinfo.value) is TypeError
-        with pytest.raises(TypeError) as excinfo:
-            source.CatalogSource("file", b"/tmp/catalogue.json")
         assert type(excinfo.value) is TypeError
         with pytest.raises(ValueError) as excinfo:
             source.CatalogSource("http", url)
         assert type(excinfo.value) is ValueError
+        with pytest.raises(TypeError) as excinfo:
+            source.CatalogSource("url", b"https://example.test/x")
+        assert str(excinfo.value) == URL_TYPE_ERROR
+        with pytest.raises(TypeError) as excinfo:
+            source.CatalogSource("file", b"/tmp/catalogue.json")
+        assert str(excinfo.value) == PATH_TYPE_ERROR
         with pytest.raises(ValueError) as excinfo:
             source.CatalogSource("file", "")
-        assert type(excinfo.value) is ValueError
-        for bad in (0, -1, True, float("nan"), float("inf"), "10"):
-            with pytest.raises(ValueError) as excinfo:
-                source.CatalogSource("url", url, timeout_s=bad)
-            assert str(excinfo.value) == TIMEOUT_ERROR
-        for bad in (0, -1, True, 1.0, None):
-            with pytest.raises(ValueError) as excinfo:
-                source.CatalogSource("url", url, max_bytes=bad)
-            assert str(excinfo.value) == HTTP_BYTE_LIMIT_ERROR
-            with pytest.raises(ValueError) as excinfo:
-                source.CatalogSource("file", fresh_path, max_bytes=bad)
-            assert str(excinfo.value) == BYTE_LIMIT_ERROR
+        assert str(excinfo.value) == CACHE_LOCATION_ERROR
+        with pytest.raises(ValueError) as excinfo:
+            source.CatalogSource("url", url, timeout_s=0)
+        assert str(excinfo.value) == TIMEOUT_ERROR
+        with pytest.raises(ValueError) as excinfo:
+            source.CatalogSource("url", url, max_bytes=0)
+        assert str(excinfo.value) == HTTP_BYTE_LIMIT_ERROR
+        with pytest.raises(ValueError) as excinfo:
+            source.CatalogSource("file", fresh_path, max_bytes=0)
+        assert str(excinfo.value) == BYTE_LIMIT_ERROR
         assert calls == []
         assert not (tmp_path / "guard").exists()
 
@@ -3202,8 +2897,10 @@ def test_catalog_source_failures_and_io_discipline(loopback, tmp_path,
         scope.setattr(source.DiskCache, "store", forbidden)
         scope.setattr(urllib.request.OpenerDirector, "open", forbidden)
         view = quiet.current(now=60)
-        attached = source.with_source(query.list_free_models(fresh, {}),
-                                      acquired)
+        attached = source.with_source(
+            query.get_model(fresh, {"provider": "synthetic-a",
+                                    "model_id": "alpha-1:free"}),
+            acquired)
         repeated = quiet.current(now=60)
     assert _acquisition_metadata(view)["fetched_at"] == 60
     assert attached["source"] == acquired["source"]
@@ -3433,22 +3130,20 @@ def test_catalog_async_source_coalesces_off_loop_and_survives_cancellation(
         with pytest.raises(TypeError) as excinfo:
             source.AsyncCatalogSource("url", held_url, monotonic_clock=bad)
         assert str(excinfo.value) == CLOCK_CALLABLE_ERROR
-    with pytest.raises(TypeError) as excinfo:
-        source.AsyncCatalogSource(None, held_url)
-    assert str(excinfo.value) == CACHE_KIND_TYPE_ERROR
+
+    # -- (a2) forwarding: the owned source gets the caller's bounds ----------
+    # Kind/location and timeout/max_bytes rejection matrices are owned by
+    # DiskCache and CatalogSource; this owner only forwards configuration, so
+    # one inert probe and one forwarded rejection are enough here.
+    with_bounds = source.AsyncCatalogSource(
+        "url", held_url, cache_dir=cache_root, timeout_s=7.5, max_bytes=4096,
+        wall_clock=wall, monotonic_clock=mono)
+    assert with_bounds._source._timeout_s == 7.5
+    assert with_bounds._source._max_bytes == 4096
+    assert with_bounds._source._cache.path.parent == cache_root
     with pytest.raises(ValueError) as excinfo:
-        source.AsyncCatalogSource("http", held_url)
-    assert str(excinfo.value) == CACHE_KIND_VALUE_ERROR
-    with pytest.raises(ValueError) as excinfo:
-        source.AsyncCatalogSource("file", "")
-    assert str(excinfo.value) == CACHE_LOCATION_ERROR
-    for bad in (0, -1, True, float("nan"), "10"):
-        with pytest.raises(ValueError) as excinfo:
-            source.AsyncCatalogSource("url", held_url, timeout_s=bad)
-        assert str(excinfo.value) == TIMEOUT_ERROR
-        with pytest.raises(ValueError) as excinfo:
-            source.AsyncCatalogSource("url", held_url, max_bytes=bad)
-        assert str(excinfo.value) == HTTP_BYTE_LIMIT_ERROR
+        source.AsyncCatalogSource("url", held_url, timeout_s=0)
+    assert str(excinfo.value) == TIMEOUT_ERROR
     assert not cache_root.exists()
     assert wall.reads == 0 and mono.reads == 0
     assert threading.active_count() == threading_before
@@ -4013,7 +3708,7 @@ def test_catalog_async_source_schedules_success_and_failure_windows(
         "/w.json": [(200, observed_raw, [], True, False)],
         "/n.json": [(404, b"", [], False, False),
                     (200, observed_raw, [], True, False)],
-        "/m.json": [(200, b'{"schema_version": 1, ', [], True, False),
+        "/m.json": [(200, b'{"schema_version": 2, ', [], True, False),
                     (200, observed_raw, [], True, False)],
         "/d.json": [("disconnect", observed_raw[:40], len(observed_raw)),
                     (200, observed_raw, [], True, False)],
@@ -4185,7 +3880,7 @@ def test_catalog_async_source_schedules_success_and_failure_windows(
         assert local_second["snapshot"] == fresher
         assert len(file_reads) == reads_before + 2
 
-        # -- (j) fallback warnings survive all five attached tool results ----
+        # -- (j) fallback warnings survive all three attached tool results ---
         mono.value = completed + REFRESH_INTERVAL_S
         assert (await a_owner.aget())["source"]["warnings"] == [
             "refresh_failed", "cache_fallback"]
@@ -4200,13 +3895,10 @@ def test_catalog_async_source_schedules_success_and_failure_windows(
         assert metadata["warnings"] == ["refresh_failed", "cache_fallback"]
         for round_index in (1, 2):
             for label, call in (
-                    ("list_free_models",
-                     lambda snapshot: query.list_free_models(snapshot, {})),
                     ("get_model",
                      lambda snapshot: query.get_model(
-                         snapshot, {"model_id": "alpha-1:free"})),
-                    ("list_endpoints",
-                     lambda snapshot: query.list_endpoints(snapshot, {})),
+                         snapshot, {"provider": "synthetic-a",
+                                    "model_id": "alpha-1:free"})),
                     ("watchdog_status",
                      lambda snapshot: query.watchdog_status(
                          snapshot, {}, now=epoch + 100)),

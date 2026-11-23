@@ -56,7 +56,7 @@
       "category": "schema_version",
       "base_fixture": "lookup.json",
       "changes": [
-        {"op": "set", "path": ["schema_version"], "value": "1"}
+        {"op": "set", "path": ["schema_version"], "value": "2"}
       ],
       "reseal": true,
       "expect": {"ok": false, "error": {"code": "invalid_snapshot", "message": "Invalid catalogue snapshot."}}
@@ -72,11 +72,11 @@
       "expect": {"ok": false, "error": {"code": "invalid_snapshot", "message": "Invalid catalogue snapshot."}}
     },
     {
-      "id": "version_unsupported_two",
+      "id": "version_unsupported_three",
       "category": "schema_version",
       "base_fixture": "lookup.json",
       "changes": [
-        {"op": "set", "path": ["schema_version"], "value": 2}
+        {"op": "set", "path": ["schema_version"], "value": 3}
       ],
       "reseal": true,
       "expect": {"ok": false, "error": {"code": "unsupported_schema_version", "message": "Unsupported catalogue schema version."}}
@@ -356,7 +356,7 @@
       "category": "models_map",
       "base_fixture": "basic.json",
       "changes": [
-        {"op": "set", "path": ["providers", "synthetic-a", "models", "vendor/ghost"], "value": {"id": "vendor/ghost", "name": "Ghost Model", "description": null, "context_length": 1024, "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}, "supported_parameters": ["temperature"], "pricing": {"prompt": "0", "completion": "0"}}}
+        {"op": "set", "path": ["providers", "synthetic-a", "models", "vendor/ghost"], "value": {"id": "vendor/ghost", "name": "Ghost Model", "description": null, "context_length": 1024, "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}, "supported_parameters": ["temperature"]}}
       ],
       "reseal": true,
       "expect": {"ok": false, "error": {"code": "invalid_snapshot", "message": "Invalid catalogue snapshot."}}
@@ -386,7 +386,7 @@
       "category": "model_entry",
       "base_fixture": "basic.json",
       "changes": [
-        {"op": "delete", "path": ["providers", "synthetic-a", "models", "alpha-1:free", "pricing"]}
+        {"op": "delete", "path": ["providers", "synthetic-a", "models", "alpha-1:free", "description"]}
       ],
       "reseal": true,
       "expect": {"ok": false, "error": {"code": "invalid_snapshot", "message": "Invalid catalogue snapshot."}}
@@ -451,26 +451,7 @@
       "reseal": true,
       "expect": {"ok": false, "error": {"code": "invalid_snapshot", "message": "Invalid catalogue snapshot."}}
     },
-    {
-      "id": "model_pricing_bool_scalar",
-      "category": "published_malformed_optional",
-      "base_fixture": "basic.json",
-      "changes": [
-        {"op": "set", "path": ["providers", "synthetic-a", "models", "alpha-1:free", "pricing", "prompt"], "value": true}
-      ],
-      "reseal": true,
-      "expect": {"ok": false, "error": {"code": "invalid_snapshot", "message": "Invalid catalogue snapshot."}}
-    },
-    {
-      "id": "model_pricing_extra_key",
-      "category": "published_malformed_optional",
-      "base_fixture": "basic.json",
-      "changes": [
-        {"op": "set", "path": ["providers", "synthetic-a", "models", "alpha-1:free", "pricing"], "value": {"prompt": "0", "completion": "0", "extra": "x"}}
-      ],
-      "reseal": true,
-      "expect": {"ok": false, "error": {"code": "invalid_snapshot", "message": "Invalid catalogue snapshot."}}
-    },
+
     {
       "id": "tick_negative",
       "category": "tick_epoch",

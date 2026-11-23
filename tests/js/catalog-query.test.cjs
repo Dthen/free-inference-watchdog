@@ -4,10 +4,14 @@
  * Node tests for the dependency-free catalogue validation/projection
  * counterpart (`web/catalog-query.js`).
  *
- * The expected values come from the reviewed golden fixture tables under
- * `tests/fixtures/catalog/` and from hand-authored literals in this file. They
- * are NEVER produced by the implementation under test, and no validator,
- * comparator or canonical encoder is reimplemented here.
+ * The shared raw-JSON, canonical, structural, projection, ordering, marker,
+ * argument and shared-tool corpora are owned by `tests/test_contract_parity.py`,
+ * which executes every row against independent literal expectations in BOTH
+ * engines. This file keeps the native host behaviour (prototype hazards, typed
+ * float tokens, browser export), the hand-authored boundary literals, and the
+ * live Python-reference drift probes. Expectations are NEVER produced by the
+ * implementation under test, and no validator, comparator or canonical encoder
+ * is reimplemented here.
  *
  * Run: node --test tests/js/catalog-query.test.cjs
  */
@@ -42,17 +46,12 @@ const REPO_ROOT = path.join(__dirname, "..", "..");
 const REFERENCE_SCRIPT = [
   "import json, sys",
   'sys.path.insert(0, ".")',
-  "from watchdog_catalog.query import (strip_free_marker, natural_key,",
-  "                                   endpoint_key)",
+  "from watchdog_catalog.query import (strip_free_marker, natural_key)",
   "payload = json.load(sys.stdin)",
-  'order = payload["provider_order"]',
   "print(json.dumps({",
   '    "markers": [strip_free_marker(x) for x in payload["ids"]],',
   '    "keys": [[list(t) for t in natural_key(x)] for x in payload["ids"]],',
-  '    "order": sorted(payload["ids"], key=natural_key),',
-  '    "pairs": [list(p) for p in sorted(',
-  '        [tuple(p) for p in payload["pairs"]],',
-  "        key=lambda p: endpoint_key(order, p[0], p[1]))],",
+  '    "order": sorted(payload["ids"], key=natural_key)',
   "}))"
 ].join("\n");
 
@@ -175,134 +174,10 @@ function assertAccepts(run, where) {
   }
 }
 
-// -- literal depth builders (grouped edge rows, not one helper per row) -----
-
-function nestedArray(depth) {
-  return "[".repeat(depth) + "0" + "]".repeat(depth);
-}
-
-function nestedObject(depth) {
-  return '{"a":'.repeat(depth) + "0" + "}".repeat(depth);
-}
-
-function nestedMixed(depth) {
-  let open = "";
-  let close = "";
-  for (let index = 0; index < depth; index += 1) {
-    if (index % 2 === 0) {
-      open += "[";
-      close = "]" + close;
-    } else {
-      open += '{"a":';
-      close = "}" + close;
-    }
-  }
-  return open + "0" + close;
-}
-
 // --------------------------------------------------------------------------
 // raw JSON acceptance/rejection boundary
 // --------------------------------------------------------------------------
 describe("raw JSON acceptance boundary", () => {
-  const rawTable = readFixtureDocument("raw-json-cases.json");
-
-  it("rejects every invalid row with the frozen literal envelope", () => {
-    assert.ok(rawTable.invalid_cases.length >= 30, "raw table is populated");
-    for (const row of rawTable.invalid_cases) {
-      const payload = assertRejects(() => catalog.loadJson(row.json_text),
-                                    "invalid_json", RAW_ERROR_MESSAGE, row.id);
-      assertSameValue(payload, row.expect, row.id);
-    }
-  });
-
-  it("decodes every valid control to the golden value and token kind", () => {
-    assert.ok(rawTable.valid_controls.length >= 20, "controls are populated");
-    for (const row of rawTable.valid_controls) {
-      assertAccepts(() => catalog.loadJson(row.json_text), row.id);
-      if (Object.prototype.hasOwnProperty.call(row, "expect_depth")) {
-        assert.equal(row.expect_depth, catalog.MAX_JSON_DEPTH);
-        assert.ok(["array", "object", "mixed"].includes(row.expect_kind));
-        const decoded = catalog.loadJson(row.json_text);
-        if (row.expect_kind === "object") {
-          assert.ok(decoded && typeof decoded === "object" &&
-                    !Array.isArray(decoded), `${row.id}: expected an object`);
-        } else {
-          assert.ok(Array.isArray(decoded), `${row.id}: expected an array`);
-        }
-        continue;
-      }
-      const decoded = catalog.loadJson(row.json_text);
-      assertSameValue(decoded, row.expect, row.id);
-      // Token identity is the fixture's own classification: every `float`
-      // row must stay a float token even when its value is integral.
-      if (row.category === "float") {
-        assert.ok(catalog.isFloatToken(decoded),
-                  `${row.id}: a float token must keep float identity`);
-      } else if (typeof row.expect === "number") {
-        assert.equal(typeof decoded, "number",
-                     `${row.id}: an integer token must stay a plain number`);
-        assert.ok(catalog.isFloatToken(decoded) === false,
-                  `${row.id}: an integer token is not a float token`);
-      }
-    }
-  });
-
-  it("enforces the inclusive container-depth bound 64 and ignores quoted brackets", () => {
-    for (const build of [nestedArray, nestedObject, nestedMixed]) {
-      assertAccepts(() => catalog.loadJson(build(64)), `depth 64 ${build.name}`);
-      assertRejects(() => catalog.loadJson(build(65)), "invalid_json",
-                    RAW_ERROR_MESSAGE, `depth 65 ${build.name}`);
-    }
-    assertAccepts(() => catalog.loadJson("42"), "root scalar");
-    assert.equal(catalog.loadJson("42"), 42);
-    const quoted = "\"" + "[".repeat(70) + "\"";
-    assertAccepts(() => catalog.loadJson(quoted), "quoted brackets");
-    assert.equal(catalog.loadJson(quoted).length, 70);
-  });
-
-  it("keeps the safe-integer boundary inclusive in every notation", () => {
-    assert.equal(catalog.loadJson("9007199254740991"), 9007199254740991);
-    assert.equal(catalog.loadJson("-9007199254740991"), -9007199254740991);
-    for (const bad of ["9007199254740992", "-9007199254740992",
-                       "9007199254740992.0", "-9007199254740992.0",
-                       "1e16", "-1e16", '{"a":[{"b":9007199254740993}]}']) {
-      assertRejects(() => catalog.loadJson(bad), "invalid_json",
-                    RAW_ERROR_MESSAGE, bad);
-    }
-    // Numeric-looking STRINGS are never inspected as numbers.
-    assert.equal(catalog.loadJson('"9007199254740992"'), "9007199254740992");
-    assert.equal(catalog.loadJson('"NaN"'), "NaN");
-    assert.equal(catalog.loadJson('"1e16"'), "1e16");
-  });
-
-  it("keeps float identity, signed zero and binary64 rounding", () => {
-    const integral = catalog.loadJson("1.0");
-    assert.ok(catalog.isFloatToken(integral), "1.0 stays a float token");
-    assert.ok(Object.is(integral.value, 1));
-    const negativeZero = catalog.loadJson("-0.0");
-    assert.ok(catalog.isFloatToken(negativeZero), "-0.0 stays a float token");
-    assert.ok(Object.is(negativeZero.value, -0), "-0.0 keeps its sign");
-    assert.equal(catalog.loadJson("1.0000000000000001").value, 1);
-    assert.equal(catalog.loadJson("9007199254740991.1").value, 9007199254740991);
-    assert.equal(catalog.loadJson("1e-400").value, 0);
-    assert.equal(catalog.loadJson("5e-324").value, 5e-324);
-    assert.equal(catalog.loadJson("0.5").value, 0.5);
-  });
-
-  it("rejects a duplicate member name at every level, escapes included", () => {
-    for (const bad of ['{"a":1,"a":2}', '{"a":1,"\\u0061":2}',
-                       '{"x":{"b":1,"b":2}}', '[{"c":1,"c":1}]',
-                       '{"a":1,"b":{"c":1,"c":2}}']) {
-      assertRejects(() => catalog.loadJson(bad), "invalid_json",
-                    RAW_ERROR_MESSAGE, bad);
-    }
-    assertSameValue(catalog.loadJson('{"A":1,"a":2}'), { A: 1, a: 2 },
-                    "case-distinct keys");
-    assertSameValue(catalog.loadJson('{"x":{"a":1},"y":{"a":2}}'),
-                    { x: { a: 1 }, y: { a: 2 } },
-                    "the same name in separate objects");
-  });
-
   it("treats prototype-looking member names as ordinary identifiers", () => {
     const decoded = catalog.loadJson(
       '{"__proto__":{"polluted":true},"constructor":1,"prototype":2}');
@@ -314,7 +189,7 @@ describe("raw JSON acceptance boundary", () => {
     assert.equal({}.polluted, undefined,
                  "decoding never pollutes Object.prototype");
     const snapshotShaped = catalog.loadJson(
-      '{"schema_version":1,"providers":{"__proto__":{"polluted":true}}}');
+      '{"schema_version":2,"providers":{"__proto__":{"polluted":true}}}');
     assert.equal(snapshotShaped.providers.polluted, undefined);
     assert.deepEqual(Object.keys(snapshotShaped.providers), ["__proto__"]);
   });
@@ -324,50 +199,6 @@ describe("raw JSON acceptance boundary", () => {
 // typed canonical encoding
 // --------------------------------------------------------------------------
 describe("typed canonical encoding", () => {
-  const canonicalTable = readFixtureDocument("canonical-cases.json");
-  const digest = (bytes) =>
-    require("node:crypto").createHash("sha256").update(bytes).digest("hex");
-
-  it("re-derives every general-value vector text and SHA-256 digest", () => {
-    const vectors = canonicalTable.canonical_vectors
-      .filter((row) => row.scope === "general_value");
-    assert.ok(vectors.length >= 10, "general-value vectors are populated");
-    for (const row of vectors) {
-      const value = catalog.loadJson(row.json_text);
-      assert.equal(catalog.canonicalText(value), row.canonical_text,
-                   `${row.id}: canonical text`);
-      const bytes = catalog.canonicalBytes(value);
-      assert.ok(bytes instanceof Uint8Array,
-                `${row.id}: canonicalBytes returns bytes`);
-      assert.equal(digest(bytes), row.sha256, `${row.id}: canonical digest`);
-    }
-  });
-
-  it("keeps integer and float tokens distinct and float spellings equivalent", () => {
-    const integer = canonicalTable.canonical_vectors
-      .find((row) => row.id === "vec_int_lexeme_one");
-    const float = canonicalTable.canonical_vectors
-      .find((row) => row.id === "vec_float_lexeme_one");
-    const exponent = canonicalTable.canonical_vectors
-      .find((row) => row.id === "vec_float_lexeme_one_exponent");
-    const integerDigest = digest(catalog.canonicalBytes(
-      catalog.loadJson(integer.json_text)));
-    const floatDigest = digest(catalog.canonicalBytes(
-      catalog.loadJson(float.json_text)));
-    const exponentDigest = digest(catalog.canonicalBytes(
-      catalog.loadJson(exponent.json_text)));
-    assert.equal(integerDigest, integer.sha256);
-    assert.equal(floatDigest, float.sha256);
-    assert.notEqual(integerDigest, floatDigest,
-                    "an integer token and a float token hash differently");
-    assert.equal(exponentDigest, floatDigest,
-                 "equivalent float spellings hash identically");
-    // Hand-authored restatement: `1` is an integer, `1.0`/`1e0` are floats.
-    assert.equal(catalog.canonicalText(catalog.loadJson("1")), "1");
-    assert.equal(catalog.canonicalText(catalog.loadJson("1.0")), "1.0");
-    assert.equal(catalog.canonicalText(catalog.loadJson("1e0")), "1.0");
-  });
-
   it("sorts keys by Unicode code point, not UTF-16 code unit", () => {
     const value = catalog.loadJson(
       '{"\\uD83D\\uDE80":"astral","2":"two","\\uFF21":"bmp","10":"ten","\\uE000":"pua"}');
@@ -375,17 +206,11 @@ describe("typed canonical encoding", () => {
       catalog.canonicalText(value),
       '{"10":"ten","2":"two","\\ue000":"pua","\\uff21":"bmp","\\ud83d\\ude80":"astral"}',
       "code-point order places the astral key last");
-    const row = canonicalTable.canonical_vectors
-      .find((item) => item.id === "vec_key_sorting_codepoint");
-    assert.equal(catalog.canonicalText(catalog.loadJson(row.json_text)),
-                 row.canonical_text);
   });
 
   it("escapes to ASCII with the frozen short escapes", () => {
-    const row = canonicalTable.canonical_vectors
-      .find((item) => item.id === "vec_ensure_ascii_escapes");
-    const text = catalog.canonicalText(catalog.loadJson(row.json_text));
-    assert.equal(text, row.canonical_text);
+    const text = catalog.canonicalText(catalog.loadJson(
+      '{"s":"caf\\u00e9","a":"[\\u007f]"}'));
     assert.ok([...text].every((character) => character.charCodeAt(0) < 0x7f),
               "canonical text is pure ASCII");
     // Hand-authored escapes: DEL, vertical tab, lone surrogate, astral pair.
@@ -436,10 +261,12 @@ describe("SHA-256 canonical body padding", () => {
   // whole extra block when `length + 9` is already a multiple of 64 goes
   // wrong. Both values are literal file content here.
   const PYTHON_SEALED_BODY =
-    `{"cadence_s":3600,"provider_order":["synthetic-a","synthetic-b"],"providers":{"synthetic-a":{"api_type":"openai","chat_completions_url":"https://synthetic-alpha.example/v1/chat/completions","display_name":"Synthetic Alpha","model_ids":["alpha-1:free","alpha-2-free"],"models":{"alpha-1:free":{"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"context_length":32768,"description":"Synthetic model one for the contract freeze.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","id":"alpha-1:free","name":"Alpha One","pricing":{"completion":"0","prompt":"0"},"supported_parameters":["temperature","max_tokens"]},"alpha-2-free":{"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"context_length":8192,"description":null,"id":"alpha-2-free","name":"Alpha Two","pricing":{"completion":"0","prompt":"0"},"supported_parameters":["temperature"]}},"stale":false},"synthetic-b":{"api_type":"openai","chat_completions_url":"https://synthetic-beta.example/v1/chat/completions","display_name":"Synthetic Beta","model_ids":[],"models":{},"stale":false}},"schema_version":1,"tick_epoch":1759200000,"warnings":[]}`;
+    `{"cadence_s":3600,"provider_order":["synthetic-a","synthetic-b"],"providers":{"synthetic-a":{"api_type":"openai","chat_completions_url":"https://synthetic-alpha.example/v1/chat/completions","display_name":"Synthetic Alpha","model_ids":["alpha-1:free","alpha-2-free"],"models":{"alpha-1:free":{"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"context_length":32768,"description":"Synthetic model one for the contract freeze.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","id":"alpha-1:free","name":"Alpha One","supported_parameters":["temperature","max_tokens"]},"alpha-2-free":{"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"context_length":8192,"description":null,"id":"alpha-2-free","name":"Alpha Two","supported_parameters":["temperature"]}},"stale":false},"synthetic-b":{"api_type":"openai","chat_completions_url":"https://synthetic-beta.example/v1/chat/completions","display_name":"Synthetic Beta","model_ids":[],"models":{},"stale":false}},"schema_version":2,"tick_epoch":1759200000,"warnings":[]}`;
   const PYTHON_SEALED_ID =
-    "61b303d4d06d4a367aec6b13223dbb21599d37794ce5a7c1d5235dec4b8fa2fb";
-  // The digest the spurious-extra-block encoder produced for that same body.
+    "60c5718e5e84e4f0283dfd7d5f693632e9f4e3e868ae69c9f8df6225812475cb";
+  // A retained known-wrong comparison value. Its historical origin is
+  // unverified; the independently sealed positive control above supplies the
+  // oracle for the current body.
   const SPURIOUS_BLOCK_DIGEST =
     "b7340b0f76cd7e0d13e4be2fb2b5cb2eb6c87c7da6e62fd8d0f57f90007b1395";
 
@@ -455,7 +282,7 @@ describe("SHA-256 canonical body padding", () => {
 
   function skeleton(filler) {
     return {
-      schema_version: 1,
+      schema_version: 2,
       tick_epoch: 1759200000,
       cadence_s: 3600,
       provider_order: ["synthetic-a"],
@@ -476,7 +303,6 @@ describe("SHA-256 canonical body padding", () => {
                 input_modalities: ["text"], output_modalities: ["text"]
               },
               supported_parameters: ["temperature"],
-              pricing: { prompt: "0", completion: "0" }
             }
           },
           stale: false
@@ -559,10 +385,6 @@ describe("SHA-256 canonical body padding", () => {
 // strict structural validation of a published snapshot
 // --------------------------------------------------------------------------
 describe("strict structural validation", () => {
-  const structuralTable =
-    catalog.decodeTypedJson(readFixtureText("structural-cases.json"));
-  const canonicalTable = readFixtureDocument("canonical-cases.json");
-
   function defineMember(target, key, value) {
     Object.defineProperty(target, key, {
       value: value, enumerable: true, writable: true, configurable: true
@@ -633,43 +455,6 @@ describe("strict structural validation", () => {
     return snapshot;
   }
 
-  it("rejects every invalid structural row with its frozen envelope", () => {
-    assert.ok(structuralTable.invalid_cases.length >= 50,
-              "structural invalid rows are populated");
-    for (const row of structuralTable.invalid_cases) {
-      const snapshot = mutate(row);
-      if (row.reseal) {
-        // The hash is TRUE before the semantic defect is tested, so no row
-        // can pass merely by failing the hash check.
-        assert.equal(catalog.snapshotHash(snapshot), snapshot.snapshot_id,
-                     `${row.id}: resealed body hashes consistently`);
-      }
-      const payload = assertRejects(
-        () => catalog.validateSnapshot(snapshot),
-        row.expect.error.code, row.expect.error.message, row.id);
-      assertSameValue(payload, row.expect, row.id);
-    }
-  });
-
-  it("accepts every valid control, returning the same unmutated object", () => {
-    assert.ok(structuralTable.valid_controls.length >= 8,
-              "structural valid controls are populated");
-    for (const row of structuralTable.valid_controls) {
-      const snapshot = mutate(row);
-      const before = catalog.canonicalText(snapshot);
-      const accepted = assertAccepts(
-        () => catalog.validateSnapshot(snapshot), row.id);
-      assert.equal(accepted, snapshot,
-                   `${row.id}: validation returns the same object`);
-      assert.equal(catalog.canonicalText(snapshot), before,
-                   `${row.id}: validation never mutates the snapshot`);
-      if (row.reseal) {
-        assert.equal(catalog.snapshotHash(snapshot), snapshot.snapshot_id,
-                     `${row.id}: resealed body hashes consistently`);
-      }
-    }
-  });
-
   it("classifies lexically accepted roots as invalid_snapshot", () => {
     for (const text of ["null", "true", "false", "42", '"hello"', "[]",
                         "[1,2]", "{}", '{"a": 1}']) {
@@ -681,19 +466,19 @@ describe("strict structural validation", () => {
         code: "invalid_snapshot", message: INVALID_SNAPSHOT_MESSAGE } }, text);
     }
     // A raw lexical fault precedes every structural check.
-    assertRejects(() => catalog.loadSnapshot("{\"schema_version\": 1,"),
+    assertRejects(() => catalog.loadSnapshot("{\"schema_version\": 2,"),
                   "invalid_json", RAW_ERROR_MESSAGE, "truncated document");
   });
 
-  it("reserves unsupported_schema_version for a strict integer other than 1", () => {
+  it("reserves unsupported_schema_version for a strict integer other than 2", () => {
     const unsupported = mutate({
-      id: "probe-version-2", base_fixture: "lookup.json", reseal: true,
-      changes: [{ op: "set", path: ["schema_version"], value: 2 }]
+      id: "probe-version-3", base_fixture: "lookup.json", reseal: true,
+      changes: [{ op: "set", path: ["schema_version"], value: 3 }]
     });
     assertRejects(() => catalog.validateSnapshot(unsupported),
                   "unsupported_schema_version", UNSUPPORTED_VERSION_MESSAGE,
-                  "schema_version 2");
-    for (const wrongType of [true, "1", null, catalog.loadJson("1.0")]) {
+                  "schema_version 3");
+    for (const wrongType of [true, "2", null, catalog.loadJson("2.0")]) {
       const probe = mutate({
         id: "probe-version-type", base_fixture: "lookup.json", reseal: true,
         changes: [{ op: "set", path: ["schema_version"], value: wrongType }]
@@ -730,30 +515,6 @@ describe("strict structural validation", () => {
       "the generic encoder excludes no key");
   });
 
-  it("pins the strict snapshot integer tokens from the canonical table", () => {
-    for (const row of canonicalTable.snapshot_cases) {
-      assertAccepts(() => catalog.loadJson(row.json_text), `${row.id}: raw`);
-      if (row.accepted === true) {
-        const accepted = assertAccepts(
-          () => catalog.loadSnapshot(row.json_text), row.id);
-        assert.equal(catalog.snapshotHash(accepted), accepted.snapshot_id,
-                     `${row.id}: accepted document re-hashes`);
-        continue;
-      }
-      const payload = assertRejects(
-        () => catalog.loadSnapshot(row.json_text),
-        row.expect.error.code, row.expect.error.message, row.id);
-      assertSameValue(payload, row.expect, row.id);
-      if (row.category !== "snapshot_hash_tamper") {
-        // Every other case is correctly sealed: the rejection is not a hash
-        // failure but the strict token rule.
-        const decoded = catalog.loadJson(row.json_text);
-        assert.equal(catalog.snapshotHash(decoded), decoded.snapshot_id,
-                     `${row.id}: hash is TRUE before the token rule bites`);
-      }
-    }
-  });
-
   it("keeps identifier namespaces, epochs and zero values honest", () => {
     // A prototype-looking provider/model id is an ordinary identifier
     // namespace, not a private field name.
@@ -771,7 +532,7 @@ describe("strict structural validation", () => {
     const providers = {};
     defineMember(providers, providerKey, provider);
     const snapshot = {
-      schema_version: 1, tick_epoch: 0, cadence_s: 3600,
+      schema_version: 2, tick_epoch: 0, cadence_s: 3600,
       provider_order: [providerKey], providers: providers, warnings: []
     };
     snapshot.snapshot_id = catalog.snapshotHash(snapshot);
@@ -1006,30 +767,6 @@ describe("wiring URL authority", () => {
 // public capability and model projection
 // --------------------------------------------------------------------------
 describe("public capability and model projection", () => {
-  const normalizationTable = readFixtureDocument("metadata-normalization.json");
-
-  it("projects and normalizes every golden capability row", () => {
-    assert.ok(normalizationTable.rows.length >= 20,
-              "normalization rows are populated");
-    assert.equal(normalizationTable.not_a_snapshot, true);
-    for (const row of normalizationTable.rows) {
-      const [projected, warnings] = catalog.projectCapabilities(row.raw);
-      assertSameValue(projected, row.projected, `${row.id}: projected`);
-      assert.deepEqual(warnings, row.warnings, `${row.id}: warnings`);
-      assert.deepEqual(Object.keys(projected).sort(),
-                       ["architecture", "context_length",
-                        "supported_parameters"],
-                       `${row.id}: projected field set`);
-      const normalized = catalog.normalizeCapabilities(projected);
-      assertSameValue(normalized, row.normalized, `${row.id}: normalized`);
-      assert.deepEqual(
-        Object.keys(normalized),
-        ["context_length", "input_modalities", "output_modalities",
-         "supported_parameters", "unknown_fields"],
-        `${row.id}: normalized field order`);
-    }
-  });
-
   it("keeps unknown, known-empty and malformed capability data distinct", () => {
     const [missing, missingWarnings] =
       catalog.projectCapabilities({ context_length: 4096 });
@@ -1045,7 +782,11 @@ describe("public capability and model projection", () => {
     assert.deepEqual(empty.architecture.input_modalities, []);
     assert.deepEqual(emptyWarnings, []);
     const emptyNormalized = catalog.normalizeCapabilities(empty);
-    assert.deepEqual(emptyNormalized.unknown_fields, []);
+    assert.deepEqual(emptyNormalized.input_modalities, []);
+    assert.deepEqual(emptyNormalized.output_modalities, []);
+    assert.deepEqual(Object.keys(emptyNormalized).sort(), [
+      "context_length", "input_modalities", "output_modalities",
+      "supported_parameters"]);
 
     const [malformed, malformedWarnings] = catalog.projectCapabilities({
       context_length: 4096, supported_parameters: "temperature"
@@ -1094,13 +835,12 @@ describe("public capability and model projection", () => {
       architecture: { input_modalities: ["text"],
                       output_modalities: ["text"] },
       supported_parameters: ["temperature"],
-      pricing: { prompt: "0", completion: 0 },
       private_field: "never serialized",
       _token: "never serialized"
     });
     assert.deepEqual(Object.keys(model).sort(),
                      ["architecture", "context_length", "description", "id",
-                      "name", "pricing", "supported_parameters"]);
+                      "name", "supported_parameters"]);
     assert.deepEqual(warnings, []);
     assertSameValue(model, {
       id: "vendor/model:free",
@@ -1109,12 +849,11 @@ describe("public capability and model projection", () => {
       context_length: 65536,
       architecture: { input_modalities: ["text"],
                       output_modalities: ["text"] },
-      supported_parameters: ["temperature"],
-      pricing: { prompt: "0", completion: 0 }
+      supported_parameters: ["temperature"]
     }, "complete projection");
   });
 
-  it("applies the name, description and pricing degradation rules", () => {
+  it("applies the name and description degradation rules", () => {
     const [fallback] = catalog.projectModel("vendor/raw-id", { name: "",
                                                               description: 5 });
     assert.equal(fallback.name, "vendor/raw-id",
@@ -1125,26 +864,6 @@ describe("public capability and model projection", () => {
                                                     { description: "" });
     assert.equal(emptyDescription.description, "",
                  "an empty string description is retained");
-
-    for (const pricing of [undefined, null, "free", []]) {
-      const [model] = catalog.projectModel("vendor/x", { pricing: pricing });
-      assert.equal(model.pricing, null, `pricing ${String(pricing)} -> null`);
-    }
-    const [emptyPricing] = catalog.projectModel("vendor/x", { pricing: {} });
-    assertSameValue(emptyPricing.pricing,
-                    { prompt: null, completion: null },
-                    "an empty pricing object projects both scalars null");
-    const [partial] = catalog.projectModel("vendor/x", {
-      pricing: { prompt: "0", completion: true, currency: "USD" }
-    });
-    assertSameValue(partial.pricing, { prompt: "0", completion: null },
-                    "a valid sibling survives and extra keys are dropped");
-    const [spelling] = catalog.projectModel("vendor/x", {
-      pricing: { prompt: "0.000001", completion: 1.5 }
-    });
-    assert.equal(spelling.pricing.prompt, "0.000001",
-                 "a numeric string keeps its spelling");
-    assert.equal(spelling.pricing.completion, 1.5);
   });
 
   it("reports only capability warnings for the metadata container", () => {
@@ -1171,8 +890,7 @@ describe("public capability and model projection", () => {
       name: "Aliased",
       architecture: { input_modalities: ["text"],
                       output_modalities: ["text"] },
-      supported_parameters: ["temperature"],
-      pricing: { prompt: "0", completion: "0" }
+      supported_parameters: ["temperature"]
     };
     const [model] = catalog.projectModel("vendor/x", raw);
     assert.notEqual(model.architecture.input_modalities,
@@ -1188,7 +906,7 @@ describe("public capability and model projection", () => {
     const [typedModel] = catalog.projectModel("vendor/x", typedRaw);
     assert.deepEqual(Object.keys(typedModel).sort(),
                      ["architecture", "context_length", "description", "id",
-                      "name", "pricing", "supported_parameters"]);
+                      "name", "supported_parameters"]);
     assert.equal(typedModel.api_key, undefined);
     assert.equal(typedModel.leak, undefined);
     assert.equal({}.leak, undefined, "projection never pollutes a prototype");
@@ -1203,13 +921,13 @@ describe("public capability and model projection", () => {
 // would empty it -- Python's `$` also matches before ONE final LF; (b) provider
 // precedence is the INDEX in `provider_order`; (c) within a provider, raw ids
 // compare by maximal ASCII `[0-9]+` runs (ORIGINAL digit count, then lexical
-// ASCII digits), with case-sensitive Unicode CODE POINT text. Every expectation
-// below is a literal fixture row or a hand-authored literal, never an array
-// produced by the comparator under test. `array.sort` is always called with the
-// PRODUCTION comparator, so no second comparator is implemented in the tests.
+// ASCII digits), with case-sensitive Unicode CODE POINT text. The frozen
+// `ordering-cases.json` and `cases.json` marker tables are executed by
+// `tests/test_contract_parity.py`; every expectation below is a hand-authored
+// literal. `array.sort` is always called with the PRODUCTION comparator, so no
+// second comparator is implemented in the tests.
 describe("ordering and free-marker helpers", () => {
   const orderingCases = readFixtureDocument("ordering-cases.json");
-  const orderingSnapshot = readFixtureDocument("ordering.json");
   const markerCases = readFixtureDocument("cases.json");
 
   // Literal delimiter-only fallbacks and the characterised regex edges of
@@ -1259,13 +977,6 @@ describe("ordering and free-marker helpers", () => {
 
   it("strips only a delimiter-bounded marker in one suffix and one prefix pass",
      () => {
-       const rows = markerCases.marker_strip_rule;
-       assert.equal(rows.length, 17, "the frozen marker table has 17 rows");
-       assert.equal(new Set(rows.map((row) => row.raw_id)).size, 17);
-       for (const row of rows) {
-         assert.equal(catalog.stripFreeMarker(row.raw_id), row.stripped,
-                      `marker rule mismatch for ${JSON.stringify(row.raw_id)}`);
-       }
        for (const [rawId, want] of MARKER_FALLBACK_CONTROLS) {
          assert.equal(catalog.stripFreeMarker(rawId), want,
                       `fallback control for ${JSON.stringify(rawId)}`);
@@ -1309,24 +1020,18 @@ describe("ordering and free-marker helpers", () => {
     assert.notEqual(first[1], second[1]);
   });
 
-  it("reproduces all seven literal ordering vectors forward and reversed",
+  it("reproduces the literal ordering controls forward and reversed",
      () => {
-       const rows = orderingCases.cases;
-       assert.equal(rows.length, 7, "the frozen vector table has 7 rows");
-       assert.equal(new Set(rows.map((row) => row.id)).size, 7);
        const corpus = new Set();
-       for (const row of rows) {
-         const supplied = row.input.slice();
-         const expected = row.expected.slice();
-         assert.equal(supplied.length, expected.length, row.id);
-         assert.notDeepEqual(supplied, expected, `${row.id}: a real sort`);
+       for (const [supplied, expected] of NATURAL_KEY_CONTROLS) {
          const before = JSON.stringify(supplied);
          assert.deepEqual(sortedBy(supplied, catalog.compareNaturalIds),
-                          expected, row.id);
-         assert.equal(JSON.stringify(supplied), before, `${row.id}: no mutation`);
+                          expected, JSON.stringify(supplied));
+         assert.equal(JSON.stringify(supplied), before,
+                      `${JSON.stringify(supplied)}: no mutation`);
          assert.deepEqual(
            sortedBy(supplied.slice().reverse(), catalog.compareNaturalIds),
-           expected, `${row.id}: reverse-supplied`);
+           expected, `${JSON.stringify(supplied)}: reverse-supplied`);
          for (const id of supplied) {
            corpus.add(id);
          }
@@ -1334,14 +1039,6 @@ describe("ordering and free-marker helpers", () => {
            corpus.add(id);
          }
        }
-       for (const [supplied, expected] of NATURAL_KEY_CONTROLS) {
-         assert.deepEqual(sortedBy(supplied, catalog.compareNaturalIds),
-                          expected, JSON.stringify(supplied));
-         for (const id of supplied) {
-           corpus.add(id);
-         }
-       }
-       assert.ok(corpus.size >= 20, `corpus size ${corpus.size}`);
      });
 
   it("compares by digit length, code point and strict prefix", () => {
@@ -1385,9 +1082,6 @@ describe("ordering and free-marker helpers", () => {
   it("is a total order over the combined boundary corpus without mutation",
      () => {
        const corpus = [];
-       for (const row of orderingCases.cases) {
-         corpus.push(...row.input, ...row.expected);
-       }
        for (const [supplied] of NATURAL_KEY_CONTROLS) {
          corpus.push(...supplied);
        }
@@ -1426,112 +1120,6 @@ describe("ordering and free-marker helpers", () => {
        assert.deepEqual(sortedBy(ordered.slice().reverse(), cmp), ordered);
      });
 
-  it("orders endpoint pairs by supplied provider precedence then natural id",
-     () => {
-       const providerOrder = orderingSnapshot.provider_order;
-       const physicalOrder = Object.keys(orderingSnapshot.providers);
-       assert.deepEqual(providerOrder,
-                        ["synthetic-b", "synthetic-a", "synthetic-c"]);
-       assert.deepEqual(physicalOrder,
-                        ["synthetic-a", "synthetic-b", "synthetic-c"]);
-       assert.notDeepEqual(providerOrder, physicalOrder,
-                           "precedence is not map insertion order");
-       const golden = markerCases.cases
-         .find((row) => row.id === "list_free_ordering_all")
-         .expect.providers;
-       assert.deepEqual(Object.keys(golden).sort(),
-                        providerOrder.slice().sort());
-       const expectedPairs = [];
-       for (const provider of providerOrder) {
-         for (const rawId of golden[provider]) {
-           expectedPairs.push([provider, rawId]);
-         }
-       }
-       assert.equal(expectedPairs.length, 10, "ten endpoints");
-       assert.equal(new Set(expectedPairs.map((pair) => pair.join("\u0000")))
-                      .size, 10);
-       const physicalPairs = [];
-       for (const provider of physicalOrder) {
-         for (const rawId of orderingSnapshot.providers[provider].model_ids) {
-           physicalPairs.push([provider, rawId]);
-         }
-       }
-       assert.equal(physicalPairs.length, 10);
-       assert.notDeepEqual(physicalPairs, expectedPairs,
-                           "the fixture input is genuinely unsorted");
-       const compare = (left, right) =>
-         catalog.compareEndpointPairs(providerOrder, left, right);
-       const snapshotBefore = JSON.stringify(orderingSnapshot);
-       assert.deepEqual(sortedBy(physicalPairs, compare), expectedPairs);
-       assert.deepEqual(sortedBy(physicalPairs.slice().reverse(), compare),
-                        expectedPairs);
-       assert.equal(JSON.stringify(orderingSnapshot), snapshotBefore,
-                    "fixture document untouched");
-       // Not alphabetic provider order: b...b, then a, then nothing from c.
-       assert.deepEqual(Array.from(new Set(expectedPairs.map((p) => p[0]))),
-                        ["synthetic-b", "synthetic-a"]);
-       // The caller-supplied order is authoritative: reversing it reverses
-       // provider precedence.
-       const flipped = ["synthetic-c", "synthetic-a", "synthetic-b"];
-       assert.ok(catalog.compareEndpointPairs(
-         flipped, ["synthetic-a", "vendor/item2"],
-         ["synthetic-b", "vendor/item2"]) < 0);
-       assert.ok(catalog.compareEndpointPairs(
-         providerOrder, ["synthetic-a", "vendor/item2"],
-         ["synthetic-b", "vendor/item2"]) > 0);
-       // A shared raw id stays TWO distinct pairs ordered by precedence.
-       const shared = markerCases.cases
-         .find((row) => row.id ===
-                       "get_model_ordering_identical_raw_id_provider_precedence")
-         .expect;
-       assert.deepEqual(shared.exact_gateways, ["synthetic-b", "synthetic-a"]);
-       const sharedPairs = [["synthetic-a", "vendor/item2"],
-                            ["synthetic-b", "vendor/item2"]];
-       const sortedShared = sortedBy(sharedPairs, compare);
-       assert.deepEqual(sortedShared.map((pair) => pair[0]),
-                        ["synthetic-b", "synthetic-a"]);
-       assert.deepEqual(sortedShared.map((pair) => pair[0]),
-                        shared.endpoints.map((endpoint) => endpoint.provider));
-       assert.notEqual(compare(sortedShared[0], sortedShared[1]), 0);
-       // Identical pairs compare equal; the zero-id provider still ranks.
-       assert.equal(compare(["synthetic-b", "vendor/item1"],
-                            ["synthetic-b", "vendor/item1"]), 0);
-       assert.deepEqual(golden["synthetic-c"], []);
-       assert.deepEqual(
-         orderingSnapshot.providers["synthetic-c"].model_ids, []);
-       assert.ok(compare(["synthetic-b", "vendor/item1"],
-                         ["synthetic-c", "vendor/absent"]) < 0);
-       assert.ok(compare(["synthetic-a", "vendor/item2"],
-                         ["synthetic-c", "vendor/absent"]) < 0);
-     });
-
-  it("exposes endpointKey as index plus natural key under the same rules", () => {
-    const providerOrder = orderingSnapshot.provider_order;
-    const key = catalog.endpointKey(providerOrder, "synthetic-b",
-                                    "vendor/item1");
-    assert.deepEqual(key, [0, [["t", 0, "vendor/item"], ["d", 1, "1"],
-                              ["t", 0, ""]]]);
-    assert.deepEqual(catalog.endpointKey(providerOrder, "synthetic-c", "x"),
-                     [2, [["t", 0, "x"]]]);
-    // Same pair, same key value; keys are fresh data.
-    const again = catalog.endpointKey(providerOrder, "synthetic-b",
-                                      "vendor/item1");
-    assert.deepEqual(again, key);
-    assert.notEqual(again, key);
-    assert.notEqual(again[1], key[1]);
-    // The index is a plain array lookup, so a prototype-named provider is a
-    // normal registered key rather than an object-member hazard.
-    assert.deepEqual(catalog.endpointKey(["__proto__", "a"], "__proto__", "z"),
-                     [0, [["t", 0, "z"]]]);
-    // An unregistered provider is outside the documented precondition and is
-    // rejected loudly instead of silently ranking at -1.
-    assert.throws(() => catalog.endpointKey(providerOrder, "nope", "vendor/x"),
-                  TypeError);
-    assert.throws(() => catalog.compareEndpointPairs(
-      providerOrder, ["nope", "vendor/x"], ["synthetic-a", "vendor/item2"]),
-                  TypeError);
-  });
-
   it("agrees with the unchanged Python reference helper", () => {
     // Test-owned parity check (NOT the later permanent 7g harness): the
     // committed literal fixtures above stay the correctness oracle; this run
@@ -1556,19 +1144,7 @@ describe("ordering and free-marker helpers", () => {
              "__proto__", "vendor/" + "9".repeat(64),
              "vendor/" + "9".repeat(65));
     const uniqueIds = Array.from(new Set(ids));
-    const providerOrder = orderingSnapshot.provider_order;
-    const pairs = [];
-    for (const provider of Object.keys(orderingSnapshot.providers)) {
-      for (const rawId of orderingSnapshot.providers[provider].model_ids) {
-        pairs.push([provider, rawId]);
-      }
-    }
-    pairs.push(["synthetic-a", "vendor/item2"],
-               ["synthetic-b", "vendor/item2"],
-               ["synthetic-b", "__proto__"]);
-    const result = runPythonReference({
-      ids: uniqueIds, pairs: pairs, provider_order: providerOrder
-    });
+    const result = runPythonReference({ ids: uniqueIds });
     assert.deepEqual(
       uniqueIds.map((rawId) => catalog.stripFreeMarker(rawId)),
       result.markers, "marker outputs agree with Python");
@@ -1576,68 +1152,29 @@ describe("ordering and free-marker helpers", () => {
                      result.keys, "natural keys agree with Python");
     assert.deepEqual(sortedBy(uniqueIds, catalog.compareNaturalIds),
                      result.order, "natural order agrees with Python");
-    assert.deepEqual(
-      sortedBy(pairs, (left, right) =>
-        catalog.compareEndpointPairs(providerOrder, left, right)),
-      result.pairs, "endpoint order agrees with Python");
   });
 });
 
 // --------------------------------------------------------------------------
-// pure list_free_models / list_endpoints queries
+// shared query-case tables
 // --------------------------------------------------------------------------
 //
-// Every success payload is compared against the INDEPENDENTLY authored
-// `cases.json` golden (deep semantic equality, object key order ignored, array
-// order and scalar types retained) plus the exact frozen README field sets. The
-// small Python comparison at the end of each group is a DRIFT probe against the
-// unchanged reference helper -- agreement alone is never taken as proof: the
-// committed literals remain the correctness oracle.
+// The literal `cases.json` success rows are driven through the pure queries by
+// the unchanged Python/Node contract-parity owner; the property owners below
+// reuse this table plus a small Python comparison as a DRIFT probe against the
+// unchanged reference helper -- agreement alone is never taken as proof.
 
 const QUERY_CASES_DOCUMENT = readFixtureDocument("cases.json");
 const QUERY_CASES = QUERY_CASES_DOCUMENT.cases;
 const QUERY_FIXTURE = QUERY_CASES_DOCUMENT.fixture;
-const QUERY_ARGUMENTS = readFixtureDocument("argument-cases.json");
 
-const LIST_ALL_FIELDS = ["counts", "models", "n_gateways", "ok",
-                         "provider_staleness", "providers", "snapshot_id",
-                         "tick_epoch", "total_ids"];
-const LIST_ONE_FIELDS = ["count", "model_ids", "models", "ok", "provider",
-                         "provider_staleness", "snapshot_id", "tick_epoch"];
-const ENDPOINT_FIELDS = ["counts", "gateways", "ok", "provider",
-                         "provider_staleness", "snapshot_id", "tick_epoch"];
-const GATEWAY_FIELDS = ["api_type", "chat_completions_url", "model_ids",
-                        "models"];
-const ENDPOINT_COUNT_FIELDS = ["distinct_raw_ids", "endpoints", "gateways",
-                               "marker_group_labels", "models"];
-const GET_MODEL_FIELDS = ["caveats", "counts", "endpoints", "exact_gateways",
-                          "exact_matches", "ok", "provider_staleness", "query",
-                          "snapshot_id", "tick_epoch"];
-const GET_MODEL_ENDPOINT_FIELDS = ["api_type", "chat_completions_url",
-                                   "metadata", "model_id", "provider", "stale"];
-const GET_MODEL_COUNT_FIELDS = ["distinct_raw_ids", "endpoints",
-                                "exact_matches", "marker_group_labels"];
-// The frozen `watchdog_status` field sets and status-only warning order, copied
-// from README's `Success envelope — watchdog_status` tables: the snapshot THREE
-// codes followed by the two derived status codes.
+// The frozen `watchdog_status` top-level field set, copied from README's
+// `Success envelope — watchdog_status` table.
 const STATUS_FIELDS = ["cadence_s", "counts", "last_tick_age_s",
                        "metadata_coverage", "ok", "pending_alerts",
                        "provider_counts", "provider_staleness",
                        "site_publish_age_s", "site_published", "snapshot_id",
                        "tick_epoch", "tick_fresh", "warnings"];
-const STATUS_COUNT_FIELDS = ["distinct_raw_ids", "endpoints", "gateways",
-                             "marker_group_labels"];
-const STATUS_COVERAGE_FIELDS = ["context_length_known", "description_known",
-                                "endpoints", "input_modalities_known",
-                                "output_modalities_known",
-                                "supported_parameters_known"];
-const STATUS_WARNING_ORDER = ["tick_epoch_unknown", "metadata_missing",
-                              "metadata_invalid", "tick_epoch_future",
-                              "tick_stale"];
-// The frozen absence caveat literal, copied from README's `get_model` table.
-const GET_MODEL_CAVEAT =
-  "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a " +
-  "missing exact id does NOT prove the model is unavailable there.";
 const ARGUMENT_MESSAGES = {
   invalid_arguments: "Invalid tool arguments.",
   unknown_provider: "Unknown provider."
@@ -1645,10 +1182,6 @@ const ARGUMENT_MESSAGES = {
 
 function queryRows(tool) {
   return QUERY_CASES.filter((row) => row.tool === tool);
-}
-
-function argumentRows(section, tool) {
-  return QUERY_ARGUMENTS[section].filter((row) => row.tool === tool);
 }
 
 /** A validated snapshot decoded straight from a committed fixture document. */
@@ -1705,8 +1238,7 @@ function lookalikeModel(rawId, name) {
     description: null,
     context_length: 0,
     architecture: {input_modalities: ["text"], output_modalities: ["text"]},
-    supported_parameters: null,
-    pricing: {prompt: "0", completion: "0"}
+    supported_parameters: null
   };
 }
 
@@ -1746,7 +1278,7 @@ function lookalikeKeySnapshot() {
     cadence_s: 300,
     provider_order: ["__proto__", "constructor"],
     providers: providers,
-    schema_version: 1,
+    schema_version: 2,
     snapshot_id: "0".repeat(64),
     tick_epoch: null,
     warnings: ["tick_epoch_unknown"]
@@ -1758,64 +1290,6 @@ function resealedSnapshot(name, changes) {
   const body = typedClone(acceptedSnapshot(name));
   changes(body);
   return resealSnapshot(body);
-}
-
-/**
- * A WELL-FORMED one-provider snapshot whose raw ids pin the accepted marker
- * boundaries: a bare `free`, an all-marker `-free`, a PREFIX marker, a single
- * final LF, a CRLF neighbour and a `-freely` separator neighbour. The raw list
- * is in literal code-point order (as the validator requires) and its `models`
- * map is deliberately inserted in a DIFFERENT order, so an endpoint array can
- * only come from sorting `model_ids`, never from map iteration order.
- */
-function markerBoundarySnapshot() {
-  const ids = ["-free", "free", "free-vendor/z", "vendor/z",
-               "vendor/z-free\n", "vendor/z-free\n\n",
-               "vendor/z-free\r\n", "vendor/z-freely"];
-  const models = {};
-  for (const rawId of ids.slice().reverse()) {
-    withOwnKey(models, rawId, lookalikeModel(rawId, `Marker ${rawId}`));
-  }
-  return resealSnapshot({
-    cadence_s: 3600,
-    provider_order: ["synthetic-z"],
-    providers: {
-      "synthetic-z": {
-        display_name: "Synthetic Marker",
-        chat_completions_url:
-          "https://synthetic-marker.example/v1/chat/completions",
-        api_type: "openai",
-        model_ids: ids,
-        models: models,
-        stale: true
-      }
-    },
-    schema_version: 1,
-    snapshot_id: "0".repeat(64),
-    tick_epoch: 1759200000,
-    warnings: []
-  });
-}
-
-/**
- * A validated snapshot whose matched endpoint carries a typed FLOAT pricing
- * token (`0.0`) instead of the string the shared fixtures use, re-sealed from
- * the module's own canonical text so the accepted typed-number path is real
- * accepted input and not a hand-waved object.
- */
-function typedPricingSnapshot() {
-  const body = typedClone(acceptedSnapshot("lookup.json"));
-  body.providers["synthetic-a"].models["vendor/shared"].pricing.prompt =
-    new catalog.JsonFloat(0);
-  body.snapshot_id = catalog.snapshotHash(body);
-  return catalog.loadSnapshot(catalog.canonicalText(body));
-}
-
-/** A validated snapshot with a FUTURE observation epoch and nothing else new. */
-function futureTickSnapshot() {
-  return resealedSnapshot("lookup.json", (body) => {
-    body.tick_epoch = 4102444800;
-  });
 }
 
 /** The frozen literal argument-error envelope, asserted field by field. */
@@ -1855,10 +1329,12 @@ const QUERY_REFERENCE_SCRIPT = [
   "        snapshot, query=args['query'], provider=args['provider'])",
   "    pairs = query_module._search_min_context_pairs(",
   "        snapshot, pairs, min_context_length=args['min_context_length'])",
-  "    pairs = query_module._search_input_modality_pairs(",
-  "        snapshot, pairs, input_modalities=args['input_modalities'])",
-  "    pairs = query_module._search_supported_parameter_pairs(",
-  "        snapshot, pairs, supported_parameters=args['supported_parameters'])",
+  "    pairs = query_module._search_capability_pairs(",
+  "        snapshot, pairs, field='input_modalities',",
+  "        requested=args['input_modalities'])",
+  "    pairs = query_module._search_capability_pairs(",
+  "        snapshot, pairs, field='supported_parameters',",
+  "        requested=args['supported_parameters'])",
   "    return [[provider, raw_id] for provider, raw_id in pairs]",
   "",
   "def _stage_filter(snapshot, args):",
@@ -1869,13 +1345,13 @@ const QUERY_REFERENCE_SCRIPT = [
   "                        snapshot, pairs,",
   "                        min_context_length=args['min_context_length'])],",
   "        'input': [list(pair) for pair in",
-  "                  query_module._search_input_modality_pairs(",
-  "                      snapshot, pairs,",
-  "                      input_modalities=args['input_modalities'])],",
+  "                  query_module._search_capability_pairs(",
+  "                      snapshot, pairs, field='input_modalities',",
+  "                      requested=args['input_modalities'])],",
   "        'parameters': [list(pair) for pair in",
-  "                       query_module._search_supported_parameter_pairs(",
-  "                           snapshot, pairs,",
-  "                           supported_parameters=args['supported_parameters'])],",
+  "                       query_module._search_capability_pairs(",
+  "                           snapshot, pairs, field='supported_parameters',",
+  "                           requested=args['supported_parameters'])],",
   "    }",
   "",
   "def _load_error(snapshot_text):",
@@ -1886,9 +1362,7 @@ const QUERY_REFERENCE_SCRIPT = [
   "    return {'code': None}",
   "",
   "payload = json.load(sys.stdin)",
-  "handlers = {'list_free_models': query_module.list_free_models,",
-  "            'list_endpoints': query_module.list_endpoints,",
-  "            'get_model': query_module.get_model,",
+  "handlers = {'get_model': query_module.get_model,",
   "            'watchdog_status': query_module.watchdog_status,",
   "            'search_stage_pairs': _stage_pairs,",
   "            'search_stage_filter': _stage_filter}",
@@ -2014,1451 +1488,173 @@ describe("live reference origin guard", () => {
   });
 });
 
-describe("pure list_free_models query", () => {
-  it("reproduces every independent success golden exactly", () => {
-    const rows = queryRows("list_free_models");
-    // Row identity is asserted so a dropped or duplicated golden cannot shrink
-    // the loop and still pass.
-    assert.equal(rows.length, 5, rows.map((row) => row.id).join(","));
-    assert.deepEqual(rows.map((row) => row.id).sort(), [
-      "list_free_extension_provider_d", "list_free_lookup_all",
-      "list_free_lookup_provider_a", "list_free_lookup_zero_provider_c",
-      "list_free_ordering_all"
-    ]);
-    const fixtures = new Set();
-    for (const row of rows) {
-      const snapshot = acceptedSnapshot(row.fixture);
-      const snapshotText = catalog.canonicalText(snapshot);
-      const args = JSON.parse(JSON.stringify(row.args));
-      const argsText = catalog.canonicalText(args);
-      const result = catalog.listFreeModels(snapshot, args);
-      // Deep semantic equality with the separately authored golden.
-      assertSameValue(result, row.expect, row.id);
-      assert.equal(result.ok, true, row.id);
-      const allForm = Object.prototype.hasOwnProperty.call(row.expect,
-                                                           "providers");
-      assert.deepEqual(Object.keys(result).sort(),
-                       allForm ? LIST_ALL_FIELDS : LIST_ONE_FIELDS, row.id);
-      // Literal provenance and untouched inputs.
-      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
-      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
-      assert.equal(catalog.canonicalText(snapshot), snapshotText,
-                   `${row.id}: the snapshot is never mutated`);
-      assert.equal(catalog.canonicalText(args), argsText,
-                   `${row.id}: the argument object is never mutated`);
-      fixtures.add(row.fixture);
-      if (allForm) {
-        assert.deepEqual(Object.keys(result.providers).sort(),
-                         snapshot.provider_order.slice().sort(), row.id);
-        for (const provider of snapshot.provider_order) {
-          const source = snapshot.providers[provider];
-          assert.ok(Number.isInteger(result.counts[provider]) &&
-                    result.counts[provider] >= 0, row.id);
-          assert.equal(result.counts[provider], source.model_ids.length,
-                       row.id);
-          assert.equal(result.provider_staleness[provider], source.stale,
-                       row.id);
-          assert.deepEqual(result.providers[provider].slice().sort(),
-                           source.model_ids.slice().sort(), row.id);
-          assert.deepEqual(Object.keys(result.models[provider]).sort(),
-                           source.model_ids.slice().sort(), row.id);
-          for (const rawId of source.model_ids) {
-            // Complete projected metadata, copied verbatim: never reprojected
-            // and never stringified/parsed away.
-            assertSameValue(result.models[provider][rawId],
-                            source.models[rawId],
-                            `${row.id}:${provider}:${rawId}`);
-          }
-        }
-      } else {
-        const source = snapshot.providers[result.provider];
-        assert.equal(result.count, result.model_ids.length, row.id);
-        assert.ok(Number.isInteger(result.count) && result.count >= 0, row.id);
-        assert.deepEqual(result.provider_staleness,
-                         flagMap([[result.provider, source.stale]]), row.id);
-        assert.deepEqual(result.model_ids.slice().sort(),
-                         source.model_ids.slice().sort(), row.id);
-        assert.deepEqual(Object.keys(result.models).sort(),
-                         source.model_ids.slice().sort(), row.id);
-        for (const rawId of source.model_ids) {
-          assertSameValue(result.models[rawId], source.models[rawId],
-                          `${row.id}:${rawId}`);
-        }
-      }
-    }
-    assert.deepEqual([...fixtures].sort(),
-                     ["lookup.json", "ordering.json", "provider-extension.json"]);
-  });
-
-  it("keeps natural raw-ID order, per-provider metadata and zero-ID registries", () => {
-    const lookup = acceptedSnapshot("lookup.json");
-    const ordering = acceptedSnapshot("ordering.json");
-    const extension = acceptedSnapshot("provider-extension.json");
-
-    // An absent provider and an explicit null are the SAME all-provider form.
-    const omitted = catalog.listFreeModels(lookup, {});
-    const nulled = catalog.listFreeModels(lookup, {provider: null});
-    assertSameValue(omitted, nulled, "absent vs null provider");
-    assert.equal(omitted.provider, undefined,
-                 "the all-provider form carries no `provider` field");
-    assert.equal(omitted.ok, true);
-
-    // Natural order -- never the snapshot's frozen code-point order. The first
-    // four ids are a compact literal restatement of the digit-run rule (run
-    // length first, then the literal digit text), independent of the golden.
-    const naturalB = catalog.listFreeModels(ordering, {}).providers[
-      "synthetic-b"];
-    assert.notDeepEqual(naturalB,
-                        ordering.providers["synthetic-b"].model_ids,
-                        "the array is re-sorted, not echoed in snapshot order");
-    assert.deepEqual(naturalB.slice(0, 4), ["vendor/item1", "vendor/item2",
-                                            "vendor/item02", "vendor/item10"]);
-    assert.deepEqual(naturalB, queryRows("list_free_models").find(
-      (row) => row.id === "list_free_ordering_all").expect.providers[
-        "synthetic-b"]);
-
-    // A raw ID shared by two providers keeps its own conflicting metadata.
-    const sharedA = omitted.models["synthetic-a"]["vendor/shared"];
-    const sharedB = omitted.models["synthetic-b"]["vendor/shared"];
-    assert.notEqual(sharedA, sharedB, "shared ids are never aliased together");
-    assert.equal(sharedA.context_length, 131072);
-    assert.equal(sharedB.context_length, 32768);
-    assert.deepEqual(sharedA.architecture.input_modalities, ["text"]);
-    assert.deepEqual(sharedB.architecture.input_modalities,
-                     ["text", "image"]);
-    assert.deepEqual(sharedA.supported_parameters,
-                     ["temperature", "max_tokens"]);
-    assert.deepEqual(sharedB.supported_parameters, ["temperature", "top_p"]);
-
-    // Scoped counters: distinct literal raw ids, gateways including zero-ID.
-    assert.deepEqual(omitted.counts, {"synthetic-a": 3, "synthetic-b": 2,
-                                      "synthetic-c": 0});
-    assert.equal(omitted.total_ids, 4);
-    assert.equal(omitted.n_gateways, 3);
-    assert.deepEqual(omitted.provider_staleness,
-                     {"synthetic-a": false, "synthetic-b": false,
-                      "synthetic-c": false});
-    assert.deepEqual(catalog.listFreeModels(ordering, {}).provider_staleness,
-                     {"synthetic-b": true, "synthetic-a": false,
-                      "synthetic-c": false});
-
-    // A registered zero-ID provider is a SUCCESS with empty containers.
-    const zero = catalog.listFreeModels(lookup, {provider: "synthetic-c"});
-    assert.equal(zero.ok, true);
-    assert.deepEqual(Object.keys(zero).sort(), LIST_ONE_FIELDS);
-    assert.deepEqual(zero.model_ids, []);
-    assert.deepEqual(zero.models, {});
-    assert.equal(zero.count, 0);
-    assert.deepEqual(zero.provider_staleness, {"synthetic-c": false});
-
-    // The legitimately EMPTY registry: every container empty, no invented
-    // gateway or count.
-    const empty = catalog.listFreeModels(emptyRegistrySnapshot(), {});
-    assert.equal(empty.ok, true);
-    assert.deepEqual(Object.keys(empty).sort(), LIST_ALL_FIELDS);
-    assert.deepEqual(empty.providers, {});
-    assert.deepEqual(empty.models, {});
-    assert.deepEqual(empty.counts, {});
-    assert.deepEqual(empty.provider_staleness, {});
-    assert.equal(empty.total_ids, 0);
-    assert.equal(empty.n_gateways, 0);
-
-    // Provider membership is driven by DATA alone: provider-extension.json adds
-    // a gateway no package code names.
-    const all = catalog.listFreeModels(extension, {});
-    assert.equal(all.n_gateways, 4);
-    assert.deepEqual(Object.keys(all.providers).sort(), ["synthetic-a",
-      "synthetic-b", "synthetic-c", "synthetic-d"]);
-    assert.deepEqual(all.counts["synthetic-d"], 1);
-    assert.equal(all.total_ids, 4);
-    const onlyD = catalog.listFreeModels(extension, {provider: "synthetic-d"});
-    assert.equal(onlyD.provider, "synthetic-d");
-    assert.deepEqual(onlyD.model_ids, ["vendor/shared"]);
-    assert.deepEqual(onlyD.provider_staleness, {"synthetic-d": true});
-    assert.equal(onlyD.models["vendor/shared"].context_length, 8192);
-    assert.equal(onlyD.models["vendor/shared"].description,
-                 "Synthetic delta endpoint with its own small context.");
-  });
-
-  it("reproduces the frozen argument boundary and its precedence", () => {
-    const invalid = argumentRows("invalid_cases", "list_free_models");
-    const valid = argumentRows("valid_controls", "list_free_models");
-    assert.equal(invalid.length, 4, invalid.map((row) => row.id).join(","));
-    assert.deepEqual(invalid.map((row) => row.id).sort(), [
-      "provider_wrong_case", "provider_wrong_type",
-      "unknown_arg_list_free_models", "unknown_provider_list_free_models"
-    ]);
-    assert.equal(valid.length, 3, valid.map((row) => row.id).join(","));
-
-    for (const row of invalid) {
-      const snapshot = acceptedSnapshot(row.fixture);
-      const args = JSON.parse(JSON.stringify(row.args));
-      const before = catalog.canonicalText(args);
-      const result = catalog.listFreeModels(snapshot, args);
-      assertSameValue(result, row.expect, row.id);
-      assertArgumentEnvelope(result, row.expect.error.code,
-                             row.expect.error.parameter, row.id);
-      assert.equal(catalog.canonicalText(args), before,
-                   `${row.id}: the argument object is never mutated`);
-    }
-    for (const row of valid) {
-      const result = catalog.listFreeModels(acceptedSnapshot(row.fixture),
-                                            JSON.parse(JSON.stringify(row.args)));
-      assert.equal(result.ok, true, row.id);
-    }
-
-    const lookup = acceptedSnapshot("lookup.json");
-    // A whole argument value that is not a JSON object is invalid_arguments /
-    // null -- null, a list, a number, a string, a boolean and no value at all.
-    for (const args of [null, [], 5, "x", false, 1.5, undefined]) {
-      assertArgumentEnvelope(catalog.listFreeModels(lookup, args),
-                             "invalid_arguments", null, String(args));
-    }
-    // A non-null provider of the wrong type is invalid_arguments/provider.
-    for (const bad of [true, false, 5, 1.5, [], ["synthetic-a"], {},
-                       {a: 1}]) {
-      assertArgumentEnvelope(catalog.listFreeModels(lookup, {provider: bad}),
-                             "invalid_arguments", "provider",
-                             JSON.stringify(bad));
-    }
-    // Empty, padded and wrong-case keys are never repaired.
-    for (const bad of ["", " synthetic-a ", "synthetic-a ", " synthetic-a",
-                       "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"]) {
-      assertArgumentEnvelope(catalog.listFreeModels(lookup, {provider: bad}),
-                             "unknown_provider", "provider", bad);
-    }
-    // Unknown-key precedence: ANY unknown key rejects with parameter null
-    // BEFORE the provider type/membership check.
-    for (const args of [
-      JSON.parse('{"provider": 5, "bogus": 1}'),
-      JSON.parse('{"provider": "synthetic-z", "bogus": 1}'),
-      JSON.parse('{"bogus": 1}'),
-      JSON.parse('{"provider": "synthetic-a", "bogus": 1}'),
-      JSON.parse('{"provider": "synthetic-a", "limit": 5}'),
-      JSON.parse('{"limit": 5, "offset": 0}'),
-      // Prototype-looking unknown KEYS are ordinary own keys: rejected, never
-      // treated as registered parameters and never reflected back.
-      JSON.parse('{"__proto__": 1}'),
-      JSON.parse('{"constructor": 1}'),
-      JSON.parse('{"toString": 1}')
-    ]) {
-      assertArgumentEnvelope(catalog.listFreeModels(lookup, args),
-                             "invalid_arguments", null,
-                             JSON.stringify(args));
-    }
-
-    // The error envelope is a FRESH object on every call.
-    const first = catalog.listFreeModels(lookup, {provider: "synthetic-z"});
-    first.ok = true;
-    first.error.code = "mutated";
-    first.error.parameter = "provider";
-    const second = catalog.listFreeModels(lookup, {provider: "synthetic-z"});
-    assertArgumentEnvelope(second, "unknown_provider", "provider",
-                           "fresh envelope");
-    assert.notEqual(second, first);
-  });
-
-  it("returns fresh, deeply isolated payloads", () => {
-    const lookup = acceptedSnapshot("lookup.json");
-    const before = catalog.canonicalText(lookup);
-
-    const whole = catalog.listFreeModels(lookup, {});
-    const again = catalog.listFreeModels(lookup, {});
-    assert.equal(catalog.canonicalText(lookup), before,
-                 "the snapshot is never mutated");
-    assert.equal(catalog.canonicalText(whole), catalog.canonicalText(again),
-                 "two calls agree");
-    for (const container of ["providers", "models", "counts",
-                             "provider_staleness"]) {
-      assert.notEqual(whole[container], again[container], container);
-      assert.notEqual(whole[container], lookup.providers[container],
-                      container);
-    }
-    for (const provider of lookup.provider_order) {
-      const source = lookup.providers[provider];
-      assert.notEqual(whole.providers[provider], source.model_ids, provider);
-      assert.notEqual(whole.models[provider], source.models, provider);
-      for (const rawId of source.model_ids) {
-        const got = whole.models[provider][rawId];
-        const src = source.models[rawId];
-        assert.notEqual(got, src, `${provider}:${rawId}`);
-        assert.notEqual(got.architecture, src.architecture, rawId);
-        assert.notEqual(got.supported_parameters, src.supported_parameters,
-                        rawId);
-        assert.notEqual(got.pricing, src.pricing, rawId);
-        assert.notEqual(got.architecture.input_modalities,
-                        src.architecture.input_modalities, rawId);
-        assert.notEqual(again.models[provider][rawId], got, rawId);
-      }
-    }
-
-    // Mutate the whole payload deeply; the snapshot, the earlier result and a
-    // brand-new call must all stay unchanged.
-    const shared = whole.models["synthetic-a"]["vendor/shared"];
-    shared.name = "mutated";
-    shared.architecture.input_modalities.push("vision");
-    shared.supported_parameters.push("seed");
-    shared.pricing.prompt = "999";
-    shared.context_length = 1;
-    whole.providers["synthetic-a"].push("injected");
-    whole.counts["synthetic-a"] = 99;
-    whole.provider_staleness["synthetic-a"] = true;
-    delete whole.models["synthetic-a"]["vendor/model:free"];
-    assert.equal(catalog.canonicalText(lookup), before,
-                 "mutating a result never reaches the snapshot");
-    const againShared = again.models["synthetic-a"]["vendor/shared"];
-    assert.equal(againShared.name, "Vendor Shared");
-    assert.deepEqual(againShared.architecture.input_modalities, ["text"]);
-    assert.deepEqual(againShared.supported_parameters,
-                     ["temperature", "max_tokens"]);
-    assert.deepEqual(againShared.pricing,
-                     {prompt: "0", completion: "0"});
-    assert.equal(againShared.context_length, 131072);
-    assert.deepEqual(again.providers["synthetic-a"],
-                     ["vendor/model-renamed", "vendor/model:free",
-                      "vendor/shared"]);
-    const third = catalog.listFreeModels(lookup, {});
-    assertSameValue(third, again, "a later call is unaffected by mutations");
-
-    // The one-provider and registered zero-ID containers are fresh too.
-    const single = catalog.listFreeModels(lookup, {provider: "synthetic-a"});
-    const sourceA = lookup.providers["synthetic-a"];
-    assert.notEqual(single.model_ids, sourceA.model_ids);
-    assert.notEqual(single.models, sourceA.models);
-    assert.notEqual(single.provider_staleness, lookup.providers);
-    single.model_ids.push("injected");
-    single.models["vendor/model:free"].architecture.input_modalities.push(
-      "audio");
-    single.provider_staleness["synthetic-a"] = true;
-    assert.equal(catalog.canonicalText(lookup), before,
-                 "a single-provider result is never a snapshot window");
-    const zero = catalog.listFreeModels(lookup, {provider: "synthetic-c"});
-    zero.model_ids.push("injected");
-    zero.provider_staleness["synthetic-c"] = true;
-    assert.equal(catalog.canonicalText(lookup), before);
-    assert.notEqual(zero.model_ids,
-                    catalog.listFreeModels(lookup, {provider: "synthetic-c"})
-                      .model_ids);
-
-    // Interleaved calls never share containers.
-    const mixed = catalog.listFreeModels(lookup, {});
-    catalog.listEndpoints(lookup, {});
-    const mixedAgain = catalog.listFreeModels(lookup, {});
-    assert.notEqual(mixed.models, mixedAgain.models);
-    assert.equal(catalog.canonicalText(mixed),
-                 catalog.canonicalText(mixedAgain));
-  });
-
-  it("survives prototype-looking provider and raw-ID keys", () => {
-    const snapshot = lookalikeKeySnapshot();
-    const frozen = catalog.canonicalText(snapshot);
-    const whole = catalog.listFreeModels(snapshot, {});
-
-    assert.deepEqual(Object.keys(whole.providers).sort(),
-                     ["__proto__", "constructor"]);
-    assert.deepEqual(Object.keys(whole.models).sort(),
-                     ["__proto__", "constructor"]);
-    assert.deepEqual(Object.keys(whole.counts).sort(),
-                     ["__proto__", "constructor"]);
-    // Exact own keys survive; inherited members are never mistaken for input.
-    assert.equal(Object.prototype.hasOwnProperty.call(whole.providers,
-                                                      "__proto__"), true);
-    assert.deepEqual(whole.providers["__proto__"],
-                     ["__proto__", "constructor-free", "shared-lookalike"]);
-    assert.deepEqual(whole.providers["constructor"], ["toString"]);
-    assert.deepEqual(whole.counts, flagMap([["__proto__", 3],
-                                           ["constructor", 1]]));
-    assert.equal(whole.total_ids, 4);
-    assert.equal(whole.n_gateways, 2);
-    assert.deepEqual(whole.provider_staleness,
-                     flagMap([["__proto__", true], ["constructor", false]]));
-    assert.equal(whole.tick_epoch, null,
-                 "an unknown observation epoch is echoed as null");
-    assert.equal(whole.snapshot_id, snapshot.snapshot_id);
-    // No prototype pollution anywhere.
-    assert.equal(Object.getPrototypeOf(whole.providers), Object.prototype);
-    assert.equal(Object.getPrototypeOf(whole.models), Object.prototype);
-    assert.equal({}.polluted, undefined);
-    assert.equal(Object.prototype.polluted, undefined);
-    assert.equal(typeof {}.constructor, "function",
-                 "the shared prototype is untouched");
-    assert.equal(whole.models["__proto__"]["__proto__"].name, "Proto");
-    assert.equal(whole.models["constructor"]["toString"].name, "ToString");
-
-    // An exact registered key is selectable, including a lookalike one.
-    const selected = catalog.listFreeModels(snapshot, {provider: "__proto__"});
-    assert.equal(selected.ok, true);
-    assert.equal(selected.provider, "__proto__");
-    assert.deepEqual(selected.model_ids,
-                     ["__proto__", "constructor-free", "shared-lookalike"]);
-    // `constructor` + `toString` are prototype MEMBERS of a normal object, so
-    // an unregistered lookalike string is still an unknown provider.
-    assertArgumentEnvelope(catalog.listFreeModels(snapshot,
-                                                  {provider: "toString"}),
-                           "unknown_provider", "provider", "inherited name");
-    assert.equal(catalog.canonicalText(snapshot), frozen,
-                 "the lookalike snapshot is never mutated");
-  });
-
-  it("publishes the same query functions to the browser namespace", () => {
-    const vm = require("node:vm");
-    const source = fs.readFileSync(
-      path.join(__dirname, "..", "..", "web", "catalog-query.js"), "utf8");
-    const sandbox = {};
-    sandbox.globalThis = sandbox;
-    vm.createContext(sandbox);
-    vm.runInContext(source, sandbox);
-    const browserApi = sandbox.WatchdogCatalog;
-    assert.equal(typeof browserApi.listFreeModels, "function");
-    assert.equal(typeof browserApi.listEndpoints, "function");
-    const snapshot = browserApi.loadSnapshot(readFixtureText("lookup.json"));
-    const expectedAll = catalog.listFreeModels(acceptedSnapshot("lookup.json"),
-                                               {});
-    assert.equal(browserApi.canonicalText(browserApi.listFreeModels(snapshot,
-                                                                    {})),
-                 catalog.canonicalText(expectedAll),
-                 "the inlined copy answers the bulk export identically");
-    assert.equal(
-      browserApi.canonicalText(browserApi.listEndpoints(
-        snapshot, {provider: "synthetic-a"})),
-      catalog.canonicalText(catalog.listEndpoints(acceptedSnapshot(
-        "lookup.json"), {provider: "synthetic-a"})),
-      "the inlined copy scopes endpoints identically");
-  });
-
-  it("agrees with the unchanged Python reference over the selected inputs", () => {
-    const cases = queryRows("list_free_models").map((row) => ({
-      label: row.id, snapshot_text: readFixtureText(row.fixture),
-      args: JSON.parse(JSON.stringify(row.args))
-    }));
-    const lookupText = readFixtureText("lookup.json");
-    for (const entry of [
-      ["boundary-unknown-key", JSON.parse('{"provider": "synthetic-a", "bogus": 1}')],
-      ["boundary-unknown-provider", {provider: "synthetic-z"}],
-      ["boundary-wrong-type", {provider: 5}],
-      ["boundary-null", {provider: null}],
-      ["boundary-non-object", null],
-      ["boundary-omitted", {}]
-    ]) {
-      cases.push({label: entry[0], snapshot_text: lookupText, args: entry[1]});
-    }
-    const lookalike = catalog.canonicalText(lookalikeKeySnapshot());
-    cases.push({label: "lookalike-all", snapshot_text: lookalike, args: {}});
-    cases.push({label: "lookalike-proto", snapshot_text: lookalike,
-                args: {provider: "__proto__"}});
-    cases.push({label: "empty-registry",
-                snapshot_text: catalog.canonicalText(
-                  emptyRegistrySnapshot()), args: {}});
-    const results = cases.map((entry) => catalog.listFreeModels(
-      catalog.loadSnapshot(entry.snapshot_text), entry.args));
-    assertQueryParity("list_free_models", cases, results);
-  });
-});
-
-describe("pure list_endpoints query", () => {
-  it("reproduces every independent success golden exactly", () => {
-    const rows = queryRows("list_endpoints");
-    assert.equal(rows.length, 5, rows.map((row) => row.id).join(","));
-    assert.deepEqual(rows.map((row) => row.id).sort(), [
-      "endpoints_extension_all", "endpoints_lookup_all",
-      "endpoints_lookup_provider_a", "endpoints_lookup_zero_provider_c",
-      "endpoints_ordering_all"
-    ]);
-    for (const row of rows) {
-      const snapshot = acceptedSnapshot(row.fixture);
-      const snapshotText = catalog.canonicalText(snapshot);
-      const args = JSON.parse(JSON.stringify(row.args));
-      const argsText = catalog.canonicalText(args);
-      const result = catalog.listEndpoints(snapshot, args);
-      assertSameValue(result, row.expect, row.id);
-      assert.equal(result.ok, true, row.id);
-      // ONE exact top-level field set for both variants.
-      assert.deepEqual(Object.keys(result).sort(), ENDPOINT_FIELDS, row.id);
-      assert.deepEqual(Object.keys(result.counts).sort(),
-                       ENDPOINT_COUNT_FIELDS, row.id);
-      const selected = result.provider === null
-        ? snapshot.provider_order : [result.provider];
-      assert.deepEqual(Object.keys(result.gateways).sort(),
-                       selected.slice().sort(), row.id);
-      assert.deepEqual(Object.keys(result.provider_staleness).sort(),
-                       selected.slice().sort(), row.id);
-      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
-      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
-      for (const provider of selected) {
-        const source = snapshot.providers[provider];
-        const gateway = result.gateways[provider];
-        assert.deepEqual(Object.keys(gateway).sort(), GATEWAY_FIELDS,
-                         `${row.id}:${provider}`);
-        assert.equal(gateway.chat_completions_url,
-                     source.chat_completions_url, row.id);
-        assert.equal(gateway.api_type, source.api_type, row.id);
-        assert.deepEqual(gateway.model_ids.slice().sort(),
-                         source.model_ids.slice().sort(), row.id);
-        assert.deepEqual(Object.keys(gateway.models).sort(),
-                         source.model_ids.slice().sort(), row.id);
-        assert.equal(result.provider_staleness[provider], source.stale,
-                     row.id);
-        for (const rawId of source.model_ids) {
-          assertSameValue(gateway.models[rawId], source.models[rawId],
-                          `${row.id}:${provider}:${rawId}`);
-        }
-      }
-      for (const field of ["gateways", "endpoints", "distinct_raw_ids",
-                           "marker_group_labels", "models"]) {
-        assert.ok(Number.isInteger(result.counts[field]) &&
-                  result.counts[field] >= 0, `${row.id}: ${field}`);
-      }
-      assert.equal(catalog.canonicalText(snapshot), snapshotText,
-                   `${row.id}: the snapshot is never mutated`);
-      assert.equal(catalog.canonicalText(args), argsText,
-                   `${row.id}: the argument object is never mutated`);
-    }
-  });
-
-  it("scopes gateways, counts and the legacy alias to the selected providers", () => {
-    const lookup = acceptedSnapshot("lookup.json");
-    const extension = acceptedSnapshot("provider-extension.json");
-
-    const omitted = catalog.listEndpoints(lookup, {});
-    const nulled = catalog.listEndpoints(lookup, {provider: null});
-    assertSameValue(omitted, nulled, "absent vs null provider");
-    assert.equal(omitted.provider, null,
-                 "the all-provider form echoes a literal null");
-    assert.deepEqual(Object.keys(omitted).sort(), ENDPOINT_FIELDS);
-    // Labels are NOT endpoint pairs: 3 gateway labels over 5 endpoints.
-    assert.deepEqual(omitted.counts, {gateways: 3, endpoints: 5,
-                                      distinct_raw_ids: 4,
-                                      marker_group_labels: 3, models: 3});
-    assert.equal(omitted.counts.models,
-                 omitted.counts.marker_group_labels,
-                 "`models` is the documented legacy alias");
-    assert.notEqual(omitted.counts.models, omitted.counts.endpoints);
-
-    // Natural order, not the frozen snapshot array.
-    const ordered = catalog.listEndpoints(acceptedSnapshot("ordering.json"),
-                                          {});
-    assert.notDeepEqual(ordered.gateways["synthetic-b"].model_ids,
-                        acceptedSnapshot("ordering.json")
-                          .providers["synthetic-b"].model_ids,
-                        "endpoint ids are re-sorted naturally");
-    assert.deepEqual(ordered.gateways["synthetic-b"].model_ids.slice(0, 4),
-                     ["vendor/item1", "vendor/item2", "vendor/item02",
-                      "vendor/item10"]);
-
-    // A filtered response carries ONLY the selected provider's gateway,
-    // staleness and counts -- no registry-wide total leaks in.
-    const onlyA = catalog.listEndpoints(lookup, {provider: "synthetic-a"});
-    assert.equal(onlyA.provider, "synthetic-a");
-    assert.deepEqual(Object.keys(onlyA.gateways), ["synthetic-a"]);
-    assert.deepEqual(Object.keys(onlyA.provider_staleness), ["synthetic-a"]);
-    assert.deepEqual(onlyA.counts, {gateways: 1, endpoints: 3,
-                                    distinct_raw_ids: 3,
-                                    marker_group_labels: 3, models: 3});
-    assert.equal(onlyA.gateways["synthetic-a"].chat_completions_url,
-                 "https://synthetic-alpha.example/v1/chat/completions");
-    assert.equal(onlyA.gateways["synthetic-a"].api_type, "openai");
-
-    // The provider-extension control: 4 gateways, 6 endpoints, 4 distinct ids
-    // but only 3 marker labels (both `model:free` and `model-free` strip to
-    // the same label), and the alias agrees with the label count.
-    const all = catalog.listEndpoints(extension, {});
-    assert.deepEqual(all.counts, {gateways: 4, endpoints: 6,
-                                  distinct_raw_ids: 4,
-                                  marker_group_labels: 3, models: 3});
-    assert.deepEqual(Object.keys(all.gateways).sort(),
-                     ["synthetic-a", "synthetic-b", "synthetic-c",
-                      "synthetic-d"]);
-    assert.deepEqual(all.provider_staleness,
-                     {"synthetic-d": true, "synthetic-a": false,
-                      "synthetic-b": false, "synthetic-c": false});
-    const onlyD = catalog.listEndpoints(extension, {provider: "synthetic-d"});
-    assert.deepEqual(onlyD.counts, {gateways: 1, endpoints: 1,
-                                    distinct_raw_ids: 1,
-                                    marker_group_labels: 1, models: 1});
-    assert.deepEqual(onlyD.gateways["synthetic-d"].model_ids,
-                     ["vendor/shared"]);
-    assert.equal(onlyD.gateways["synthetic-d"].models["vendor/shared"]
-                   .context_length, 8192);
-
-    // A registered zero-ID provider: gateways 1, every other count zero.
-    const zero = catalog.listEndpoints(lookup, {provider: "synthetic-c"});
-    assert.equal(zero.ok, true);
-    assert.deepEqual(zero.counts, {gateways: 1, endpoints: 0,
-                                   distinct_raw_ids: 0,
-                                   marker_group_labels: 0, models: 0});
-    assert.deepEqual(zero.gateways["synthetic-c"].model_ids, []);
-    assert.deepEqual(zero.gateways["synthetic-c"].models, {});
-    assert.deepEqual(zero.provider_staleness, {"synthetic-c": false});
-
-    // The legitimately EMPTY registry: all counts zero, no gateway entries.
-    const empty = catalog.listEndpoints(emptyRegistrySnapshot(), {});
-    assert.equal(empty.ok, true);
-    assert.deepEqual(Object.keys(empty).sort(), ENDPOINT_FIELDS);
-    assert.equal(empty.provider, null);
-    assert.deepEqual(empty.gateways, {});
-    assert.deepEqual(empty.provider_staleness, {});
-    assert.deepEqual(empty.counts, {gateways: 0, endpoints: 0,
-                                    distinct_raw_ids: 0,
-                                    marker_group_labels: 0, models: 0});
-  });
-
-  it("reproduces the frozen argument boundary and its precedence", () => {
-    const invalid = argumentRows("invalid_cases", "list_endpoints");
-    const valid = argumentRows("valid_controls", "list_endpoints");
-    assert.equal(invalid.length, 3, invalid.map((row) => row.id).join(","));
-    assert.deepEqual(invalid.map((row) => row.id).sort(), [
-      "provider_empty", "unknown_arg_list_endpoints",
-      "unknown_provider_list_endpoints"
-    ]);
-    assert.equal(valid.length, 2, valid.map((row) => row.id).join(","));
-
-    for (const row of invalid) {
-      const snapshot = acceptedSnapshot(row.fixture);
-      const args = JSON.parse(JSON.stringify(row.args));
-      const before = catalog.canonicalText(args);
-      const result = catalog.listEndpoints(snapshot, args);
-      assertSameValue(result, row.expect, row.id);
-      assertArgumentEnvelope(result, row.expect.error.code,
-                             row.expect.error.parameter, row.id);
-      assert.equal(catalog.canonicalText(args), before,
-                   `${row.id}: the argument object is never mutated`);
-    }
-    for (const row of valid) {
-      const result = catalog.listEndpoints(acceptedSnapshot(row.fixture),
-                                           JSON.parse(JSON.stringify(row.args)));
-      assert.equal(result.ok, true, row.id);
-    }
-
-    const lookup = acceptedSnapshot("lookup.json");
-    for (const args of [null, [], 5, "x", false, 1.5, undefined]) {
-      assertArgumentEnvelope(catalog.listEndpoints(lookup, args),
-                             "invalid_arguments", null, String(args));
-    }
-    for (const bad of [true, false, 5, 1.5, [], ["synthetic-a"], {},
-                       {a: 1}]) {
-      assertArgumentEnvelope(catalog.listEndpoints(lookup, {provider: bad}),
-                             "invalid_arguments", "provider",
-                             JSON.stringify(bad));
-    }
-    for (const bad of ["", " synthetic-a ", "synthetic-a ", " synthetic-a",
-                       "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"]) {
-      assertArgumentEnvelope(catalog.listEndpoints(lookup, {provider: bad}),
-                             "unknown_provider", "provider", bad);
-    }
-    // Unknown-key precedence, including `limit`/`offset` (NOT bulk truncation
-    // controls) and prototype-looking unknown keys.
-    for (const args of [
-      JSON.parse('{"provider": 5, "limit": 5}'),
-      JSON.parse('{"provider": "synthetic-z", "bogus": 1}'),
-      JSON.parse('{"provider": null, "limit": 5}'),
-      JSON.parse('{"provider": "synthetic-a", "limit": 5}'),
-      JSON.parse('{"__proto__": 1}'),
-      JSON.parse('{"constructor": 1}'),
-      JSON.parse('{"toString": 1}')
-    ]) {
-      assertArgumentEnvelope(catalog.listEndpoints(lookup, args),
-                             "invalid_arguments", null,
-                             JSON.stringify(args));
-    }
-    const first = catalog.listEndpoints(lookup, {provider: "synthetic-z"});
-    first.error.code = "mutated";
-    const second = catalog.listEndpoints(lookup, {provider: "synthetic-z"});
-    assertArgumentEnvelope(second, "unknown_provider", "provider",
-                           "fresh envelope");
-    assert.notEqual(second, first);
-  });
-
-  it("returns fresh, deeply isolated payloads", () => {
-    const lookup = acceptedSnapshot("lookup.json");
-    const before = catalog.canonicalText(lookup);
-    const whole = catalog.listEndpoints(lookup, {});
-    const again = catalog.listEndpoints(lookup, {});
-    assert.equal(catalog.canonicalText(lookup), before,
-                 "the snapshot is never mutated");
-    assert.equal(catalog.canonicalText(whole), catalog.canonicalText(again));
-    for (const container of ["gateways", "counts", "provider_staleness"]) {
-      assert.notEqual(whole[container], again[container], container);
-      assert.notEqual(whole[container], lookup.providers[container],
-                      container);
-    }
-    for (const provider of lookup.provider_order) {
-      const source = lookup.providers[provider];
-      const gateway = whole.gateways[provider];
-      assert.notEqual(gateway, source, provider);
-      assert.notEqual(gateway.model_ids, source.model_ids, provider);
-      assert.notEqual(gateway.models, source.models, provider);
-      assert.notEqual(again.gateways[provider], gateway, provider);
-      for (const rawId of source.model_ids) {
-        const got = gateway.models[rawId];
-        const src = source.models[rawId];
-        assert.notEqual(got, src, `${provider}:${rawId}`);
-        assert.notEqual(got.architecture, src.architecture, rawId);
-        assert.notEqual(got.supported_parameters, src.supported_parameters,
-                        rawId);
-        assert.notEqual(got.pricing, src.pricing, rawId);
-        assert.notEqual(again.gateways[provider].models[rawId], got, rawId);
-      }
-    }
-
-    const shared = whole.gateways["synthetic-a"].models["vendor/shared"];
-    shared.name = "mutated";
-    shared.architecture.input_modalities.push("vision");
-    shared.supported_parameters.push("seed");
-    shared.pricing.prompt = "999";
-    whole.gateways["synthetic-a"].model_ids.push("injected");
-    whole.gateways["synthetic-a"].chat_completions_url = "https://evil.example";
-    whole.counts.endpoints = 99;
-    whole.provider_staleness["synthetic-a"] = true;
-    assert.equal(catalog.canonicalText(lookup), before,
-                 "mutating a result never reaches the snapshot");
-    const againShared = again.gateways["synthetic-a"].models["vendor/shared"];
-    assert.equal(againShared.name, "Vendor Shared");
-    assert.deepEqual(againShared.architecture.input_modalities, ["text"]);
-    assert.deepEqual(againShared.supported_parameters,
-                     ["temperature", "max_tokens"]);
-    assert.deepEqual(againShared.pricing, {prompt: "0", completion: "0"});
-    assert.deepEqual(again.gateways["synthetic-a"].model_ids,
-                     ["vendor/model-renamed", "vendor/model:free",
-                      "vendor/shared"]);
-    assert.equal(again.gateways["synthetic-a"].chat_completions_url,
-                 "https://synthetic-alpha.example/v1/chat/completions");
-    const third = catalog.listEndpoints(lookup, {});
-    assertSameValue(third, again, "a later call is unaffected by mutations");
-
-    const single = catalog.listEndpoints(lookup, {provider: "synthetic-a"});
-    const sourceA = lookup.providers["synthetic-a"];
-    assert.notEqual(single.gateways["synthetic-a"].model_ids,
-                    sourceA.model_ids);
-    assert.notEqual(single.gateways["synthetic-a"].models, sourceA.models);
-    single.gateways["synthetic-a"].model_ids.push("injected");
-    single.gateways["synthetic-a"].models["vendor/model:free"]
-      .architecture.input_modalities.push("audio");
-    single.provider_staleness["synthetic-a"] = true;
-    assert.equal(catalog.canonicalText(lookup), before);
-    const zero = catalog.listEndpoints(lookup, {provider: "synthetic-c"});
-    assert.notEqual(zero.gateways["synthetic-c"].model_ids,
-                    catalog.listEndpoints(lookup, {provider: "synthetic-c"})
-                      .gateways["synthetic-c"].model_ids);
-
-    // Interleaved calls never share containers.
-    const mixed = catalog.listEndpoints(lookup, {});
-    catalog.listFreeModels(lookup, {});
-    const mixedAgain = catalog.listEndpoints(lookup, {});
-    assert.notEqual(mixed.gateways, mixedAgain.gateways);
-    assert.equal(catalog.canonicalText(mixed),
-                 catalog.canonicalText(mixedAgain));
-  });
-
-  it("survives prototype-looking provider and raw-ID keys", () => {
-    const snapshot = lookalikeKeySnapshot();
-    const frozen = catalog.canonicalText(snapshot);
-    const whole = catalog.listEndpoints(snapshot, {});
-
-    assert.deepEqual(Object.keys(whole.gateways).sort(),
-                     ["__proto__", "constructor"]);
-    assert.deepEqual(Object.keys(whole.provider_staleness).sort(),
-                     ["__proto__", "constructor"]);
-    assert.equal(Object.prototype.hasOwnProperty.call(whole.gateways,
-                                                      "__proto__"), true);
-    assert.equal(Object.getPrototypeOf(whole.gateways), Object.prototype);
-    assert.equal(Object.getPrototypeOf(whole.counts), Object.prototype);
-    assert.deepEqual(whole.gateways["__proto__"].model_ids,
-                     ["__proto__", "constructor-free", "shared-lookalike"]);
-    assert.deepEqual(whole.gateways["__proto__"].models["__proto__"].name,
-                     "Proto");
-    assert.deepEqual(whole.gateways["constructor"].model_ids, ["toString"]);
-    // Labels count distinct STRINGS, never prototype member names conflated
-    // with each other: `constructor-free` strips to `constructor`, which is a
-    // real label here alongside the `__proto__` label.
-    assert.deepEqual(whole.counts, {gateways: 2, endpoints: 4,
-                                    distinct_raw_ids: 4,
-                                    marker_group_labels: 4, models: 4});
-    assert.deepEqual(whole.provider_staleness,
-                     flagMap([["__proto__", true], ["constructor", false]]));
-    assert.equal(whole.provider, null);
-    assert.equal(whole.tick_epoch, null);
-    assert.equal({}.polluted, undefined);
-    assert.equal(Object.prototype.polluted, undefined);
-
-    const selected = catalog.listEndpoints(snapshot, {provider: "__proto__"});
-    assert.equal(selected.provider, "__proto__");
-    assert.deepEqual(Object.keys(selected.gateways), ["__proto__"]);
-    assert.deepEqual(selected.counts, {gateways: 1, endpoints: 3,
-                                       distinct_raw_ids: 3,
-                                       marker_group_labels: 3, models: 3});
-    assertArgumentEnvelope(catalog.listEndpoints(snapshot,
-                                                 {provider: "constructor "}),
-                           "unknown_provider", "provider", "padded lookalike");
-    assertArgumentEnvelope(catalog.listEndpoints(snapshot,
-                                                 {provider: "valueOf"}),
-                           "unknown_provider", "provider", "inherited name");
-    assert.equal(catalog.canonicalText(snapshot), frozen,
-                 "the lookalike snapshot is never mutated");
-  });
-
-  it("agrees with the unchanged Python reference over the selected inputs", () => {
-    const cases = queryRows("list_endpoints").map((row) => ({
-      label: row.id, snapshot_text: readFixtureText(row.fixture),
-      args: JSON.parse(JSON.stringify(row.args))
-    }));
-    const lookupText = readFixtureText("lookup.json");
-    for (const entry of [
-      ["boundary-unknown-key", JSON.parse('{"provider": null, "limit": 5}')],
-      ["boundary-unknown-provider", {provider: "synthetic-z"}],
-      ["boundary-wrong-type", {provider: 5}],
-      ["boundary-null", {provider: null}],
-      ["boundary-omitted", {}],
-      ["boundary-non-object", null],
-      ["boundary-filtered", {provider: "synthetic-a"}]
-    ]) {
-      cases.push({label: entry[0], snapshot_text: lookupText, args: entry[1]});
-    }
-    const lookalike = catalog.canonicalText(lookalikeKeySnapshot());
-    cases.push({label: "lookalike-all", snapshot_text: lookalike, args: {}});
-    cases.push({label: "lookalike-proto", snapshot_text: lookalike,
-                args: {provider: "__proto__"}});
-    cases.push({label: "empty-registry",
-                snapshot_text: catalog.canonicalText(
-                  emptyRegistrySnapshot()), args: {}});
-    const results = cases.map((entry) => catalog.listEndpoints(
-      catalog.loadSnapshot(entry.snapshot_text), entry.args));
-    assertQueryParity("list_endpoints", cases, results);
-  });
-});
-
 // --------------------------------------------------------------------------
-// pure get_model: literal membership + separate marker endpoints
+// pure get_model: exact provider + literal raw id
 // --------------------------------------------------------------------------
 //
 // `catalog.getModel(snapshot, args)` is the dependency-free counterpart of
 // `watchdog_catalog.query.get_model`. It takes an already-VALIDATED public
-// snapshot and the whole DECODED argument object, returns the frozen success
-// payload or the shared argument-error envelope, never raises for a malformed
-// argument and never mutates its inputs. Every expected payload below is either
-// the independently authored `cases.json` / `argument-cases.json` golden or a
-// hand-written literal from README's `get_model` contract table.
+// snapshot and the whole DECODED argument object, returns the flat success
+// payload or the shared error envelope, never raises for a malformed argument
+// and never mutates its inputs. The literal success rows are driven by the
+// unchanged contract-parity owner; the owners here pin the exact pair identity,
+// the flat details row, the not_found envelope, the argument boundary and
+// output freshness.
 describe("pure get_model query", () => {
-  it("reproduces every independent success golden exactly", () => {
-    const rows = queryRows("get_model");
-    assert.equal(rows.length, 13, rows.map((row) => row.id).join(","));
-    assert.equal(new Set(rows.map((row) => row.id)).size, 13,
-                 "every golden id is unique");
-    assert.deepEqual(rows.map((row) => row.id).sort(), [
-      "get_model_capability_known_empty_lists",
-      "get_model_capability_unknown_all_null",
-      "get_model_exact_id_alpha_with_marker_endpoints",
-      "get_model_marker_base_no_exact",
-      "get_model_metadata_known_context_inclusive_boundary",
-      "get_model_metadata_unknown_context_null",
-      "get_model_metadata_unknown_description_null",
-      "get_model_metadata_zero_context_known_zero",
-      "get_model_ordering_identical_raw_id_provider_precedence",
-      "get_model_padded_query_not_trimmed",
-      "get_model_shared_raw_id_two_endpoints",
-      "get_model_unknown_id_empty_success",
-      "get_model_unrelated_renamed_model_exact_only"
-    ]);
-    for (const row of rows) {
-      // Per-row fixture override with the documented `lookup.json` default --
-      // never a wrong-fixture fallback.
-      const snapshot = acceptedSnapshot(row.fixture || "lookup.json");
-      const snapshotText = catalog.canonicalText(snapshot);
-      const args = JSON.parse(JSON.stringify(row.args));
-      const argsText = catalog.canonicalText(args);
-      const result = catalog.getModel(snapshot, args);
-      assertSameValue(result, row.expect, row.id);
-      assert.equal(result.ok, true, row.id);
-      assert.deepEqual(Object.keys(result).sort(), GET_MODEL_FIELDS, row.id);
-      // Strict scalar types and literal provenance.
-      assert.equal(typeof result.query, "string", row.id);
-      assert.equal(result.query, args.model_id, row.id);
-      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
-      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
-      // exact_matches / provider_staleness carry ONE entry per provider_order
-      // provider -- the registered zero-ID provider included.
-      assert.deepEqual(Object.keys(result.exact_matches).sort(),
-                       snapshot.provider_order.slice().sort(), row.id);
-      assert.deepEqual(Object.keys(result.provider_staleness).sort(),
-                       snapshot.provider_order.slice().sort(), row.id);
-      for (const provider of snapshot.provider_order) {
-        assert.equal(typeof result.exact_matches[provider], "boolean", row.id);
-        assert.equal(result.provider_staleness[provider],
-                     snapshot.providers[provider].stale, row.id);
-      }
-      assert.deepEqual(
-        result.exact_gateways,
-        snapshot.provider_order.filter(
-          (provider) => result.exact_matches[provider]),
-        row.id);
-      for (const endpoint of result.endpoints) {
-        assert.deepEqual(Object.keys(endpoint).sort(),
-                         GET_MODEL_ENDPOINT_FIELDS, row.id);
-        assert.equal(typeof endpoint.stale, "boolean", row.id);
-        assert.equal(endpoint.stale,
-                     result.provider_staleness[endpoint.provider], row.id);
-        const source = snapshot.providers[endpoint.provider];
-        assert.equal(endpoint.chat_completions_url,
-                     source.chat_completions_url, row.id);
-        assert.equal(endpoint.api_type, source.api_type, row.id);
-        // Complete projected public model object of ITS OWN pair.
-        assertSameValue(endpoint.metadata, source.models[endpoint.model_id],
-                        `${row.id}:${endpoint.model_id}`);
-      }
-      assert.deepEqual(Object.keys(result.counts).sort(),
-                       GET_MODEL_COUNT_FIELDS, row.id);
-      for (const field of GET_MODEL_COUNT_FIELDS) {
-        assert.ok(Number.isInteger(result.counts[field]) &&
-                  result.counts[field] >= 0,
-                  `${row.id}: ${field} is a non-negative integer`);
-      }
-      // Count identities -- structural restatements, the golden literal above
-      // remains the correctness oracle.
-      assert.equal(result.counts.exact_matches, result.exact_gateways.length,
-                   row.id);
-      assert.equal(result.counts.endpoints, result.endpoints.length, row.id);
-      assert.equal(result.counts.distinct_raw_ids,
-                   new Set(result.endpoints.map((e) => e.model_id)).size,
-                   row.id);
-      assert.equal(
-        result.counts.marker_group_labels,
-        new Set(result.endpoints.map(
-          (e) => catalog.stripFreeMarker(e.model_id))).size,
-        row.id);
-      assert.deepEqual(result.caveats, [GET_MODEL_CAVEAT], row.id);
-      assert.equal(catalog.canonicalText(snapshot), snapshotText,
-                   `${row.id}: the snapshot is never mutated`);
-      assert.equal(catalog.canonicalText(args), argsText,
-                   `${row.id}: the argument object is never mutated`);
-    }
-  });
-
-  it("keeps literal membership separate from the marker-insensitive endpoints",
-     () => {
-    const lookup = acceptedSnapshot("lookup.json");
-    const ordering = acceptedSnapshot("ordering.json");
-
-    // Exact membership is LITERAL; the endpoint lookup is a separate marker
-    // comparison. The bare label matches two endpoints and no gateway.
-    const base = catalog.getModel(lookup, {model_id: "vendor/model"});
-    assert.deepEqual(base.exact_matches,
-                     {"synthetic-a": false, "synthetic-b": false,
-                      "synthetic-c": false});
-    assert.deepEqual(base.exact_gateways, []);
-    assert.deepEqual(base.endpoints.map((e) => [e.provider, e.model_id]),
-                     [["synthetic-a", "vendor/model:free"],
-                      ["synthetic-b", "vendor/model-free"]]);
-    assert.deepEqual(base.counts, {exact_matches: 0, endpoints: 2,
-                                   distinct_raw_ids: 2,
-                                   marker_group_labels: 1});
-
-    // An EXACT id is not the marker lookup: it matches only its own gateway,
-    // while the marker endpoints still return both spellings.
-    const exact = catalog.getModel(lookup, {model_id: "vendor/model:free"});
-    assert.deepEqual(exact.exact_matches,
-                     {"synthetic-a": true, "synthetic-b": false,
-                      "synthetic-c": false});
-    assert.deepEqual(exact.exact_gateways, ["synthetic-a"]);
-    assert.deepEqual(exact.endpoints.map((e) => e.model_id),
-                     ["vendor/model:free", "vendor/model-free"]);
-    assert.deepEqual(exact.counts, {exact_matches: 1, endpoints: 2,
-                                    distinct_raw_ids: 2,
-                                    marker_group_labels: 1});
-    assert.notEqual(exact.counts.endpoints, exact.counts.exact_matches);
-
-    // The other spelling is the mirror image: exact membership never uses the
-    // marker label, and the unrelated renamed id is EXACT only.
-    const other = catalog.getModel(lookup, {model_id: "vendor/model-free"});
-    assert.deepEqual(other.exact_gateways, ["synthetic-b"]);
-    assert.deepEqual(other.endpoints.map((e) => e.model_id),
-                     ["vendor/model:free", "vendor/model-free"]);
-    const renamed = catalog.getModel(lookup,
-                                     {model_id: "vendor/model-renamed"});
-    assert.deepEqual(renamed.exact_gateways, ["synthetic-a"]);
-    assert.deepEqual(renamed.endpoints.map((e) => [e.provider, e.model_id]),
-                     [["synthetic-a", "vendor/model-renamed"]]);
-    assert.deepEqual(renamed.counts, {exact_matches: 1, endpoints: 1,
-                                      distinct_raw_ids: 1,
-                                      marker_group_labels: 1});
-
-    // One raw id on two gateways is two endpoints but ONE distinct raw id, and
-    // result-scoped counts never report the registry-wide totals (the whole
-    // fixture has 5 endpoint pairs, 4 distinct ids and 3 labels).
-    const shared = catalog.getModel(lookup, {model_id: "vendor/shared"});
-    assert.deepEqual(shared.endpoints.map((e) => [e.provider, e.model_id]),
-                     [["synthetic-a", "vendor/shared"],
-                      ["synthetic-b", "vendor/shared"]]);
-    assert.deepEqual(shared.counts, {exact_matches: 2, endpoints: 2,
-                                     distinct_raw_ids: 1,
-                                     marker_group_labels: 1});
-
-    // The padded and case-changed queries are literal: no trimming, no case
-    // repair, and therefore no match at all.
-    for (const query of [" vendor/shared", "vendor/shared ",
-                         "VENDOR/SHARED", "Vendor/Shared"]) {
-      const result = catalog.getModel(lookup, {model_id: query});
-      assert.equal(result.ok, true, query);
-      assert.equal(result.query, query, query);
-      assert.deepEqual(result.exact_gateways, [], query);
-      assert.deepEqual(result.endpoints, [], query);
-      assert.deepEqual(result.counts, {exact_matches: 0, endpoints: 0,
-                                       distinct_raw_ids: 0,
-                                       marker_group_labels: 0}, query);
-      assert.deepEqual(result.caveats, [GET_MODEL_CAVEAT], query);
-    }
-
-    // Declared display order beats alphabetic and physical provider-map order:
-    // ordering.json declares b, a, c and its providers map is written a, b, c.
-    const ordered = catalog.getModel(ordering, {model_id: "vendor/item2"});
-    assert.deepEqual(ordered.exact_matches,
-                     {"synthetic-b": true, "synthetic-a": true,
-                      "synthetic-c": false});
-    assert.deepEqual(ordered.exact_gateways, ["synthetic-b", "synthetic-a"]);
-    assert.deepEqual(ordered.endpoints.map((e) => [e.provider, e.model_id]),
-                     [["synthetic-b", "vendor/item2"],
-                      ["synthetic-a", "vendor/item2"]]);
-    assert.deepEqual(ordered.provider_staleness,
-                     {"synthetic-b": true, "synthetic-a": false,
-                      "synthetic-c": false});
-    // The shared pair keeps its OWN metadata: same raw id, different gateways.
-    assert.equal(ordered.endpoints[0].metadata.name, "Order B Item Two");
-    assert.equal(ordered.endpoints[1].metadata.name, "Order A Item Two");
-    assert.equal(ordered.endpoints[0].metadata.context_length, 131072);
-    assert.equal(ordered.endpoints[1].metadata.context_length, 65536);
-    assert.notEqual(ordered.endpoints[0].metadata,
-                    ordered.endpoints[1].metadata);
-
-    // A huge numeric ID run and non-ASCII ids survive exact membership and
-    // arrive unchanged in the endpoint list.
-    const longId = ordering.providers["synthetic-b"].model_ids.find(
-      (rawId) => rawId.startsWith("vendor/long"));
-    assert.ok(longId && longId.length > 60, longId);
-    for (const query of [longId, "vendor/item\u0661", "vendor/\uff21",
-                         "vendor/\ud83d\ude00"]) {
-      const result = catalog.getModel(ordering, {model_id: query});
-      assert.equal(result.ok, true, query);
-      assert.deepEqual(result.exact_gateways, ["synthetic-b"], query);
-      assert.deepEqual(result.endpoints.map((e) => e.model_id), [query], query);
-      assert.deepEqual(result.counts, {exact_matches: 1, endpoints: 1,
-                                       distinct_raw_ids: 1,
-                                       marker_group_labels: 1}, query);
-      assert.equal(result.snapshot_id, ordering.snapshot_id, query);
-      assert.equal(result.tick_epoch, ordering.tick_epoch, query);
-    }
-
-    // A registered zero-ID provider still gets its exact_matches and staleness
-    // entries, and a no-match success is a success.
-    const missing = catalog.getModel(lookup,
-                                     {model_id: "vendor/does-not-exist"});
-    assert.equal(missing.ok, true);
-    assert.deepEqual(missing.exact_matches,
-                     {"synthetic-a": false, "synthetic-b": false,
-                      "synthetic-c": false});
-    assert.deepEqual(missing.exact_gateways, []);
-    assert.deepEqual(missing.endpoints, []);
-    assert.deepEqual(missing.provider_staleness,
-                     {"synthetic-a": false, "synthetic-b": false,
-                      "synthetic-c": false});
-    assert.deepEqual(missing.counts, {exact_matches: 0, endpoints: 0,
-                                      distinct_raw_ids: 0,
-                                      marker_group_labels: 0});
-    assert.deepEqual(missing.caveats, [GET_MODEL_CAVEAT]);
-
-    // The legitimately EMPTY registry: every map empty, every count zero.
-    const empty = catalog.getModel(emptyRegistrySnapshot(),
-                                   {model_id: "vendor/shared"});
-    assert.equal(empty.ok, true);
-    assert.deepEqual(Object.keys(empty).sort(), GET_MODEL_FIELDS);
-    assert.deepEqual(empty.exact_matches, {});
-    assert.deepEqual(empty.exact_gateways, []);
-    assert.deepEqual(empty.provider_staleness, {});
-    assert.deepEqual(empty.endpoints, []);
-    assert.deepEqual(empty.counts, {exact_matches: 0, endpoints: 0,
-                                    distinct_raw_ids: 0,
-                                    marker_group_labels: 0});
-    assert.deepEqual(empty.caveats, [GET_MODEL_CAVEAT]);
-
-    // Observation provenance is echoed, never derived: an unknown epoch stays
-    // null and a future epoch is not "fresh" or clamped.
-    const unknownTick = catalog.getModel(
-      acceptedSnapshot("status-unknown-time.json"),
-      {model_id: "vendor/unknown-capabilities"});
-    assert.equal(unknownTick.ok, true);
-    assert.equal(unknownTick.tick_epoch, null);
-    assert.deepEqual(unknownTick.exact_gateways, ["synthetic-a"]);
-    assert.deepEqual(unknownTick.provider_staleness,
-                     {"synthetic-a": false, "synthetic-b": true});
-    assert.deepEqual(Object.keys(unknownTick.exact_matches).sort(),
-                     ["synthetic-a", "synthetic-b"]);
-    const futureTick = catalog.getModel(futureTickSnapshot(),
-                                        {model_id: "vendor/shared"});
-    assert.equal(futureTick.tick_epoch, 4102444800);
-    assert.equal(futureTick.snapshot_id,
-                 futureTickSnapshot().snapshot_id,
-                 "the same body content is the same snapshot");
-  });
-
-  it("pins the accepted marker boundaries and their natural endpoint order",
-     () => {
-    const snapshot = markerBoundarySnapshot();
-    const frozen = catalog.canonicalText(snapshot);
-
-    // One suffix pass then one prefix pass, with the reference's own `$`
-    // semantics: a bare `free` is not a marker, an all-marker `-free` falls
-    // back to itself, the prefix marker strips, and a `-freely` neighbour is
-    // not a delimiter-bounded marker.
-    const base = catalog.getModel(snapshot, {model_id: "vendor/z"});
-    assert.deepEqual(base.exact_gateways, ["synthetic-z"]);
-    assert.deepEqual(base.endpoints.map((e) => e.model_id),
-                     ["free-vendor/z", "vendor/z"]);
-    assert.deepEqual(base.counts, {exact_matches: 1, endpoints: 2,
-                                   distinct_raw_ids: 2,
-                                   marker_group_labels: 1});
-    const bare = catalog.getModel(snapshot, {model_id: "free"});
-    assert.deepEqual(bare.endpoints.map((e) => e.model_id), ["free"]);
-    assert.deepEqual(bare.counts, {exact_matches: 1, endpoints: 1,
-                                   distinct_raw_ids: 1,
-                                   marker_group_labels: 1});
-    const allMarker = catalog.getModel(snapshot, {model_id: "-free"});
-    assert.deepEqual(allMarker.endpoints.map((e) => e.model_id), ["-free"]);
-
-    // Python's `$` also matches before ONE final LF, so a `-free\n` id strips
-    // the marker and KEEPS the LF in the label; a DOUBLE LF or a CRLF pair is
-    // not a single trailing LF, so those ids keep their `free` segment. The
-    // query must carry the same label, never the trimmed id.
-    assert.equal(catalog.stripFreeMarker("vendor/z-free\n"), "vendor/z\n");
-    assert.equal(catalog.stripFreeMarker("vendor/z-free\n\n"),
-                 "vendor/z-free\n\n");
-    assert.equal(catalog.stripFreeMarker("vendor/z-free\r\n"),
-                 "vendor/z-free\r\n");
-    const lf = catalog.getModel(snapshot, {model_id: "vendor/z\n"});
-    assert.deepEqual(lf.exact_matches, {"synthetic-z": false});
-    assert.deepEqual(lf.endpoints.map((e) => e.model_id),
-                     ["vendor/z-free\n"]);
-    assert.deepEqual(lf.counts, {exact_matches: 0, endpoints: 1,
-                                 distinct_raw_ids: 1,
-                                 marker_group_labels: 1});
-    const doubleLf = catalog.getModel(snapshot,
-                                      {model_id: "vendor/z-free\n\n"});
-    assert.deepEqual(doubleLf.exact_gateways, ["synthetic-z"]);
-    assert.deepEqual(doubleLf.endpoints.map((e) => e.model_id),
-                     ["vendor/z-free\n\n"]);
-    const bareDoubleLf = catalog.getModel(snapshot, {model_id: "vendor/z\n\n"});
-    assert.deepEqual(bareDoubleLf.endpoints, []);
-    const crlf = catalog.getModel(snapshot, {model_id: "vendor/z-free\r\n"});
-    assert.deepEqual(crlf.exact_gateways, ["synthetic-z"]);
-    assert.deepEqual(crlf.endpoints.map((e) => e.model_id),
-                     ["vendor/z-free\r\n"]);
-    const neighbour = catalog.getModel(snapshot, {model_id: "vendor/z-freely"});
-    assert.deepEqual(neighbour.endpoints.map((e) => e.model_id),
-                     ["vendor/z-freely"]);
-
-    // Endpoint order is the accepted natural raw-ID order, NOT the order the
-    // `models` map happens to be inserted in (it is reversed here).
-    const mapOrder = Object.keys(snapshot.providers["synthetic-z"].models);
-    assert.deepEqual(mapOrder,
-                     snapshot.providers["synthetic-z"].model_ids.slice()
-                       .reverse(),
-                     "the models map is inserted in reverse raw-ID order");
-    assert.notDeepEqual(
-      base.endpoints.map((e) => e.model_id),
-      mapOrder.filter((rawId) => base.endpoints.some(
-        (e) => e.model_id === rawId)),
-      "endpoints follow the natural raw-ID order, never map order");
-    assert.equal(catalog.canonicalText(snapshot), frozen,
-                 "the marker snapshot is never mutated");
-  });
-
-  it("reproduces the frozen required model_id argument boundary", () => {
-    const invalid = argumentRows("invalid_cases", "get_model");
-    const valid = argumentRows("valid_controls", "get_model");
-    assert.equal(invalid.length, 8, invalid.map((row) => row.id).join(","));
-    assert.equal(new Set(invalid.map((row) => row.id)).size, 8);
-    assert.deepEqual(invalid.map((row) => row.id).sort(), [
-      "args_number_not_object", "model_id_ascii_blank", "model_id_empty",
-      "model_id_missing", "model_id_null", "model_id_number",
-      "precedence_unknown_key_before_required", "unknown_arg_get_model"
-    ]);
-    assert.equal(valid.length, 2, valid.map((row) => row.id).join(","));
-
-    for (const row of invalid) {
-      const snapshot = acceptedSnapshot(row.fixture);
-      const args = JSON.parse(JSON.stringify(row.args));
-      const before = catalog.canonicalText(args);
-      const result = catalog.getModel(snapshot, args);
-      assertSameValue(result, row.expect, row.id);
-      assertArgumentEnvelope(result, row.expect.error.code,
-                             row.expect.error.parameter, row.id);
-      assert.equal(catalog.canonicalText(args), before,
-                   `${row.id}: the argument object is never mutated`);
-    }
-    // Acceptance-only controls: the complete oracles are the thirteen success
-    // goldens above, so this pins acceptance and the retained literal query.
-    for (const row of valid) {
-      const result = catalog.getModel(acceptedSnapshot(row.fixture),
-                                      JSON.parse(JSON.stringify(row.args)));
-      assert.equal(result.ok, true, row.id);
-      assert.equal(result.query, row.args.model_id, row.id);
-    }
-
-    const lookup = acceptedSnapshot("lookup.json");
-
-    // A whole argument value that is not a JSON object: parameter is null.
-    for (const args of [null, [], 5, "x", false, true, 1.5, undefined]) {
-      assertArgumentEnvelope(catalog.getModel(lookup, args),
-                             "invalid_arguments", null, String(args));
-    }
-    // A missing or wrong-typed required model_id -- never coerced.
-    for (const bad of [null, true, false, 5, 1.5, [], ["vendor/shared"], {},
-                       {a: 1}, new String("vendor/shared")]) {
-      assertArgumentEnvelope(catalog.getModel(lookup, {model_id: bad}),
-                             "invalid_arguments", "model_id",
-                             JSON.stringify(String(bad)));
-    }
-    assertArgumentEnvelope(catalog.getModel(lookup, {model_id: undefined}),
-                           "invalid_arguments", "model_id", "undefined");
-    // Empty and ASCII-blank-only strings: every member of the explicit
-    // U+0009..U+000D + U+0020 set, alone and combined.
-    for (const blank of ["", " ", "\t", "\n", "\r", "\v", "\f",
-                         " \t\n\r\v\f", "\t \n", "  ", "\f\v"]) {
-      assertArgumentEnvelope(catalog.getModel(lookup, {model_id: blank}),
-                             "invalid_arguments", "model_id",
-                             JSON.stringify(blank));
-    }
-    // The ASCII blank set is never widened: non-ASCII blank-LOOKING code points
-    // are literal nonblank queries -- accepted, no match, zero counts, caveat.
-    for (const query of ["\u00a0", "\u2003", "\u2028", "\u2029", "\u3000",
-                         "\u001c", "\u0000", "\ufeff", "\u00a0\u2003"]) {
-      const result = catalog.getModel(lookup, {model_id: query});
-      assert.equal(result.ok, true, JSON.stringify(query));
-      assert.equal(result.query, query, JSON.stringify(query));
-      assert.deepEqual(result.exact_gateways, [], JSON.stringify(query));
-      assert.deepEqual(result.endpoints, [], JSON.stringify(query));
-      assert.deepEqual(result.counts, {exact_matches: 0, endpoints: 0,
-                                       distinct_raw_ids: 0,
-                                       marker_group_labels: 0},
-                       JSON.stringify(query));
-      assert.deepEqual(result.caveats, [GET_MODEL_CAVEAT],
-                       JSON.stringify(query));
-    }
-    // Unknown-key precedence: ANY unknown key rejects with parameter null
-    // BEFORE the required model_id check. `provider`, `limit`, `offset` and
-    // `query` are unknown here, not selection/truncation aliases.
-    for (const args of [
-      JSON.parse("{\"bogus\":1}"),
-      JSON.parse("{\"model_id\":5,\"bogus\":1}"),
-      JSON.parse("{\"model_id\":\"\",\"bogus\":1}"),
-      JSON.parse("{\"provider\":\"synthetic-a\"}"),
-      JSON.parse("{\"model_id\":\"vendor/shared\",\"provider\":\"synthetic-a\"}"),
-      JSON.parse("{\"model_id\":\"vendor/shared\",\"limit\":5}"),
-      JSON.parse("{\"model_id\":\"vendor/shared\",\"offset\":0}"),
-      JSON.parse("{\"model_id\":\"vendor/shared\",\"query\":\"x\"}"),
-      JSON.parse("{\"__proto__\":1}"),
-      JSON.parse("{\"constructor\":1}"),
-      JSON.parse("{\"toString\":1}"),
-      JSON.parse("{\"model_id\":\"vendor/shared\",\"__proto__\":1}")
-    ]) {
-      assertArgumentEnvelope(catalog.getModel(lookup, args),
-                             "invalid_arguments", null,
-                             JSON.stringify(args));
-    }
-    // The retained identifier is never trimmed, folded or repaired.
-    for (const query of [" vendor/shared ", "VENDOR/SHARED", "Vendor/Shared"]) {
-      const result = catalog.getModel(lookup, {model_id: query});
-      assert.equal(result.ok, true, query);
-      assert.equal(result.query, query, query);
-    }
-    // A fresh, non-reflecting envelope on every call.
-    const first = catalog.getModel(lookup, {model_id: ""});
-    first.error.code = "mutated";
-    first.ok = true;
-    const second = catalog.getModel(lookup, {model_id: ""});
-    assertArgumentEnvelope(second, "invalid_arguments", "model_id",
-                           "fresh envelope");
-    assert.notEqual(second, first);
-    assert.notEqual(second.error, first.error);
-  });
-
-  it("returns fresh, deeply isolated payloads", () => {
+  it("returns the exact pair's flat details and provider-scoped staleness", () => {
     const lookup = acceptedSnapshot("lookup.json");
     const before = catalog.canonicalText(lookup);
-    const first = catalog.getModel(lookup, {model_id: "vendor/shared"});
-    const second = catalog.getModel(lookup, {model_id: "vendor/shared"});
-    assert.equal(catalog.canonicalText(lookup), before,
-                 "the snapshot is never mutated");
-    assertSameValue(first, second, "repeated call");
-    for (const field of ["exact_matches", "exact_gateways",
-                         "provider_staleness", "endpoints", "counts",
-                         "caveats"]) {
-      assert.notEqual(first[field], second[field], field);
-    }
-    assert.notEqual(first.endpoints[0], second.endpoints[0], "endpoint object");
-    for (let index = 0; index < first.endpoints.length; index += 1) {
-      const endpoint = first.endpoints[index];
-      const source = lookup.providers[endpoint.provider].models[endpoint.model_id];
-      const other = second.endpoints[index].metadata;
-      assert.notEqual(endpoint.metadata, source, endpoint.model_id);
-      assert.notEqual(endpoint.metadata, other, endpoint.model_id);
-      assert.notEqual(endpoint.metadata.architecture, source.architecture,
-                      endpoint.model_id);
-      assert.notEqual(endpoint.metadata.supported_parameters,
-                      source.supported_parameters, endpoint.model_id);
-      assert.notEqual(endpoint.metadata.pricing, source.pricing,
-                      endpoint.model_id);
-      assert.notEqual(endpoint.metadata.architecture, other.architecture,
-                      endpoint.model_id);
-    }
-    // Mutating the returned payload deeply leaves the snapshot, the earlier
-    // independent result and a brand-new call untouched.
-    const sharedA = first.endpoints[0].metadata;
-    sharedA.name = "mutated";
-    sharedA.architecture.input_modalities.push("vision");
-    sharedA.supported_parameters.push("seed");
-    sharedA.pricing.prompt = "999";
-    first.exact_matches["synthetic-a"] = false;
-    first.exact_gateways.push("injected");
-    first.provider_staleness["synthetic-a"] = true;
-    first.endpoints.push("injected");
-    first.counts.endpoints = 99;
-    first.caveats.push("injected");
-    assert.equal(catalog.canonicalText(lookup), before,
-                 "mutating a result never reaches the snapshot");
-    const kept = second.endpoints[0].metadata;
-    assert.equal(kept.name, "Vendor Shared");
-    assert.deepEqual(kept.architecture.input_modalities, ["text"]);
-    assert.deepEqual(kept.supported_parameters,
+
+    const result = catalog.getModel(lookup, {
+      provider: "synthetic-a", model_id: "vendor/model:free"});
+    assert.deepEqual(Object.keys(result).sort(), [
+      "endpoint", "ok", "provider_staleness", "snapshot_id", "tick_epoch"]);
+    assert.equal(result.ok, true);
+    assert.equal(result.snapshot_id, lookup.snapshot_id);
+    assert.equal(result.tick_epoch, lookup.tick_epoch);
+    assert.deepEqual(result.provider_staleness, {"synthetic-a": false});
+    assert.deepEqual(result.endpoint, {
+      provider: "synthetic-a",
+      model_id: "vendor/model:free",
+      name: "Vendor Model",
+      description: "Oracle case 1 alpha endpoint: sufficient context, image input.",
+      context_length: 131072,
+      input_modalities: ["text", "image"],
+      output_modalities: ["text"],
+      supported_parameters: ["temperature", "max_tokens"],
+      chat_completions_url:
+        "https://synthetic-alpha.example/v1/chat/completions",
+      api_type: "openai"
+    });
+    assert.equal(catalog.canonicalText(lookup), before);
+
+    // A raw id tracked by two providers is TWO endpoint identities; each call
+    // returns that pair's OWN metadata and its own staleness scope.
+    const alpha = catalog.getModel(lookup, {
+      provider: "synthetic-a", model_id: "vendor/shared"});
+    const beta = catalog.getModel(lookup, {
+      provider: "synthetic-b", model_id: "vendor/shared"});
+    assert.equal(alpha.endpoint.context_length, 131072);
+    assert.deepEqual(alpha.endpoint.input_modalities, ["text"]);
+    assert.deepEqual(alpha.endpoint.supported_parameters,
                      ["temperature", "max_tokens"]);
-    assert.deepEqual(kept.pricing, {prompt: "0", completion: "0"});
-    assert.deepEqual(second.exact_matches,
-                     {"synthetic-a": true, "synthetic-b": true,
-                      "synthetic-c": false});
-    assert.equal(second.counts.endpoints, 2);
-    assert.deepEqual(second.caveats, [GET_MODEL_CAVEAT]);
-    const third = catalog.getModel(lookup, {model_id: "vendor/shared"});
-    assertSameValue(third, second, "a later call is unaffected");
-
-    // The marker-endpoint metadata of two gateways sharing a label is
-    // independent, and a no-match success still owns fresh containers.
-    const base = catalog.getModel(lookup, {model_id: "vendor/model"});
-    const aMeta = base.endpoints[0].metadata;
-    const bMeta = base.endpoints[1].metadata;
-    assert.notEqual(aMeta, bMeta);
-    aMeta.architecture.input_modalities.push("audio");
-    assert.deepEqual(bMeta.architecture.input_modalities, ["text"]);
-    const noMatch = catalog.getModel(lookup, {model_id: "vendor/nope"});
-    noMatch.exact_matches["synthetic-a"] = true;
-    noMatch.exact_gateways.push("injected");
-    noMatch.endpoints.push("injected");
-    noMatch.counts.endpoints = 7;
-    noMatch.caveats.push("injected");
-    const freshNoMatch = catalog.getModel(lookup, {model_id: "vendor/nope"});
-    assert.deepEqual(freshNoMatch.exact_matches,
-                     {"synthetic-a": false, "synthetic-b": false,
-                      "synthetic-c": false});
-    assert.deepEqual(freshNoMatch.exact_gateways, []);
-    assert.deepEqual(freshNoMatch.endpoints, []);
-    assert.deepEqual(freshNoMatch.caveats, [GET_MODEL_CAVEAT]);
-
-    // A typed float pricing token keeps its `JsonFloat` wrapper: semantic
-    // equality alone would not prove the accepted typed representation was
-    // preserved. The returned wrapper is a fresh object, so mutating it can
-    // never reach the snapshot or another result.
-    const typed = typedPricingSnapshot();
-    const typedFrozen = catalog.canonicalText(typed);
-    const typedFirst = catalog.getModel(typed, {model_id: "vendor/shared"});
-    const typedSecond = catalog.getModel(typed, {model_id: "vendor/shared"});
-    const sourceWrapper =
-      typed.providers["synthetic-a"].models["vendor/shared"].pricing.prompt;
-    assert.ok(catalog.isFloatToken(sourceWrapper),
-              "the re-sealed snapshot carries a typed float token");
-    assert.ok(catalog.isFloatToken(typedFirst.endpoints[0].metadata.pricing
-                                     .prompt),
-              "the returned endpoint metadata keeps the float wrapper");
-    assert.equal(typedFirst.endpoints[0].metadata.pricing.prompt.value, 0);
-    assert.notEqual(typedFirst.endpoints[0].metadata.pricing.prompt,
-                    sourceWrapper, "the wrapper is freshly allocated");
-    assert.notEqual(typedFirst.endpoints[0].metadata.pricing.prompt,
-                    typedSecond.endpoints[0].metadata.pricing.prompt,
-                    "two results never share a wrapper");
-    typedFirst.endpoints[0].metadata.pricing.prompt.value = 5;
-    assert.equal(sourceWrapper.value, 0,
-                 "mutating the result wrapper never reaches the snapshot");
-    assert.equal(typedSecond.endpoints[0].metadata.pricing.prompt.value, 0);
-    assert.equal(catalog.canonicalText(typed), typedFrozen,
-                 "the typed snapshot is never mutated");
-
-    // Interleaved calls never share containers.
-    const mixed = catalog.getModel(lookup, {model_id: "vendor/shared"});
-    catalog.listEndpoints(lookup, {});
-    catalog.listFreeModels(lookup, {});
-    const mixedAgain = catalog.getModel(lookup, {model_id: "vendor/shared"});
-    assert.notEqual(mixed.endpoints, mixedAgain.endpoints);
-    assert.notEqual(mixed.endpoints[0].metadata,
-                    mixedAgain.endpoints[0].metadata);
-    assert.equal(catalog.canonicalText(mixed),
-                 catalog.canonicalText(mixedAgain));
+    assert.equal(beta.endpoint.context_length, 32768);
+    assert.deepEqual(beta.endpoint.input_modalities, ["text", "image"]);
+    assert.deepEqual(beta.endpoint.supported_parameters,
+                     ["temperature", "top_p"]);
+    assert.deepEqual(alpha.provider_staleness, {"synthetic-a": false});
+    assert.deepEqual(beta.provider_staleness, {"synthetic-b": false});
   });
 
-  it("survives prototype-looking provider and raw-ID keys", () => {
-    const snapshot = lookalikeKeySnapshot();
-    const frozen = catalog.canonicalText(snapshot);
+  it("keeps ids literal and returns the fixed not_found envelope", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const notFound = {
+      ok: false,
+      error: {code: "not_found", message: "Model not found."}
+    };
+    for (const modelId of ["vendor/model", "vendor/model-free", "VENDOR/SHARED",
+                           " vendor/shared", "vendor/shared ",
+                           "vendor/does-not-exist", "\u00a0", "\u2003"]) {
+      const result = catalog.getModel(lookup, {
+        provider: "synthetic-a", model_id: modelId});
+      assert.deepEqual(result, notFound, JSON.stringify(modelId));
+      assert.deepEqual(Object.keys(result.error).sort(), ["code", "message"]);
+    }
+    // A registered zero-ID provider is a KNOWN provider: every id is absent.
+    assert.deepEqual(catalog.getModel(lookup, {
+      provider: "synthetic-c", model_id: "vendor/shared"}), notFound);
+  });
 
-    const shared = catalog.getModel(snapshot, {model_id: "shared-lookalike"});
-    assert.deepEqual(Object.keys(shared.exact_matches).sort(),
-                     ["__proto__", "constructor"]);
-    assert.equal(Object.prototype.hasOwnProperty.call(shared.exact_matches,
-                                                      "__proto__"), true);
-    assert.equal(Object.getPrototypeOf(shared.exact_matches),
-                 Object.prototype);
-    assert.equal(shared.exact_matches["__proto__"], true);
-    assert.equal(shared.exact_matches["constructor"], false);
-    assert.deepEqual(shared.exact_gateways, ["__proto__"]);
-    assert.deepEqual(shared.provider_staleness,
-                     flagMap([["__proto__", true], ["constructor", false]]));
-    assert.deepEqual(shared.endpoints.map((e) => [e.provider, e.model_id]),
-                     [["__proto__", "shared-lookalike"]]);
-    assert.equal(shared.endpoints[0].metadata.name, "Shared Lookalike");
-    assert.deepEqual(shared.counts, {exact_matches: 1, endpoints: 1,
-                                     distinct_raw_ids: 1,
-                                     marker_group_labels: 1});
+  it("pins the provider-first argument boundary", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    for (const args of [null, [], 5, "x", false, 1.0, "{}", undefined]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, args),
+                             "invalid_arguments", null, `object ${args}`);
+    }
+    for (const args of [{bogus: 1},
+                        {provider: "synthetic-a", bogus: 1},
+                        {provider: "synthetic-a", model_id: "vendor/shared",
+                         limit: 5},
+                        {provider: "synthetic-z", bogus: 1}]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, args),
+                             "invalid_arguments", null, JSON.stringify(args));
+    }
+    // provider: missing or wrong-typed is invalid_arguments(provider).
+    assertArgumentEnvelope(catalog.getModel(lookup, {model_id: "vendor/shared"}),
+                           "invalid_arguments", "provider", "missing");
+    for (const bad of [null, true, false, 5, 1.5, [], ["synthetic-a"], {}]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, {
+        provider: bad, model_id: "vendor/shared"}),
+        "invalid_arguments", "provider", String(bad));
+    }
+    for (const bad of ["", " synthetic-a ", "synthetic-a ", " synthetic-a",
+                       "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, {
+        provider: bad, model_id: "vendor/shared"}),
+        "unknown_provider", "provider", JSON.stringify(bad));
+    }
+    // Provider membership precedes the model_id check.
+    assertArgumentEnvelope(catalog.getModel(lookup, {provider: "synthetic-z"}),
+                           "unknown_provider", "provider", "unknown first");
+    assertArgumentEnvelope(catalog.getModel(lookup, {
+      provider: "synthetic-z", model_id: ""}),
+      "unknown_provider", "provider", "unknown before blank");
 
-    // A prototype-looking QUERY is literal membership, never an inherited
-    // member of a result map.
-    const proto = catalog.getModel(snapshot, {model_id: "__proto__"});
-    assert.equal(proto.exact_matches["__proto__"], true);
-    assert.deepEqual(proto.endpoints.map((e) => e.model_id), ["__proto__"]);
-    const inherited = catalog.getModel(snapshot, {model_id: "valueOf"});
-    assert.equal(inherited.ok, true);
-    assert.deepEqual(inherited.exact_gateways, []);
-    assert.deepEqual(inherited.endpoints, []);
+    // model_id: missing or wrong-typed is invalid_arguments(model_id).
+    assertArgumentEnvelope(catalog.getModel(lookup, {provider: "synthetic-a"}),
+                           "invalid_arguments", "model_id", "missing");
+    for (const bad of [null, true, false, 5, 1.5, [], ["vendor/shared"], {},
+                       {a: 1}]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, {
+        provider: "synthetic-a", model_id: bad}),
+        "invalid_arguments", "model_id", String(bad));
+    }
+    for (const blank of ["", " ", "\t", "\n", "\r", "\u000b", "\f",
+                         " \t\n\r\u000b\f", "\t \n", "  "]) {
+      assertArgumentEnvelope(catalog.getModel(lookup, {
+        provider: "synthetic-a", model_id: blank}),
+        "invalid_arguments", "model_id", JSON.stringify(blank));
+    }
+  });
 
-    // `constructor` is a real marker LABEL here (from `constructor-free`) but
-    // not an exact id: the two lookups stay separate and no prototype member
-    // is ever treated as tracked.
-    const ctor = catalog.getModel(snapshot, {model_id: "constructor"});
-    assert.deepEqual(ctor.exact_gateways, []);
-    assert.deepEqual(ctor.endpoints.map((e) => [e.provider, e.model_id]),
-                     [["__proto__", "constructor-free"]]);
-    assert.deepEqual(ctor.counts, {exact_matches: 0, endpoints: 1,
-                                   distinct_raw_ids: 1,
-                                   marker_group_labels: 1});
-    const tostring = catalog.getModel(snapshot, {model_id: "toString"});
-    assert.deepEqual(tostring.exact_gateways, ["constructor"]);
-    assert.deepEqual(tostring.endpoints.map((e) => e.model_id), ["toString"]);
+  it("returns fresh containers and never aliases the snapshot", () => {
+    const lookup = acceptedSnapshot("lookup.json");
+    const before = catalog.canonicalText(lookup);
+    const args = {provider: "synthetic-a", model_id: "vendor/shared"};
+    const first = catalog.getModel(lookup, args);
+    const second = catalog.getModel(lookup, args);
+    assert.deepEqual(first, second);
+    assert.notEqual(first.endpoint, second.endpoint);
+    assert.notEqual(first.endpoint.input_modalities,
+                    second.endpoint.input_modalities);
+    assert.notEqual(first.provider_staleness, second.provider_staleness);
 
-    assert.equal({}.polluted, undefined);
-    assert.equal(Object.prototype.polluted, undefined);
-    // Prototype-looking ARGUMENT keys are unknown keys, rejected before the
-    // required id.
-    assertArgumentEnvelope(catalog.getModel(snapshot,
-                                            JSON.parse("{\"__proto__\":1}")),
-                           "invalid_arguments", null, "proto argument");
+    first.endpoint.input_modalities.push("vision");
+    first.endpoint.supported_parameters.push("seed");
+    first.provider_staleness["synthetic-a"] = true;
+    assert.equal(catalog.canonicalText(lookup), before);
+    assert.deepEqual(args, {provider: "synthetic-a",
+                            model_id: "vendor/shared"});
+    assert.deepEqual(second.endpoint.input_modalities, ["text"]);
+    assert.deepEqual(second.endpoint.supported_parameters,
+                     ["temperature", "max_tokens"]);
+    assert.deepEqual(second.provider_staleness, {"synthetic-a": false});
+
+    const firstError = catalog.getModel(lookup, {
+      provider: "synthetic-a", model_id: ""});
+    firstError.error.code = "mutated";
+    firstError.ok = true;
+    const secondError = catalog.getModel(lookup, {
+      provider: "synthetic-a", model_id: ""});
+    assertArgumentEnvelope(secondError, "invalid_arguments", "model_id",
+                           "fresh error");
+    assert.notEqual(secondError, firstError);
+
+    // A real empty registry has no known provider at all.
     assertArgumentEnvelope(
-      catalog.getModel(snapshot,
-                       JSON.parse("{\"model_id\":\"__proto__\"," +
-                                  "\"constructor\":1}")),
-      "invalid_arguments", null, "constructor argument");
-    assert.equal(catalog.canonicalText(snapshot), frozen,
-                 "the lookalike snapshot is never mutated");
+      catalog.getModel(emptyRegistrySnapshot(),
+                       {provider: "synthetic-a", model_id: "vendor/shared"}),
+      "unknown_provider", "provider", "empty registry");
   });
 
   it("agrees with the unchanged Python reference over the selected inputs",
@@ -3471,47 +1667,27 @@ describe("pure get_model query", () => {
     const lookupText = readFixtureText("lookup.json");
     for (const entry of [
       ["boundary-unknown-key",
-       JSON.parse("{\"model_id\":\"vendor/shared\",\"bogus\":1}")],
+       JSON.parse("{\"provider\":\"synthetic-a\",\"bogus\":1}")],
       ["boundary-non-object", 5],
-      ["boundary-missing", {}],
-      ["boundary-empty", {model_id: ""}],
-      ["boundary-ascii-blank", {model_id: " \t\n\r\v\f"}],
-      ["boundary-nbsp", {model_id: "\u00a0"}],
-      ["boundary-em-space", {model_id: "\u2003"}],
-      ["boundary-line-separator", {model_id: "\u2028"}],
-      ["boundary-nul", {model_id: "\u0000"}],
-      ["boundary-padded", {model_id: " vendor/shared "}],
-      ["boundary-case", {model_id: "VENDOR/SHARED"}],
-      ["boundary-marker", {model_id: "vendor/model"}],
-      ["boundary-exact-with-marker", {model_id: "vendor/model:free"}],
-      ["boundary-no-match", {model_id: "vendor/does-not-exist"}]
+      ["boundary-missing-provider", {}],
+      ["boundary-missing-id", {provider: "synthetic-a"}],
+      ["boundary-empty-id", {provider: "synthetic-a", model_id: ""}],
+      ["boundary-ascii-blank",
+       {provider: "synthetic-a", model_id: " \t\n\r\u000b\f"}],
+      ["boundary-nbsp", {provider: "synthetic-a", model_id: "\u00a0"}],
+      ["boundary-em-space", {provider: "synthetic-a", model_id: "\u2003"}],
+      ["boundary-nul", {provider: "synthetic-a", model_id: "\u0000"}],
+      ["boundary-padded", {provider: "synthetic-a",
+                           model_id: " vendor/shared "}],
+      ["boundary-case", {provider: "synthetic-a",
+                         model_id: "VENDOR/SHARED"}],
+      ["boundary-marker", {provider: "synthetic-a", model_id: "vendor/model"}],
+      ["boundary-unknown-provider",
+       {provider: "synthetic-z", model_id: "vendor/shared"}],
+      ["boundary-no-match", {provider: "synthetic-a",
+                             model_id: "vendor/does-not-exist"}]
     ]) {
       cases.push({label: entry[0], snapshot_text: lookupText, args: entry[1]});
-    }
-    cases.push({label: "empty-registry",
-                snapshot_text: catalog.canonicalText(emptyRegistrySnapshot()),
-                args: {model_id: "vendor/shared"}});
-    cases.push({label: "null-tick",
-                snapshot_text: readFixtureText("status-unknown-time.json"),
-                args: {model_id: "vendor/unknown-capabilities"}});
-    cases.push({label: "future-tick",
-                snapshot_text: catalog.canonicalText(futureTickSnapshot()),
-                args: {model_id: "vendor/shared"}});
-    cases.push({label: "typed-pricing",
-                snapshot_text: catalog.canonicalText(typedPricingSnapshot()),
-                args: {model_id: "vendor/shared"}});
-    const markerText = catalog.canonicalText(markerBoundarySnapshot());
-    for (const query of ["vendor/z", "free", "-free", "vendor/z\n",
-                         "vendor/z\n\n", "vendor/z-free\n\n",
-                         "vendor/z-free\r\n", "vendor/z-freely"]) {
-      cases.push({label: `marker-${JSON.stringify(query)}`,
-                  snapshot_text: markerText, args: {model_id: query}});
-    }
-    const lookalikeText = catalog.canonicalText(lookalikeKeySnapshot());
-    for (const query of ["__proto__", "shared-lookalike", "constructor",
-                         "toString"]) {
-      cases.push({label: `lookalike-${query}`, snapshot_text: lookalikeText,
-                  args: {model_id: query}});
     }
     const results = cases.map((entry) => catalog.getModel(
       catalog.loadSnapshot(entry.snapshot_text), entry.args));
@@ -3519,16 +1695,18 @@ describe("pure get_model query", () => {
   });
 });
 
+
 // --------------------------------------------------------------------------
 // pure watchdog_status: fixed-clock whole-catalogue health
 // --------------------------------------------------------------------------
 //
 // `watchdog_status` reports published-catalogue health over the WHOLE snapshot
 // at a REQUIRED, separately supplied fixed clock. `args` is `{}` on every
-// golden -- the clock is never a tool argument and never an ambient read -- and
-// every expected payload below is either the independently authored
-// `cases.json` / `argument-cases.json` row or a hand-written literal from
-// README's `Success envelope — watchdog_status` and argument tables.
+// case -- the clock is never a tool argument and never an ambient read. The
+// `cases.json` / `argument-cases.json` rows are executed by
+// `tests/test_contract_parity.py`; every expected payload below is a
+// hand-written literal from README's `Success envelope — watchdog_status` and
+// argument tables.
 
 /** Epoch 0 at clock 0: a VALID fresh observation, never "missing". */
 function zeroEpochSnapshot() {
@@ -3557,146 +1735,6 @@ function composedWarningSnapshot() {
 }
 
 describe("pure watchdog_status query", () => {
-  it("reproduces every independent success golden exactly", () => {
-    const rows = queryRows("watchdog_status");
-    // Row identity is asserted so a dropped or duplicated golden cannot shrink
-    // the loop and still pass.
-    assert.equal(rows.length, 9, rows.map((row) => row.id).join(","));
-    assert.equal(new Set(rows.map((row) => row.id)).size, 9,
-                 "every golden id is unique");
-    assert.deepEqual(rows.map((row) => row.id).sort(), [
-      "status_capability_unknown_epoch_now_fresh",
-      "status_lookup_future_epoch_not_stale",
-      "status_lookup_old_tick_stale_healthy_providers",
-      "status_metadata_age_at_cadence_fresh",
-      "status_metadata_age_below_cadence_fresh",
-      "status_metadata_age_just_over_cadence_stale",
-      "status_short_cadence_age_at_cadence_fresh",
-      "status_short_cadence_age_just_over_stale",
-      "status_unknown_time_missing_epoch"
-    ]);
-    for (const row of rows) {
-      // Every status case is argument-free with its own literal case clock.
-      assert.deepEqual(row.args, {}, row.id);
-      assert.ok(Number.isInteger(row.now) && row.now >= 0, row.id);
-      // Per-row fixture override with the documented `lookup.json` default --
-      // never a wrong-fixture fallback.
-      const snapshot = acceptedSnapshot(row.fixture || "lookup.json");
-      const snapshotText = catalog.canonicalText(snapshot);
-      const args = JSON.parse(JSON.stringify(row.args));
-      const result = catalog.watchdogStatus(snapshot, args, row.now);
-      assertSameValue(result, row.expect, row.id);
-      assert.deepEqual(Object.keys(result).sort(), STATUS_FIELDS, row.id);
-      assert.deepEqual(Object.keys(result.counts).sort(), STATUS_COUNT_FIELDS,
-                       row.id);
-      assert.deepEqual(Object.keys(result.metadata_coverage).sort(),
-                       STATUS_COVERAGE_FIELDS, row.id);
-      // Strict scalar types: ok exactly true, tick_fresh a strict bool.
-      assert.equal(result.ok, true, row.id);
-      assert.equal(typeof result.tick_fresh, "boolean", row.id);
-      assert.ok(result.last_tick_age_s === null ||
-                Number.isInteger(result.last_tick_age_s), row.id);
-      // Provenance echoes the consumed snapshot literally; a future epoch is
-      // never repaired and the cadence is never a hardcoded 3600.
-      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
-      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
-      assert.equal(result.cadence_s, snapshot.cadence_s, row.id);
-      // Inclusive freshness: age 0 and age == cadence are fresh; a null or
-      // future tick is null age and false, never clamped to a healthy zero.
-      const tick = snapshot.tick_epoch;
-      const cadence = snapshot.cadence_s;
-      if (tick === null || tick > row.now) {
-        assert.equal(result.last_tick_age_s, null, row.id);
-        assert.equal(result.tick_fresh, false, row.id);
-      } else {
-        assert.equal(result.last_tick_age_s, row.now - tick, row.id);
-        assert.equal(result.tick_fresh, row.now - tick <= cadence, row.id);
-        assert.ok(result.last_tick_age_s >= 0, row.id);
-      }
-      // Every provider_order key, zero-ID providers included, in display order.
-      assert.deepEqual(Object.keys(result.provider_staleness),
-                       snapshot.provider_order, row.id);
-      assert.deepEqual(Object.keys(result.provider_counts),
-                       snapshot.provider_order, row.id);
-      for (const provider of snapshot.provider_order) {
-        const entry = snapshot.providers[provider];
-        assert.equal(typeof result.provider_staleness[provider], "boolean",
-                     `${row.id}:${provider}`);
-        assert.equal(result.provider_staleness[provider], entry.stale,
-                     `${row.id}:${provider}`);
-        assert.ok(Number.isInteger(result.provider_counts[provider]) &&
-                  result.provider_counts[provider] >= 0,
-                  `${row.id}:${provider}`);
-        assert.equal(result.provider_counts[provider],
-                     entry.model_ids.length, `${row.id}:${provider}`);
-      }
-      // Whole-catalogue counts, structurally restated from the snapshot; the
-      // literal golden above remains the correctness oracle.
-      const pairs = [];
-      for (const provider of snapshot.provider_order) {
-        for (const rawId of snapshot.providers[provider].model_ids) {
-          pairs.push(rawId);
-        }
-      }
-      assert.deepEqual(result.counts, {
-        gateways: snapshot.provider_order.length,
-        endpoints: pairs.length,
-        distinct_raw_ids: new Set(pairs).size,
-        marker_group_labels:
-          new Set(pairs.map((rawId) => catalog.stripFreeMarker(rawId))).size
-      }, row.id);
-      // Coverage is NON-NULL presence: a known 0 / [] / "" counts, null does
-      // not, over the global tracked-pair denominator.
-      const coverage = {
-        endpoints: pairs.length, context_length_known: 0,
-        input_modalities_known: 0, output_modalities_known: 0,
-        supported_parameters_known: 0, description_known: 0
-      };
-      for (const provider of snapshot.provider_order) {
-        const entry = snapshot.providers[provider];
-        for (const rawId of entry.model_ids) {
-          const model = entry.models[rawId];
-          if (model.context_length !== null) {
-            coverage.context_length_known += 1;
-          }
-          if (model.architecture.input_modalities !== null) {
-            coverage.input_modalities_known += 1;
-          }
-          if (model.architecture.output_modalities !== null) {
-            coverage.output_modalities_known += 1;
-          }
-          if (model.supported_parameters !== null) {
-            coverage.supported_parameters_known += 1;
-          }
-          if (model.description !== null) {
-            coverage.description_known += 1;
-          }
-        }
-      }
-      assert.deepEqual(result.metadata_coverage, coverage, row.id);
-      assert.equal(result.metadata_coverage.endpoints,
-                   result.counts.endpoints, row.id);
-      for (const value of Object.values(result.metadata_coverage)) {
-        assert.ok(Number.isInteger(value) && value >= 0 &&
-                  value <= result.metadata_coverage.endpoints, row.id);
-      }
-      // The three unobservables are STRICTLY null -- never 0 or false.
-      assert.equal(result.pending_alerts, null, row.id);
-      assert.equal(result.site_published, null, row.id);
-      assert.equal(result.site_publish_age_s, null, row.id);
-      // Snapshot warnings plus derived codes, deduplicated in frozen order.
-      assert.deepEqual(result.warnings,
-                       STATUS_WARNING_ORDER.filter(
-                         (code) => result.warnings.includes(code)), row.id);
-      assert.equal(result.warnings.length,
-                   new Set(result.warnings).size, row.id);
-      // Inputs are never mutated.
-      assert.equal(catalog.canonicalText(snapshot), snapshotText,
-                   `${row.id}: the snapshot is never mutated`);
-      assert.deepEqual(args, {}, `${row.id}: the arguments are never mutated`);
-    }
-  });
-
   it("moves only the clock-derived fields across the freshness boundary", () => {
     const lookup = acceptedSnapshot("lookup.json");
     const clocks = [1759199999, 1759200000, 1759203600, 1759203601];
@@ -3770,19 +1808,15 @@ describe("pure watchdog_status query", () => {
     assertSameValue(catalog.watchdogStatus(lookup, {}, 1759203601), second,
                     "a later call is unaffected");
 
-    // Interleaving the three earlier tools neither sees nor supplies state.
+    // Interleaving the other tools neither sees nor supplies state.
     const statusA = catalog.watchdogStatus(lookup, {}, 1759200000);
-    const models = catalog.listFreeModels(lookup, {});
-    const endpoints = catalog.listEndpoints(lookup, {});
-    const model = catalog.getModel(lookup, {model_id: "vendor/shared"});
+    const model = catalog.getModel(lookup, {
+      provider: "synthetic-a", model_id: "vendor/shared"});
     const statusB = catalog.watchdogStatus(lookup, {}, 1759200000);
     assertSameValue(statusA, statusB, "interleaved status calls agree");
     statusB.provider_counts["synthetic-b"] = 42;
     statusB.warnings.push("injected");
-    assert.equal(models.n_gateways, 3);
-    assert.equal(endpoints.ok, true);
-    assert.equal(endpoints.counts.endpoints, 5);
-    assert.equal(model.counts.endpoints, 2);
+    assert.equal(model.endpoint.model_id, "vendor/shared");
     assert.equal(catalog.canonicalText(lookup), frozen, "still untouched");
 
     // A fresh error envelope on every call, independent of the clock.
@@ -3896,7 +1930,7 @@ describe("pure watchdog_status query", () => {
       assert.deepEqual(Object.keys(payload).sort(), STATUS_FIELDS);
       for (const absent of ["state_root", "source", "path", "cache", "tool",
                             "caveats", "endpoints", "query",
-                            "provider_health", "pricing"]) {
+                            "provider_health"]) {
         assert.equal(Object.prototype.hasOwnProperty.call(payload, absent),
                      false, `no ${absent} field`);
       }
@@ -3904,34 +1938,8 @@ describe("pure watchdog_status query", () => {
   });
 
   it("accepts only the empty argument object", () => {
-    const invalid = argumentRows("invalid_cases", "watchdog_status");
-    const valid = argumentRows("valid_controls", "watchdog_status");
-    assert.equal(invalid.length, 1, "one frozen invalid row");
-    assert.equal(invalid[0].id, "unknown_arg_watchdog_status");
-    assert.deepEqual(invalid[0].args, {now: 1759200000});
-    assert.equal(valid.length, 1, "one frozen acceptance control");
-    assert.equal(valid[0].id, "valid_omitted_watchdog_status");
-    assert.deepEqual(valid[0].args, {});
-
     const lookup = acceptedSnapshot("lookup.json");
     const frozen = catalog.canonicalText(lookup);
-
-    for (const row of invalid) {
-      // The COMPLETE literal, independently authored envelope.
-      const snapshot = acceptedSnapshot(row.fixture);
-      const args = JSON.parse(JSON.stringify(row.args));
-      const result = catalog.watchdogStatus(snapshot, args, 1759200000);
-      assertSameValue(result, row.expect, row.id);
-      assertArgumentEnvelope(result, "invalid_arguments", null, row.id);
-      assert.deepEqual(args, row.args,
-                       "the argument object is never mutated");
-    }
-    for (const row of valid) {
-      const result = catalog.watchdogStatus(
-        acceptedSnapshot(row.fixture), JSON.parse(JSON.stringify(row.args)),
-        1759200000);
-      assert.equal(result.ok, true, row.id);
-    }
 
     // A whole argument value that is not a JSON object rejects with parameter
     // null -- never a coerced array, number, string or bool.
@@ -4120,15 +2128,8 @@ function searchRows() {
 function completeStageRows() {
   return searchRows().filter((row) =>
     Object.keys(row.args).every((key) => SEARCH_STAGE_KEYS.has(key)) &&
-    row.expect.offset === 0 &&
     row.expect.next_offset === null &&
     row.expect.total_matches === row.expect.endpoints.length);
-}
-
-/** The ordered `[provider, model_id]` identities of one committed golden. */
-function goldenIdentities(row) {
-  return row.expect.endpoints.map(
-    (endpoint) => [endpoint.provider, endpoint.model_id]);
 }
 
 function rowSnapshot(row) {
@@ -4148,112 +2149,6 @@ function composeSearchStages(snapshot, args) {
   return catalog.searchSupportedParameterPairs(snapshot, pairs,
                                                stage.supported_parameters);
 }
-
-/** The exact frozen goldens whose arguments are confined to text and provider. */
-const TEXT_STAGE_CASE_IDS = [
-  "search_metadata_reasoning_text_only",
-  "search_capability_defaults_both_models",
-  "search_provider_b_shared_stale_scope",
-  "search_provider_c_empty_stale_scope",
-  "search_text_unicode_upper_echo_first",
-  "search_text_unicode_lower_echo_second",
-  "search_text_literal_brackets_not_regex",
-  "search_text_metadata_array_not_searched",
-  "search_text_raw_id_unknown_flags",
-  "search_text_padded_query_not_trimmed"
-];
-
-/** (case id, fixture, stage arguments, literal expected identities). */
-const MIN_CONTEXT_GOLDENS = [
-  ["search_metadata_reasoning_min_context_inclusive",
-   "metadata-edge-cases.json",
-   {query: "reasoning", min_context_length: 65536},
-   [["synthetic-a", "vendor/known-context"]]],
-  ["search_metadata_reasoning_min_context_zero",
-   "metadata-edge-cases.json",
-   {query: "reasoning", min_context_length: 0},
-   [["synthetic-a", "vendor/known-context"],
-    ["synthetic-a", "vendor/zero-context"]]],
-  ["search_capability_min_context_zero_known_only",
-   "capability-unknown.json",
-   {min_context_length: 0},
-   [["synthetic-a", "vendor/known-empty-capabilities"]]],
-  ["search_shared_min_context_a_only",
-   "lookup.json",
-   {query: "shared", min_context_length: 65536},
-   [["synthetic-a", "vendor/shared"]]]
-];
-
-const MODALITY_GOLDENS = [
-  ["search_capability_positive_modality_yields_none",
-   "capability-unknown.json",
-   {input_modalities: ["text"]},
-   []],
-  ["search_shared_modalities_and_b_only",
-   "lookup.json",
-   {query: "shared", input_modalities: ["text", "IMAGE"]},
-   [["synthetic-b", "vendor/shared"]]],
-  // Individual predicates each match a DIFFERENT provider, so only the
-  // same-endpoint conjunction explains the empty result.
-  ["search_shared_context_and_image_neither",
-   "lookup.json",
-   {query: "shared", min_context_length: 65536,
-    input_modalities: ["image"]},
-   []]
-];
-
-const PARAMETER_GOLDENS = [
-  ["search_capability_empty_filters_no_constraint",
-   "capability-unknown.json",
-   {query: "", input_modalities: [], supported_parameters: []},
-   [["synthetic-a", "vendor/known-empty-capabilities"],
-    ["synthetic-a", "vendor/unknown-capabilities"]]],
-  ["search_capability_positive_parameter_yields_none",
-   "capability-unknown.json",
-   {supported_parameters: ["temperature"]},
-   []],
-  ["search_shared_params_and_a_only",
-   "lookup.json",
-   {query: "shared", supported_parameters: ["temperature", "MAX_TOKENS"]},
-   [["synthetic-a", "vendor/shared"]]],
-  ["search_shared_context_and_top_p_neither",
-   "lookup.json",
-   {query: "shared", min_context_length: 65536,
-    supported_parameters: ["top_p"]},
-   []],
-  ["search_text_case_extended_filters_normalize",
-   "search-text.json",
-   {query: "REASONING", min_context_length: 65536,
-    input_modalities: ["IMAGE", "text", "IMAGE"],
-    supported_parameters: ["TEMPERATURE"]},
-   [["synthetic-a", "vendor/literal[ab].*"]]]
-];
-
-/** The exact 22 complete, unsliced stage-composition goldens. */
-const COMPLETE_STAGE_CASE_IDS = [
-  "search_metadata_reasoning_text_only",
-  "search_metadata_reasoning_min_context_inclusive",
-  "search_metadata_reasoning_min_context_zero",
-  "search_capability_defaults_both_models",
-  "search_capability_empty_filters_no_constraint",
-  "search_capability_positive_modality_yields_none",
-  "search_capability_positive_parameter_yields_none",
-  "search_capability_min_context_zero_known_only",
-  "search_shared_min_context_a_only",
-  "search_shared_modalities_and_b_only",
-  "search_shared_context_and_image_neither",
-  "search_shared_params_and_a_only",
-  "search_shared_context_and_top_p_neither",
-  "search_provider_b_shared_stale_scope",
-  "search_provider_c_empty_stale_scope",
-  "search_text_case_extended_filters_normalize",
-  "search_text_unicode_upper_echo_first",
-  "search_text_unicode_lower_echo_second",
-  "search_text_literal_brackets_not_regex",
-  "search_text_metadata_array_not_searched",
-  "search_text_raw_id_unknown_flags",
-  "search_text_padded_query_not_trimmed"
-];
 
 // -- synthetic, fully-validated search registries ---------------------------
 //
@@ -4290,8 +2185,7 @@ function searchModel(rawId, name, options) {
       input_modalities: pick("input_modalities", null),
       output_modalities: pick("output_modalities", null)
     },
-    supported_parameters: pick("supported_parameters", null),
-    pricing: pick("pricing", null)
+    supported_parameters: pick("supported_parameters", null)
   };
 }
 
@@ -4320,7 +2214,7 @@ function searchSnapshot(providerOrder, providers) {
     withOwnKey(ordered, key, providers[key]);
   }
   return resealSnapshot({
-    schema_version: 1,
+    schema_version: 2,
     snapshot_id: "0".repeat(64),
     tick_epoch: 1759200000,
     cadence_s: 3600,
@@ -4372,8 +2266,7 @@ function searchBoundarySnapshot() {
     "caps-only": searchModel("caps-only", "Caps Only", {
       description: "plain synthetic prose", context_length: 7,
       input_modalities: ["ImageToken"], output_modalities: ["OutToken"],
-      supported_parameters: ["ParamToken"],
-      pricing: {prompt: "0.123", completion: 0}
+      supported_parameters: ["ParamToken"]
     }),
     "fusion-left": searchModel("fusion-left", "Alpha", {
       description: "Beta prose body."
@@ -4464,16 +2357,14 @@ const SEARCH_TEXT_BOUNDARY_ROWS = [
   // spelling nor the JSON spelling may match a null.
   ["none", null, []],
   ["null", null, []],
-  // Capability arrays, pricing, wiring URL, provider keys and object key names
+  // Capability arrays, wiring URL, provider keys and object key names
   // are never searched.
   ["ImageToken", null, []],
   ["ParamToken", null, []],
   ["urltoken", null, []],
   ["apitoken", null, []],
-  ["0.123", null, []],
   ["https", null, []],
   ["zeta", null, []],
-  ["pricing", null, []],
   ["context_length", null, []],
   ["architecture", null, []],
   ["supported_parameters", null, []],
@@ -4601,11 +2492,7 @@ function searchCapabilitySnapshot() {
       context_length: 65536, input_modalities: ["text"],
       supported_parameters: ["image_size"]
     }),
-    "price-image": searchModel("price-image", "Price Image", {
-      context_length: 65536, input_modalities: ["text"],
-      supported_parameters: ["temperature"],
-      pricing: {prompt: "0", completion: "0"}
-    }),
+
     "raw-id-image": searchModel("raw-id-image", "Raw Id Image", {
       context_length: 65536, input_modalities: ["text"],
       supported_parameters: ["temperature"]
@@ -4705,7 +2592,7 @@ function adversarialSearchSnapshot() {
 /** The exact document a wrong-schema loader refusal must reject. */
 function wrongSchemaSnapshotText() {
   const body = typedClone(acceptedSnapshot("lookup.json"));
-  body.schema_version = 2;
+  body.schema_version = 3;
   body.snapshot_id = catalog.snapshotHash(body);
   return catalog.canonicalText(body);
 }
@@ -4761,37 +2648,6 @@ function assertStageParity(cases) {
 }
 
 describe("pure metadata-search stage helpers", () => {
-  it("selects the ten frozen text/provider goldens as ordered identities", () => {
-    const rows = completeStageRows().filter((row) =>
-      Object.keys(row.args).every((key) => key === "query" || key === "provider"));
-    assert.equal(rows.length, 10, "ten text/provider goldens");
-    assert.deepEqual(rows.map((row) => row.id).sort(),
-                     TEXT_STAGE_CASE_IDS.slice().sort(),
-                     "the text/provider case set is exactly the frozen ten");
-    for (const row of rows) {
-      const snapshot = rowSnapshot(row);
-      const before = catalog.canonicalText(snapshot);
-      const result = catalog.searchTextProviderPairs(snapshot, {
-        query: row.args.query, provider: row.args.provider
-      });
-      assert.deepEqual(result.map(pairIdentity), goldenIdentities(row), row.id);
-      assert.ok(Array.isArray(result), `${row.id}: a plain array`);
-      for (const pair of result) {
-        assert.equal(Array.isArray(pair) && pair.length, 2,
-                     `${row.id}: fresh two-string pairs`);
-        assert.equal(typeof pair[0], "string", row.id);
-        assert.equal(typeof pair[1], "string", row.id);
-        // Every selected identity is a REAL tracked pair, never a borrowed row.
-        assert.ok(snapshot.provider_order.includes(pair[0]),
-                  `${row.id}: provider is registered`);
-        assert.ok(snapshot.providers[pair[0]].model_ids.includes(pair[1]),
-                  `${row.id}: raw id is tracked by that provider`);
-      }
-      assert.equal(catalog.canonicalText(snapshot), before,
-                   `${row.id}: the snapshot is never mutated`);
-    }
-  });
-
   it("pins literal ASCII-only text and exact provider scope boundaries", () => {
     const snapshot = searchBoundarySnapshot();
     // The pin is meaningful: neither provider-map insertion order nor literal
@@ -4816,7 +2672,7 @@ describe("pure metadata-search stage helpers", () => {
     assert.deepEqual(catalog.searchTextProviderPairs(snapshot, {}).map(pairIdentity),
                      SEARCH_ALL_PAIRS);
 
-    // More than the public default page (50) is returned WHOLE.
+    // More than the public default page (5) is returned WHOLE.
     const bulk = catalog.searchTextProviderPairs(snapshot, {query: "bulk"});
     assert.equal(bulk.length, 55);
     assert.deepEqual(bulk[0], ["bulk", "bulk-00"]);
@@ -4872,31 +2728,6 @@ describe("pure metadata-search stage helpers", () => {
                  "surrogate-half controls never mutate the snapshot");
   });
 
-  it("reproduces the four frozen inclusive-context goldens", () => {
-    assert.equal(MIN_CONTEXT_GOLDENS.length, 4, "four context goldens");
-    assert.equal(new Set(MIN_CONTEXT_GOLDENS.map((row) => row[0])).size, 4);
-    const byId = new Map(searchRows().map((row) => [row.id, row]));
-    for (const [id, fixture, args, expected] of MIN_CONTEXT_GOLDENS) {
-      const row = byId.get(id);
-      assert.ok(row, `${id} exists in cases.json`);
-      assert.deepEqual(row.args, args, `${id}: frozen arguments`);
-      assert.equal(row.fixture, fixture, `${id}: frozen fixture`);
-      assert.deepEqual(row.expect.filters, {
-        provider: null, min_context_length: args.min_context_length,
-        input_modalities: null, supported_parameters: null
-      }, `${id}: only the context filter is active`);
-      const snapshot = rowSnapshot(row);
-      const text = catalog.searchTextProviderPairs(
-        snapshot, {query: args.query, provider: null});
-      const composed = catalog.searchMinContextPairs(
-        snapshot, text, args.min_context_length);
-      assert.deepEqual(composed.map(pairIdentity), expected, id);
-      assert.deepEqual(composed.map(pairIdentity), goldenIdentities(row), id);
-      // A pure filter: it can only narrow the accepted selection.
-      assert.ok(composed.length <= text.length, `${id}: never expands`);
-    }
-  });
-
   it("keeps context inclusive, unknown distinct from zero and selection order", () => {
     const snapshot = searchCapabilitySnapshot();
     const gate = (rawId) => ["gate", rawId];
@@ -4943,29 +2774,6 @@ describe("pure metadata-search stage helpers", () => {
     assert.deepEqual(catalog.searchMinContextPairs(snapshot, [], 0), []);
   });
 
-  it("reproduces the three frozen modality goldens with same-endpoint AND", () => {
-    assert.equal(MODALITY_GOLDENS.length, 3, "three modality goldens");
-    const byId = new Map(searchRows().map((row) => [row.id, row]));
-    for (const [id, fixture, args, expected] of MODALITY_GOLDENS) {
-      const row = byId.get(id);
-      assert.ok(row, `${id} exists in cases.json`);
-      assert.deepEqual(row.args, args, `${id}: frozen arguments`);
-      assert.equal(row.fixture, fixture, `${id}: frozen fixture`);
-      assert.deepEqual(row.expect.filters.input_modalities,
-                       args.input_modalities, id);
-      assert.equal(row.expect.filters.supported_parameters, null, id);
-      const snapshot = rowSnapshot(row);
-      let pairs = catalog.searchTextProviderPairs(
-        snapshot, {query: args.query, provider: null});
-      pairs = catalog.searchMinContextPairs(snapshot, pairs,
-                                            args.min_context_length);
-      const composed = catalog.searchInputModalityPairs(
-        snapshot, pairs, args.input_modalities);
-      assert.deepEqual(composed.map(pairIdentity), expected, id);
-      assert.deepEqual(composed.map(pairIdentity), goldenIdentities(row), id);
-    }
-  });
-
   it("ANDs every requested input modality on the same endpoint", () => {
     const snapshot = searchCapabilitySnapshot();
     const gate = (rawId) => ["gate", rawId];
@@ -4999,11 +2807,10 @@ describe("pure metadata-search stage helpers", () => {
       // Output modalities are not substitutes for input modalities.
       [[gate("output-image")], ["image"], []],
       [[gate("output-image")], ["text"], [gate("output-image")]],
-      // No capability is inferred from name, description, raw id, provider key,
-      // pricing or supported_parameters.
+      // No capability is inferred from name, description, raw id, provider key
+      // or supported_parameters.
       [[gate("name-image")], ["image"], []],
       [[gate("param-image")], ["image"], []],
-      [[gate("price-image")], ["image"], []],
       [[gate("raw-id-image")], ["raw-id-image"], []],
       [[gate("name-image")], ["image name"], []],
       // Exact tokens, never substrings or wildcards.
@@ -5058,26 +2865,6 @@ describe("pure metadata-search stage helpers", () => {
         .map(pairIdentity), [["ctx", "high-text"]]);
   });
 
-  it("reproduces the five frozen parameter goldens with same-pair conjunction",
-     () => {
-    assert.equal(PARAMETER_GOLDENS.length, 5, "five parameter goldens");
-    assert.equal(new Set(PARAMETER_GOLDENS.map((row) => row[0])).size, 5);
-    const byId = new Map(searchRows().map((row) => [row.id, row]));
-    for (const [id, fixture, args, expected] of PARAMETER_GOLDENS) {
-      const row = byId.get(id);
-      assert.ok(row, `${id} exists in cases.json`);
-      assert.deepEqual(row.args, args, `${id}: frozen arguments`);
-      assert.equal(row.fixture, fixture, `${id}: frozen fixture`);
-      assert.deepEqual(row.expect.filters.supported_parameters,
-                       args.supported_parameters, id);
-      const snapshot = rowSnapshot(row);
-      assert.deepEqual(composeSearchStages(snapshot, args).map(pairIdentity),
-                       expected, id);
-      assert.deepEqual(composeSearchStages(snapshot, args).map(pairIdentity),
-                       goldenIdentities(row), id);
-    }
-  });
-
   it("ANDs every requested supported parameter on the same endpoint", () => {
     const snapshot = searchCapabilitySnapshot();
     const gate = (rawId) => ["gate", rawId];
@@ -5130,32 +2917,6 @@ describe("pure metadata-search stage helpers", () => {
         catalog.searchSupportedParameterPairs(snapshot, pairs, request)
           .map(pairIdentity), expected,
         `${JSON.stringify(pairs)} request=${JSON.stringify(request)}`);
-    }
-  });
-
-  it("composes all four stages over the twenty-two complete goldens", () => {
-    const rows = completeStageRows();
-    assert.equal(rows.length, 22, "twenty-two complete stage rows");
-    assert.deepEqual(rows.map((row) => row.id).sort(),
-                     COMPLETE_STAGE_CASE_IDS.slice().sort(),
-                     "the composition case set is exactly the frozen 22");
-    // The seven remaining search rows are page-sliced: they stay a later
-    // public-envelope oracle instead of a truncated stage oracle.
-    assert.equal(searchRows().length, 29, "twenty-nine search rows in total");
-    const sliced = searchRows().filter((row) => !COMPLETE_STAGE_CASE_IDS
-      .includes(row.id));
-    assert.equal(sliced.length, 7, "seven page-sliced rows stay for later");
-    for (const row of sliced) {
-      assert.ok(row.expect.next_offset !== null || row.args.limit !== undefined,
-                `${row.id}: is genuinely page-limited`);
-    }
-    for (const row of rows) {
-      const snapshot = rowSnapshot(row);
-      const before = catalog.canonicalText(snapshot);
-      const composed = composeSearchStages(snapshot, row.args);
-      assert.deepEqual(composed.map(pairIdentity), goldenIdentities(row), row.id);
-      assert.equal(catalog.canonicalText(snapshot), before,
-                   `${row.id}: no stage mutates the snapshot`);
     }
   });
 
@@ -5303,7 +3064,7 @@ describe("pure metadata-search stage helpers", () => {
     assert.throws(() => catalog.loadSnapshot(text),
                   {name: "CatalogError",
                    message: UNSUPPORTED_VERSION_MESSAGE},
-                  "the accepted loader refuses schema_version 2");
+                  "the accepted loader refuses schema_version 3");
     assert.deepEqual(runQueryReference([{tool: "load_error",
                                         snapshot_text: text, args: {},
                                         now: null}]),
@@ -5426,19 +3187,6 @@ describe("pure metadata-search stage helpers", () => {
 // pure search_models query: pagination, argument errors, complete payload
 // ---------------------------------------------------------------------------
 describe("pure search_models query", () => {
-  const PAYLOAD_KEYS = ["caveats", "counts", "endpoints", "filters", "limit",
-                        "next_offset", "offset", "ok", "provider_staleness",
-                        "query", "returned_count", "snapshot_id", "tick_epoch",
-                        "total_matches"].sort();
-  const ENDPOINT_KEYS = ["api_type", "chat_completions_url", "context_length",
-                         "description", "input_modalities", "metadata",
-                         "model_id", "name", "output_modalities", "provider",
-                         "stale", "supported_parameters", "unknown_fields"].sort();
-  const FILTER_KEYS = ["input_modalities", "min_context_length", "provider",
-                       "supported_parameters"].sort();
-  const COUNT_KEYS = ["distinct_raw_ids", "endpoints", "gateways",
-                      "marker_group_labels"].sort();
-
   /** The frozen argument-error envelope with its literal message. */
   function searchArgumentError(code, parameter) {
     const messages = {invalid_arguments: "Invalid tool arguments.",
@@ -5473,7 +3221,7 @@ describe("pure search_models query", () => {
       withOwnKey(ordered, key, providers[key]);
     }
     return resealSnapshot({
-      schema_version: 1,
+      schema_version: 2,
       snapshot_id: "0".repeat(64),
       tick_epoch: opts.tick_epoch === undefined ? 1759200000
                                                 : opts.tick_epoch,
@@ -5487,146 +3235,6 @@ describe("pure search_models query", () => {
   function identities(page) {
     return page.endpoints.map((row) => [row.provider, row.model_id]);
   }
-
-  function assertSearchShape(result, where) {
-    assert.deepEqual(Object.keys(result).sort(), PAYLOAD_KEYS, where);
-    assert.equal(result.ok, true, where);
-    assert.deepEqual(Object.keys(result.filters).sort(), FILTER_KEYS, where);
-    assert.deepEqual(Object.keys(result.counts).sort(), COUNT_KEYS, where);
-    for (const name of ["limit", "offset", "total_matches", "returned_count"]) {
-      assert.ok(Number.isInteger(result[name]) && result[name] >= 0,
-                `${where}: ${name} is a non-negative strict integer`);
-    }
-    if (result.next_offset !== null) {
-      assert.ok(Number.isInteger(result.next_offset), where);
-    }
-    for (const row of result.endpoints) {
-      assert.deepEqual(Object.keys(row).sort(), ENDPOINT_KEYS, where);
-      assert.equal(typeof row.stale, "boolean", where);
-      assert.equal(typeof row.metadata, "object", where);
-      assert.ok(Array.isArray(row.unknown_fields), where);
-    }
-    assert.ok(Array.isArray(result.caveats), where);
-  }
-
-  function querySearchRows() {
-    const doc = readFixtureDocument("cases.json");
-    return {doc: doc, rows: doc.cases.filter((row) => row.tool ===
-                                             "search_models")};
-  }
-
-  it("reproduces every one of the twenty-nine frozen search goldens", () => {
-    const {doc, rows} = querySearchRows();
-    assert.equal(rows.length, 29, "all 29 frozen search rows");
-    assert.equal(new Set(rows.map((row) => row.id)).size, 29);
-    const seenFixtures = new Set();
-    for (const row of rows) {
-      const fixture = row.fixture === undefined ? doc.fixture : row.fixture;
-      seenFixtures.add(fixture);
-      const snapshot = catalog.loadSnapshot(readFixtureText(fixture));
-      const before = catalog.canonicalText(snapshot);
-      const args = typedArgs(JSON.stringify(row.args));
-      const argsBefore = JSON.stringify(row.args);
-      const result = catalog.searchModels(snapshot, args);
-
-      // The WHOLE payload equals the independent stored literal, typed.
-      assert.equal(catalog.canonicalText(result),
-                   catalog.canonicalText(row.expect), row.id);
-      assertSameValue(result, row.expect, row.id);
-      assertSearchShape(result, row.id);
-      assertSearchShape(row.expect, row.id);
-
-      // Raw echoes: query and filters keep the supplied value verbatim.
-      assert.equal(result.query, row.args.query === undefined
-        ? null : row.args.query, row.id);
-      for (const name of ["provider", "min_context_length",
-                          "input_modalities", "supported_parameters"]) {
-        assertSameValue(result.filters[name],
-                        row.args[name] === undefined ? null : row.args[name],
-                        `${row.id}:${name}`);
-        if (Array.isArray(row.args[name])) {
-          assert.notEqual(result.filters[name], row.args[name],
-                          `${row.id}: filter echo is a copy`);
-        }
-      }
-      // Effective pagination is a strict integer value.
-      assert.equal(result.limit, row.args.limit === undefined ? 50
-                                                              : row.args.limit);
-      assert.equal(result.offset, row.args.offset === undefined ? 0
-                                                                : row.args.offset);
-      // Provenance mirrors the consumed snapshot and the caveat is fresh.
-      assert.equal(result.snapshot_id, snapshot.snapshot_id, row.id);
-      assert.equal(result.tick_epoch, snapshot.tick_epoch, row.id);
-      assert.equal(result.caveats.length, 1, row.id);
-      assert.equal(result.caveats[0],
-                   "Cross-gateway ABSENCE is unreliable: gateways rename " +
-                   "inconsistently, so a missing exact id does NOT prove the " +
-                   "model is unavailable there.", row.id);
-
-      // Metadata is THAT pair's complete projected model, deep-copied.
-      for (const endpoint of result.endpoints) {
-        const pairModel = snapshot.providers[endpoint.provider].models[
-          endpoint.model_id];
-        assert.equal(catalog.canonicalText(endpoint.metadata),
-                     catalog.canonicalText(pairModel), row.id);
-        assert.notEqual(endpoint.metadata, pairModel, row.id);
-        assert.notEqual(endpoint.metadata.architecture,
-                        pairModel.architecture, row.id);
-      }
-
-      // Fresh result, untouched inputs and a repeatable call.
-      assert.notEqual(result, row.expect, row.id);
-      assert.equal(JSON.stringify(row.args), argsBefore, row.id);
-      assert.equal(catalog.canonicalText(snapshot), before, row.id);
-      const again = catalog.searchModels(snapshot, typedArgs(
-        JSON.stringify(row.args)));
-      assert.equal(catalog.canonicalText(again),
-                   catalog.canonicalText(row.expect), row.id);
-      again.caveats.length = 0;
-      again.endpoints.length = 0;
-      assert.equal(catalog.canonicalText(catalog.searchModels(
-        snapshot, typedArgs(JSON.stringify(row.args)))),
-        catalog.canonicalText(row.expect), row.id);
-    }
-    assert.deepEqual([...seenFixtures].sort(),
-                     ["capability-unknown.json", "lookup.json",
-                      "metadata-edge-cases.json", "ordering.json",
-                      "search-text.json"]);
-  });
-
-  it("matches every frozen argument row: 47 envelopes and 21 controls", () => {
-    const doc = readFixtureDocument("argument-cases.json");
-    assert.equal(doc.invalid_cases.length, 47);
-    assert.equal(doc.valid_controls.length, 21);
-    const dispatch = {
-      search_models: (snapshot, args) => catalog.searchModels(snapshot, args),
-      get_model: (snapshot, args) => catalog.getModel(snapshot, args),
-      list_free_models: (snapshot, args) => catalog.listFreeModels(snapshot,
-                                                                   args),
-      list_endpoints: (snapshot, args) => catalog.listEndpoints(snapshot, args),
-      watchdog_status: (snapshot, args) => catalog.watchdogStatus(
-        snapshot, args, 1759200000)
-    };
-    for (const row of doc.invalid_cases) {
-      const snapshot = catalog.loadSnapshot(readFixtureText(row.fixture));
-      const result = dispatch[row.tool](snapshot, typedArgs(
-        JSON.stringify(row.args)));
-      assert.deepEqual(result, row.expect, row.id);
-      assert.equal(result.ok, false, row.id);
-      assert.deepEqual(Object.keys(result).sort(), ["error", "ok"], row.id);
-      assert.deepEqual(Object.keys(result.error).sort(),
-                       ["code", "message", "parameter"], row.id);
-    }
-    for (const row of doc.valid_controls) {
-      const snapshot = catalog.loadSnapshot(readFixtureText(row.fixture));
-      const result = dispatch[row.tool](snapshot, typedArgs(
-        JSON.stringify(row.args)));
-      assert.equal(result.ok, true, row.id);
-      if (row.tool === "search_models") {
-        assertSearchShape(result, row.id);
-      }
-    }
-  });
 
   it("keeps the frozen error precedence independent of key order", () => {
     const snapshot = acceptedSnapshot("lookup.json");
@@ -5653,7 +3261,8 @@ describe("pure search_models query", () => {
       assert.deepEqual(catalog.searchModels(snapshot, args),
                        searchArgumentError("invalid_arguments", null), name);
     }
-    // A literal `__proto__` member stays data in the echoed filter object.
+    // An own `constructor` member is an unknown key, so it is rejected rather
+    // than inherited from the prototype chain.
     const protoQuery = typedArgs('{"query":"x","provider":null}');
     withOwnKey(protoQuery, "constructor", 1);
     assert.deepEqual(catalog.searchModels(snapshot, protoQuery),
@@ -5709,28 +3318,27 @@ describe("pure search_models query", () => {
     const alphaIds = snapshot.providers.alpha.model_ids;
 
     const defaultPage = catalog.searchModels(snapshot, {});
-    assertSearchShape(defaultPage, "default");
-    assert.equal(defaultPage.limit, 50);
-    assert.equal(defaultPage.offset, 0);
+    assert.deepEqual(Object.keys(defaultPage).sort(),
+                     ["endpoints", "next_offset", "ok", "provider_staleness",
+                      "snapshot_id", "tick_epoch", "total_matches"].sort(),
+                     "default page field set");
+    assert.equal(defaultPage.ok, true);
     assert.equal(defaultPage.total_matches, 215);
-    assert.equal(defaultPage.returned_count, 50);
-    assert.equal(defaultPage.next_offset, 50);
+    assert.equal(defaultPage.endpoints.length, 5);
+    assert.equal(defaultPage.next_offset, 5);
     assert.deepEqual(identities(defaultPage),
-                     omegaIds.slice(0, 50).map((id) => ["omega", id]));
+                     omegaIds.slice(0, 5).map((id) => ["omega", id]));
     assert.deepEqual(defaultPage.provider_staleness,
                      {omega: false, alpha: false, zero: false});
-    assert.deepEqual(defaultPage.counts, {gateways: 1, endpoints: 50,
-                                          distinct_raw_ids: 50,
-                                          marker_group_labels: 50});
 
     const maxPage = catalog.searchModels(snapshot, {limit: 200});
-    assert.equal(maxPage.returned_count, 200);
+    assert.equal(maxPage.endpoints.length, 200);
     assert.equal(maxPage.next_offset, 200);
     assert.equal(maxPage.endpoints[119].model_id, "om-119");
     assert.equal(maxPage.endpoints[120].provider, "alpha");
     assert.equal(maxPage.endpoints[120].model_id, "al-000");
     const tail = catalog.searchModels(snapshot, {limit: 200, offset: 200});
-    assert.equal(tail.returned_count, 15);
+    assert.equal(tail.endpoints.length, 15);
     assert.equal(tail.next_offset, null);
     assert.deepEqual(tail.endpoints.map((row) => row.model_id),
                      alphaIds.slice(80));
@@ -5740,25 +3348,18 @@ describe("pure search_models query", () => {
     assert.deepEqual(identities(cross), [["omega", "om-119"],
                                          ["alpha", "al-000"]]);
     assert.equal(cross.next_offset, 121);
-    assert.deepEqual(cross.counts, {gateways: 2, endpoints: 2,
-                                    distinct_raw_ids: 2,
-                                    marker_group_labels: 2});
 
     const exactEnd = catalog.searchModels(snapshot, {limit: 2, offset: 213});
-    assert.equal(exactEnd.returned_count, 2);
+    assert.equal(exactEnd.endpoints.length, 2);
     assert.equal(exactEnd.next_offset, null);
     const continuing = catalog.searchModels(snapshot, {limit: 2, offset: 211});
     assert.equal(continuing.next_offset, 213);
 
     for (const offset of [215, 999999, catalog.MAX_SAFE_INT]) {
       const page = catalog.searchModels(snapshot, {limit: 2, offset: offset});
-      assert.equal(page.offset, offset);
-      assert.equal(page.returned_count, 0);
+      assert.deepEqual(page.endpoints, []);
       assert.equal(page.next_offset, null);
       assert.equal(page.total_matches, 215);
-      assert.deepEqual(page.counts, {gateways: 0, endpoints: 0,
-                                    distinct_raw_ids: 0,
-                                    marker_group_labels: 0});
       assert.deepEqual(page.provider_staleness,
                        {omega: false, alpha: false, zero: false});
     }
@@ -5772,9 +3373,6 @@ describe("pure search_models query", () => {
                      ["om-115", "om-116", "om-117"]);
     assert.equal(filtered.total_matches, 5);
     assert.equal(filtered.next_offset, 3);
-    assert.deepEqual(filtered.counts, {gateways: 1, endpoints: 3,
-                                       distinct_raw_ids: 3,
-                                       marker_group_labels: 3});
 
     // A zero-ID provider and a genuinely empty registry both succeed.
     const zeroPage = catalog.searchModels(snapshot, {provider: "zero"});
@@ -5785,13 +3383,13 @@ describe("pure search_models query", () => {
       sealedSearchSnapshot([], {}, {}), {});
     assert.equal(empty.ok, true);
     assert.deepEqual(empty.provider_staleness, {});
-    assert.deepEqual(empty.counts, {gateways: 0, endpoints: 0,
-                                    distinct_raw_ids: 0,
-                                    marker_group_labels: 0});
+    assert.deepEqual(empty.endpoints, []);
+    assert.equal(empty.total_matches, 0);
+    assert.equal(empty.next_offset, null);
     assert.equal(catalog.canonicalText(snapshot), before);
   });
 
-  it("scopes page counts and staleness to the returned page", () => {
+  it("scopes staleness to the selected provider", () => {
     const markerId = "acme/chat:free";
     function markerModel(rawId) {
       return searchModel(rawId, "Marker " + rawId, {
@@ -5819,28 +3417,23 @@ describe("pure search_models query", () => {
                                         ["p2", "acme/chat_free"],
                                         ["p3", markerId]]);
     assert.equal(page.total_matches, 4);
-    assert.deepEqual(page.counts, {gateways: 3, endpoints: 4,
-                                   distinct_raw_ids: 3,
-                                   marker_group_labels: 2});
     assert.deepEqual(page.provider_staleness,
                      {p1: true, p2: false, p3: true});
 
-    // A single-provider page keeps only its own scope and stale flag.
+    // A single-provider page keeps only its own scope; the row itself has no
+    // stale flag or wiring field.
     const p3 = catalog.searchModels(snapshot, {provider: "p3"});
     assert.deepEqual(identities(p3), [["p3", markerId]]);
-    assert.equal(p3.endpoints[0].stale, true);
-    assert.equal(p3.endpoints[0].chat_completions_url,
-                 "https://p3.example/v1/chat/completions");
+    assert.deepEqual(Object.keys(p3.endpoints[0]).sort(), [
+      "context_length", "input_modalities", "model_id", "name",
+      "output_modalities", "provider", "supported_parameters"]);
     assert.deepEqual(p3.provider_staleness, {p3: true});
-    assert.deepEqual(p3.counts, {gateways: 1, endpoints: 1,
-                                 distinct_raw_ids: 1,
-                                 marker_group_labels: 1});
 
-    // An exhausted page keeps every provider's staleness but zero counts.
+    // An exhausted page keeps every provider's staleness and stays a success.
     const exhausted = catalog.searchModels(snapshot, {offset: 99});
-    assert.deepEqual(exhausted.counts, {gateways: 0, endpoints: 0,
-                                        distinct_raw_ids: 0,
-                                        marker_group_labels: 0});
+    assert.deepEqual(exhausted.endpoints, []);
+    assert.equal(exhausted.total_matches, 4);
+    assert.equal(exhausted.next_offset, null);
     assert.deepEqual(exhausted.provider_staleness,
                      {p1: true, p2: false, p3: true});
   });
@@ -5903,12 +3496,11 @@ describe("pure search_models query", () => {
     assert.equal(catalog.canonicalText(snapshot), before);
   });
 
-  it("separates normalized fields from the raw metadata deep copy", () => {
+  it("projects compact normalized rows without any metadata copy", () => {
     const cased = searchModel("vendor/cased", "Cased", {
       description: "Prose for the cased row.", context_length: 100,
       input_modalities: ["TEXT", "Image", "text"], output_modalities: [],
-      supported_parameters: ["Temperature", "TEMPERATURE"],
-      pricing: {prompt: "0.5", completion: 0}
+      supported_parameters: ["Temperature", "TEMPERATURE"]
     });
     const unknown = searchModel("vendor/unknown", "Unknown");
     const models = {};
@@ -5923,53 +3515,36 @@ describe("pure search_models query", () => {
       '{"input_modalities":["TEXT","text"],' +
       '"supported_parameters":["temperature"],"limit":1.0}');
     const result = catalog.searchModels(snapshot, args);
-    assert.deepEqual(result.filters, {
-      provider: null, min_context_length: null,
-      input_modalities: ["TEXT", "text"],
-      supported_parameters: ["temperature"]
-    });
-    assert.notEqual(result.filters.input_modalities, args.input_modalities);
-    assert.notEqual(result.filters.supported_parameters,
-                    args.supported_parameters);
+    assert.deepEqual(Object.keys(result).sort(), [
+      "endpoints", "next_offset", "ok", "provider_staleness", "snapshot_id",
+      "tick_epoch", "total_matches"]);
     assert.deepEqual(identities(result), [["norm", "vendor/cased"]]);
     const row = result.endpoints[0];
+    assert.deepEqual(Object.keys(row).sort(), [
+      "context_length", "input_modalities", "model_id", "name",
+      "output_modalities", "provider", "supported_parameters"]);
+    assert.equal(row.name, "Cased");
     assert.deepEqual(row.input_modalities, ["text", "image"]);
     assert.deepEqual(row.output_modalities, []);
     assert.deepEqual(row.supported_parameters, ["temperature"]);
-    assert.deepEqual(row.unknown_fields, []);
-    assert.deepEqual(row.metadata.architecture.input_modalities,
-                     ["TEXT", "Image", "text"]);
-    assert.deepEqual(row.metadata.supported_parameters,
-                     ["Temperature", "TEMPERATURE"]);
-    assert.deepEqual(row.metadata.pricing, {prompt: "0.5", completion: 0});
-    assert.equal(typeof row.metadata.pricing.completion, "number");
-    assert.notEqual(row.metadata, cased);
-    assert.notEqual(row.metadata.architecture, cased.architecture);
-    assert.notEqual(row.metadata.pricing, cased.pricing);
-    assert.notEqual(row.metadata.supported_parameters,
-                    cased.supported_parameters);
+    assert.equal("description" in row, false);
+    assert.equal("metadata" in row, false);
+    assert.equal("unknown_fields" in row, false);
 
-    const unknownRow = catalog.searchModels(snapshot, {query: "unknown"}).endpoints[0];
+    const unknownRow = catalog.searchModels(
+      snapshot, {query: "unknown"}).endpoints[0];
     assert.equal(unknownRow.context_length, null);
     assert.equal(unknownRow.input_modalities, null);
-    assert.deepEqual(unknownRow.unknown_fields,
-                     ["context_length", "input_modalities",
-                      "output_modalities", "supported_parameters"]);
-    assertSameValue(unknownRow.metadata, unknown, "unknown metadata");
+    assert.equal(unknownRow.output_modalities, null);
+    assert.equal(unknownRow.supported_parameters, null);
+    assert.equal("unknown_fields" in unknownRow, false);
 
     // Deep isolation: mutating any returned category never reaches a later
     // call, the argument object or the snapshot.
     const saved = catalog.canonicalText(result);
-    result.filters.input_modalities.push("injected");
-    result.filters.supported_parameters.length = 0;
     result.provider_staleness.norm = true;
     row.input_modalities.push("injected");
-    row.unknown_fields.push("injected");
-    row.metadata.architecture.input_modalities.push("injected");
-    row.metadata.pricing.prompt = "9";
-    row.metadata.supported_parameters.push("injected");
-    result.counts.gateways = 99;
-    result.caveats.length = 0;
+    row.supported_parameters.length = 0;
     result.endpoints.length = 0;
     assert.equal(catalog.canonicalText(catalog.searchModels(snapshot, args)),
                  saved);
@@ -5977,12 +3552,10 @@ describe("pure search_models query", () => {
     assert.equal(args.input_modalities.length, 2);
   });
 
-  it("echoes a raw 1.0 filter while paginating with strict integers", () => {
+  it("accepts integral float pagination inputs without an echo", () => {
     const priced = searchModel("vendor/priced", "Priced", {
       context_length: 0, input_modalities: ["text"],
-      output_modalities: ["text"], supported_parameters: ["temperature"],
-      pricing: {prompt: new catalog.JsonFloat(1),
-                completion: new catalog.JsonFloat(0.5)}
+      output_modalities: ["text"], supported_parameters: ["temperature"]
     });
     const models = {};
     withOwnKey(models, "vendor/priced", priced);
@@ -5991,30 +3564,17 @@ describe("pure search_models query", () => {
                              "https://floats.example/v1/chat/completions")
     });
     const text = catalog.canonicalText(body);
-    assert.ok(text.includes('"prompt":1.0'), "the document keeps a float token");
     const snapshot = catalog.loadSnapshot(text);
     assert.equal(catalog.snapshotHash(snapshot), snapshot.snapshot_id);
 
-    const result = catalog.searchModels(snapshot, typedArgs(
-      '{"min_context_length":1.0,"limit":1.0,"offset":1.0}'));
-    assert.equal(result.limit, 1);
-    assert.equal(result.offset, 1);
-    assert.ok(!catalog.isFloatToken(result.limit), "limit is a strict integer");
-    assert.ok(catalog.isFloatToken(result.filters.min_context_length),
-              "the raw 1.0 filter echo keeps its float token");
-    assert.equal(result.filters.min_context_length.value, 1);
-    assert.ok(catalog.canonicalText(result).includes(
-      '"min_context_length":1.0'));
-    assert.ok(catalog.canonicalText(result).includes('"limit":1,'));
-
-    const page = catalog.searchModels(snapshot, {min_context_length: 0});
-    assert.equal(page.returned_count, 1);
-    const copied = page.endpoints[0].metadata.pricing;
-    assert.ok(catalog.isFloatToken(copied.prompt), "typed pricing preserved");
-    assert.ok(catalog.isFloatToken(copied.completion));
-    assert.equal(copied.prompt.value, 1);
-    assert.equal(copied.completion.value, 0.5);
-    assert.notEqual(copied, priced.pricing);
+    const typed = catalog.searchModels(snapshot, typedArgs(
+      '{"min_context_length":0.0,"limit":1.0,"offset":0.0}'));
+    const strict = catalog.searchModels(
+      snapshot, {min_context_length: 0, limit: 1, offset: 0});
+    assert.deepEqual(typed, strict);
+    assert.equal(typed.total_matches, 1);
+    assert.equal(typed.endpoints.length, 1);
+    assert.equal("filters" in typed, false);
   });
 
   it("handles prototype-looking keys, unicode and lone surrogates", () => {
@@ -6139,7 +3699,7 @@ describe("pure search_models query", () => {
     const models = {};
     withOwnKey(models, "vendor/x", searchModel("vendor/x", "X"));
     const duplicate = {
-      schema_version: 1, snapshot_id: "0".repeat(64),
+      schema_version: 2, snapshot_id: "0".repeat(64),
       tick_epoch: 1759200000, cadence_s: 3600,
       provider_order: ["dup"],
       providers: {dup: {display_name: "Dup",
@@ -6154,7 +3714,7 @@ describe("pure search_models query", () => {
                   (error) => error instanceof catalog.CatalogError &&
                              error.code === "invalid_snapshot");
     const duplicateMembers =
-      '{"schema_version":1,"schema_version":1,"snapshot_id":"' +
+      '{"schema_version":2,"schema_version":2,"snapshot_id":"' +
       "0".repeat(64) + '","tick_epoch":1759200000,"cadence_s":3600,' +
       '"provider_order":[],"providers":{},"warnings":[]}';
     assert.throws(() => catalog.loadJson(duplicateMembers),
@@ -6188,44 +3748,6 @@ describe("pure search_models query", () => {
 });
 
 describe("fixture integration and export shape", () => {
-  const SNAPSHOT_FIELDS = ["cadence_s", "provider_order", "providers",
-                           "schema_version", "snapshot_id", "tick_epoch",
-                           "warnings"];
-
-  it("accepts and re-hashes every published snapshot fixture", () => {
-    const accepted = [];
-    for (const name of fs.readdirSync(FIXTURE_DIR).sort()) {
-      if (!name.endsWith(".json")) {
-        continue;
-      }
-      const text = readFixtureText(name);
-      const shape = JSON.parse(text);
-      if (!shape || typeof shape !== "object" || Array.isArray(shape)) {
-        continue;
-      }
-      if (Object.keys(shape).sort().join(",") !==
-          SNAPSHOT_FIELDS.join(",")) {
-        continue;
-      }
-      const decoded = catalog.loadJson(text);
-      const snapshot = catalog.validateSnapshot(decoded);
-      assert.equal(catalog.snapshotHash(snapshot), snapshot.snapshot_id,
-                   `${name}: fixture id matches the canonical body digest`);
-      assert.equal(catalog.loadSnapshot(text).snapshot_id,
-                   snapshot.snapshot_id,
-                   `${name}: loadSnapshot accepts the same document`);
-      accepted.push(name);
-    }
-    assert.ok(accepted.length >= 9,
-              `at least nine snapshot fixtures, saw ${accepted.join(",")}`);
-    for (const required of ["basic.json", "lookup.json", "ordering.json",
-                            "provider-extension.json", "search-text.json",
-                            "capability-unknown.json",
-                            "metadata-edge-cases.json"]) {
-      assert.ok(accepted.includes(required), `${required} is a snapshot`);
-    }
-  });
-
   it("loads as a classic script that publishes one namespaced global", () => {
     const vm = require("node:vm");
     const source = fs.readFileSync(
@@ -6250,9 +3772,9 @@ describe("fixture integration and export shape", () => {
     assert.deepEqual(Object.keys(catalog).sort(), [
       "CatalogError", "JsonFloat", "MAX_JSON_DEPTH", "MAX_SAFE_INT",
       "SCHEMA_VERSION", "canonicalBytes", "canonicalText",
-      "compareEndpointPairs", "compareNaturalIds", "decodeTypedJson",
-      "endpointKey", "getModel", "isFloatToken", "listEndpoints",
-      "listFreeModels", "loadJson", "loadSnapshot", "naturalKey",
+      "compareNaturalIds", "decodeTypedJson", "getModel", "isFloatToken",
+      "loadJson", "loadSnapshot",
+      "naturalKey",
       "normalizeCapabilities", "projectCapabilities", "projectModel",
       "searchInputModalityPairs", "searchMinContextPairs", "searchModels",
       "searchSupportedParameterPairs", "searchTextProviderPairs",
@@ -6260,7 +3782,7 @@ describe("fixture integration and export shape", () => {
     ]);
     assert.equal(catalog.MAX_SAFE_INT, 9007199254740991);
     assert.equal(catalog.MAX_JSON_DEPTH, 64);
-    assert.equal(catalog.SCHEMA_VERSION, 1);
+    assert.equal(catalog.SCHEMA_VERSION, 2);
     const error = new catalog.CatalogError("invalid_json");
     assert.equal(error.code, "invalid_json");
     assert.equal(error.message, RAW_ERROR_MESSAGE);

@@ -7,8 +7,9 @@ export) and ``index.html`` (a single dark page whose body is a PRESENCE MATRIX �
 one row per UNIQUE model id across the gateway union, one column per gateway, a
 green (nord14) dot where tracked, a `#` column counting the gateways each model
 reaches, rows sorted alphabetically by stripped name, and a footer row of
-per-gateway totals). Roster keys OUTSIDE DISPLAY_ORDER are unknown gateways:
-they get NO column (and, on the public route, no published provider entry).
+per-gateway totals). Roster keys OUTSIDE the resolved registry are unknown
+gateways: they get NO column (and, on the public route, no published provider
+entry).
 The page carries the SAME public snapshot inline as
 ``<script type="application/json" id="catalog-data">`` plus the shared tool
 definitions as ``<script type="application/json" id="tool-contract">``, so it is
@@ -26,9 +27,9 @@ is absent or registration fails: the ordinary page stays exactly as useful as it
 was before JavaScript existed.
 
 Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
-  - Display order is derived from config_loader.PROVIDERS (sorted by the
-    `display` field in each provider's JSON config). This does NOT match
-    the providers.PROVIDERS registry order, and must NOT be alphabetized.
+  - Display order is the caller's already-resolved registry order, which the
+    config loader sorts by the `display` field in each provider's JSON config.
+    It is never alphabetized and never re-derived here.
   - Header copy is minimal: title + "updated hourly" + three chips
     ("N unique models", "M endpoints", "G gateways"). NO
     snapshot/alert/stale wording anywhere.
@@ -38,12 +39,13 @@ Design contract (Dthen-approved mockup v3 = watchdog-dashboard-MOCKUP.html):
     heads #81a1c1, nord14 dots #a3be8c.
 
 Determinism: same roster + registry -> byte-identical HTML and JSON. All
-iteration goes through sorted()/DISPLAY_ORDER.
+iteration goes through sorted() or the caller's explicit provider order.
 
 Publication contract (one observation, one snapshot, two artifacts): the CLI
-reads the roster once, captures the already-resolved registry once, builds ONE
-validated public snapshot, and serializes/renders BOTH artifacts from that SAME
-object before either final file is replaced. The prepared pair is validated
+loads configuration once, reads the roster once, captures that already-resolved
+registry once, builds ONE validated public snapshot, and serializes/renders
+BOTH artifacts from that SAME object before either final file is replaced. The
+prepared pair is validated
 in-memory, both payloads are staged in exclusively-created unique temp files in
 the destination directory, replacement + exact-target read-back are serialized
 under one advisory build lock (POSIX ``fcntl`` flock on ``site/.build.lock``;
@@ -93,14 +95,12 @@ try:  # POSIX advisory locking for the producer's two-artifact publication.
 except ImportError:  # pragma: no cover - Windows producer support is later work
     fcntl = None
 
-# Probe-verified gateway wiring (single source of truth): see config_loader.py
-# GATEWAY_WIRING. We IMPORT rather than re-hardcode so a probed-URL fix
-# in config_loader.py reaches the dashboard on the next tick with no second
-# site to keep in sync. config_loader is also held as a MODULE reference:
-# build_provider_header_meta() re-reads providers/*.json through it per
-# render, and degrade tests monkeypatch config_loader.load_configs.
+# Gateway wiring and header metadata are PROJECTED here from the ONE resolved
+# registry the CLI loads after argument parsing — never re-read from
+# providers/*.json per render. config_loader is imported as a module reference
+# only (its import performs no discovery, auth or warning); build_site's own
+# import stays inert for the same reason.
 import config_loader  # noqa: E402
-from config_loader import GATEWAY_WIRING, PROVIDERS  # noqa: E402
 
 # The accepted producer adapter: ONE captured roster + ONE captured registry ->
 # ONE validated public snapshot, its deterministic export text, and the pure
@@ -108,17 +108,12 @@ from config_loader import GATEWAY_WIRING, PROVIDERS  # noqa: E402
 # is a single call each and tests can observe the one-shot acquisition.
 from catalog_export import (  # noqa: E402
     build_snapshot,
+    capture_catalog_formats,
     capture_registry,
     serialize_snapshot,
     validate_artifact_pair,
 )
 from watchdog_catalog import catalog  # noqa: E402
-
-# Dthen's quality ranking, derived from config_loader.PROVIDERS (sorted by
-# `display` field in providers/*.json). Single source of truth; a display
-# reorder in config reaches the dashboard on the next tick with no second
-# site to keep in sync.
-DISPLAY_ORDER = list(PROVIDERS.keys())
 
 REPO = Path(__file__).resolve().parent
 
@@ -175,13 +170,12 @@ _FORBIDDEN_SCRIPT_SEQUENCES = ("</script", "<!--")
 #: changes NO operational cadence.
 BUILD_CADENCE_S = 3600
 
-# The free-marker stripper and the portable natural raw-ID key now live in the
-# pure, side-effect-free watchdog_catalog.query module (stdlib-only, no
-# config/state/SDK import). These names re-export those exact function objects
-# during the compatibility transition, so existing importers, the legacy
-# adapter and the public renderer never drift from a second copy.
+# The portable natural raw-ID key lives in the pure, side-effect-free
+# watchdog_catalog.query module (stdlib-only, no config/state/SDK import). It
+# is imported here as itself: no local wrapper, so the ordering rule has
+# exactly one definition.
 from watchdog_catalog.catalog import canonical_bytes  # noqa: E402
-from watchdog_catalog.query import natural_key, strip_free_marker  # noqa: E402
+from watchdog_catalog.query import natural_key  # noqa: E402
 
 
 def load_roster(root):
@@ -247,19 +241,6 @@ def load_logo_b64(root):
         )
         raise SystemExit(2)
     return base64.b64encode(blob).decode("ascii")
-
-
-def _natural_key(s):
-    """Thin private delegate to the accepted portable natural raw-ID key.
-
-    Kept as a name (rather than inlining the import at every call site) so the
-    module's private call surface is unchanged; the ordering RULE itself lives
-    only in ``watchdog_catalog.query.natural_key`` -- ASCII digit runs by run
-    length then digits, every other piece case-sensitively by code point, so a
-    very long digit run, mixed case, leading zeroes and non-ASCII digit
-    lookalikes can never raise the old heterogeneous int/str comparison error.
-    """
-    return natural_key(s)
 
 
 def _script_json(value):
@@ -332,7 +313,7 @@ def _page_scripts_script(sources):
     no caller can relabel, reorder or extend what a visitor's browser runs.
 
     The returned markup starts and ends with a newline so the slot sits on its
-    own lines; the legacy route passes no slot and its bytes stay unchanged.
+    own lines; the template-only route passes no slot and emits no script.
     """
     if sources is None:
         return ""
@@ -361,38 +342,30 @@ def _page_scripts_script(sources):
     return "\n" + "\n".join(elements) + "\n"
 
 
-def build_provider_header_meta():
-    """gateway key -> {'signup_url': str, 'limits_note': str} (fields may be
-    absent — both are OPTIONAL operator-maintained facts in providers/*.json,
-    same file as everything else about a gateway).
+def build_provider_header_meta(registry):
+    """Project gateway key -> {'signup_url', 'limits_note'} from the registry.
 
-    Called ONCE per render. DEGRADE-SAFE by contract: if config loading
-    raises for ANY reason, return an empty map so headers render plain and
-    the site build still exits 0 (a site build failure must never page —
-    established wrapper rule). The scheme/XSS guard itself lives at render
-    time (only https:// signup_urls are ever linked).
+    ``registry`` is the CLI's ONE already-resolved provider-key -> config
+    mapping. Both fields are OPTIONAL operator-maintained facts; only a
+    non-empty string survives, and a provider carrying neither contributes no
+    entry (its column head renders plain). This reads no file and cannot
+    raise, so no degraded-empty fallback is needed: an empty registry simply
+    yields an empty map. The scheme/XSS guard itself lives at render time
+    (only https:// signup_urls are ever linked).
     """
-    try:
-        meta = {}
-        for cfg in config_loader.load_configs():
-            key = config_loader._provider_key(cfg)
-            entry = {}
-            for field in ("signup_url", "limits_note"):
-                value = cfg.get(field)
-                if isinstance(value, str) and value:
-                    entry[field] = value
-            if entry:
-                meta[key] = entry
-        return meta
-    except Exception as exc:
-        # Degrade, never die: broken/absent configs cost the dashboard its
-        # links, nothing more. stderr goes to state/site_build.log (log,
-        # never page).
-        print(f"build_site: provider header meta degraded: {exc}", file=sys.stderr)
-        return {}
+    meta = {}
+    for key, cfg in registry.items():
+        entry = {}
+        for field in ("signup_url", "limits_note"):
+            value = cfg.get(field)
+            if isinstance(value, str) and value:
+                entry[field] = value
+        if entry:
+            meta[key] = entry
+    return meta
 
 
-def build_groups(providers, provider_models, *, provider_order=None):
+def build_groups(providers, provider_models, *, provider_order):
     """Group raw ids by their display `name` field, deterministically.
 
     Returns (group_names, groups, endpoints) where:
@@ -414,17 +387,16 @@ def build_groups(providers, provider_models, *, provider_order=None):
     Fallback: if a model id has no entry in provider_models (e.g. gateway
     fetch failed), use the raw id as the group name (don't crash).
 
-    provider_order: optional keyword-only provider precedence. None (the legacy
-    two-positional-argument shape) means the module DISPLAY_ORDER; an explicit
-    list -- including an EMPTY one -- is used verbatim, never truthiness-fallen
-    back to the global. Every internal provider loop and the variant sort use
-    this order, so a caller can render from its own explicit provider view.
+    provider_order: REQUIRED keyword-only provider precedence. A list --
+    including an EMPTY one -- is used verbatim, never truthiness-fallen back to
+    a module default. Every internal provider loop and the variant sort use
+    this order, so a caller renders from its own explicit provider view.
     """
-    order = DISPLAY_ORDER if provider_order is None else list(provider_order)
+    order = list(provider_order)
     raw_ids = sorted({mid for models in providers.values() for mid in models})
     groups: dict = {}
     # Build the per-(gw, raw_id) variant map deterministically: one slot
-    # per distinct raw id, then sort variants by DISPLAY_ORDER then by
+    # per distinct raw id, then sort variants by provider order then by
     # the natural key of the raw id. We keep this separate from
     # `groups[].variants` so the byte-order in the HTML is stable.
     for mid in raw_ids:
@@ -445,26 +417,11 @@ def build_groups(providers, provider_models, *, provider_order=None):
     for slot in groups.values():
         slot["variants"].sort(
             key=lambda pair: (order.index(pair[0]),
-                              _natural_key(pair[1]))
+                              natural_key(pair[1]))
         )
     group_names = sorted(groups.keys())
     endpoints = sum(len(slot["variants"]) for slot in groups.values())
     return group_names, groups, endpoints
-
-
-def build_counts(providers):
-    """Kept for backward-compat with the test suite; returns per-raw-id
-    availability across DISPLAY_ORDER. The dashboard now renders by
-    stripped group, not by raw id — see build_groups / render_page."""
-    ids = sorted({mid for models in providers.values() for mid in models})
-    counts = {}
-    for mid in ids:
-        n = 0
-        for gw in DISPLAY_ORDER:
-            if mid in providers.get(gw, []):
-                n += 1
-        counts[mid] = n
-    return ids, counts
 
 
 def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
@@ -487,13 +444,11 @@ def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
     wiring: gateway key -> {'chat_completions_url', 'api_type'}.
     header_meta: explicit trusted gateway -> {'signup_url', 'limits_note'} map;
         never derived here.
-    data_script: the complete data-script slot markup. The legacy adapter
-        passes its single roster-data island; the public route passes the two
-        inert public islands (catalogue + tool contract).
+    data_script: the complete data-script slot markup -- the two inert public
+        islands (catalogue + tool contract).
     page_scripts: the complete executable page-script slot markup, rendered by
-        :func:`_page_scripts_script` from explicit sources. The legacy adapter
-        and the template-only route pass nothing, so their bytes are unchanged
-        and no executable script appears at all.
+        :func:`_page_scripts_script` from explicit sources. The template-only
+        route passes nothing, so no executable script appears at all.
 
     Rows are GROUPED by stripped name: a model that ships as
     `vendor/x:free` on gateway A and `vendor/x-free` on gateway B renders
@@ -515,9 +470,9 @@ def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
         provider entry, so the reader gets the exact endpoint.
         """
         w = wiring[gw]
-        # Both wiring sources (the legacy config_loader map and a validated
-        # public provider entry) always carry chat_completions_url and
-        # api_type for an ACTIVE gateway -- the subscripts are safe.
+        # A validated public provider entry always carries
+        # chat_completions_url and api_type for an ACTIVE gateway, so the
+        # subscripts are safe.
         url_text = w["chat_completions_url"]
         # All visible strings: escaped, monospaced, copy-pasteable.
         return (
@@ -643,8 +598,8 @@ def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
         f'<span class="chip"><b>{len(active_gateways)}</b> gateways</span>'
     )
     meta = "updated hourly"
-    # The data-script slot is supplied fully formed by the adapter: the legacy
-    # one carries its roster-data island, the public route the two public ones.
+    # The data-script slot is supplied fully formed by the caller: the two
+    # public inert islands (catalogue + tool contract).
     body_rows = "".join(
         f"<tbody>{row_html(name, i)}</tbody>"
         for i, name in enumerate(group_names)
@@ -734,43 +689,6 @@ def _render_matrix(*, gateways, models_by_gateway, provider_order, wiring,
 </div>{page_scripts}</body></html>"""
 
 
-def render_page(roster, logo_b64, header_meta=None):
-    """Render the full HTML document as one string (byte-deterministic).
-
-    Legacy adapter: keeps its existing signature, roster-data island bytes and
-    default header derivation EXACTLY. Providers with zero free models are
-    hidden from the matrix — they clutter the view with an empty column and
-    inflate the gateway chip.
-
-    header_meta: gateway key -> {'signup_url', 'limits_note'} (see
-    build_provider_header_meta). None (default) = derive from the repo's
-    providers/*.json once per render; config load failure degrades to plain
-    headers, never a crash. Wiring and display order are this module's
-    legacy GATEWAY_WIRING / DISPLAY_ORDER views.
-    """
-    providers = roster["providers"]
-    # Hide providers with zero free models — they clutter the matrix with
-    # an empty column and inflate the "gateways" chip for no reason.
-    providers = {gw: ids for gw, ids in providers.items() if ids}
-    if header_meta is None:
-        header_meta = build_provider_header_meta()
-    # sort_keys keeps the embedded JSON byte-stable across builds; the
-    # JSON island stays the RAW roster so MCP and other consumers that
-    # read raw ids are unaffected by the matrix grouping.
-    roster_json = json.dumps(roster, sort_keys=True).replace("</", "<\\/")
-    return _render_matrix(
-        gateways=providers,
-        models_by_gateway=roster.get("provider_models", {}),
-        provider_order=DISPLAY_ORDER,
-        wiring=GATEWAY_WIRING,
-        logo_b64=logo_b64,
-        header_meta=header_meta,
-        data_script=(
-            f'<script type="application/json" id="roster-data">'
-            f"{roster_json}</script>"),
-    )
-
-
 def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract,
                         sources=None):
     """Render the matrix HTML from an already-VALIDATED public snapshot.
@@ -778,9 +696,7 @@ def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract,
     ``snapshot`` is a CALLER PRECONDITION: validation (and the eventual
     build-before-render/write sequencing) belongs to the publishing unit, so
     this function performs none itself. In-memory only — no roster/registry
-    read or capture, no logo/header/config load, no clock and no I/O. The
-    module's import-time producer configuration stays outside this function's
-    purity claim.
+    read or capture, no logo/header/config load, no clock and no I/O.
 
     ``tool_contract`` is a REQUIRED keyword-only argument: the already-decoded
     bare shared ``watchdog_catalog/tools.json`` array, loaded by the caller.
@@ -793,7 +709,7 @@ def render_catalog_page(snapshot, logo_b64, header_meta=None, *, tool_contract,
     global or another provider's data:
 
     * column order comes from ``snapshot["provider_order"]`` (an explicit empty
-      list is honoured, never replaced by DISPLAY_ORDER);
+      list is honoured, never replaced by a module default);
     * tracked ids/models come from each public provider entry's ``model_ids`` /
       ``models``;
     * the wiring URL and api type come from THAT provider entry;
@@ -914,26 +830,37 @@ def load_maintained_sources():
     return tuple(sources)
 
 
-def build_public_pair(root):
+def build_public_pair(root, registry):
     """Acquire ONCE and prepare BOTH artifacts from ONE public snapshot.
 
     Exactly one roster read (the existing strict :func:`load_roster`), exactly
-    one capture of the already-resolved ``PROVIDERS`` / ``GATEWAY_WIRING`` maps
-    through the accepted :func:`catalog_export.capture_registry`, exactly one
+    one capture of the caller's already-resolved ``registry`` -- and the wiring
+    and header metadata projected from that SAME mapping, never a second
+    configuration read -- through the accepted
+    :func:`catalog_export.capture_registry`, exactly one
     :func:`catalog_export.build_snapshot`, then BOTH outputs derived from that
     SAME object: :func:`catalog_export.serialize_snapshot` for the external
     JSON text and :func:`render_catalog_page` for the HTML (with the bundled
     tool contract and the trusted header metadata passed explicitly).
 
+    ``registry`` is the ONE provider-key -> config mapping the CLI loaded after
+    argument parsing. An unexpected whole-registry fault is a preparation
+    error reported by the caller; there is no stale global to fall back to.
+
     Returns ``(snapshot, catalog_text, html_text)``. Nothing is written here:
     the caller stages and publishes only after the prepared pair validates.
     """
     roster = load_roster(root)                                    # ONE read
-    records = capture_registry(PROVIDERS, GATEWAY_WIRING)         # ONE capture
-    snapshot = build_snapshot(records, roster, cadence_s=BUILD_CADENCE_S)
+    wiring = config_loader.build_gateway_wiring(registry)
+    records = capture_registry(registry, wiring)                  # ONE capture
+    # The SAME already-resolved registry supplies the catalogue formats, so a
+    # nonlegacy adapter projects its metadata without a second config/auth read.
+    formats = capture_catalog_formats(registry)
+    snapshot = build_snapshot(records, roster, cadence_s=BUILD_CADENCE_S,
+                              catalog_formats=formats)
     tool_contract = load_tool_contract()
     sources = load_maintained_sources()
-    header_meta = build_provider_header_meta()
+    header_meta = build_provider_header_meta(registry)
     logo_b64 = load_logo_b64(root)
     catalog_text = serialize_snapshot(snapshot)
     html_text = render_catalog_page(
@@ -1134,7 +1061,12 @@ def main(argv=None):
     )
     args = ap.parse_args(argv)
     try:
-        snapshot, catalog_text, html_text = build_public_pair(args.root)
+        # Configuration is acquired EXACTLY ONCE per invocation, after argparse
+        # has finished: --help and a bad argument never reach this line, so the
+        # builder's import and its help path discover no provider and print no
+        # config warning. Every later step consumes this ONE resolved mapping.
+        registry = config_loader.build_providers(config_loader.load_configs())
+        snapshot, catalog_text, html_text = build_public_pair(args.root, registry)
     except catalog.CatalogError as exc:
         print(f"build_site: invalid public snapshot: {exc}", file=sys.stderr)
         raise SystemExit(2)

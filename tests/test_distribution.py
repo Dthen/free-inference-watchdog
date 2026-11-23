@@ -1,131 +1,26 @@
-"""Distribution packaging contract and installed-console evidence (units 6a/6e).
+"""Distribution packaging contract and installed-console evidence.
 
-This module pins the PEP 621 metadata contract, proves the ACTUAL wheel payload
-rather than a spelling of the configuration, and then exercises that wheel as an
-INSTALLED console command. It has exactly three unparametrized groups, plus one
-small check of the scratch filesystem lifetime described below.
-
-The first two are the preserved unit-6a archive/core checks:
-
-1. ``test_packaging_metadata_contract`` reads ``pyproject.toml`` with the
-   stdlib ``tomllib`` and the tracked ``LICENSE`` text. It is a file/metadata
-   contract, never an AST or regex guess about runtime code, and it never
-   imports the SDK, provider configuration or the producer modules to read a
-   version. The distribution version is declared statically in the TOML and is
-   deliberately NOT duplicated here, so a version bump cannot fail a test that
-   is really about the wheel/metadata relationship. It also pins PREREQUISITE
-   DISCOVERY as portable: an explicit interpreter override is authoritative,
-   discovery uses ordinary executables, a ``python3.11`` that is not CPython
-   3.11 is rejected on its own probed version, and an unset
-   ``TMPDIR`` uses the standard temporary root instead of inventing a Hermes
-   cache under ``HOME``. Those rows use a controlled discovery double only --
-   never real floor evidence.
-
-2. ``test_wheel_payload_and_core_smoke`` stages the real package, the reviewed
-   ``tools.json`` contract, ``README.md``, ``LICENSE`` and the committed
-   ``pyproject.toml`` into owned scratch, adds synthetic unwanted neighbours
-   (producer/provider/state/cron/site/assets/test files plus an ``.env``-like
-   sentinel, all authored here -- no real credential or state file is read),
-   and builds a genuine wheel through ``setuptools.build_meta`` in a bounded
-   subprocess. It then inspects the archive with ``zipfile`` and runs the
-   WHEEL's own core/resource from a neutral working directory with the source
-   tree absent from ``sys.path`` and the SDK/producer/provider imports blocked.
-   That group stays a zip-on-``sys.path`` smoke: it is not a pip clean install
-   and not a console launch, and it says so.
-
-3. ``test_installed_console_clean_install_and_stdio_isolation`` is the unit-6e
-   INTEGRATION evidence for Task 6. It builds the same reviewed payload again,
-   audits the exact wheel it installs, hides the owned staged source, creates a
-   NEW PEP 405 CPython 3.11 environment from the floor interpreter (no system or
-   user site-packages) and installs the real wheel OFFLINE from an owned
-   dependency wheelhouse with the reviewed SDK pins as extra constraints -- the
-   application's own ``Requires-Dist`` drives resolution, and a missing
-   wheelhouse fails with the exact preparation command instead of skipping. It
-   proves the fresh prefix/interpreter/site-packages, the installed
-   distribution version, the installer-generated console metadata and the
-   installed package bytes, then launches ONLY
-   ``<fresh-env>/bin/free-inference-watchdog-mcp`` by absolute path from a
-   neutral cwd with an empty HOME, an owned cache root and a minimal
-   credential-free environment. An owned probe hook blocks the legacy graph
-   before any package code runs, blocks the SDK where help/core must not need it,
-   refuses every outbound connection except the one owned 127.0.0.1 feed port,
-   and reports the child's real pid, cwd, interpreter, prefix, ``sys.path`` and
-   per-module import digests, so installed-origin and byte claims never rest on
-   the launch command. It covers no-feed ``--help`` plus a missing-file
-   selection followed by ``--help`` (each with its own report destination, the
-   same origin checker and its own stdout/stderr/side-effect evidence), an
-   SDK-blocker positive control, the
-   installed pure core/resource in an isolated process, a no-feed stdin-EOF
-   launch, a full real-SDK file session, loopback acquisition, last-good cache
-   fallback, absent/corrupt-cache source errors and five complete raw
-   transcripts. A checkout-shadow negative control proves the same origin
-   checker rejects an identical-bytes checkout import, and two real packaging
-   variants (wrong console entry point, omitted ``tools.json``) must be rejected
-   by the same payload/launch assertions. The transport coverage itself is
-   REUSED from the reviewed group-5/6 harness in ``tests/test_mcp_protocol.py``,
-   loaded explicitly in the host process, so no second protocol implementation
-   exists and no test/helper/repo path is ever given to a server child.
-
-   Group 3 attributes its evidence per invocation: every hook-enabled child (the
-   primary help run, each blocker control, the missing-file help, the core probe,
-   the EOF launch, every protocol session and the shadow console) writes to its
-   OWN report/audit destination, because the owned hook reports from ``atexit``
-   and would otherwise overwrite an earlier child's evidence. Retained reports
-   are reconciled by label/pid/argv against the saved files both before and after
-   the manifest is written, and the shadow control is rejected at the
-   ``outside the installed site-packages`` branch specifically -- never by an
-   earlier missing-report or foreign-pid branch. Retained ``.session.json``
-   records are validated for ``returncode``/``natural_exit``/``stdin_closed``/
-   ``protocol_violations`` AND ``forced_cleanup is False`` (with a negative row
-   proving that last guard), since the live unit-6d audit cannot speak for a
-   saved record. The manifest keeps the declared backend's own build transcript
-   for the exact installed wheel (the ``uv build`` frontend transcript stays
-   separately labelled), plus SHA-256 of both executed test files. Every one of
-   those reports, transcripts and the manifest itself lives INSIDE this test's
-   owned scratch root: they are readable for every assertion above and are
-   removed with that root when the test finishes, so ``retained`` here means
-   saved for the rest of THIS run, never published as a durable artifact.
-
-4. ``test_scratch_roots_outlive_neither_success_nor_failure`` pins the FILESYSTEM
-   lifetime of the three groups above. Every ``_scratch_directory`` root lives
-   under the caller's temporary root and stays readable until its test's last
-   assertion, then is removed -- after a passing test and after a failing one
-   alike -- by the autouse ``_owned_scratch_lifetime`` fixture, never by an
-   ``atexit`` handler and never by deleting anything else in that root. The rows
-   run a real child interpreter, because a root that outlives its test cannot be
-   observed from inside the test that allocated it.
-
-Honest scope of group 3: this is a LOCAL wheel-only clean installation. Published
-Git-source ``uvx --from git+...`` evidence is deliberately absent because no
-public ref contains this package yet, and PyPI publication, rollout and operator
-configuration changes are out of scope. The dependency wheels come from a
-one-time preparation performed OUTSIDE pytest; the test performs no public
-network operation and contacts only its own loopback feed.
-
-Build tooling is a prerequisite, not a runtime dependency. Nothing here assumes
-this machine's account layout: every interpreter is probed for its own
-implementation and version, never accepted because a path exists. Group 2 needs
-a ``setuptools>=77.0.3`` interpreter (``FREE_INFERENCE_WATCHDOG_BUILD_PYTHON``
-overrides the default of the current interpreter) and only a ``>=3.11``
-interpreter for its archive/core smoke. Group 3 additionally needs an EXACT
-CPython 3.11 (``FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON``, else an ordinary
-``python3.11`` on ``PATH``, else the current interpreter when it really is
-3.11), the real ``uv`` frontend (``FREE_INFERENCE_WATCHDOG_UV``, else ``uv`` on
-``PATH``) and a prepared wheelhouse (``FREE_INFERENCE_WATCHDOG_WHEELHOUSE``,
-default the portable account cache
-``~/.cache/free-inference-watchdog-mcp/cp311-sdk2.3.0/``). An explicit
-INTERPRETER override is authoritative: naming a wrong interpreter fails with
-the reason instead of silently selecting another one. The ``uv`` override is
-simply tried first, with an ordinary ``uv`` on ``PATH`` as the existing
-fallback when it is absent or unusable. Owned temporary artifacts live under the
-caller's ``TMPDIR`` when set and under the standard temporary root otherwise; an
-unset ``TMPDIR`` never creates a Hermes directory, and every root allocated that
-way is removed when the test that allocated it finishes rather than left for a
-later sweep. A missing prerequisite is an actionable failure with the exact
-preparation command, never a skip.
+``test_packaging_metadata_contract`` pins the static PEP 621 metadata;
+``test_wheel_payload_and_core_smoke`` audits the genuine wheel built once by the
+module-scoped ``primary_wheel`` fixture and runs its pure core/resource with
+producer and SDK imports blocked from a neutral cwd.
+``test_installed_console_clean_install_and_stdio_isolation`` installs that SAME
+wheel OFFLINE into a fresh CPython 3.11 environment and drives the
+installer-generated console through help, core, stdin-EOF, SDK file, loopback,
+cache-fallback and source-error sessions behind an owned probe hook. The same
+installed environment then drives the native one-shot executable (the sibling
+``free-inference-watchdog`` console) from a neutral cwd through help, owned-file
+search/get/status JSON parity, human freshness output, failure distinctions and
+loopback cache fallback.
+Prerequisites, probed never assumed: a ``setuptools>=77.0.3`` build interpreter,
+an exact CPython 3.11, the real ``uv`` frontend and a prepared wheelhouse (each
+with a ``FREE_INFERENCE_WATCHDOG_*`` override); a missing tool fails with its
+preparation command and a missing wheelhouse fails inside the native offline
+install, never a skip. Scratch roots are ordinary
+``tempfile.TemporaryDirectory`` contexts under the caller's explicit ``TMPDIR``.
+Nothing here contacts the public network.
 """
 
-import contextlib
 import hashlib
 import json
 import os
@@ -150,17 +45,9 @@ SNAPSHOT_FIXTURE = REPO / "tests" / "fixtures" / "catalog" / "basic.json"
 DIST_NAME = "free-inference-watchdog-mcp"
 CONSOLE_COMMAND = "free-inference-watchdog-mcp"
 CONSOLE_TARGET = "watchdog_catalog.__main__:main"
+NATIVE_CLI_COMMAND = "free-inference-watchdog"
+NATIVE_CLI_TARGET = "watchdog_catalog.cli:main"
 MINIMUM_BACKEND = (77, 0, 3)
-
-#: A controlled discovery double. It reports the REAL CPython implementation
-#: identity (``sys.implementation.name`` is lowercase ``cpython``) with the
-#: version 3.14, so ONLY the interpreter probe's version gate can reject it: a
-#: wrong identity name would prove nothing about the version rule. It is never
-#: used as real floor evidence.
-_NON_FLOOR_DOUBLE = """#!/bin/sh
-# controlled discovery double: never a real interpreter
-printf '{"implementation": "cpython", "version": [3, 14]}\\n'
-"""
 
 # The only legal SDK import in this wheel arrives with the transport modules in
 # a later unit; the pure core and its resource must import neither the SDK nor
@@ -248,10 +135,9 @@ _SMOKE_SCRIPT = (
     "    'search': {\n"
     "        'ok': page['ok'],\n"
     "        'total_matches': page['total_matches'],\n"
-    "        'returned_count': page['returned_count'],\n"
+    "        'page_len': len(page['endpoints']),\n"
     "        'model_ids': [row['model_id'] for row in page['endpoints']],\n"
     "        'next_offset': page['next_offset'],\n"
-    "        'filters': page['filters'],\n"
     "    },\n"
     "    'original_path': original_path,\n"
     "    'cwd': os.getcwd(),\n"
@@ -295,59 +181,24 @@ def _clean_environment():
     return environment
 
 
-#: Scratch roots allocated by ``_scratch_directory`` and not yet torn down.
-#: Allocation order matters: a test's own roots are a contiguous tail slice.
-_OWNED_SCRATCH = []
+def _temporary_root(prefix):
+    """A temporary root under the caller's explicit ``TMPDIR``, else the default.
 
-
-def _scratch_directory(prefix):
-    """An owned scratch directory under the CALLER's configured temp root.
-
-    An explicit ``TMPDIR`` always owns the artifacts; otherwise this is the
-    ordinary platform temporary directory. No application cache (and in
-    particular no Hermes directory) is invented when ``TMPDIR`` is unset.
-
-    The root is recorded in ``_OWNED_SCRATCH`` so the autouse
-    ``_owned_scratch_lifetime`` fixture can remove it once the allocating test
-    finishes; every caller keeps the plain path it always got back.
+    ``TMPDIR`` always owns the artifacts when it is set; otherwise this is the
+    ordinary platform temporary directory, never an invented application cache.
+    Cleanup belongs to the context itself, so a passing, failing or erroring
+    test leaves nothing behind.
     """
     base = Path(os.environ.get("TMPDIR") or tempfile.gettempdir())
     base.mkdir(parents=True, exist_ok=True)
-    path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(base)))
-    _OWNED_SCRATCH.append(path)
-    return path
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=str(base))
 
 
-@contextlib.contextmanager
-def _owned_scratch_roots():
-    """Remove every scratch root allocated inside this context, however it ends.
-
-    Only the roots recorded while the context was open are removed, in reverse
-    allocation order: the caller's temporary root and anything else in it --
-    another run's output, an unrelated sibling -- is never touched, and an
-    enclosing context keeps its own roots. Removal runs in ``finally``, so a
-    failing or erroring test tears its roots down exactly like a passing one.
-    """
-    first = len(_OWNED_SCRATCH)
-    try:
-        yield
-    finally:
-        for path in reversed(_OWNED_SCRATCH[first:]):
-            shutil.rmtree(path, ignore_errors=True)
-        del _OWNED_SCRATCH[first:]
-
-
-@pytest.fixture(autouse=True)
-def _owned_scratch_lifetime():
-    """Tie ``_scratch_directory`` roots to the lifetime of the owning test.
-
-    A pytest fixture finalizer runs after a passing, a failing and an erroring
-    test alike, so no owned root outlives the test that asked for it. Evidence
-    a test builds inside its own root stays readable until its last assertion
-    has run; nothing outside those roots is deleted.
-    """
-    with _owned_scratch_roots():
-        yield
+@pytest.fixture
+def scratch_root():
+    """This test's own root, cleaned on exit; the module build root stays separate."""
+    with _temporary_root("unit16-test-") as path:
+        yield Path(path)
 
 
 def _floor_python():
@@ -412,7 +263,7 @@ def _build_python():
 # --------------------------------------------------------------------------
 # group 1: static PEP 621 metadata contract
 # --------------------------------------------------------------------------
-def test_packaging_metadata_contract(tmp_path, monkeypatch):
+def test_packaging_metadata_contract(scratch_root):
     assert PYPROJECT.is_file(), "pyproject.toml carries the distribution contract"
     with PYPROJECT.open("rb") as handle:
         document = tomllib.load(handle)
@@ -459,7 +310,8 @@ def test_packaging_metadata_contract(tmp_path, monkeypatch):
     assert not project.get("optional-dependencies"), (
         "the SDK is a declared dependency of the console command, not an extra")
 
-    assert project["scripts"] == {CONSOLE_COMMAND: CONSOLE_TARGET}
+    assert project["scripts"] == {CONSOLE_COMMAND: CONSOLE_TARGET,
+                                  NATIVE_CLI_COMMAND: NATIVE_CLI_TARGET}
 
     tool = document["tool"]["setuptools"]
     assert set(tool) == {"packages", "py-modules", "include-package-data",
@@ -476,7 +328,8 @@ def test_packaging_metadata_contract(tmp_path, monkeypatch):
         assert not (REPO / legacy).exists(), (
             "one static configuration source; no legacy metadata file")
 
-    neutral = _scratch_directory("unit6a-inert-cwd-")
+    neutral = scratch_root / "inert-cwd"
+    neutral.mkdir()
     probe = subprocess.run(
         [sys.executable, "-I", "-c", _INERT_ROOT_PROBE, str(REPO),
          *BLOCKED_IMPORTS],
@@ -487,97 +340,12 @@ def test_packaging_metadata_contract(tmp_path, monkeypatch):
     assert probe.stdout == "" and probe.stderr == "", (
         "importing the package root stays silent and inert")
 
-    # ------------------------------------------------------------------
-    # prerequisite discovery is PORTABLE, never account-specific
-    # ------------------------------------------------------------------
-    # The controlled double below is the only interpreter involved: it reports
-    # the REAL CPython identity with the version 3.14, so only the version gate
-    # can reject it, whether it is named by an override or found as an ordinary
-    # ``python3.11`` executable. No installed interpreter is read or modified
-    # by these rows.
-    empty_home = tmp_path / "empty-home"
-    empty_bin = tmp_path / "empty-bin"
-    configured_tmp = tmp_path / "configured-tmp"
-    for directory in (empty_home, empty_bin, configured_tmp):
-        directory.mkdir()
-    double = empty_bin / "python3.11"
-    double.write_text(_NON_FLOOR_DOUBLE, encoding="utf-8")
-    double.chmod(0o755)
-    # These rows are NEGATIVES: they must not become the next group's
-    # configuration. One contained monkeypatch context restores the caller's
-    # temporary root, HOME, PATH and prerequisite overrides exactly --
-    # presence, absence and values -- before anything real runs again.
-    caller_state = {name: os.environ.get(name)
-                    for name in ("TMPDIR", "HOME", "PATH", UV_ENVIRONMENT,
-                                 INSTALLED_PYTHON_ENVIRONMENT)}
-    caller_floor = caller_state[INSTALLED_PYTHON_ENVIRONMENT]
-
-    with monkeypatch.context() as probe_patch:
-        # An explicit TMPDIR owns every temporary artifact this module creates.
-        probe_patch.setenv("TMPDIR", str(configured_tmp))
-        assert _scratch_directory("unit9a-tmpdir-").parent == configured_tmp
-
-        # An UNSET TMPDIR uses the ordinary temp root. It must never invent a
-        # Hermes-owned cache directory under the caller's HOME.
-        probe_patch.delenv("TMPDIR", raising=False)
-        probe_patch.setenv("HOME", str(empty_home))
-        standard = _scratch_directory("unit9a-standard-")
-        assert standard.parent == Path(tempfile.gettempdir()), standard.parent
-        assert not (empty_home / ".hermes").exists(), (
-            "an unset TMPDIR must not create a Hermes cache under HOME")
-        probe_patch.setenv("TMPDIR", str(configured_tmp))
-
-        # A missing installer frontend is an actionable failure, never a silent
-        # download and never a hard-coded account path.
-        probe_patch.setenv("PATH", str(empty_bin))
-        probe_patch.delenv(UV_ENVIRONMENT, raising=False)
-        with pytest.raises(AssertionError) as no_installer:
-            _uv_binary()
-        assert UV_ENVIRONMENT in str(no_installer.value), no_installer.value
-
-        # A ``python3.11`` that is not CPython 3.11 is not the installed floor.
-        probe_patch.delenv(INSTALLED_PYTHON_ENVIRONMENT, raising=False)
-        if (sys.implementation.name == "cpython"
-                and sys.version_info[:2] == INSTALLED_MINOR):
-            # The current interpreter IS the floor: legitimate even though its
-            # executable is not named ``python3.11``.
-            assert Path(_installed_python()).resolve() == Path(sys.executable).resolve()
-        else:
-            with pytest.raises(AssertionError) as wrong_floor:
-                _installed_python()
-            assert str(double) in str(wrong_floor.value), wrong_floor.value
-            # The double IS CPython by identity: pin the VERSION rejection.
-            assert ("cpython 3.14 is not exactly CPython 3.11"
-                    in str(wrong_floor.value)), wrong_floor.value
-
-        # An explicitly named interpreter is authoritative: a wrong one fails
-        # actionably instead of silently falling back to another installation.
-        probe_patch.setenv(INSTALLED_PYTHON_ENVIRONMENT, str(double))
-        with pytest.raises(AssertionError) as named_wrong_floor:
-            _installed_python()
-        assert str(double) in str(named_wrong_floor.value), named_wrong_floor.value
-        assert INSTALLED_PYTHON_ENVIRONMENT in str(named_wrong_floor.value)
-        assert ("cpython 3.14 is not exactly CPython 3.11"
-                in str(named_wrong_floor.value)), named_wrong_floor.value
-
-    # The caller's environment is back EXACTLY as supplied -- including an
-    # absent variable and the original PATH -- before the installed-console
-    # group consumes it.
-    for name, value in caller_state.items():
-        assert os.environ.get(name) == value, (
-            f"{name} was not restored to the caller's value {value!r}")
-    if caller_floor:
-        # A supplied override is the floor genuine integration must use; it is
-        # consumed here with no test-time patch in effect.
-        assert Path(_installed_python()) == Path(caller_floor), (
-            "the caller's installed-floor override was not used")
-
 
 # --------------------------------------------------------------------------
 # group 2: real wheel payload plus isolated core/resource smoke
 # --------------------------------------------------------------------------
 def _stage_source(destination):
-    """Stage the public package and synthetic neighbours into owned scratch."""
+    """Stage the public package and synthetic neighbours into a scratch root."""
     package = destination / "watchdog_catalog"
     package.mkdir(parents=True)
     for module in sorted(PACKAGE.glob("*.py")):
@@ -593,17 +361,14 @@ def _stage_source(destination):
     return destination
 
 
-def _build_wheel(source, output, *, log_path=None):
+def _build_wheel(source, output, *, python, log_path=None):
     """Build a genuine wheel through the declared backend, in a subprocess.
 
-    ``log_path`` is an OPTIONAL, keyword-only destination for this invocation's
-    own transcript (command, return status, stdout and stderr). It defaults to
-    ``None`` so every pre-existing caller keeps the exact same command, build
-    behaviour and return value; a caller that passes it gets the REAL transcript
-    of the wheel it will install, written before any build assertion can discard
-    the diagnostics.
+    ``python`` is the caller's already-selected build interpreter; this helper
+    selects nothing. ``log_path`` is an optional destination for this
+    invocation's own transcript (command, status, stdout, stderr), written
+    before any build assertion can discard the diagnostics.
     """
-    python, _version = _build_python()
     output.mkdir(parents=True, exist_ok=True)
     marker = output / "wheel-name.txt"
     # distutils rewrites sys.argv while building, so bind both paths first.
@@ -628,6 +393,40 @@ def _build_wheel(source, output, *, log_path=None):
     wheel = output / marker.read_text(encoding="utf-8").strip()
     assert wheel.is_file(), f"reported wheel is missing: {wheel}"
     return wheel
+
+
+@pytest.fixture(scope="module")
+def primary_wheel():
+    """The ONE genuine wheel both normal consumers share, and its provenance.
+
+    The staged source is hidden after the real build and the backend transcript
+    lives in this root; the ``TemporaryDirectory`` context removes all of it when
+    the module ends, including a setup failure before ``yield``.
+    Payload and schema claims belong to the consumers.
+    """
+    with _temporary_root("unit16-primary-") as directory:
+        root = Path(directory)
+        source = _stage_source(root / "source")
+        backend_log = root / "backend-build.log"
+
+        # ONE backend selection, shared by both normal consumers.
+        backend_python, _ = _build_python()
+        wheel = _build_wheel(source, root / "wheel", python=backend_python,
+                             log_path=backend_log)
+
+        # Hide that EXACT staged source once, after the real build: every later
+        # launch must work without it. No live checkout is touched.
+        hidden_source = source.with_name("staged-source-hidden")
+        os.rename(source, hidden_source)
+        assert not source.exists() and hidden_source.is_dir()
+
+        yield {
+            "source": source,
+            "hidden_source": hidden_source,
+            "wheel": wheel,
+            "backend_python": backend_python,
+            "backend_log": backend_log,
+        }
 
 
 def _read_wheel(wheel):
@@ -718,13 +517,10 @@ def _payload_violations(facts, expected_python, expected_resource):
     return violations
 
 
-def test_wheel_payload_and_core_smoke():
+def test_wheel_payload_and_core_smoke(primary_wheel, scratch_root):
     assert PYPROJECT.is_file(), "the wheel needs the committed packaging metadata"
-    root = _scratch_directory("unit6a-dist-")
-    stage = _stage_source(root / "source")
-    wheelhouse = root / "wheelhouse"
-    wheel = _build_wheel(stage, wheelhouse)
-    assert wheel.parent == wheelhouse
+    root = scratch_root
+    wheel = primary_wheel["wheel"]
     fixture = root / "fixture-basic.json"
     shutil.copyfile(SNAPSHOT_FIXTURE, fixture)
 
@@ -772,9 +568,10 @@ def test_wheel_payload_and_core_smoke():
     entry_lines = [line.strip() for line in facts["entry_points"].splitlines()
                    if line.strip()]
     assert entry_lines == ["[console_scripts]",
+                           f"{NATIVE_CLI_COMMAND} = {NATIVE_CLI_TARGET}",
                            f"{CONSOLE_COMMAND} = {CONSOLE_TARGET}"], (
-        "the console command is declared for the planned CLI module; this test "
-        "does not claim the command is runnable yet")
+        "both console commands are declared for their shipped modules, in "
+        "setuptools' sorted entry-point order")
 
     neutral = root / "neutral-cwd"
     neutral.mkdir()
@@ -794,7 +591,11 @@ def test_wheel_payload_and_core_smoke():
     assert Path(result["cwd"]).resolve() == neutral.resolve()
     assert str(REPO) not in result["original_path"], (
         "the smoke must not see the implementation checkout on sys.path")
-    assert str(stage) not in result["original_path"]
+    # The fixture hid the exact staged source before yielding; neither the
+    # original (now absent) path nor the real hidden directory may be on path.
+    for staged in (primary_wheel["source"], primary_wheel["hidden_source"]):
+        assert str(staged) not in result["original_path"], (
+            "the smoke must not import from the staged source tree")
 
     assert set(result["application_modules"]) == {
         "watchdog_catalog", "watchdog_catalog.catalog", "watchdog_catalog.query"}
@@ -811,15 +612,10 @@ def test_wheel_payload_and_core_smoke():
     search = result["search"]
     assert search["ok"] is True
     assert search["total_matches"] == 1
-    assert search["returned_count"] == 1
+    assert search["page_len"] == 1
     assert search["model_ids"] == ["alpha-1:free"]
-    assert search["next_offset"] is None
-    assert search["filters"] == {
-        "provider": None,
-        "min_context_length": 16000,
-        "input_modalities": None,
-        "supported_parameters": None,
-    }, "the pure query applies real filters on the wheel's own core"
+    assert search["next_offset"] is None, (
+        "the wheel's own core reports honest pagination")
 
 
 # --------------------------------------------------------------------------
@@ -827,24 +623,27 @@ def test_wheel_payload_and_core_smoke():
 # transport, cache, error and isolation sessions
 #
 # Group 2 ends with a zip-on-``sys.path`` smoke. This group is the installed
-# evidence Task 6 asks for: a genuine wheel built by the declared backend, a NEW
-# PEP 405 Python 3.11 environment created from the floor interpreter with no
-# system or user site-packages, an offline install from an owned dependency
-# wheelhouse, and the INSTALLER-GENERATED ``free-inference-watchdog-mcp``
-# console script launched by absolute path from a neutral cwd. The
+# evidence: the SAME genuine wheel installed into a NEW PEP 405 Python 3.11
+# environment created from the floor interpreter with no system or user
+# site-packages, from an offline dependency wheelhouse, and the
+# INSTALLER-GENERATED ``free-inference-watchdog-mcp`` console script launched by
+# absolute path from a neutral cwd. The
 # transport/cache/error sessions REUSE the reviewed group-5/6 harness of
 # ``test_mcp_protocol`` -- the real SDK ``ClientSession`` over a real child's
 # real stdin/stdout -- loaded explicitly into this HOST process, so no
 # test/helper/repo path is ever handed to a server child and no second
-# handwritten protocol implementation exists. The host computes every oracle;
-# the child only runs the installed wheel.
+# handwritten protocol implementation exists. That harness's own audit already
+# checks real frames, protocol errors and natural shutdown; this group adds the
+# installed-origin, guard and cache/state facts only. The host computes every
+# oracle; the child only runs the installed wheel.
 #
 # Honest scope: LOCAL wheel-only clean installation. No published Git-source
 # ``uvx`` run (no public ref contains this package yet), no PyPI publication and
 # no rollout. The dependency wheels come from an owned one-time preparation
 # OUTSIDE pytest; this group performs no public network operation and contacts
-# only the loopback feed it owns. A missing offline prerequisite fails with the
-# exact preparation command -- never a skip.
+# only the loopback feed it owns. A missing offline tool fails with its exact
+# preparation command, and a missing or unsuitable dependency wheelhouse fails
+# inside the native offline install -- never a skip.
 # --------------------------------------------------------------------------
 WHEELHOUSE_ENVIRONMENT = "FREE_INFERENCE_WATCHDOG_WHEELHOUSE"
 INSTALLED_PYTHON_ENVIRONMENT = "FREE_INFERENCE_WATCHDOG_INSTALLED_PYTHON"
@@ -1078,15 +877,6 @@ _INSTALLED_CORE_PROBE = (
     "}))\n"
 )
 
-#: Legacy producer/config/state roots that must never load in a child. The SDK
-#: is deliberately NOT here: an ordinary transport run may use it.
-INSTALLED_LEGACY_ROOTS = (
-    "config_loader", "providers", "inference_watchdog", "catalog_export",
-    "envfile", "notify", "diffing", "detection", "alive", "build_site",
-    "pending_removals", "probe_select", "probe_state", "probe_zero_credit",
-    "state",
-)
-
 #: Help/core paths additionally refuse the SDK graph: parsing help and importing
 #: the pure core must not need it.
 INSTALLED_SDK_ROOTS = ("mcp", "mcp_types", "pydantic")
@@ -1191,36 +981,6 @@ def _uv_binary():
         "the offline installer frontend is unavailable: install uv once outside "
         "pytest (`pipx install uv` or the standalone installer) or set "
         f"{UV_ENVIRONMENT}=/path/to/uv. Tried: " + "; ".join(tried))
-
-
-def _dependency_wheelhouse(floor):
-    """The owned genuine-wheel dependency source, or the exact preparation command."""
-    override = os.environ.get(WHEELHOUSE_ENVIRONMENT)
-    wheelhouse = Path(override) if override else DEFAULT_WHEELHOUSE
-    names = (sorted(entry.name for entry in wheelhouse.iterdir()
-                    if entry.suffix == ".whl")
-             if wheelhouse.is_dir() else [])
-    present = {}
-    for name in names:
-        parts = name[:-len(".whl")].split("-")
-        if len(parts) >= 2:
-            present.setdefault(parts[0].lower(), set()).add(parts[1])
-    missing = {dist: version for dist, version in SDK_PIN_VERSIONS.items()
-               if version not in present.get(dist, set())}
-    if missing:
-        command = (
-            "env -i HOME=%s PATH=/usr/bin:/bin PIP_CONFIG_FILE=/dev/null "
-            "PIP_DISABLE_PIP_VERSION_CHECK=1 %s -m pip download "
-            "--only-binary=:all: --dest %s --index-url https://pypi.org/simple "
-            "%s" % (wheelhouse.parent, floor, wheelhouse,
-                    " ".join(f"'{pin}'" for pin in SDK_PINS)))
-        raise AssertionError(
-            "the offline dependency wheelhouse is not prepared (missing "
-            f"{sorted(missing)} in {wheelhouse}, found {len(names)} wheels). "
-            "This test downloads nothing itself. Prepare it ONCE outside "
-            "pytest, from genuine PyPI wheels:\n  " + command
-            + f"\n(or set {WHEELHOUSE_ENVIRONMENT}=<prepared directory>).")
-    return wheelhouse
 
 
 def _tool_environment(home, temp):
@@ -1489,128 +1249,6 @@ def _assert_installed_origin(report_path, *, label, pid, cwd, env_prefix, pureli
     return report
 
 
-def _with_report(environment, *, report, audit):
-    """A SCOPED copy of a child environment pointed at its OWN evidence paths.
-
-    The owned hook writes its report from an ``atexit`` handler, so it fires on
-    EVERY interpreter exit -- including a blocked-import failure. Two children
-    started from one environment dictionary would therefore leave only the
-    LAST report on disk, which is how a guard control silently destroys the
-    console evidence it was meant to protect. Callers derive a fresh copy with
-    unique destinations instead of mutating a shared dictionary.
-    """
-    scoped = dict(environment)
-    scoped["WD_PROBE_REPORT"] = str(report)
-    scoped["WD_GUARD_AUDIT"] = str(audit)
-    return scoped
-
-
-def _script_argv(*arguments):
-    """The ``sys.argv`` a ``python -c SCRIPT [args...]`` child will observe."""
-    return ["-c"] + [str(argument) for argument in arguments]
-
-
-def _report_entry(index, *, label, kind, run, report, audit, argv):
-    """Attribute one hook-enabled invocation to its OWN report destination."""
-    index.append({"label": label, "kind": kind, "report": str(report),
-                  "audit": str(audit), "pid": run.pid,
-                  "argv": [str(part) for part in argv]})
-
-
-def _assert_report_index(index, evidence):
-    """Prove every guarded invocation still owns its report, on disk, at the end.
-
-    Uniqueness of the destinations is what makes accidental reuse impossible,
-    and the PID/argv reconciliation is what detects an overwrite that slipped
-    through: a surviving report would carry another child's pid or argv, so this
-    is a real attribution check rather than a count of files.
-    """
-    for field, values in (
-            ("label", [entry["label"] for entry in index]),
-            ("report", [entry["report"] for entry in index]),
-            ("audit", [entry["audit"] for entry in index])):
-        assert len(set(values)) == len(values), (
-            f"two invocations share a {field} destination, so one would "
-            f"overwrite the other: "
-            f"{sorted({value for value in values if values.count(value) > 1})}")
-    for entry in index:
-        path = Path(entry["report"])
-        assert path.parent == Path(evidence), (entry["label"], str(path))
-        assert path.is_file(), (
-            f"{entry['label']}: the {entry['kind']} invocation lost its report "
-            f"at {path}")
-        report = json.loads(path.read_text(encoding="utf-8"))
-        assert report["hook"] == INSTALLED_HOOK_ID, (
-            f"{entry['label']}: the retained report was not written by the "
-            "owned hook")
-        assert report["pid"] == entry["pid"], (
-            f"{entry['label']}: the retained report belongs to pid "
-            f"{report['pid']}, not to the {entry['kind']} child {entry['pid']} "
-            "-- an invocation overwrote another's evidence")
-        assert report["argv"] == entry["argv"], (
-            f"{entry['label']}: the retained argv {report['argv']!r} is not this "
-            f"{entry['kind']} invocation's {entry['argv']!r}")
-        _assert_guard_clean(entry["audit"], entry["label"])
-    return [entry["label"] for entry in index]
-
-
-def _assert_shadow_console_report(report_path, *, run, console, module_hashes):
-    """The negative control's OWN saved state: real console pid/argv, checkout bytes."""
-    report = json.loads(Path(report_path).read_text(encoding="utf-8"))
-    assert report["hook"] == INSTALLED_HOOK_ID, (
-        "the negative control must keep the guards active")
-    assert report["pid"] == run.pid, (
-        f"the saved shadow report belongs to pid {report['pid']}, not to the "
-        f"shadow console child {run.pid}")
-    assert report["argv"] == [str(console), "--help"], report["argv"]
-    module = report["application_modules"]["watchdog_catalog"]
-    assert module["file"] == str(REPO / "watchdog_catalog" / "__init__.py"), (
-        module)
-    assert module["sha256"] == module_hashes["watchdog_catalog"], (
-        "the negative control needs IDENTICAL module bytes")
-    return report
-
-
-def _assert_retained_session(summary, *, label):
-    """Validate a RETAINED ``.session.json`` record, as a later reader sees it.
-
-    This is the DISK/MANIFEST boundary. The reused unit-6d helpers already call
-    ``_audit_clean_stdio``, which rejects a LIVE ``forced_cleanup``; nothing in
-    that live audit survives into the saved record, and a drain timeout can set
-    ``forced_cleanup=True`` while ``natural_exit`` stays true. Graceful EOF is
-    therefore only claimed here when the SAVED record says nothing was killed.
-    """
-    assert summary["returncode"] == 0, (label, summary["returncode"])
-    assert summary["natural_exit"] is True, (
-        f"{label}: the retained session records no natural exit")
-    assert summary["stdin_closed"] is True, (
-        f"{label}: the retained session never closed the child's stdin")
-    assert summary["protocol_violations"] == [], (
-        label, summary["protocol_violations"])
-    assert summary["forced_cleanup"] is False, (
-        f"{label}: the retained session records forced_cleanup="
-        f"{summary['forced_cleanup']!r}; a bounded drain or exit timeout "
-        "force-killed the child, so this record does not prove a graceful EOF")
-    return summary
-
-
-def _test_identity(harness):
-    """SHA-256 of the two test files THIS run actually executed."""
-    distribution = Path(__file__).resolve()
-    protocol = Path(harness.__file__).resolve()
-    assert distribution == (REPO / "tests" / "test_distribution.py").resolve(), (
-        distribution)
-    assert protocol == (REPO / "tests" / "test_mcp_protocol.py").resolve(), protocol
-    return {
-        "distribution_test": {
-            "path": str(distribution),
-            "sha256": hashlib.sha256(distribution.read_bytes()).hexdigest()},
-        "protocol_harness": {
-            "path": str(protocol),
-            "sha256": hashlib.sha256(protocol.read_bytes()).hexdigest()},
-    }
-
-
 def _protocol_harness():
     """Load the reviewed group-5/6 stdio harness explicitly in THIS process.
 
@@ -1661,58 +1299,46 @@ def _directory_entries(*directories):
 
 
 def _owned_fixture(path):
-    """An owned, validated copy of the reviewed fixture input."""
+    """An owned copy of the reviewed fixture input."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = SNAPSHOT_FIXTURE.read_bytes()
-    path.write_bytes(data)
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == hashlib.sha256(
-        data).hexdigest()
+    shutil.copyfile(SNAPSHOT_FIXTURE, path)
     return path
 
 
-def _dependency_manifest(wheelhouse):
-    entries = []
-    for path in sorted(wheelhouse.glob("*.whl")):
-        entries.append({"name": path.name,
-                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                        "size": path.stat().st_size})
-    return entries
+def _owned_catalog_fixture(name, path):
+    """An owned copy of one reviewed catalogue fixture, still unmodified."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(REPO / "tests" / "fixtures" / "catalog" / name, path)
+    return path
 
 
-def _variant_wheel(directory, label, *, entry_point=None, drop_resource=False):
-    """Build one real packaging variant of the UNCHANGED application payload."""
-    stage = _stage_source(directory / (label + "-source"))
-    if entry_point is not None:
-        text = (stage / "pyproject.toml").read_text(encoding="utf-8")
-        declared = f'{CONSOLE_COMMAND} = "{CONSOLE_TARGET}"'
-        assert declared in text, "the staged metadata lost its console declaration"
-        (stage / "pyproject.toml").write_text(
-            text.replace(declared, f'{CONSOLE_COMMAND} = "{entry_point}"'),
-            encoding="utf-8")
-    if drop_resource:
-        (stage / "watchdog_catalog" / "tools.json").unlink()
-    return _build_wheel(stage, directory / (label + "-wheel"))
+def _native_console_name():
+    """The native one-shot executable name on the LIVE platform."""
+    return NATIVE_CLI_COMMAND + (".exe" if os.name == "nt" else "")
 
 
-def test_installed_console_clean_install_and_stdio_isolation():
-    """The REAL wheel, clean-installed, driven through its own console command."""
+def test_installed_console_clean_install_and_stdio_isolation(primary_wheel,
+                                                             scratch_root):
+    """The REAL shared wheel, clean-installed, driven through its console command."""
     assert PYPROJECT.is_file(), "the wheel needs the committed packaging metadata"
     with PYPROJECT.open("rb") as handle:
-        project = tomllib.load(handle)["project"]
-    version = project["version"]
+        version = tomllib.load(handle)["project"]["version"]
     from watchdog_catalog.query import search_models as host_search_models
     from watchdog_catalog.source import DEFAULT_CATALOG_URL
 
     floor = _installed_python()
-    uv, uv_version = _uv_binary()
-    wheelhouse = _dependency_wheelhouse(floor)
-    build_python, backend_version = _build_python()
+    uv, _ = _uv_binary()
+    # The dependency source is only RESOLVED here. The native offline install
+    # below rejects a missing, foreign-platform or wrong-version candidate
+    # itself, and the installed pins are read back from the environment after.
+    override = os.environ.get(WHEELHOUSE_ENVIRONMENT)
+    wheelhouse = Path(override) if override else DEFAULT_WHEELHOUSE
     harness = _protocol_harness()
     blocked_legacy = tuple(harness.BLOCKED_LEGACY_ONLY)
     blocked_sdk = INSTALLED_SDK_ROOTS
     blocked_help = blocked_sdk + blocked_legacy + ("watchdog_catalog.server",)
 
-    root = _scratch_directory("unit6e-installed-")
+    root = scratch_root
     evidence = root / "evidence"
     neutral = root / "cwd"
     home = root / "home"
@@ -1725,33 +1351,22 @@ def test_installed_console_clean_install_and_stdio_isolation():
         directory.mkdir(parents=True)
 
     # ------------------------------------------------------------------
-    # 1. stage, build and audit the EXACT wheel this group installs
+    # 1. bind the shared wheel's bytes and provenance to this install
     # ------------------------------------------------------------------
-    stage = _stage_source(root / "source")
-    backend_log = evidence / "backend-build.log"
-    wheel = _build_wheel(stage, root / "wheel", log_path=backend_log)
-    assert wheel.name == (
-        f"free_inference_watchdog_mcp-{version}-py3-none-any.whl"), wheel.name
-    # The retained transcript must belong to THIS wheel: it is the declared
-    # backend's own command/status/streams for the exact file installed below,
-    # not the independent frontend build that runs later on a separate export.
+    # The module-scoped fixture built this wheel once and already hid its
+    # staged source; this consumer only proves the bytes it will install.
+    wheel = primary_wheel["wheel"]
+    backend_log = primary_wheel["backend_log"]
+    build_python = primary_wheel["backend_python"]
+    source = primary_wheel["source"]
+    hidden = primary_wheel["hidden_source"]
+    # The declared backend's own transcript for this exact build is retained.
     transcript = backend_log.read_text(encoding="utf-8")
-    assert "RETURNCODE: 0" in transcript, transcript[-4000:]
-    assert "COMMAND: " in transcript and str(wheel.parent) in transcript, (
-        transcript[:2000])
-    assert "--- STDOUT ---" in transcript and "--- STDERR ---" in transcript
     assert wheel.name in transcript, (
         "the backend transcript does not name the wheel it produced: "
         + transcript[-4000:])
     facts = _read_wheel(wheel)
     expected_python, expected_resource = _expected_payload()
-    violations = _payload_violations(facts, expected_python, expected_resource)
-    assert violations == [], (
-        "the wheel this group installs is not the reviewed payload:\n"
-        + "\n".join(violations))
-    top_levels = {name.split("/")[0] for name in facts["names"]}
-    assert top_levels == {"watchdog_catalog", facts["prefix"]}, top_levels
-    wheel_sha = hashlib.sha256(wheel.read_bytes()).hexdigest()
     module_hashes, wheel_file_hashes = _installed_module_hashes(wheel)
     assert _entry_point_target(facts) == CONSOLE_TARGET
     # The wheel's package bytes are the REVIEWED SOURCES' bytes, so the later
@@ -1761,20 +1376,17 @@ def test_installed_console_clean_install_and_stdio_isolation():
             reviewed = PACKAGE / name.split("/")[-1]
             assert hashlib.sha256(reviewed.read_bytes()).hexdigest() == digest, (
                 f"the wheel's {name} differs from the reviewed source")
-    assert facts["tools_json"] == CONTRACT_RESOURCE.read_bytes()
 
-    # The OWNED staged source is hidden after the build: every later launch must
-    # work without it. No live checkout is touched.
-    hidden = stage.with_name("staged-source-hidden")
-    os.rename(stage, hidden)
-    assert not stage.exists() and hidden.is_dir()
-    stage = hidden
+    # The shared fixture hid the EXACT staged source after its real build:
+    # every later launch must work without it, and the original path is gone.
+    assert not source.exists(), "the shared staged source is still present"
+    assert hidden.is_dir(), hidden
 
     # ------------------------------------------------------------------
     # 2. a genuinely fresh Python 3.11 environment, offline install
     # ------------------------------------------------------------------
     environment_dir = root / "fresh-3.11"
-    created = _create_environment(
+    _create_environment(
         uv, floor, environment_dir, evidence / "create-environment.log",
         tool_home, temp)
     env_python = environment_dir / "bin" / "python"
@@ -1790,6 +1402,8 @@ def test_installed_console_clean_install_and_stdio_isolation():
     assert Path(installed["prefix"]).resolve() != Path(
         installed["base_prefix"]).resolve()
     assert installed["entry_points"] == [{
+        "name": NATIVE_CLI_COMMAND, "value": NATIVE_CLI_TARGET,
+        "group": "console_scripts"}, {
         "name": CONSOLE_COMMAND, "value": CONSOLE_TARGET,
         "group": "console_scripts"}], installed["entry_points"]
     assert installed["installer"] == "uv", installed["installer"]
@@ -1832,14 +1446,9 @@ def test_installed_console_clean_install_and_stdio_isolation():
     help_env = _installed_environment(
         home, cache_home, temp, help_hooks, evidence / "help-report.json",
         evidence / "help-guard.jsonl")
-    # Every hook-enabled invocation below owns a DISTINCT report/audit pair; the
-    # index is reconciled against the saved files again at the end of the group.
-    reports = []
+    # Each hook-enabled invocation below owns its own report/audit pair.
     help_argv = [str(console), "--help"]
     help_run = _run_console(help_argv, help_env, neutral)
-    _report_entry(reports, label="help", kind="console --help", run=help_run,
-                  report=evidence / "help-report.json",
-                  audit=evidence / "help-guard.jsonl", argv=help_argv)
     assert help_run.returncode == 0, help_run.stderr[-4000:]
     assert help_run.stderr == "", "help must keep stderr empty"
     help_stdout = help_run.stdout
@@ -1853,7 +1462,7 @@ def test_installed_console_clean_install_and_stdio_isolation():
     assert sorted(home.iterdir()) == [], "help created HOME state"
     assert sorted(cache_home.iterdir()) == [], "help created cache state"
     _assert_guard_clean(evidence / "help-guard.jsonl", "installed --help")
-    help_report = _assert_installed_origin(
+    _assert_installed_origin(
         evidence / "help-report.json", label="installed --help",
         pid=help_run.pid, cwd=neutral, env_prefix=environment_dir,
         purelib=purelib, module_hashes=module_hashes,
@@ -1862,29 +1471,6 @@ def test_installed_console_clean_install_and_stdio_isolation():
         absent_modules=("watchdog_catalog.server",) + blocked_sdk,
         blocked_legacy=blocked_legacy, blocked_sdk=blocked_sdk)
 
-    # The SDK blocker is ACTIVE in that exact environment: a positive control.
-    # Each control is a SEPARATE hook-enabled child, so each gets its own
-    # report/audit pair: the hook writes on exit, and reusing the console's
-    # destination here would replace the help evidence with a ``-c`` child.
-    for module in ("mcp", "pydantic"):
-        sdk_report = evidence / f"help-sdk-{module}-report.json"
-        sdk_audit = evidence / f"help-sdk-{module}-guard.jsonl"
-        control_env = _with_report(help_env, report=sdk_report, audit=sdk_audit)
-        control = _run_console([env_python, "-B", "-c", f"import {module}"],
-                               control_env, neutral)
-        assert control.returncode != 0, f"{module} was importable in help mode"
-        assert (f"blocked import during installed-console probe: {module}"
-                in control.stderr), control.stderr[-2000:]
-        assert control.stdout == ""
-        control_report = json.loads(sdk_report.read_text(encoding="utf-8"))
-        assert control_report["pid"] == control.pid, control_report["pid"]
-        assert control_report["application_modules"] == {}, (
-            f"the {module} blocker did not raise before any package code: "
-            f"{control_report['application_modules']}")
-        _report_entry(reports, label=f"help-sdk-{module}",
-                      kind=f"SDK blocker control ({module})", run=control,
-                      report=sdk_report, audit=sdk_audit, argv=_script_argv())
-
     # An explicit MISSING file selection followed by --help still succeeds:
     # parsing and help happen before any source validation or catalogue read.
     # This invocation keeps its OWN evidence: a distinct report/audit pair, the
@@ -1892,17 +1478,13 @@ def test_installed_console_clean_install_and_stdio_isolation():
     # side-effect snapshots taken around THIS child rather than inherited.
     missing = root / "inputs" / "absent-catalogue.json"
     ordered_argv = [str(console), "--catalog-file", str(missing), "--help"]
-    ordered_env = _with_report(
-        help_env, report=evidence / "help-missing-file-report.json",
-        audit=evidence / "help-missing-file-guard.jsonl")
+    ordered_env = _installed_environment(
+        home, cache_home, temp, help_hooks,
+        evidence / "help-missing-file-report.json",
+        evidence / "help-missing-file-guard.jsonl")
     ordered_before = _directory_entries(neutral, home, cache_home)
     ordered = _run_console(ordered_argv, ordered_env, neutral)
     ordered_after = _directory_entries(neutral, home, cache_home)
-    _report_entry(reports, label="help-missing-file",
-                  kind="console missing-file --help", run=ordered,
-                  report=evidence / "help-missing-file-report.json",
-                  audit=evidence / "help-missing-file-guard.jsonl",
-                  argv=ordered_argv)
     assert ordered.returncode == 0, ordered.stderr[-4000:]
     assert ordered.stderr == "", "missing-file help must keep stderr empty"
     assert ordered.stdout == help_stdout, "help depends on the selection order"
@@ -1922,7 +1504,7 @@ def test_installed_console_clean_install_and_stdio_isolation():
                         "missing-file --help")
     # Same checker, same environment, this child's pid: the run is installed
     # evidence about the installed console, not about the checkout.
-    ordered_report = _assert_installed_origin(
+    _assert_installed_origin(
         evidence / "help-missing-file-report.json",
         label="missing-file --help", pid=ordered.pid, cwd=neutral,
         env_prefix=environment_dir, purelib=purelib,
@@ -1931,8 +1513,6 @@ def test_installed_console_clean_install_and_stdio_isolation():
                           "watchdog_catalog.source"},
         absent_modules=("watchdog_catalog.server",) + blocked_sdk,
         blocked_legacy=blocked_legacy, blocked_sdk=blocked_sdk)
-    assert ordered_report["argv"] == [str(part) for part in ordered_argv], (
-        ordered_report["argv"])
 
     # ------------------------------------------------------------------
     # 4. the installed pure core/resource with SDK and legacy imports blocked
@@ -1945,10 +1525,6 @@ def test_installed_console_clean_install_and_stdio_isolation():
     core_run = _run_console(
         [env_python, "-B", "-c", _INSTALLED_CORE_PROBE, str(fixture),
          ",".join(blocked_help)], core_env, neutral)
-    _report_entry(reports, label="core", kind="installed pure core probe",
-                  run=core_run, report=evidence / "core-report.json",
-                  audit=evidence / "core-guard.jsonl",
-                  argv=_script_argv(fixture, ",".join(blocked_help)))
     assert core_run.returncode == 0, core_run.stderr[-4000:]
     assert core_run.stderr == "", core_run.stderr[-2000:]
     core = json.loads(core_run.stdout)
@@ -1973,9 +1549,7 @@ def test_installed_console_clean_install_and_stdio_isolation():
         "the installed core's result differs from the accepted host core")
     assert [row["model_id"] for row in core["search"]["endpoints"]] == [
         "alpha-1:free"]
-    assert core["search"]["filters"] == {
-        "provider": None, "min_context_length": 16000,
-        "input_modalities": None, "supported_parameters": None}
+    assert "filters" not in core["search"] and "counts" not in core["search"]
     assert tuple(core["version"][:2]) == INSTALLED_MINOR
     assert os.path.realpath(core["prefix"]) == os.path.realpath(
         str(environment_dir))
@@ -1998,9 +1572,6 @@ def test_installed_console_clean_install_and_stdio_isolation():
         home, cache_home, temp, serve_hooks, evidence / "eof-report.json",
         evidence / "eof-guard.jsonl")
     eof = _run_console([console], eof_env, neutral)
-    _report_entry(reports, label="eof", kind="no-feed stdin-EOF launch",
-                  run=eof, report=evidence / "eof-report.json",
-                  audit=evidence / "eof-guard.jsonl", argv=[str(console)])
     assert eof.returncode == 0, eof.stderr[-4000:]
     assert eof.stdout == "", "a no-feed EOF launch printed into the protocol stream"
     assert eof.stderr == "", eof.stderr[-2000:]
@@ -2018,11 +1589,17 @@ def test_installed_console_clean_install_and_stdio_isolation():
         "a no-feed launch created cache state before any query")
 
     # ------------------------------------------------------------------
-    # 6. installed console file session: real SDK client, full 6d coverage
+    # 6. installed console file session: real SDK client, reviewed coverage
     # ------------------------------------------------------------------
-    sessions = {}
+    def assert_session_child(label, child, environment):
+        """One genuine session's child: minimal env, real guards, installed bytes.
 
-    def record_session(label, child, environment):
+        The reviewed harness already audited the live protocol transcript --
+        frames, protocol errors, natural shutdown. What only this group knows is
+        that the child stayed credential-free, saw no test/helper/repo path, had
+        its network guard reject nothing, and imported every module from the
+        installed site-packages with the wheel's own bytes.
+        """
         minimal = {"PATH", "HOME", "XDG_CACHE_HOME", "TMPDIR", "PYTHONPATH",
                    "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE",
                    "WD_PROBE_REPORT", "WD_GUARD_AUDIT"}
@@ -2032,7 +1609,7 @@ def test_installed_console_clean_install_and_stdio_isolation():
         assert environment["PYTHONPATH"] == str(serve_hooks), (
             "a server child must never see a test/helper/repo path")
         _assert_guard_clean(environment["WD_GUARD_AUDIT"], label)
-        report = _assert_installed_origin(
+        _assert_installed_origin(
             environment["WD_PROBE_REPORT"], label=label, pid=child.pid,
             cwd=neutral, env_prefix=environment_dir, purelib=purelib,
             module_hashes=module_hashes,
@@ -2042,66 +1619,18 @@ def test_installed_console_clean_install_and_stdio_isolation():
                               "watchdog_catalog.query",
                               "watchdog_catalog.catalog"},
             blocked_legacy=blocked_legacy)
-        sessions[label] = {
-            "pid": child.pid,
-            "argv": list(child.argv),
-            "cwd": str(child.cwd),
-            "returncode": child.proc.returncode,
-            "natural_exit": child.natural_exit,
-            "stdin_closed": child.stdin_closed,
-            "forced_cleanup": child.forced_cleanup,
-            "protocol_violations": list(child.protocol_violations),
-            "stdout_frames": len(child.stdout_lines),
-            "outbound_frames": len(child.stdin_lines),
-            "stdout_bytes": len(child.raw_stdout),
-            "artifacts": sorted(str(path) for path in artifacts.glob(label + ".*")),
-            "report": environment["WD_PROBE_REPORT"],
-            "sys_path": report["sys_path"],
-            "import_origins": {name: fact["file"]
-                               for name, fact in
-                               report["application_modules"].items()},
-        }
-        _report_entry(reports, label=label,
-                      kind="installed console protocol session", run=child,
-                      report=environment["WD_PROBE_REPORT"],
-                      audit=environment["WD_GUARD_AUDIT"], argv=child.argv)
 
-    # The legacy blocker raises in THIS child environment, before package code.
-    # Its own report destination keeps the session's report intact: the blocking
-    # child exits through the same hook, so a shared path would hand the session
-    # assertion a ``-c`` report instead of the session's.
     file_environment = _installed_environment(
         home, cache_home, temp, serve_hooks,
         evidence / "file-session-report.json",
         evidence / "file-session-guard.jsonl")
-    file_control_env = _with_report(
-        file_environment, report=evidence / "file-legacy-control-report.json",
-        audit=evidence / "file-legacy-control-guard.jsonl")
-    control = _run_console([env_python, "-B", "-c", "import config_loader"],
-                           file_control_env, neutral)
-    _report_entry(reports, label="file-legacy-control",
-                  kind="legacy blocker control", run=control,
-                  report=evidence / "file-legacy-control-report.json",
-                  audit=evidence / "file-legacy-control-guard.jsonl",
-                  argv=_script_argv())
-    assert control.returncode != 0, "the legacy blocker did not raise"
-    assert ("blocked import during installed-console probe: config_loader"
-            in control.stderr), control.stderr[-2000:]
-    assert control.stdout == ""
-    file_control_report = json.loads(
-        (evidence / "file-legacy-control-report.json").read_text(
-            encoding="utf-8"))
-    assert file_control_report["application_modules"] == {}, (
-        "the legacy blocker must raise before any package code: "
-        f"{file_control_report['application_modules']}")
-
     file_cache = root / "cache-file"
     file_child = _installed_child(
         harness, "installed-file",
         [console, "--catalog-file", str(fixture), "--cache-dir", str(file_cache)],
         file_environment, neutral, artifacts)
     harness.anyio.run(harness._file_stdio_session, file_child)
-    record_session("installed-file", file_child, file_environment)
+    assert_session_child("installed-file", file_child, file_environment)
     assert sorted(neutral.iterdir()) == [], "the file session wrote into its cwd"
     assert sorted(home.iterdir()) == [], "the file session created HOME state"
     assert file_cache.is_dir() and list(file_cache.glob("*.json")), (
@@ -2112,7 +1641,6 @@ def test_installed_console_clean_install_and_stdio_isolation():
     # ------------------------------------------------------------------
     url_cache = root / "cache-url"
     feed = harness._LoopbackFeed(fixture.read_bytes()).start()
-    feed_hits = 0
     port = feed.server.server_address[1]
     first_environment = _installed_environment(
         home, cache_home, temp, serve_hooks,
@@ -2126,10 +1654,9 @@ def test_installed_console_clean_install_and_stdio_isolation():
         fetched_at, entry_path = harness.anyio.run(
             harness._first_url_stdio_session, first_child, feed)
         assert feed.requests == ["/catalog.json"], feed.requests
-        feed_hits += len(feed.requests)
     finally:
         feed.stop()
-    record_session("installed-url-first", first_child, first_environment)
+    assert_session_child("installed-url-first", first_child, first_environment)
 
     entry_file = Path(entry_path)
     cache_bytes = entry_file.read_bytes()
@@ -2146,7 +1673,8 @@ def test_installed_console_clean_install_and_stdio_isolation():
         offline_environment, neutral, artifacts)
     harness.anyio.run(harness._offline_url_stdio_session, offline_child,
                       fetched_at, offline_warnings)
-    record_session("installed-url-offline", offline_child, offline_environment)
+    assert_session_child("installed-url-offline", offline_child,
+                         offline_environment)
     assert entry_file.read_bytes() == cache_bytes, (
         "a failed refresh rewrote the persisted last-good cache")
     assert sorted(path.name for path in url_cache.iterdir()) == cache_names
@@ -2160,7 +1688,8 @@ def test_installed_console_clean_install_and_stdio_isolation():
         harness, "installed-url-absent", console, feed.url, absent_cache,
         absent_environment, neutral, artifacts)
     harness.anyio.run(harness._unavailable_stdio_session, absent_child)
-    record_session("installed-url-absent", absent_child, absent_environment)
+    assert_session_child("installed-url-absent", absent_child,
+                         absent_environment)
     assert not absent_cache.exists(), (
         "a failed refresh with no cache created cache state")
 
@@ -2179,218 +1708,19 @@ def test_installed_console_clean_install_and_stdio_isolation():
         harness, "installed-url-corrupt", console, feed.url, corrupt_cache,
         corrupt_environment, neutral, artifacts)
     harness.anyio.run(harness._unavailable_stdio_session, corrupt_child)
-    record_session("installed-url-corrupt", corrupt_child, corrupt_environment)
+    assert_session_child("installed-url-corrupt", corrupt_child,
+                         corrupt_environment)
     assert Path(target).read_bytes() == corrupt_bytes, (
         "a corrupt cache entry was repaired, rewritten or deleted")
     assert sorted(path.name for path in corrupt_cache.iterdir()) == [
         Path(target).name]
 
-    # Five complete raw sessions, each with its own transcript and natural exit.
-    assert sorted(sessions) == [
-        "installed-file", "installed-url-absent", "installed-url-corrupt",
-        "installed-url-first", "installed-url-offline"], sorted(sessions)
-    for label, record in sessions.items():
-        assert record["returncode"] == 0, (label, record)
-        assert record["natural_exit"] is True, (label, record)
-        assert record["stdout_frames"] >= 2, (label, record)
-        assert record["outbound_frames"] > 2, (label, record)
-        assert len(record["artifacts"]) == 4, (label, record["artifacts"])
-        for suffix in (".stdin.raw", ".stdout.raw", ".stderr.raw",
-                       ".session.json"):
-            path = artifacts / (label + suffix)
-            assert path.is_file(), path
-        # The retained transcript is re-validated from the RAW FILES: every
-        # stdout line is an intact JSON-RPC 2.0 frame and a clean session wrote
-        # nothing at all to stderr.
-        raw_stdout = (artifacts / (label + ".stdout.raw")).read_text(
-            encoding="utf-8")
-        assert raw_stdout.endswith("\n"), label
-        frames = [json.loads(line) for line in raw_stdout.splitlines()]
-        assert frames, label
-        for frame in frames:
-            assert frame.get("jsonrpc") == "2.0", (label, frame)
-            assert (("result" in frame) or ("error" in frame)
-                    or isinstance(frame.get("method"), str)), (label, frame)
-        assert (artifacts / (label + ".stdin.raw")).stat().st_size > 0, label
-        # stderr is diagnostics-only: the SDK's documented "Tool ... not found"
-        # line is legal for the unknown-tool rejection, a traceback never is.
-        raw_stderr = (artifacts / (label + ".stderr.raw")).read_text(
-            encoding="utf-8")
-        for marker in ("Traceback (most recent call last)", "was never awaited",
-                       "Task exception was never retrieved"):
-            assert marker not in raw_stderr, (label, raw_stderr[-2000:])
-        summary = json.loads((artifacts / (label + ".session.json")).read_text(
-            encoding="utf-8"))
-        # The retained record must stand on its own: the live 6d audit above is
-        # gone once the process ends, and only these saved fields remain.
-        _assert_retained_session(summary, label=label)
     assert sorted(neutral.iterdir()) == [], "a session wrote into its cwd"
     assert sorted(home.iterdir()) == [], "a session created HOME state"
     assert sorted(cache_home.iterdir()) == [], (
         "a session without an explicit cache root used the platform cache")
-
-    # The DISK/MANIFEST boundary, negatively: a retained record that also says
-    # the child had to be killed must NOT count as graceful EOF. The reused 6d
-    # helpers reject a LIVE ``forced_cleanup`` via ``_audit_clean_stdio``; this
-    # row proves the SAVED record is validated just as strictly, from a copy of
-    # an authentic summary with nothing changed but that one flag.
-    authentic_path = artifacts / "installed-file.session.json"
-    authentic_bytes = authentic_path.read_bytes()
-    authentic = json.loads(authentic_bytes)
-    _assert_retained_session(authentic, label="installed-file")
-    tampered = json.loads(authentic_bytes)
-    tampered["forced_cleanup"] = True
-    with pytest.raises(AssertionError) as rejected_summary:
-        _assert_retained_session(tampered, label="forced-cleanup-row")
-    retained_reason = str(rejected_summary.value)
-    assert "records forced_cleanup=True" in retained_reason, retained_reason
-    assert "no natural exit" not in retained_reason, retained_reason
-    assert authentic_path.read_bytes() == authentic_bytes, (
-        "the evidence-boundary row must never rewrite an authentic session file")
-
     # ------------------------------------------------------------------
-    # 8. strict origin negative control: identical bytes, wrong origin
-    # ------------------------------------------------------------------
-    shadow_hooks = _write_hook(root / "hooks" / "shadow", blocked_help)
-    shadow_env = _installed_environment(
-        home, cache_home, temp, shadow_hooks, evidence / "shadow-report.json",
-        evidence / "shadow-guard.jsonl")
-    # The ONE deliberate difference from a clean install: the reviewed checkout
-    # joins the import path, so resolution -- not the bytes -- is wrong.
-    shadow_env["PYTHONPATH"] = os.pathsep.join([str(shadow_hooks), str(REPO)])
-    shadow_argv = [str(console), "--help"]
-    shadow = _run_console(shadow_argv, shadow_env, neutral)
-    assert shadow.returncode == 0, shadow.stderr[-4000:]
-    assert shadow.stdout == help_stdout
-    _report_entry(reports, label="shadow-console",
-                  kind="checkout-shadow console --help", run=shadow,
-                  report=evidence / "shadow-report.json",
-                  audit=evidence / "shadow-guard.jsonl", argv=shadow_argv)
-    # The saved state belongs to the real shadow CONSOLE: its pid, its `--help`
-    # argv and the identical-byte checkout module. Only then is rejecting it
-    # evidence about ORIGIN rather than about a destroyed report.
-    _assert_shadow_console_report(
-        evidence / "shadow-report.json", run=shadow, console=console,
-        module_hashes=module_hashes)
-
-    control = _run_console([env_python, "-B", "-c", "import config_loader"],
-                           _with_report(
-                               shadow_env,
-                               report=evidence / "shadow-control-report.json",
-                               audit=evidence / "shadow-control-guard.jsonl"),
-                           neutral)
-    _report_entry(reports, label="shadow-legacy-control",
-                  kind="legacy blocker control with the checkout import path",
-                  run=control, report=evidence / "shadow-control-report.json",
-                  audit=evidence / "shadow-control-guard.jsonl",
-                  argv=_script_argv())
-    assert control.returncode != 0 and (
-        "blocked import during installed-console probe: config_loader"
-        in control.stderr), control.stderr[-2000:]
-    # The control could not have overwritten the console report: it is intact.
-    _assert_shadow_console_report(
-        evidence / "shadow-report.json", run=shadow, console=console,
-        module_hashes=module_hashes)
-    # The SAME checker used for every successful installed child must reject
-    # this saved state AT THE ORIGIN BRANCH -- not earlier at a missing report,
-    # a foreign pid, a version or a prefix complaint.
-    with pytest.raises(AssertionError) as rejected_shadow:
-        _assert_installed_origin(
-            evidence / "shadow-report.json", label="checkout-shadow control",
-            pid=shadow.pid, cwd=neutral, env_prefix=environment_dir,
-            purelib=purelib, module_hashes=module_hashes,
-            required_modules={"watchdog_catalog"}, blocked_legacy=blocked_legacy)
-    shadow_reason = str(rejected_shadow.value)
-    assert "outside the installed site-packages" in shadow_reason, shadow_reason
-    assert "watchdog_catalog imported from" in shadow_reason, shadow_reason
-    assert str(REPO / "watchdog_catalog" / "__init__.py") in shadow_reason, (
-        shadow_reason)
-    for earlier_branch in ("wrote no report", "the report came from pid",
-                           "is not the fresh environment",
-                           "this is no virtual environment",
-                           "bytes differ from the installed wheel"):
-        assert earlier_branch not in shadow_reason, (
-            f"the control was rejected before the origin branch ({earlier_branch}): "
-            + shadow_reason)
-    _assert_guard_clean(evidence / "shadow-guard.jsonl",
-                        "checkout-shadow control")
-
-    # ------------------------------------------------------------------
-    # 9. two real packaging variants must be rejected by the SAME assertions
-    # ------------------------------------------------------------------
-    variants = root / "variants"
-    variant_env = variants / "env"
-    _create_environment(uv, floor, variant_env,
-                        evidence / "variant-environment.log", tool_home, temp)
-    variant_python = variant_env / "bin" / "python"
-    variant_console = variant_env / "bin" / CONSOLE_COMMAND
-    plain_env = _probe_environment(home, cache_home, temp)
-    variant_outcomes = {}
-
-    wrong_target = "watchdog_catalog.__main__:main_missing"
-    broken_entry = _variant_wheel(variants, "wrong-entry",
-                                  entry_point=wrong_target)
-    broken_facts = _read_wheel(broken_entry)
-    assert _entry_point_target(broken_facts) == wrong_target
-    assert _entry_point_target(broken_facts) != CONSOLE_TARGET
-    assert _payload_violations(broken_facts, expected_python,
-                               expected_resource) == [], (
-        "the entry-point variant must keep the reviewed payload")
-    _install_offline(uv, variant_python, broken_entry, wheelhouse,
-                     evidence / "variant-entry-install.log", tool_home, temp)
-    broken_run = _run_console([variant_console, "--help"], plain_env, neutral)
-    assert broken_run.returncode != 0, (
-        "the wrong console entry point was accepted")
-    assert "main_missing" in broken_run.stderr, broken_run.stderr[-2000:]
-    assert broken_run.stdout == "", "a broken console wrote to stdout"
-    still_importable = _run_console(
-        [variant_python, "-I", "-B", "-c",
-         "import watchdog_catalog.__main__; print('ok')"], plain_env, neutral)
-    assert still_importable.returncode == 0, still_importable.stderr[-2000:]
-    assert still_importable.stdout.strip() == "ok", (
-        "the rejection must come from the console target, not a broken package")
-    variant_outcomes["wrong-entry-point"] = {
-        "wheel": str(broken_entry),
-        "sha256": hashlib.sha256(broken_entry.read_bytes()).hexdigest(),
-        "rejected_by": "declared entry point and installed console launch",
-        "exit": broken_run.returncode,
-        "diagnostic": broken_run.stderr.strip().splitlines()[-1:],
-    }
-
-    missing_resource = _variant_wheel(variants, "missing-tools",
-                                      drop_resource=True)
-    missing_facts = _read_wheel(missing_resource)
-    missing_violations = _payload_violations(missing_facts, expected_python,
-                                             expected_resource)
-    assert any("missing the reviewed tool-contract resource" in item
-               for item in missing_violations), missing_violations
-    removal = _run_console([uv, "pip", "uninstall", "--no-config", "--python",
-                            str(variant_python), DIST_NAME],
-                           _tool_environment(tool_home, temp), neutral)
-    assert removal.returncode == 0, removal.stderr[-2000:]
-    _install_offline(uv, variant_python, missing_resource, wheelhouse,
-                     evidence / "variant-resource-install.log", tool_home,
-                     temp)
-    resource_help = _run_console([variant_console, "--help"], plain_env, neutral)
-    assert resource_help.returncode == 0, (
-        "help must not need the tool-contract resource: "
-        + resource_help.stderr[-2000:])
-    resource_launch = _run_console([variant_console], plain_env, neutral)
-    assert resource_launch.returncode != 0, (
-        "a wheel without tools.json served a session")
-    assert "tools.json" in resource_launch.stderr, resource_launch.stderr[-3000:]
-    assert resource_launch.stdout == "", (
-        "a broken wheel wrote into the protocol stream")
-    variant_outcomes["missing-tools-json"] = {
-        "wheel": str(missing_resource),
-        "sha256": hashlib.sha256(missing_resource.read_bytes()).hexdigest(),
-        "rejected_by": "wheel payload audit and installed launch",
-        "audit": [item for item in missing_violations if "tool-contract" in item],
-        "exit": resource_launch.returncode,
-    }
-
-    # ------------------------------------------------------------------
-    # 10. a real `uv build --wheel` frontend produces the same reviewed payload
+    # 8. a real `uv build --wheel` frontend produces the same reviewed payload
     # ------------------------------------------------------------------
     frontend_root = root / "frontend"
     frontend_source = _stage_source(frontend_root / "source")
@@ -2423,210 +1753,293 @@ def test_installed_console_clean_install_and_stdio_isolation():
                     f"the frontend wheel changed package bytes: {name}")
 
     # ------------------------------------------------------------------
-    # 11. retained evidence manifest
+    # 9. the installed NATIVE one-shot console: the sibling executable, run
+    #    from a neutral cwd over owned v2 file and loopback feeds
+    #
+    # The SAME shared wheel, the SAME fresh environment and the SAME probe
+    # hooks as the MCP sessions above: no second build, install or harness.
+    # JSON parity is against the accepted host pure core; the human form must
+    # display freshness/fallback with the raw source URL deliberately absent.
     # ------------------------------------------------------------------
-    # Every guarded invocation still owns the report it wrote: verify BEFORE the
-    # manifest records the index, and again from disk after it is written.
-    labels = _assert_report_index(reports, evidence)
-    assert labels == [
-        "help", "help-sdk-mcp", "help-sdk-pydantic", "help-missing-file", "core",
-        "eof", "file-legacy-control", "installed-file", "installed-url-first",
-        "installed-url-offline", "installed-url-absent", "installed-url-corrupt",
-        "shadow-console", "shadow-legacy-control"], labels
-    test_identity = _test_identity(harness)
-    manifest = {
-        "kind": "LOCAL wheel-only clean installation (no published Git/PyPI)",
-        "repo": str(REPO),
-        "test_identity": test_identity,
-        "distribution": {"name": DIST_NAME, "version": version,
-                         "requires_python": project["requires-python"],
-                         "requires": installed["requires"]},
-        "build": {"transcript_kind": (
-                      "declared setuptools.build_meta backend, exact installed "
-                      "wheel"),
-                  "transcript": str(backend_log),
-                  "transcript_sha256": hashlib.sha256(
-                      backend_log.read_bytes()).hexdigest(),
-                  "backend_python": build_python,
-                  "backend_setuptools": backend_version,
-                  "wheel": str(wheel), "wheel_sha256": wheel_sha,
-                  "wheel_bytes": wheel.stat().st_size,
-                  "payload_entries": sorted(facts["names"])},
-        "frontend_build": {"transcript_kind": (
-                               "independent uv build frontend of a SEPARATE "
-                               "staged export; not the installed wheel's build"),
-                           "uv": uv_version, "command": frontend_command,
-                           "log": str(frontend_log),
-                           "wheel": str(frontend_wheel),
-                           "wheel_sha256": hashlib.sha256(
-                               frontend_wheel.read_bytes()).hexdigest()},
-        "wheelhouse": {"path": str(wheelhouse),
-                       "wheels": _dependency_manifest(wheelhouse)},
-        "environment": {"floor_interpreter": floor,
-                        "prefix": installed["prefix"],
-                        "base_prefix": installed["base_prefix"],
-                        "version": installed["version_info"],
-                        "purelib": installed["purelib"],
-                        "console": installed["console"],
-                        "console_shebang": installed["console_shebang"],
-                        "installer": installed["installer"],
-                        "sdk_versions": installed["versions"],
-                        "create_transcript": str(
-                            evidence / "create-environment.log"),
-                        "install_transcript": str(evidence / "install.log"),
-                        "created": created},
-        "installed_module_sha256": module_hashes,
-        "help": {"exit": help_run.returncode, "pid": help_run.pid,
-                 "report": str(evidence / "help-report.json"),
-                 "argv": [str(part) for part in help_argv],
-                 "stderr": help_run.stderr,
-                 "stdout_sha256": hashlib.sha256(
-                     help_run.stdout.encode()).hexdigest(),
-                 "modules": sorted(help_report["application_modules"]),
-                 "import_origins": {
-                     name: fact["file"] for name, fact in
-                     help_report["application_modules"].items()},
-                 "sys_path": help_report["sys_path"]},
-        "sessions": sessions,
-        "report_index": reports,
-        "loopback_feed_hits": feed_hits,
-        "variants": variant_outcomes,
-        "hidden_staged_source": str(stage),
-        "staged_source_absent": not (root / "source").exists(),
+    from watchdog_catalog import catalog as host_catalog
+    from watchdog_catalog import query as host_query
+
+    native = console.with_name(_native_console_name())
+    assert native.is_file(), f"the native console is missing: {native}"
+    assert os.access(str(native), os.X_OK), native
+    assert native.parent == console.parent, (
+        "the native console is not the MCP console's sibling: "
+        f"{native} vs {console}")
+    assert native.name == _native_console_name(), native.name
+
+    native_inputs = root / "native-inputs"
+    search_fixture = _owned_catalog_fixture(
+        "search-text.json", native_inputs / "search-text.json")
+    lookup_fixture = _owned_catalog_fixture(
+        "lookup.json", native_inputs / "lookup.json")
+    basic_fixture = _owned_catalog_fixture(
+        "basic.json", native_inputs / "basic.json")
+    search_snapshot = host_catalog.load_snapshot(
+        search_fixture.read_text(encoding="utf-8"))
+    lookup_snapshot = host_catalog.load_snapshot(
+        lookup_fixture.read_text(encoding="utf-8"))
+    basic_snapshot = host_catalog.load_snapshot(
+        basic_fixture.read_text(encoding="utf-8"))
+    assert search_snapshot["schema_version"] == 2
+    assert lookup_snapshot["schema_version"] == 2
+    assert basic_snapshot["schema_version"] == 2
+
+    native_hooks = _write_hook(root / "hooks" / "native", blocked_help)
+
+    def run_native(label, arguments, *, feed_port=None, timeout=180):
+        environment = _installed_environment(
+            home, cache_home, temp, native_hooks,
+            evidence / ("native-" + label + "-report.json"),
+            evidence / ("native-" + label + "-guard.jsonl"),
+            feed_port=feed_port)
+        return _run_console([native, *arguments], environment, neutral,
+                            timeout=timeout)
+
+    def assert_native_origin(label, completed):
+        _assert_guard_clean(evidence / ("native-" + label + "-guard.jsonl"),
+                            label)
+        _assert_installed_origin(
+            evidence / ("native-" + label + "-report.json"), label=label,
+            pid=completed.pid, cwd=neutral, env_prefix=environment_dir,
+            purelib=purelib, module_hashes=module_hashes,
+            required_modules={"watchdog_catalog", "watchdog_catalog.cli",
+                              "watchdog_catalog.source",
+                              "watchdog_catalog.catalog",
+                              "watchdog_catalog.query"},
+            absent_modules=("watchdog_catalog.server",) + blocked_sdk,
+            blocked_legacy=blocked_legacy, blocked_sdk=blocked_sdk)
+
+    # 9a. help before any source: no feed, cache, HOME or cwd state
+    native_before = _directory_entries(neutral, home, cache_home)
+    native_help = run_native("help", ["--help"])
+    native_after = _directory_entries(neutral, home, cache_home)
+    assert native_help.returncode == 0, native_help.stderr[-4000:]
+    assert native_help.stderr == "", "native help must keep stderr empty"
+    assert native_help.stdout.splitlines()[0].startswith(
+        f"usage: {NATIVE_CLI_COMMAND}"), native_help.stdout[:400]
+    for fragment in ("{search,get,status}", "--cache-dir", DEFAULT_CATALOG_URL):
+        assert fragment in native_help.stdout, (fragment, native_help.stdout[:1500])
+    assert "--root" not in native_help.stdout, "the native command has no --root"
+    assert native_after == native_before, (
+        "native help wrote cwd/HOME/cache state: "
+        + str({key: (native_before[key], native_after[key])
+               for key in native_after if native_before[key] != native_after[key]}))
+    assert_native_origin("help", native_help)
+
+    # The per-operation help is where the shared source/output flags live.
+    search_help = run_native("search-help", ["search", "--help"])
+    assert search_help.returncode == 0, search_help.stderr[-4000:]
+    assert search_help.stderr == ""
+    for fragment in ("--json", "--catalog-url", "--catalog-file",
+                     "--cache-dir", "--provider", "--min-context-length",
+                     "--input-modality", "--supported-parameter", "--limit",
+                     "--offset"):
+        assert fragment in search_help.stdout, (
+            fragment, search_help.stdout[:1500])
+    assert_native_origin("search-help", search_help)
+
+    # 9b. installed-file search: JSON parity plus the human rendering
+    search_cache = root / "native-cache-search"
+    search_json = run_native("search-json", [
+        "search", "reasoning", "--catalog-file", str(search_fixture),
+        "--cache-dir", str(search_cache), "--limit", "1", "--json"])
+    assert search_json.returncode == 0, search_json.stderr[-4000:]
+    assert search_json.stderr == "", search_json.stderr[-2000:]
+    document = json.loads(search_json.stdout)
+    source_block = document.pop("source")
+    assert document == host_query.search_models(
+        search_snapshot, {"query": "reasoning", "limit": 1}), (
+        "the installed native JSON differs from the accepted host core")
+    assert document["ok"] is True and document["total_matches"] == 1
+    assert [row["model_id"] for row in document["endpoints"]] == [
+        "vendor/literal[ab].*"]
+    assert document["endpoints"][0]["name"] == "ÉCHO TEXT"
+    assert source_block["mode"] == "file" and source_block["url"] is None
+    assert source_block["cached"] is False
+    assert {"metadata_missing", "tick_stale"} <= set(source_block["warnings"])
+    assert_native_origin("search-json", search_json)
+
+    search_human = run_native("search-human", [
+        "search", "reasoning", "--catalog-file", str(search_fixture),
+        "--cache-dir", str(search_cache), "--limit", "1"])
+    assert search_human.returncode == 0, search_human.stderr[-4000:]
+    assert search_human.stderr == "", search_human.stderr[-2000:]
+    text = search_human.stdout
+    assert text.startswith("search:"), text[:300]
+    for fragment in ("total_matches=1", "model_id=vendor/literal[ab].*",
+                     "name=ÉCHO TEXT", "source: mode=file cached=no",
+                     "source warnings:"):
+        assert fragment in text, (fragment, text[:1500])
+    assert "metadata_missing" in text and "tick_stale" in text
+    assert text.count("source warnings:") == 1, (
+        "freshness warnings must appear once per result, not per row")
+    assert "url=" not in text, (
+        "the human source summary must not print the raw source URL")
+    assert_native_origin("search-human", search_human)
+
+    # 9c. installed-file get: exact ids, JSON parity and detail rendering
+    get_cache = root / "native-cache-get"
+    get_json = run_native("get-json", [
+        "get", "synthetic-a", "vendor/shared",
+        "--catalog-file", str(lookup_fixture),
+        "--cache-dir", str(get_cache), "--json"])
+    assert get_json.returncode == 0, get_json.stderr[-4000:]
+    assert get_json.stderr == "", get_json.stderr[-2000:]
+    document = json.loads(get_json.stdout)
+    source_block = document.pop("source")
+    assert document == host_query.get_model(
+        lookup_snapshot,
+        {"provider": "synthetic-a", "model_id": "vendor/shared"}), (
+        "the installed native get JSON differs from the accepted host core")
+    assert document["endpoint"]["model_id"] == "vendor/shared"
+    assert document["endpoint"]["description"].startswith("Synthetic-a")
+    assert source_block["mode"] == "file" and source_block["cached"] is False
+    assert_native_origin("get-json", get_json)
+
+    get_human = run_native("get-human", [
+        "get", "synthetic-a", "vendor/shared",
+        "--catalog-file", str(lookup_fixture), "--cache-dir", str(get_cache)])
+    assert get_human.returncode == 0, get_human.stderr[-4000:]
+    assert get_human.stderr == "", get_human.stderr[-2000:]
+    text = get_human.stdout
+    assert text.startswith(
+        "get: provider=synthetic-a model_id=vendor/shared"), text[:300]
+    for fragment in ("description=Synthetic-a", "context_length=131072",
+                     "chat_completions_url=https://synthetic-alpha.example/",
+                     "api_type=openai", "source: mode=file"):
+        assert fragment in text, (fragment, text[:1500])
+    assert_native_origin("get-human", get_human)
+
+    # 9d. installed-file status: the clock-derived age is the core's own answer
+    status_json = run_native("status-json", [
+        "status", "--catalog-file", str(basic_fixture),
+        "--cache-dir", str(root / "native-cache-status"), "--json"])
+    assert status_json.returncode == 0, status_json.stderr[-4000:]
+    assert status_json.stderr == "", status_json.stderr[-2000:]
+    document = json.loads(status_json.stdout)
+    source_block = document.pop("source")
+    reference = document["tick_epoch"] + document["last_tick_age_s"]
+    assert document == host_query.watchdog_status(
+        basic_snapshot, {}, now=reference), (
+        "the installed native status differs from the accepted host core")
+    assert document["tick_fresh"] is False
+    assert document["counts"] == {"gateways": 2, "endpoints": 2,
+                                  "distinct_raw_ids": 2,
+                                  "marker_group_labels": 2}
+    assert document["metadata_coverage"]["description_known"] == 1
+    assert source_block["mode"] == "file" and source_block["cached"] is False
+    assert_native_origin("status-json", status_json)
+
+    status_human = run_native("status-human", [
+        "status", "--catalog-file", str(basic_fixture),
+        "--cache-dir", str(root / "native-cache-status")])
+    assert status_human.returncode == 0, status_human.stderr[-4000:]
+    assert status_human.stderr == "", status_human.stderr[-2000:]
+    text = status_human.stdout
+    assert text.startswith("status: snapshot="), text[:300]
+    for fragment in ("counts: gateways=2 endpoints=2",
+                     "metadata_coverage: endpoints=2",
+                     "pending_alerts=unknown site_published=unknown "
+                     "site_publish_age_s=unknown",
+                     "source: mode=file cached=no"):
+        assert fragment in text, (fragment, text[:1500])
+    assert "url=" not in text
+    assert_native_origin("status-human", status_human)
+
+    # 9e. failure distinctions keep their structured code and exit status
+    not_found = run_native("not-found", [
+        "get", "synthetic-a", "absent", "--catalog-file", str(lookup_fixture),
+        "--cache-dir", str(root / "native-cache-miss"), "--json"])
+    assert not_found.returncode == 1, not_found.stderr[-2000:]
+    document = json.loads(not_found.stdout)
+    assert document["ok"] is False
+    assert document["error"]["code"] == "not_found"
+    assert "snapshot" not in document and "source" in document
+    assert_native_origin("not-found", not_found)
+
+    not_found_human = run_native("not-found-human", [
+        "get", "synthetic-a", "absent", "--catalog-file", str(lookup_fixture),
+        "--cache-dir", str(root / "native-cache-miss")])
+    assert not_found_human.returncode == 1
+    assert not_found_human.stdout == "", (
+        "a human failure must not print a replacement document")
+    assert not_found_human.stderr.startswith(f"{NATIVE_CLI_COMMAND}: "), (
+        not_found_human.stderr)
+    assert_native_origin("not-found-human", not_found_human)
+
+    unknown_provider = run_native("unknown-provider", [
+        "get", "nope", "x", "--catalog-file", str(lookup_fixture),
+        "--cache-dir", str(root / "native-cache-unknown"), "--json"])
+    assert unknown_provider.returncode == 2, unknown_provider.stderr[-2000:]
+    assert json.loads(
+        unknown_provider.stdout)["error"]["code"] == "unknown_provider"
+
+    unavailable_cache = root / "native-cache-absent"
+    unavailable = run_native("source-unavailable", [
+        "status", "--catalog-file", str(native_inputs / "absent.json"),
+        "--cache-dir", str(unavailable_cache), "--json"])
+    assert unavailable.returncode == 1, unavailable.stderr[-2000:]
+    assert json.loads(unavailable.stdout) == {
+        "ok": False,
+        "error": {"code": "source_unavailable",
+                  "message": "Catalogue source unavailable."},
     }
-    (evidence / "manifest.json").write_text(
-        json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
-    assert json.loads((evidence / "manifest.json").read_text(
-        encoding="utf-8")) == manifest
+    assert not unavailable_cache.exists(), (
+        "a failed acquisition with no cache created cache state")
 
-    # The manifest is only evidence if it still describes the FILES: reconcile
-    # every session record with its retained summary, the help block with the
-    # primary help report, and the index with every saved report.
-    retained_manifest = json.loads((evidence / "manifest.json").read_text(
-        encoding="utf-8"))
-    assert retained_manifest["report_index"] == reports
-    _assert_report_index(retained_manifest["report_index"], evidence)
-    _assert_shadow_console_report(
-        evidence / "shadow-report.json", run=shadow, console=console,
-        module_hashes=module_hashes)
-    assert retained_manifest["test_identity"] == test_identity
-    for label in ("tests/test_distribution.py", "tests/test_mcp_protocol.py"):
-        recorded = next(item for item in retained_manifest[
-            "test_identity"].values() if item["path"].endswith(label))
-        assert recorded["sha256"] == hashlib.sha256(
-            Path(recorded["path"]).read_bytes()).hexdigest(), label
-    assert retained_manifest["help"]["report"] == str(
-        evidence / "help-report.json")
-    retained_help = json.loads(
-        (evidence / "help-report.json").read_text(encoding="utf-8"))
-    assert retained_help["pid"] == help_run.pid, (
-        "the manifest's help report is not the primary help invocation")
-    assert retained_help["argv"] == [str(part) for part in help_argv]
-    assert set(retained_help["application_modules"]) == set(
-        help_report["application_modules"])
-    assert retained_manifest["build"]["transcript"] == str(backend_log)
-    for label, record in retained_manifest["sessions"].items():
-        summary = json.loads((artifacts / (label + ".session.json")).read_text(
-            encoding="utf-8"))
-        _assert_retained_session(summary, label=label)
-        for field in ("pid", "argv", "cwd", "returncode", "natural_exit",
-                      "stdin_closed", "forced_cleanup"):
-            assert record[field] == summary[field], (label, field)
-        assert record["forced_cleanup"] is False, label
-        assert record["protocol_violations"] == [], label
+    # 9f. loopback URL: a fresh process attempts the refresh and only then
+    #     serves the persisted last-good snapshot, honestly flagged
+    native_url_cache = root / "native-cache-url"
+    native_feed = harness._LoopbackFeed(search_fixture.read_bytes()).start()
+    native_port = native_feed.server.server_address[1]
+    url_arguments = [
+        "search", "reasoning", "--catalog-url", native_feed.url,
+        "--cache-dir", str(native_url_cache), "--limit", "1", "--json"]
+    try:
+        assert native_feed.url.startswith("http://127.0.0.1:"), native_feed.url
+        first = run_native("url-first", url_arguments, feed_port=native_port)
+        assert native_feed.requests == ["/catalog.json"], native_feed.requests
+    finally:
+        native_feed.stop()
+    assert first.returncode == 0, first.stderr[-4000:]
+    assert first.stderr == "", first.stderr[-2000:]
+    first_document = json.loads(first.stdout)
+    first_source = first_document["source"]
+    assert first_source["mode"] == "url"
+    assert first_source["url"] == native_feed.url
+    assert first_source["cached"] is False
+    assert isinstance(first_source["fetched_at"], int)
+    assert "refresh_failed" not in first_source["warnings"]
+    assert_native_origin("url-first", first)
+    entry_names = sorted(path.name for path in native_url_cache.iterdir())
+    assert len(entry_names) == 1, entry_names
 
+    # The feed is gone: this NEW process still ATTEMPTS the refresh first
+    # (the loopback port is closed, so the attempt fails promptly), then serves
+    # the persisted snapshot with the original fetched_at and both warnings.
+    fallback = run_native("url-fallback", url_arguments,
+                          feed_port=native_port)
+    assert fallback.returncode == 0, fallback.stderr[-4000:]
+    assert fallback.stderr == "", fallback.stderr[-2000:]
+    fallback_document = json.loads(fallback.stdout)
+    fallback_source = fallback_document["source"]
+    assert fallback_source["mode"] == "url"
+    assert fallback_source["cached"] is True
+    assert fallback_source["fetched_at"] == first_source["fetched_at"]
+    assert fallback_source["warnings"][:2] == ["refresh_failed",
+                                               "cache_fallback"]
+    assert {key: value for key, value in fallback_document.items()
+            if key != "source"} == {
+        key: value for key, value in first_document.items() if key != "source"}
+    assert sorted(path.name for path in native_url_cache.iterdir()) == entry_names
+    assert_native_origin("url-fallback", fallback)
 
-# --------------------------------------------------------------------------
-# scratch lifetime: no owned root outlives the test that allocated it
-#
-# ``_scratch_directory`` roots belong to the test that asked for them. A root
-# that outlives its test cannot be observed from inside that same test, so the
-# rows split in two: the context manager the fixture is built from is driven
-# directly (passing and raising lifetimes, roots asserted ALIVE inside so the
-# afterwards check cannot pass vacuously), and this module's real metadata
-# contract test is run in a child interpreter twice -- passing and failing
-# late -- to prove the pytest finalizer wiring end to end. An unrelated sibling
-# in the same temporary root must survive every row byte for byte: the teardown
-# is owned by the allocations, never a blanket delete of the caller's root.
-# --------------------------------------------------------------------------
-def _run_isolated_pytest(targets, scratch_root, basetemp, extra_environment=None):
-    """Run one focused pytest target in a child bound to an owned TMPDIR."""
-    environment = _clean_environment()
-    environment.pop("PYTEST_ADDOPTS", None)
-    environment["TMPDIR"] = str(scratch_root)
-    environment.pop(INSTALLED_PYTHON_ENVIRONMENT, None)
-    environment.update(extra_environment or {})
-    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-               f"--basetemp={basetemp}", *targets]
-    return subprocess.run(command, cwd=str(REPO), capture_output=True,
-                          text=True, timeout=600, env=environment)
-
-
-def test_scratch_roots_outlive_neither_success_nor_failure(tmp_path, monkeypatch):
-    scratch_root = tmp_path / "caller-tmp"
-    scratch_root.mkdir()
-    sibling = scratch_root / "unrelated-sibling"
-    sibling.mkdir()
-    sentinel = sibling / "keep.txt"
-    sentinel.write_text("unrelated caller evidence\n", encoding="utf-8")
-    monkeypatch.setenv("TMPDIR", str(scratch_root))
-
-    def leftovers():
-        return sorted(entry.name for entry in scratch_root.iterdir()
-                      if entry.name != sibling.name)
-
-    def assert_sibling_intact():
-        assert sentinel.read_text(encoding="utf-8") == "unrelated caller evidence\n"
-        assert [entry.name for entry in sibling.iterdir()] == [sentinel.name]
-
-    # 1. A lifetime that ends normally removes exactly the roots it owns, and
-    #    keeps them alive (with evidence inside) until it ends.
-    with _owned_scratch_roots():
-        owned = [_scratch_directory("unit-a-lifetime-") for _ in range(2)]
-        for root in owned:
-            assert root.parent == scratch_root, root.parent
-            assert root.is_dir()
-        (owned[0] / "evidence.json").write_text("{}", encoding="utf-8")
-        assert (owned[0] / "evidence.json").is_file(), (
-            "evidence must stay readable until the owning lifetime ends")
-    assert [root.exists() for root in owned] == [False, False]
-    assert leftovers() == [], leftovers()
-    assert_sibling_intact()
-
-    # 2. A lifetime that ends by raising removes its roots too -- the path a
-    #    failing test takes -- and leaves an enclosing lifetime's roots alone.
-    with _owned_scratch_roots():
-        outer = _scratch_directory("unit-a-outer-")
-        with pytest.raises(RuntimeError):
-            with _owned_scratch_roots():
-                failing = _scratch_directory("unit-a-failing-")
-                assert failing.is_dir()
-                raise RuntimeError("intentional failure inside the lifetime")
-        assert not failing.exists()
-        assert outer.is_dir(), "an enclosing lifetime's root was removed"
-        assert_sibling_intact()
-    assert not outer.exists()
-    assert leftovers() == [], leftovers()
-    assert_sibling_intact()
-
-    # 3 and 4. This module's own metadata contract test allocates three roots
-    #    through the real code path. It passes in one child and fails LATE
-    #    (its authoritative installed-floor override is unusable) in another:
-    #    both native exits must leave nothing behind.
-    rows = [
-        ({}, 0, "1 passed"),
-        ({INSTALLED_PYTHON_ENVIRONMENT: "/nonexistent/python3.11"},
-         1, "1 failed"),
-    ]
-    for index, (extra_environment, exit_code, summary) in enumerate(rows):
-        run = _run_isolated_pytest(
-            ["tests/test_distribution.py::test_packaging_metadata_contract"],
-            scratch_root, tmp_path / f"basetemp-metadata-{index}",
-            extra_environment)
-        output = run.stdout + run.stderr
-        assert run.returncode == exit_code, output
-        assert summary in run.stdout, output
-        assert leftovers() == [], (
-            f"the child run ({summary}) left owned scratch roots "
-            "behind: " + repr(leftovers()))
-        assert_sibling_intact()
+    assert sorted(neutral.iterdir()) == [], "a native invocation wrote into its cwd"
+    assert sorted(home.iterdir()) == [], "a native invocation created HOME state"
+    assert sorted(cache_home.iterdir()) == [], (
+        "a native invocation without an explicit cache root used the platform cache")

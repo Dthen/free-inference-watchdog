@@ -15,7 +15,7 @@ default, requiredness, pattern, item or unknown-argument constraint is ever
 taken from it, and it is never assigned as a replacement ``inputSchema``.
 
 Boundary configuration (installed ``mcp`` 2.3.0, Pydantic 2.14.1) is deliberately
-narrow and scoped to these five registrations:
+narrow and scoped to these three registrations:
 
 * :class:`_StrictFuncMetadata` overrides the SDK's documented
   ``FuncMetadata.pre_parse_json`` convenience. ``Tool.run`` otherwise parses
@@ -34,12 +34,11 @@ narrow and scoped to these five registrations:
   accept ``"5"``/``True``/``1.5``; the alias accepts strict ints and finite
   integral floats inside the reviewed inclusive bounds, rejects bools, numeric
   strings, fractions, non-finite and unsafe values, and keeps an integral float
-  as ``1.0`` so the core's literal ``filters`` echo is preserved. The schema
-  bounds come from the same bound constants the validator uses.
+  as ``1.0`` so the core still sees the caller's original JSON value.
 
 ``create_server`` performs no acquisition, cache bootstrap/write, feed request,
 provider probe or clock read. ``source`` and ``wall_clock`` are closure-captured
-factory configuration and are never tool arguments. The five wrappers acquire
+factory configuration and are never tool arguments. The three wrappers acquire
 once with ``AsyncCatalogSource.aget()``, delegate entirely to the existing pure
 query functions and attach provenance with
 :func:`watchdog_catalog.source.with_source`. No query, matching, sorting,
@@ -97,10 +96,11 @@ def _bounded_integer(minimum, maximum):
     """Build the strict integer boundary for ``minimum..maximum``.
 
     The ORIGINAL value is returned unchanged: an integral float stays ``1.0``
-    so the pure core's literal filter echo is preserved, while bools, numeric
-    strings, fractions, non-finite numbers and out-of-range values are rejected
-    before the wrapper or the core can see them. ``handler`` is intentionally
-    not called -- it is the conversion this alias exists to bypass.
+    so the core still sees the caller's original JSON value, while bools,
+    numeric strings, fractions, non-finite numbers and out-of-range values are
+    rejected before the wrapper or the core can see them. ``handler`` is
+    intentionally not called -- it is the conversion this alias exists to
+    bypass.
     """
 
     def validate(value, handler):
@@ -145,7 +145,7 @@ class _StrictFuncMetadata(FuncMetadata):
     validation to be forgiving about JSON-looking strings. The reviewed contract
     treats a string as a string, so this registration boundary keeps the
     arguments exactly as supplied; the strict argument model then validates the
-    originals. This is scoped to the five tools created below -- the SDK class
+    originals. This is scoped to the three tools created below -- the SDK class
     default is untouched.
     """
 
@@ -212,11 +212,6 @@ def _tool(fn, entry):
     )
 
 
-def _failed(acquisition):
-    """The unchanged semantic source error, freshly detached per call."""
-    return with_source({}, acquisition)
-
-
 def _status_epoch(clock):
     """One validated capture of the closure's wall clock as a native epoch.
 
@@ -245,40 +240,30 @@ def create_server(source, *, wall_clock=time.time):
     bootstrap/write, feed request, provider probe or clock invocation.
     """
 
-    async def list_free_models(provider: str | None = None) -> dict:
-        acquisition = await source.aget()
-        if acquisition.get("ok") is not True:
-            return _failed(acquisition)
-        return with_source(
-            _query.list_free_models(acquisition["snapshot"],
-                                    {"provider": provider}),
-            acquisition)
+    async def _acquire_and_answer(build):
+        """The shared acquisition, failure/success and provenance sequence.
 
-    async def get_model(model_id: _ModelId) -> dict:
+        ``build`` is a LAZY synchronous payload builder: it is called only
+        after a successful acquisition, with the acquired snapshot. A failed
+        acquisition therefore invokes no query and reads no clock, and the
+        status clock is captured once, after the awaited acquisition, exactly
+        as each wrapper did inline. The builder stays pure-core delegation --
+        no task, retry or lifecycle is introduced here.
+        """
         acquisition = await source.aget()
         if acquisition.get("ok") is not True:
-            return _failed(acquisition)
-        return with_source(
-            _query.get_model(acquisition["snapshot"], {"model_id": model_id}),
-            acquisition)
+            return with_source({}, acquisition)
+        return with_source(build(acquisition["snapshot"]), acquisition)
 
-    async def list_endpoints(provider: str | None = None) -> dict:
-        acquisition = await source.aget()
-        if acquisition.get("ok") is not True:
-            return _failed(acquisition)
-        return with_source(
-            _query.list_endpoints(acquisition["snapshot"],
-                                  {"provider": provider}),
-            acquisition)
+    async def get_model(provider: str, model_id: _ModelId) -> dict:
+        return await _acquire_and_answer(
+            lambda snapshot: _query.get_model(
+                snapshot, {"provider": provider, "model_id": model_id}))
 
     async def watchdog_status() -> dict:
-        acquisition = await source.aget()
-        if acquisition.get("ok") is not True:
-            return _failed(acquisition)
-        return with_source(
-            _query.watchdog_status(acquisition["snapshot"], {},
-                                   now=_status_epoch(wall_clock)),
-            acquisition)
+        return await _acquire_and_answer(
+            lambda snapshot: _query.watchdog_status(
+                snapshot, {}, now=_status_epoch(wall_clock)))
 
     async def search_models(
             query: str | None = None,
@@ -286,13 +271,10 @@ def create_server(source, *, wall_clock=time.time):
             min_context_length: _SafeInteger | None = None,
             input_modalities: list[_Capability] | None = None,
             supported_parameters: list[_Capability] | None = None,
-            limit: _PageLimit = 50,
+            limit: _PageLimit = 5,
             offset: _SafeInteger = 0) -> dict:
-        acquisition = await source.aget()
-        if acquisition.get("ok") is not True:
-            return _failed(acquisition)
-        return with_source(
-            _query.search_models(acquisition["snapshot"], {
+        return await _acquire_and_answer(
+            lambda snapshot: _query.search_models(snapshot, {
                 "query": query,
                 "provider": provider,
                 "min_context_length": min_context_length,
@@ -300,13 +282,10 @@ def create_server(source, *, wall_clock=time.time):
                 "supported_parameters": supported_parameters,
                 "limit": limit,
                 "offset": offset,
-            }),
-            acquisition)
+            }))
 
     wrappers = {
-        "list_free_models": list_free_models,
         "get_model": get_model,
-        "list_endpoints": list_endpoints,
         "watchdog_status": watchdog_status,
         "search_models": search_models,
     }

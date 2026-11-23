@@ -111,7 +111,7 @@ def test_builder_renders_seeded_id():
         assert "vendor-z/zero-priced-model" in html
 
 
-def test_catalog_data_script_extracts_cleanly():
+def test_catalog_data_script_extracts_cleanly(script_elements):
     """The public catalogue island round-trips as the versioned snapshot.
 
     The CLI publishes ONE validated public snapshot, never raw roster state:
@@ -125,12 +125,15 @@ def test_catalog_data_script_extracts_cleanly():
         proc = _run_builder(SEED_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        islands = _json_islands(html)
+        islands = _json_islands(script_elements(html))
         assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
         data = json.loads(islands[0][1])
-        assert data["schema_version"] == 1 and data["snapshot_id"]
+        assert data["schema_version"] == 2 and data["snapshot_id"]
+        # ONE entry per ENABLED config in providers/ (display order below), so
+        # the set must name every shipped gateway — not a pre-gateway subset.
         assert set(data["providers"]) == {
-            "nous", "tokenrouter", "kilo", "openrouter", "amd", "bai"}
+            "nous", "tokenrouter", "kilo", "openrouter", "amd", "bai",
+            "vercel", "felo", "tokenra", "infron", "aimlapi"}
         assert data["providers"]["nous"]["model_ids"] == [
             "vendor-g/model-7:free", "vendor-z/zero-priced-model"]
         external = json.loads(
@@ -149,24 +152,6 @@ def test_deterministic_output():
         p2 = _run_builder(SEED_ROSTER, tmp_b)
         assert p1.returncode == 0 and p2.returncode == 0
         assert _build_html(tmp_a) == _build_html(tmp_b)
-
-
-def test_display_order_constant():
-    """DISPLAY_ORDER is Dthen's quality ranking, derived dynamically from
-    config_loader.PROVIDERS (sorted by `display` field). Must produce
-    [nous, tokenrouter, kilo, openrouter, amd, bai] — NOT providers.py
-    registry order and NOT alphabetical. nim is absent: providers/nim.json
-    is still on disk but carries enabled:false, so the loader gates it
-    out of the registry. bai is last (display 5)."""
-    from build_site import DISPLAY_ORDER
-    assert DISPLAY_ORDER == ["nous", "tokenrouter", "kilo", "openrouter",
-                             "amd", "bai"]
-    # Confirm it's sourced from config_loader (dynamic), not a hardcoded list.
-    src = BUILDER.read_text(encoding="utf-8")
-    assert "PROVIDERS" in src and "config_loader" in src, \
-        "DISPLAY_ORDER must be derived from config_loader.PROVIDERS, not hardcoded"
-    assert re.search(r'DISPLAY_ORDER\s*=\s*list\(PROVIDERS\.keys\(\)\)', src), \
-        "DISPLAY_ORDER must be derived via list(PROVIDERS.keys())"
 
 
 def test_missing_roster_fails_without_writing_site():
@@ -302,7 +287,7 @@ def test_valid_list_of_str_providers_still_builds(tmp_path):
     (2 ** 53, None),              # above the JSON-safe ceiling
 ])
 def test_out_of_range_tick_epoch_projects_to_null_with_warning(
-        epoch, projected, tmp_path):
+        epoch, projected, tmp_path, script_elements):
     """An invalid optional epoch degrades to null + tick_epoch_unknown.
 
     The accepted public projection is authoritative on this route: a negative
@@ -316,7 +301,7 @@ def test_out_of_range_tick_epoch_projects_to_null_with_warning(
     proc = _run_builder(roster, tmp_path)
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
-    catalog = json.loads(_json_islands(html)[0][1])
+    catalog = json.loads(_json_islands(script_elements(html))[0][1])
     assert catalog["tick_epoch"] == projected
     assert ("tick_epoch_unknown" in catalog["warnings"]) is (projected is None)
     external = json.loads(
@@ -341,13 +326,16 @@ def test_publish_staging_paths_are_unique_per_invocation(tmp_path, monkeypatch):
     import build_site
     from catalog_export import (capture_registry, serialize_snapshot,
                                 validate_artifact_pair)
+    import config_loader
 
     tool_contract = _pair_tool_contract()
-    registry = capture_registry(build_site.PROVIDERS, build_site.GATEWAY_WIRING)
+    resolved = config_loader.build_providers(config_loader.load_configs())
+    records = capture_registry(
+        resolved, config_loader.build_gateway_wiring(resolved))
 
     def pair(epoch):
         snapshot = build_site.build_snapshot(
-            registry,
+            records,
             {"tick_epoch": epoch,
              "providers": {"nous": [f"vendor-z/staged-{epoch}-free"]}},
             cadence_s=3600)
@@ -507,116 +495,6 @@ def test_wrapper_still_parses_bash_n(operator_tick_wrapper):
     assert proc.returncode == 0, proc.stderr
 
 
-# ---------- strip_free_marker: remove ONLY a free marker at a segment boundary ----------
-
-def test_strip_free_marker_suffix_dash():
-    """a/b-free -> a/b (dash suffix)."""
-    from build_site import strip_free_marker
-    assert strip_free_marker("a/b-free") == "a/b"
-
-
-def test_strip_free_marker_suffix_colon():
-    """a/b:free -> a/b (colon suffix)."""
-    from build_site import strip_free_marker
-    assert strip_free_marker("a/b:free") == "a/b"
-
-
-def test_strip_free_marker_suffix_underscore():
-    """a/b_free -> a/b (underscore suffix)."""
-    from build_site import strip_free_marker
-    assert strip_free_marker("a/b_free") == "a/b"
-
-
-def test_strip_free_marker_case_insensitive():
-    """A/B-FREE -> A/B (case-insensitive)."""
-    from build_site import strip_free_marker
-    assert strip_free_marker("A/B-FREE") == "A/B"
-
-
-def test_strip_free_marker_prefix_form():
-    """free-experiment -> experiment (prefix form)."""
-    from build_site import strip_free_marker
-    assert strip_free_marker("free-experiment") == "experiment"
-
-
-def test_strip_free_marker_mid_string_not_touched():
-    """Marker mid-string is NOT touched: freetier -> freetier, a/free-b -> a/free-b."""
-    from build_site import strip_free_marker
-    assert strip_free_marker("freetier") == "freetier"
-    assert strip_free_marker("a/free-b") == "a/free-b"
-
-
-def test_strip_free_marker_in_namespace_not_touched():
-    """Marker in namespace is NOT touched: vendor-g/free:free -> vendor-g/free."""
-    from build_site import strip_free_marker
-    assert strip_free_marker("vendor-g/free:free") == "vendor-g/free"
-
-
-def test_strip_free_marker_no_marker_unchanged():
-    """No marker at all -> returned unchanged."""
-    from build_site import strip_free_marker
-    assert strip_free_marker("vendor-z/zero-priced-model") == "vendor-z/zero-priced-model"
-
-
-# Delimiter-only inputs: a "free" marker WITH its delimiter, but with nothing
-# else in the id. Each is matched by exactly one of the two delimiter-bounded
-# regexes, so stripping alone would leave "" — these are the inputs the
-# helper's empty-result guard exists for.
-#
-# The guard's exact non-empty results and the bare-"free" non-marker control are
-# pinned by their owner test — `watchdog_catalog.query` owns the helper, and
-# `tests/test_catalog_queries.py::test_strip_free_marker_matches_literal_corpus_and_compat_edges`
-# asserts every one of these literals against `MARKER_FALLBACK_CONTROLS`. This
-# site-builder block keeps only the re-export identity and idempotence invariants.
-EMPTY_RESULT_GUARD_INPUTS = [
-    ":free",  # trailing colon-delimited marker, nothing before it
-    "-free",  # trailing dash-delimited marker, nothing before it
-    "_free",  # trailing underscore-delimited marker, nothing before it
-    "free:",  # leading colon-delimited marker, nothing after it
-    "free-",  # leading dash-delimited marker, nothing after it
-    "free_",  # leading underscore-delimited marker, nothing after it
-]
-
-
-# Synthetic raw IDs for the idempotence guard — covers every marker form
-# the production helper supports plus namespace-boundary, non-marker and
-# delimiter-only (empty-result) inputs. These are NOT production ids; they
-# exist only to pin the invariant.
-SYNTHETIC_IDEMPOTENCE_IDS = [
-    # Delimiter-bounded trailing markers
-    "vendor-x/model-a:free",
-    "vendor-x/model-b-free",
-    "vendor-x/model-c_free",
-    # Delimiter-bounded leading marker
-    "free-experiment",
-    # Non-marker identifiers (unchanged); bare "free" has no delimiter at all
-    "vendor-z/zero-priced-model",
-    "free",
-    # Namespace boundary (marker in namespace, not at segment boundary)
-    "vendor-g/free:free",
-    # Empty-result inputs (delimiter-only; the guard returns the original)
-    *EMPTY_RESULT_GUARD_INPUTS,
-]
-
-
-def test_strip_free_marker_idempotent_on_synthetic_ids():
-    """Idempotent: f(f(x)) == f(x) for every synthetic raw id.
-
-    Covers all supported marker forms, non-marker identifiers, namespace
-    boundaries, and the delimiter-only empty-result inputs. This is a
-    portable invariant test — it does NOT read the live production roster.
-    """
-    from watchdog_catalog.query import strip_free_marker as core_strip_free_marker
-    from build_site import strip_free_marker
-    # Compatibility re-export: the site builder exposes the SAME function object
-    # as the pure query module, never a copied wrapper.
-    assert strip_free_marker is core_strip_free_marker
-    for mid in SYNTHETIC_IDEMPOTENCE_IDS:
-        once = strip_free_marker(mid)
-        twice = strip_free_marker(once)
-        assert once == twice, f"not idempotent for {mid!r}: {once!r} vs {twice!r}"
-
-
 # ---------- Task 3: matrix rows grouped by display name ----------
 
 # Fixture with multi-variant groups: one model ships on two gateways under
@@ -698,7 +576,7 @@ def _row_count(html):
 
 
 def _tfoot_numbers(html):
-    """Return the per-gateway <tfoot> numbers in DISPLAY_ORDER."""
+    """Return the per-gateway <tfoot> numbers in rendered provider order."""
     tfoot = html.split("<tfoot>", 1)[1].split("</tfoot>", 1)[0]
     return [int(n) for n in re.findall(r'class="n">(\d+)<', tfoot)]
 
@@ -803,7 +681,7 @@ def test_tfoot_totals_stay_raw_per_gateway_counts(tmp_path):
     )
 
 
-def test_published_catalogue_keeps_raw_ids(tmp_path):
+def test_published_catalogue_keeps_raw_ids(tmp_path, script_elements):
     """The public snapshot keeps RAW ids — variants preserved, not collapsed.
 
     The old raw-roster island is gone, so this pins the same guarantee on the
@@ -820,7 +698,7 @@ def test_published_catalogue_keeps_raw_ids(tmp_path):
     assert "vendor-x/poolside-s-2.1-free" in catalog["providers"]["tokenrouter"]["model_ids"]
     assert "vendor-x/poolside-s-2.1:free" in catalog["providers"]["nous"]["model_ids"]
     assert "vendor-x/poolside-s-2.1-free" in catalog["providers"]["kilo"]["model_ids"]
-    assert _typed(json.loads(_json_islands(html)[0][1])) == _typed(catalog)
+    assert _typed(json.loads(_json_islands(script_elements(html))[0][1])) == _typed(catalog)
 
 
 def test_grouped_deterministic_output(tmp_path):
@@ -909,7 +787,7 @@ def test_footer_has_github_and_kofi_links(tmp_path):
 
 def test_groups_sorted_alphabetically_by_stripped_name(tmp_path):
     """Task 3: groups sort alphabetically by stripped name. The first body
-    row in DISPLAY_ORDER is the alphabetically-first group."""
+    row in the resolved provider order is the alphabetically-first group."""
     _seed_logo(tmp_path)
     proc = _run_builder(GROUP_ROSTER, tmp_path)
     assert proc.returncode == 0, proc.stderr
@@ -1152,32 +1030,8 @@ def _all_trs_for(html, stripped_name):
     return []
 
 
-def test_expand_html_well_formed_round_trip(tmp_path):
-    """The full HTML round-trips through html.parser — proves no broken
-    nesting even with the new expansion rows added (reviewer M2: a stray
-    <div> in a <td> was previously caught this way)."""
-    import tempfile
-    from html.parser import HTMLParser
-    errors = []
-
-    class _Strict(HTMLParser):
-        def error(self, message):  # called by html.parser on bad markup
-            errors.append(message)
-
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        _seed_logo(tmp)
-        proc = _run_builder(EXPAND_ROSTER, tmp)
-        assert proc.returncode == 0, proc.stderr
-        html = _build_html(tmp)
-        parser = _Strict()
-        parser.feed(html)
-        parser.close()
-        assert not errors, f"html.parser reported parse errors: {errors}"
-
-
 def test_expand_page_carries_two_inert_islands_and_maintained_scripts(
-        tmp_path):
+        tmp_path, script_elements):
     """Exactly two inert JSON islands, then the three maintained page scripts.
 
     The old single raw roster island is gone: the page carries the catalogue
@@ -1193,14 +1047,14 @@ def test_expand_page_carries_two_inert_islands_and_maintained_scripts(
         proc = _run_builder(EXPAND_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        islands = _json_islands(html)
+        scripts = script_elements(html)
+        islands = _json_islands(scripts)
         assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS), (
             f"expected exactly the two public islands, found {islands}")
         assert [attrs.get("type") for attrs, _ in islands] == [
             "application/json", "application/json"]
         assert 'id="roster-data"' not in html
 
-        scripts = _script_elements(html)
         assert [attrs.get("type") for attrs, _ in scripts] == [
             "application/json", "application/json", None, None, None]
         assert [attrs.get("data-watchdog") for attrs, _ in scripts] == [
@@ -1213,11 +1067,11 @@ def test_expand_page_carries_two_inert_islands_and_maintained_scripts(
 
         # Source integrity: the inlined bodies are the maintained files,
         # byte for byte, in page order.
-        assert _page_script_body(html, "catalog-query") == (
+        assert _page_script_body(scripts, "catalog-query") == (
             REPO / "web" / "catalog-query.js").read_text(encoding="utf-8")
-        assert _page_script_body(html, "webmcp") == (
+        assert _page_script_body(scripts, "webmcp") == (
             REPO / "web" / "webmcp.js").read_text(encoding="utf-8")
-        assert _page_script_body(html, "boot")
+        assert _page_script_body(scripts, "boot")
 
 
 def test_expand_every_raw_id_in_html_collapsed(tmp_path):
@@ -1243,8 +1097,8 @@ def test_expand_every_raw_id_in_html_collapsed(tmp_path):
 
 def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
     """Every variant <tr class='expand'> contains that gateway's
-    chat-completions URL. The wiring mapping is imported from config_loader,
-    never hardcoded a second time in build_site.py."""
+    chat-completions URL. The wiring mapping is the config loader's own
+    projection of the resolved registry, never hardcoded a second time."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -1253,13 +1107,15 @@ def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
         # Pull the wiring map for cross-check (we are testing the rendered
-        # page, but pinning the URLs against the import avoids a drift).
-        from config_loader import GATEWAY_WIRING
+        # page, but pinning the URLs against the loader avoids a drift).
+        import config_loader
+        wiring = config_loader.build_gateway_wiring(
+            config_loader.build_providers(config_loader.load_configs()))
         # We expect variant rows for: poolside:free on nous, poolside-free
         # on tokenrouter, poolside:free on kilo, poolside-free on kilo, standalone-1
         # on nous, standalone-2 on openrouter — 6 expansion rows total.
         # Each MUST mention its gateway's chat_completions_url (every
-        # gateway in GATEWAY_WIRING now carries a static URL).
+        # gateway in the resolved registry now carries a static URL).
         expand_rows = [r for r in _all_trs_in_tbody(html) if 'class="expand"' in r]
         assert len(expand_rows) == 6, (
             f"expected 6 expansion rows, got {len(expand_rows)}"
@@ -1268,7 +1124,7 @@ def test_expand_each_variant_row_has_chat_completions_url(tmp_path):
         # text. The cell class is part of the visible contract — readers
         # can copy the URL straight out of the page.
         for gw in ("tokenrouter", "kilo", "openrouter"):
-            url = GATEWAY_WIRING[gw]["chat_completions_url"]
+            url = wiring[gw]["chat_completions_url"]
             assert any(url in r for r in expand_rows), (
                 f"{gw} URL {url!r} missing from every expansion row"
             )
@@ -1287,9 +1143,11 @@ def test_expand_each_variant_row_has_api_type_and_no_auth(tmp_path):
         proc = _run_builder(EXPAND_ROSTER, tmp)
         assert proc.returncode == 0, proc.stderr
         html = _build_html(tmp)
-        from config_loader import GATEWAY_WIRING
+        import config_loader
+        wiring = config_loader.build_gateway_wiring(
+            config_loader.build_providers(config_loader.load_configs()))
         # The auth field is gone from the wiring contract itself...
-        for w in GATEWAY_WIRING.values():
+        for w in wiring.values():
             assert "auth" not in w
         # ...and never reaches the rendered page.
         assert "wire-auth" not in html, "wire-auth span back in the page"
@@ -1300,7 +1158,7 @@ def test_expand_each_variant_row_has_api_type_and_no_auth(tmp_path):
         # For every gateway that appears in EXPAND_ROSTER, at least one
         # expansion row must mention that gateway's api_type.
         for gw in ("nous", "tokenrouter", "kilo", "openrouter"):
-            w = GATEWAY_WIRING[gw]
+            w = wiring[gw]
             assert any(w["api_type"] in r for r in expand_rows), (
                 f"{gw} api_type {w['api_type']!r} missing from expansion rows"
             )
@@ -1377,7 +1235,7 @@ def test_expand_via_css_sibling_selector(tmp_path):
 # ---------- Gateway column + expand-row overflow (operator fixes, 2026-09-13) ----------
 #
 # Retargeted from nim to bai on 2026-09-28: nim.json carries enabled:false
-# and no longer loads into the registry, so DISPLAY_ORDER has no nim column
+# and no longer loads into the registry, so there is no nim column
 # to render. The coverage being protected — "a gateway in the roster gets a
 # column, carries its wiring URL in the expand row, and links its signup_url
 # in the column head" — is about ANY gateway, not nim.
@@ -1450,7 +1308,7 @@ HEADER_ROSTER = {
     "tick_epoch": 1787721434,
     "providers": {
         "nous": ["vendor-z/zero-priced-model", "vendor-g/model-7:free"],
-        # bai, not nim: nim.json carries enabled:false, so DISPLAY_ORDER has
+        # bai, not nim: nim.json carries enabled:false, so the registry has
         # no nim column. bai stays in the registry and keeps the "gateway with
         # no header meta renders a bare <th>" coverage alive.
         "bai": ["meta/llama-3.3-70b-instruct"],
@@ -1493,14 +1351,44 @@ EXPECTED_PROVIDER_FIELDS = {
         "signup_url": "https://build.nvidia.com/?modal=signin",
         "limits_note": "No published limits; ~40 RPM community baseline, per-model, not SLA (as of 2026-09-13)",
     },
+    "felo": {
+        "signup_url": "https://openapi.felo.ai/console/api-keys",
+        "limits_note": "Advertised free chat prices; zero balance is allowed, a negative balance blocks; numeric Model API quotas unpublished; optional cache/tool/service charges may differ; the gateway documents Chat Completions but current admitted models recommend Messages and omit supported_protocols, so per-model protocol compatibility is UNVERIFIED; monitoring needs no key, top-up, completion or routing header; missing fields do not imply model support or unlimited access (as of 2026-11-22).",
+    },
+    "tokenra": {
+        "signup_url": "https://tokenra.io/register",
+        "limits_note": "Advertised $0 token prices need a funded account under current terms (no free signup credit; $10 minimum top-up; a $0 balance returns 403 insufficient_user_quota); RPM/TPM/RPD and concurrency are unpublished and a zero price is not an allowance; route availability, especially crouton-alpha, is not completion-verified; monitoring needs no key, top-up or completion (as of 2026-11-22).",
+    },
+    "infron": {
+        "signup_url": "https://infron.ai/login",
+        "limits_note": "Advertised $0 token prices need an account holding at least $5 under the standard free policy; that balance is an anti-abuse floor and free usage never deducts from it. Standard free models share 1,000 requests/day per account (reset 00:00 UTC) and default per-account rate limits still apply; numeric RPM/TPM/concurrency are unpublished and a zero price is not an allowance. Special promotions may carry different balance/quota terms; the July 2026 uncapped promotion is historical, not current access. Free variants are served from a shared public pool with no SLA, and default routing balances price against uptime/throughput/latency rather than always choosing the cheapest provider, so only a wholly zero-priced provider set is tracked. Monitoring needs no key, funding, completion or routing header (as of 2026-11-22).",
+    },
+    "aimlapi": {
+        "signup_url": "https://aimlapi.com/app/sign-up",
+        "limits_note": "General free tier paused; no qualifying fixed-zero Chat Completions quote in the 2026-11-22 capture. Variable-priced stealth campaigns are a monitoring blind spot and may need separate terms review; zero unit placeholders on a variable block are not a free quote. The dated Crouton preview prose and the contradicting 'no longer served' page are unresolved and establish no current free, paid, callable or retired verdict. Numeric account/inference quotas are unpublished and catalogue headers are not inference limits. Monitoring needs no key, funding or completion (as of 2026-11-22).",
+    },
 }
 
 
 def _render(roster, meta):
-    """Render via the real build_site.render_page with an explicit
-    gateway -> {signup_url, limits_note} map (the render_page 3rd arg)."""
+    """Render the <thead> through the ONE public renderer.
+
+    The registry is explicit and synthetic: one entry per gateway the roster
+    names, so `header_meta` is the only source of link/tooltip data and the
+    assertion below is about the public template, not about configuration.
+    """
     import build_site
-    html = build_site.render_page(roster, "ZmFrZWxvZ28=", meta)
+    from catalog_export import build_snapshot, capture_registry
+
+    registry = {key: {"name": key,
+                      "base_url": f"https://{key}.synthetic.example/v1"}
+                for key in roster["providers"]}
+    records = capture_registry(
+        registry, build_site.config_loader.build_gateway_wiring(registry))
+    snapshot = build_snapshot(records, roster,
+                              cadence_s=build_site.BUILD_CADENCE_S)
+    html = build_site.render_catalog_page(
+        snapshot, "ZmFrZWxvZ28=", meta, tool_contract=[])
     return html.split("<thead>", 1)[1].split("</thead>", 1)[0]
 
 
@@ -1567,43 +1455,41 @@ def test_header_scheme_guard_accepts_uppercase_https():
     assert ">nous</a>" in head
 
 
-def test_config_load_failure_degrades_to_plain_headers(tmp_path, monkeypatch):
-    """If loading provider configs raises for ANY reason the map is empty,
-    headers render plain, and the builder still completes with
-    exit 0 and a written site — site-build failure must never page."""
+def test_header_meta_is_a_pure_projection_of_the_resolved_registry():
+    """The header map comes from the ONE resolved registry, and only
+    non-empty string fields survive: absent, blank and non-string values
+    contribute nothing, so that column head renders plain."""
     import build_site
-    _seed_logo(tmp_path)
-    (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "roster.json").write_text(json.dumps(HEADER_ROSTER))
 
-    def boom():
-        raise RuntimeError("simulated config catastrophe")
-    monkeypatch.setattr(build_site.config_loader, "load_configs", boom)
-    assert build_site.build_provider_header_meta() == {}
-    build_site.main(["--root", str(tmp_path)])  # must NOT raise
-    html = (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
-    head = html.split("<thead>", 1)[1].split("</thead>", 1)[0]
-    assert "<th>nous</th>" in head and "<th>bai</th>" in head
-    assert "<a " not in head
-
-
-def test_render_page_header_map_is_optional_argument():
-    """Back-compat: render_page(roster, logo) without the 3rd arg must work
-    and derive the map from the repo's real configs (nous carries signup_url
-    in providers/nous.json)."""
-    import build_site
-    html = build_site.render_page(HEADER_ROSTER, "ZmFrZWxvZ28=")
-    assert '>nous</a>' in html
+    registry = {
+        "nous": {"name": "Nous", "base_url": "https://n.example/v1",
+                 "signup_url": "https://portal.nousresearch.com/",
+                 "limits_note": "Per-token rate limits"},
+        "amd": {"name": "AMD", "base_url": "https://a.example/v1",
+                "signup_url": "", "limits_note": 7},
+        "kilo": {"name": "Kilo", "base_url": "https://k.example/v1"},
+    }
+    assert build_site.build_provider_header_meta(registry) == {
+        "nous": {"signup_url": "https://portal.nousresearch.com/",
+                 "limits_note": "Per-token rate limits"}}
+    assert build_site.build_provider_header_meta({}) == {}
 
 
 def test_real_provider_configs_carry_verified_fields():
-    """All seven providers/*.json carry BOTH fields; values pinned
-    per-gateway by test_provider_config_field_values below (VERIFIED
-    2026-09-13 by a dedicated URL-research pass; /signup-style URLs were
-    checked and REJECTED as 200-but-404 SPA traps — these are canonical)."""
+    """Every metadata-pinned provider carries both fields.
+
+    Exact per-gateway values are pinned by test_provider_config_field_values
+    below; this inventory is EXPECTED_PROVIDER_FIELDS, not every config file.
+    """
+    displays = {}
     for key, fields in EXPECTED_PROVIDER_FIELDS.items():
         cfg = json.loads((REPO / "providers" / f"{key}.json").read_text(encoding="utf-8"))
         assert {"signup_url", "limits_note"} <= set(cfg), f"{key}.json missing fields"
+        displays[key] = cfg.get("display", 0)
+    # `display` orders every user-visible list: a shared slot would silently
+    # interleave two gateways in the dashboard and the public snapshot order.
+    # This guard covers the metadata-pinned inventory above, not every config.
+    assert len(set(displays.values())) == len(displays), displays
 
 
 @pytest.mark.parametrize("key", sorted(EXPECTED_PROVIDER_FIELDS))
@@ -1652,21 +1538,20 @@ def test_dead_raw_count_key_removed(tmp_path):
 
 # ---------- Unit 4c: snapshot-authoritative public matrix rendering ----------
 #
-# The public route renders an already-VALIDATED snapshot through the SAME
-# template the legacy adapter uses. Two synthetic-only groups pin it:
+# The public route renders an already-VALIDATED snapshot through the ONE
+# public renderer. Two synthetic-only groups pin it:
 #   1. snapshot authority: provider order, per-provider wiring and per-pair
-#      projected metadata come from the snapshot, never module globals; the
+#      projected metadata come from the snapshot, never module state; the
 #      public data-script slot carries ONLY its two inert JSON islands (no
 #      roster island) and the visible matrix is the page minus those islands.
-#   2. one shared template: public HTML equals the legacy render_page output
-#      minus ONLY its roster-data island, and a capture -> build -> render
-#      round trip leaks none of the excluded operational fields.
+#   2. a capture -> build -> render round trip leaks none of the excluded
+#      operational fields and keeps intended public text escaped.
 # No production roster, provider config, site artifact or network is touched.
 
 PUBLIC_RENDER_LOGO = "ZmFrZWxvZ28="
 
-# Authoritative display order DIFFERS from the poisoned global order below and
-# from the reversed insertion order used for the snapshot's providers map.
+# Authoritative display order DIFFERS from the reversed insertion order used
+# for the snapshot's providers map.
 PUBLIC_PROVIDER_ORDER = ["synthetic-beta", "synthetic-alpha", "synthetic-empty"]
 PUBLIC_LONG_RUN = "acme/token-" + "0" * 59 + "1:free"
 PUBLIC_TOKEN_IDS = [
@@ -1746,8 +1631,7 @@ def _thead_columns(html):
 TOOLS_RESOURCE = REPO / "watchdog_catalog" / "tools.json"
 
 _TOOL_NAMES = (
-    "list_free_models", "get_model", "list_endpoints", "watchdog_status",
-    "search_models",
+    "get_model", "watchdog_status", "search_models",
 )
 
 _ISLAND_IDS = ("catalog-data", "tool-contract")
@@ -1756,37 +1640,6 @@ _ISLAND_IDS = ("catalog-data", "tool-contract")
 def _load_tool_contract():
     """Decode the ACTUAL unchanged shared tool resource (a bare array)."""
     return json.loads(TOOLS_RESOURCE.read_text(encoding="utf-8"))
-
-
-def _script_elements(html):
-    """All <script> elements as (attrs dict, EXACT inner text), in order."""
-    from html.parser import HTMLParser
-
-    class _Collector(HTMLParser):
-        def __init__(self):
-            super().__init__(convert_charrefs=True)
-            self.scripts = []
-            self.open = None
-
-        def handle_starttag(self, tag, attrs):
-            if tag == "script":
-                assert self.open is None, "nested/unterminated <script> element"
-                self.open = [dict(attrs), []]
-
-        def handle_data(self, data):
-            if self.open is not None:
-                self.open[1].append(data)
-
-        def handle_endtag(self, tag):
-            if tag == "script" and self.open is not None:
-                self.scripts.append((self.open[0], "".join(self.open[1])))
-                self.open = None
-
-    collector = _Collector()
-    collector.feed(html)
-    collector.close()
-    assert collector.open is None, "unterminated <script> element"
-    return collector.scripts
 
 
 _ISLANDS_RE = (
@@ -1814,21 +1667,20 @@ def _strip_public_islands(html):
 _PAGE_SCRIPT_MARKERS = ("catalog-query", "webmcp", "boot")
 
 
-def _json_islands(html):
+def _json_islands(scripts):
     """The inert ``application/json`` islands, in document order."""
-    return [script for script in _script_elements(html)
+    return [script for script in scripts
             if script[0].get("type", "").strip().lower() == "application/json"]
 
 
-def _page_scripts(html):
+def _page_scripts(scripts):
     """The generated page's classic (executable) scripts, in document order."""
-    return [script for script in _script_elements(html)
-            if script[0].get("type") is None]
+    return [script for script in scripts if script[0].get("type") is None]
 
 
-def _page_script_body(html, marker):
+def _page_script_body(scripts, marker):
     """The exact inner text of the one page script carrying `marker`."""
-    matches = [body for attrs, body in _page_scripts(html)
+    matches = [body for attrs, body in _page_scripts(scripts)
                if attrs.get("data-watchdog") == marker]
     assert len(matches) == 1, (marker, matches)
     return matches[0]
@@ -1906,12 +1758,13 @@ def _typed(value):
     raise AssertionError("non-JSON value in island: %r" % type(value).__name__)
 
 
-def test_public_snapshot_renderer_is_snapshot_authoritative():
+def test_public_snapshot_renderer_is_snapshot_authoritative(
+        monkeypatch, script_elements):
     """Public matrix derives order/wiring/metadata from the snapshot only.
 
     Builds two actual validated synthetic snapshots (populated + true empty),
-    poisons the module globals and the legacy adapter with matching keys but
-    WRONG values, and pins literal output: header order, every raw endpoint
+    makes any configuration access raise, and pins literal output: header
+    order, every raw endpoint
     identity + wiring, portable natural order (ASCII/leading-zero/long-run/
     non-ASCII digit controls), per-gateway footer counts, endpoint totals and
     the `#` distinct-gateway count. Also pins the PUBLIC ISLANDS: exactly the
@@ -1978,34 +1831,18 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
             "signup_url": "javascript:alert(1)", "limits_note": "ignored"},
     }
 
-    saved_order = build_site.DISPLAY_ORDER
-    saved_wiring = build_site.GATEWAY_WIRING
-    saved_meta = build_site.build_provider_header_meta
-    saved_render_page = build_site.render_page
-    saved_load_configs = build_site.config_loader.load_configs
-
     def _forbidden(*args, **kwargs):
-        raise AssertionError("public renderer consulted legacy configuration")
+        raise AssertionError("public renderer consulted configuration")
 
     def _thead(html):
         return html.split("<thead>", 1)[1].split("</thead>", 1)[0]
 
-    try:
-        # Matching keys, WRONG order / URLs / api types: a wrong source must
-        # produce a meaningful literal mismatch, never a KeyError.
-        build_site.DISPLAY_ORDER = [
-            "synthetic-alpha", "synthetic-empty", "synthetic-beta"]
-        build_site.GATEWAY_WIRING = {
-            key: {
-                "chat_completions_url":
-                    f"https://poisoned.example/WRONG-{key}",
-                "api_type": "WRONG-api-type",
-            }
-            for key in PUBLIC_PROVIDER_ORDER
-        }
-        build_site.build_provider_header_meta = _forbidden
-        build_site.render_page = _forbidden
-        build_site.config_loader.load_configs = _forbidden
+    # No configuration read may occur anywhere under the public renderer, so
+    # both loader entry points fail loudly if one is ever reintroduced.
+    with monkeypatch.context() as patch:
+        patch.setattr(build_site.config_loader, "load_configs", _forbidden)
+        patch.setattr(build_site.config_loader, "build_gateway_wiring",
+                      _forbidden)
 
         snapshot_before = copy.deepcopy(snapshot)
         header_before = copy.deepcopy(header_meta)
@@ -2078,8 +1915,6 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
         wires = _public_wires(matrix_html)
         assert len(wires) == 8, wires
         assert sorted(wires) == sorted(expected_wires)
-        assert "poisoned.example" not in matrix_html
-        assert "WRONG-api-type" not in matrix_html
 
         # --- portable natural order inside the shared group ----------------
         token_body = next(
@@ -2108,12 +1943,12 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
         assert 'href="https://ko-fi.com/dthen"' in matrix_html
 
         # --- the inert islands, then the maintained page scripts -----------
-        islands = _json_islands(html)
+        islands = _json_islands(script_elements(html))
         assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
         assert [attrs.get("type") for attrs, _ in islands] == [
             "application/json", "application/json"]
         assert all(attrs.get("src") is None for attrs, _ in islands)
-        assert [attrs.get("data-watchdog") for attrs, _ in _page_scripts(html)] == [
+        assert [attrs.get("data-watchdog") for attrs, _ in _page_scripts(script_elements(html))] == [
             "catalog-query", "webmcp", "boot"]
         assert 'id="roster-data"' not in html
         assert "<script" not in matrix_html
@@ -2127,7 +1962,7 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
         assert "<a " not in _thead(default_html)
         assert _thead_columns(default_html) == [
             "model", "#", "synthetic-beta", "synthetic-alpha"]
-        assert [attrs.get("id") for attrs, _ in _json_islands(default_html)] \
+        assert [attrs.get("id") for attrs, _ in _json_islands(script_elements(default_html))] \
             == list(_ISLAND_IDS)
 
         # --- true empty registry stays a valid, distinguishable page -------
@@ -2143,21 +1978,15 @@ def test_public_snapshot_renderer_is_snapshot_authoritative():
         assert "<b>0</b> gateways" in empty_chips
         empty_matrix = _strip_public_payloads(empty_html)
         assert "<script" not in empty_matrix
-        empty_islands = _json_islands(empty_html)
+        empty_islands = _json_islands(script_elements(empty_html))
         assert [attrs.get("id") for attrs, _ in empty_islands] == list(_ISLAND_IDS)
         assert json.loads(empty_islands[1][1]) == tool_contract
-    finally:
-        build_site.DISPLAY_ORDER = saved_order
-        build_site.GATEWAY_WIRING = saved_wiring
-        build_site.build_provider_header_meta = saved_meta
-        build_site.render_page = saved_render_page
-        build_site.config_loader.load_configs = saved_load_configs
 
 
-def test_shared_template_parity_and_public_html_is_secret_safe():
-    """One template: public HTML == legacy HTML minus ONLY the roster island.
+def test_public_html_is_secret_safe_and_structurally_sound(script_elements):
+    """The rendered public page carries no private state and stays well formed.
 
-    Also drives real capture -> build_snapshot -> render_catalog_page with
+    Drives real capture -> build_snapshot -> render_catalog_page with
     genuine token/auth/local-path/pending/upstream-unknown sentinels in
     EXCLUDED fields, asserting none reach the HTML (islands included) or the
     external export JSON, while retained public name/context/modality/wiring
@@ -2169,53 +1998,10 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
 
     import build_site
     from catalog_export import build_snapshot, capture_registry, serialize_snapshot
-    from config_loader import GATEWAY_WIRING
 
     tool_contract = _load_tool_contract()
 
-    # ---- (a) legacy parity through the shared template -------------------
-    order = ["nous", "tokenrouter", "kilo", "openrouter"]
-    legacy_roster = copy.deepcopy(EXPAND_ROSTER)
-    parity_header_meta = {"nous": {
-        "signup_url": "https://nous.synthetic.example/signup",
-        "limits_note": 'nous "note" & <synthetic>'}}
-    parity_records = capture_registry(
-        {key: {"name": key} for key in order},
-        {key: {"chat_completions_url":
-               GATEWAY_WIRING[key]["chat_completions_url"],
-               "api_type": GATEWAY_WIRING[key]["api_type"]}
-         for key in order},
-    )
-    parity_snapshot = build_snapshot(
-        parity_records,
-        {
-            "tick_epoch": 1787721434,
-            "providers": {key: list(legacy_roster["providers"][key])
-                          for key in order},
-            "provider_models": copy.deepcopy(legacy_roster["provider_models"]),
-            "stale_providers": [],
-        },
-        cadence_s=3600,
-    )
-    legacy_html = build_site.render_page(
-        legacy_roster, PUBLIC_RENDER_LOGO, parity_header_meta)
-    public_html = build_site.render_catalog_page(
-        parity_snapshot, PUBLIC_RENDER_LOGO, parity_header_meta,
-        tool_contract=tool_contract, sources=_page_sources())
-    assert re.findall(r'<script\b[^>]*>', legacy_html) == [
-        '<script type="application/json" id="roster-data">']
-    assert [attrs.get("id") for attrs, _ in _json_islands(public_html)] == [
-        "catalog-data", "tool-contract"]
-    assert [attrs.get("data-watchdog") for attrs, _ in _page_scripts(public_html)] \
-        == ["catalog-query", "webmcp", "boot"]
-    stripped_legacy = re.sub(
-        r'<script type="application/json" id="roster-data">.*?</script>', "",
-        legacy_html, count=1, flags=re.S)
-    assert stripped_legacy == _strip_public_payloads(public_html), (
-        "public route must reuse the ONE legacy template byte-for-byte, "
-        "adding only the inert islands and the maintained page scripts")
-
-    # ---- (b) secret-safe public HTML from real capture/build -------------
+    # ---- secret-safe public HTML from real capture/build -------------
     token_sentinel = "sk-live-SENTINEL-TOKEN-9f3a"
     auth_sentinel = "Bearer SENTINEL-AUTH-77c1"
     path_sentinel = "/home/operator/.secrets/SENTINEL-PATH"
@@ -2277,8 +2063,10 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
     assert header_meta == header_before
 
     # Both inert islands are present and decode to the intended public data.
-    safe_islands = _json_islands(safe_html)
+    safe_islands = _json_islands(script_elements(safe_html))
     assert [attrs.get("id") for attrs, _ in safe_islands] == list(_ISLAND_IDS)
+    assert [attrs.get("data-watchdog") for attrs, _ in _page_scripts(script_elements(safe_html))] \
+        == ["catalog-query", "webmcp", "boot"]
     embedded_catalogue = json.loads(safe_islands[0][1])
     embedded_tools = json.loads(safe_islands[1][1])
     external_json = serialize_snapshot(snapshot)
@@ -2362,7 +2150,7 @@ def test_shared_template_parity_and_public_html_is_secret_safe():
 # execution, layout or native WebMCP support.
 
 #: Hostile retained strings for the script-context group. Every entry is legal
-#: in a public v1 snapshot value, so the fixture stays a VALID snapshot.
+#: in a public v2 snapshot value, so the fixture stays a VALID snapshot.
 _SCRIPT_HOSTILE_TEXTS = (
     "</script>",
     "</SCRIPT>",
@@ -2380,7 +2168,8 @@ _SCRIPT_HOSTILE_TEXTS = (
 )
 
 
-def test_embedded_islands_are_whole_value_lossless_and_deterministic():
+def test_embedded_islands_are_whole_value_lossless_and_deterministic(
+        script_elements):
     """Both islands carry the COMPLETE inputs, typed, for every registry shape.
 
     Loops the accepted capture/build path over a populated, a zero-ID and a
@@ -2388,7 +2177,7 @@ def test_embedded_islands_are_whole_value_lossless_and_deterministic():
     exactly two inert JSON elements in order; the catalogue validates and
     equals the SAME snapshot's export text with types intact (root
     ``snapshot_id``, warnings and provider metadata the matrix never shows);
-    the tool contract equals the real unchanged five-definition resource in
+    the tool contract equals the real unchanged three-definition resource in
     resource order; ASCII-only, less-than-free script bodies; deterministic
     output and unmutated inputs.
     """
@@ -2412,15 +2201,13 @@ def test_embedded_islands_are_whole_value_lossless_and_deterministic():
             {
                 "synthetic-beta": {
                     "acme/token-2:free": {
-                        "name": "acme/token", "context_length": 262144,
-                        "pricing": {"prompt": 1, "completion": 1.0}},
+                        "name": "acme/token", "context_length": 262144},
                     "acme/only-beta-free": {
                         "name": "acme/only-beta", "context_length": 8192},
                 },
                 "synthetic-alpha": {
                     "acme/token-2:free": {
-                        "name": "acme/token", "context_length": 262144,
-                        "pricing": {"prompt": "0.0", "completion": None}},
+                        "name": "acme/token", "context_length": 262144},
                 },
             },
         ),
@@ -2439,7 +2226,7 @@ def test_embedded_islands_are_whole_value_lossless_and_deterministic():
         assert snapshot == snapshot_before, f"{label}: snapshot mutated"
         assert tool_contract == tools_before, f"{label}: tool array mutated"
 
-        islands = _json_islands(html)
+        islands = _json_islands(script_elements(html))
         assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS), label
         assert [attrs.get("type") for attrs, _ in islands] == [
             "application/json", "application/json"], label
@@ -2460,7 +2247,7 @@ def test_embedded_islands_are_whole_value_lossless_and_deterministic():
         assert _typed(catalog.load_snapshot(catalogue_body)) == _typed(snapshot)
         assert _typed(embedded) == _typed(json.loads(serialize_snapshot(snapshot)))
         assert embedded["snapshot_id"] == snapshot["snapshot_id"], label
-        assert embedded["schema_version"] == 1
+        assert embedded["schema_version"] == 2
         assert embedded["cadence_s"] == 3600
 
         # The REAL shared tool array, complete and in resource order.
@@ -2479,16 +2266,6 @@ def test_embedded_islands_are_whole_value_lossless_and_deterministic():
             # A zero-ID provider ships in the DATA even though it gets no
             # column: empty legitimate data stays distinguishable from loss.
             assert embedded["providers"]["synthetic-empty"]["model_ids"] == []
-            # int / float / numeric-string / null must not conflate.
-            beta = embedded["providers"]["synthetic-beta"]["models"][
-                "acme/token-2:free"]
-            assert beta["pricing"] == {"prompt": 1, "completion": 1.0}
-            assert type(beta["pricing"]["prompt"]) is int
-            assert type(beta["pricing"]["completion"]) is float
-            alpha = embedded["providers"]["synthetic-alpha"]["models"][
-                "acme/token-2:free"]
-            assert alpha["pricing"] == {"prompt": "0.0", "completion": None}
-            assert type(alpha["pricing"]["prompt"]) is str
             assert embedded["providers"]["synthetic-beta"]["stale"] is False
             assert type(embedded["tick_epoch"]) is int
         if label == "zero-id":
@@ -2771,14 +2548,11 @@ vm.runInContext(fs.readFileSync(bootPath, "utf8"), sandbox);
     for (const descriptor of calls) {
       byName[descriptor.name] = descriptor;
     }
-    // A routine lookup and the explicit bulk export, through the registered
-    // descriptors: no browser-only truncation, counts stay truthful.
+    // A routine lookup through the registered descriptors: no browser-only
+    // truncation.
     const searchText = await byName.search_models.execute({ limit: 1 });
-    const bulkText = await byName.list_free_models.execute({});
     report.search = JSON.parse(searchText);
-    report.bulk = JSON.parse(bulkText);
     report.searchLength = searchText.length;
-    report.bulkLength = bulkText.length;
   }
   process.stdout.write(JSON.stringify(report));
 })().catch(function (error) {
@@ -2789,10 +2563,11 @@ vm.runInContext(fs.readFileSync(bootPath, "utf8"), sandbox);
 '''
 
 
-def _run_page_driver(work, html, mode, node):
+def _run_page_driver(work, html, mode, node, script_elements):
     """Run the generated page's OWN scripts in a Node realm; return the report."""
     work.mkdir(parents=True, exist_ok=True)
-    islands = {attrs["id"]: body for attrs, body in _json_islands(html)}
+    scripts = script_elements(html)
+    islands = {attrs["id"]: body for attrs, body in _json_islands(scripts)}
     paths = {}
     for island_id, name in (("catalog-data", "catalog.json"),
                             ("tool-contract", "contract.json")):
@@ -2800,7 +2575,7 @@ def _run_page_driver(work, html, mode, node):
         paths[island_id].write_text(islands[island_id], encoding="utf-8")
     for marker in _PAGE_SCRIPT_MARKERS:
         paths[marker] = work / f"{marker}.js"
-        paths[marker].write_text(_page_script_body(html, marker),
+        paths[marker].write_text(_page_script_body(scripts, marker),
                                  encoding="utf-8")
     driver = work / "page-driver.cjs"
     driver.write_text(_PAGE_DRIVER, encoding="utf-8")
@@ -2818,7 +2593,7 @@ def _run_page_driver(work, html, mode, node):
 
 
 def test_generated_page_scripts_come_from_the_builder_not_the_build_root(
-        tmp_path):
+        tmp_path, script_elements):
     """A decoy web/ tree under --root can never become the page's JavaScript."""
     _seed_logo(tmp_path)
     decoy = tmp_path / "web"
@@ -2829,14 +2604,16 @@ def test_generated_page_scripts_come_from_the_builder_not_the_build_root(
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
 
+    scripts = script_elements(html)
     assert "decoy-source" not in html
-    assert _page_script_body(html, "catalog-query") == (
+    assert _page_script_body(scripts, "catalog-query") == (
         REPO / "web" / "catalog-query.js").read_text(encoding="utf-8")
-    assert _page_script_body(html, "webmcp") == (
+    assert _page_script_body(scripts, "webmcp") == (
         REPO / "web" / "webmcp.js").read_text(encoding="utf-8")
 
 
-def test_page_script_slot_rejects_unsafe_or_misordered_sources():
+def test_page_script_slot_rejects_unsafe_or_misordered_sources(
+        script_elements):
     """Sources are inlined as raw script text, so unsafe text is a hard fault.
 
     The builder never rewrites a maintained file: a body that could close the
@@ -2860,15 +2637,15 @@ def test_page_script_slot_rejects_unsafe_or_misordered_sources():
     assert [marker for marker, _ in real] == ["catalog-query", "webmcp"]
     assert [marker for marker, _ in real] == [
         marker for marker, _ in build_site.PAGE_SOURCE_FILES]
-    for attrs, body in _page_scripts(html):
+    for attrs, body in _page_scripts(script_elements(html)):
         assert "src" not in attrs
     # Pair validation is unaffected by the extra scripts.
     from catalog_export import validate_artifact_pair
     validate_artifact_pair(serialize_snapshot(snapshot), html)
 
     # The documented template-only route: no page script slot.
-    assert _page_scripts(render(None)) == []
-    assert [attrs.get("id") for attrs, _ in _json_islands(render(None))] == \
+    assert _page_scripts(script_elements(render(None))) == []
+    assert [attrs.get("id") for attrs, _ in _json_islands(script_elements(render(None)))] == \
         list(_ISLAND_IDS)
 
     hostile = (
@@ -2887,7 +2664,8 @@ def test_page_script_slot_rejects_unsafe_or_misordered_sources():
         render(real + (("boot", "// duplicate slot\n"),))
 
 
-def test_page_scripts_are_inert_without_the_native_api(tmp_path, ):
+def test_page_scripts_are_inert_without_the_native_api(
+        tmp_path, script_elements):
     """No native API: ONE honest no-op attempt, no island read, no network.
 
     The generated page is built by the real CLI, its scripts are extracted and
@@ -2902,20 +2680,22 @@ def test_page_scripts_are_inert_without_the_native_api(tmp_path, ):
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
 
-    report = _run_page_driver(tmp_path / "driver-absent", html, "absent", node)
+    report = _run_page_driver(
+        tmp_path / "driver-absent", html, "absent", node, script_elements)
     assert report["calls"] == [], report
     assert report["islandReads"] == [], report
     assert report["modelContextReads"] == 1, report  # exactly one detection
     assert report["net"] == {"fetch": 0, "xhr": 0, "timers": 0}, report
 
 
-def test_page_bootstrap_registers_the_five_shared_tools_once(tmp_path):
-    """Wiring evidence: the page's own bootstrap registers the five tools.
+def test_page_bootstrap_registers_the_three_shared_tools_once(
+        tmp_path, script_elements):
+    """Wiring evidence: the page's own bootstrap registers the three tools.
 
     A fake registrar proves the ADAPTER/page wiring only. Descriptions and
     schemas come from the embedded shared contract, annotations are the
-    documented triplet, and one routine search plus the bulk export come back
-    complete with truthful count/pagination fields.
+    documented triplet, and one routine search comes back complete with
+    honest pagination fields (``total_matches`` / ``next_offset``).
     """
     node = _page_node_binary()
     _seed_logo(tmp_path)
@@ -2923,7 +2703,8 @@ def test_page_bootstrap_registers_the_five_shared_tools_once(tmp_path):
     assert proc.returncode == 0, proc.stderr
     html = _build_html(tmp_path)
 
-    report = _run_page_driver(tmp_path / "driver-native", html, "native", node)
+    report = _run_page_driver(
+        tmp_path / "driver-native", html, "native", node, script_elements)
     assert report["calls"] == list(_TOOL_NAMES), report
     assert report["islandReads"] == list(_ISLAND_IDS), report
     assert report["net"] == {"fetch": 0, "xhr": 0, "timers": 0}, report
@@ -2942,22 +2723,11 @@ def test_page_bootstrap_registers_the_five_shared_tools_once(tmp_path):
 
     search = report["search"]
     assert search["source"] == {"mode": "browser"}
-    assert search["limit"] == 1
-    assert search["returned_count"] == len(search["endpoints"]) == 1
+    assert len(search["endpoints"]) == 1
     assert search["total_matches"] == 3
     assert search["next_offset"] == 1
 
-    bulk = report["bulk"]
-    assert bulk["source"] == {"mode": "browser"}
-    assert bulk["total_ids"] == 2
-    # Per-gateway id counts stay raw (nous carries two variants, kilo one) --
-    # never collapsed into the distinct-id total.
-    assert bulk["counts"]["nous"] == 2 and bulk["counts"]["kilo"] == 1
-    assert bulk["providers"]["kilo"] == ["vendor-z/shared-free"]
-    assert bulk["providers"]["openrouter"] == []  # published, legitimately empty
-    assert bulk["models"]["nous"]["vendor-z/shared-free"]["name"] == (
-        "vendor-z/shared")
-    assert report["bulkLength"] > 0 and report["searchLength"] > 0
+    assert report["searchLength"] > 0
 
 
 def test_page_stays_useful_without_javascript_or_a_server(tmp_path):
@@ -2992,8 +2762,10 @@ def test_page_stays_useful_without_javascript_or_a_server(tmp_path):
     for mid in ("vendor-x/poolside-s-2.1:free", "vendor-x/poolside-s-2.1-free",
                 "vendor-x/standalone-1:free", "vendor-x/standalone-2-free"):
         assert mid in no_js
-    from config_loader import GATEWAY_WIRING
-    assert GATEWAY_WIRING["tokenrouter"]["chat_completions_url"] in no_js
+    import config_loader
+    wiring = config_loader.build_gateway_wiring(
+        config_loader.build_providers(config_loader.load_configs()))
+    assert wiring["tokenrouter"]["chat_completions_url"] in no_js
     assert 'href="https://github.com/Dthen/free-inference-watchdog"' in no_js
     assert 'href="https://ko-fi.com/dthen"' in no_js
     # The islands are plain data a page script (or a reader) can still get.
@@ -3249,28 +3021,34 @@ def _arm_stage_failure(patch, which, operation, seen):
 def _expected_pair(root):
     """Independent oracle: the accepted capture -> build -> serialize -> render."""
     import build_site
+    import config_loader
     from catalog_export import capture_registry, serialize_snapshot
 
+    registry = config_loader.build_providers(config_loader.load_configs())
     snapshot = build_site.build_snapshot(
-        capture_registry(build_site.PROVIDERS, build_site.GATEWAY_WIRING),
+        capture_registry(registry,
+                         config_loader.build_gateway_wiring(registry)),
         json.loads(json.dumps(PAIR_ROSTER)), cadence_s=3600)
     return (
         snapshot,
         serialize_snapshot(snapshot),
         build_site.render_catalog_page(
             snapshot, build_site.load_logo_b64(root),
-            build_site.build_provider_header_meta(),
+            build_site.build_provider_header_meta(registry),
             tool_contract=_pair_tool_contract(), sources=_page_sources()),
     )
 
 
-def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
+def test_cli_publishes_one_validated_public_pair(
+        tmp_path, monkeypatch, capsys, script_elements):
     """One roster read -> one capture -> ONE snapshot -> BOTH artifacts.
 
     Pins the coherent public route end to end: spied single acquisition, the
     SAME snapshot object serialized and rendered, deterministic repeated
     builds, exact both-target read-back, the real shared tool array, default
-    provider headers/logo, no legacy roster island, zero-ID/true-empty data
+    provider headers/logo, one configuration load whose ONE resolved registry
+    reaches capture as the wiring/header source, no legacy roster island,
+    zero-ID/true-empty data
     staying distinguishable from corruption, excluded sentinels absent, and a
     stdlib-only run with no SDK/Node/PATH dependency.
     """
@@ -3278,19 +3056,35 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
     import os
 
     import build_site
+    import config_loader
     from catalog_export import validate_artifact_pair
 
     _seed_logo(tmp_path)
     _write_roster(tmp_path, PAIR_ROSTER)
 
     calls = {"load": 0, "capture": 0, "build": 0, "load_sources": 0,
-             "serialize": [], "render": [], "sources": []}
+             "config_loads": 0, "serialize": [], "render": [], "sources": []}
     seen = {}
     real_load = build_site.load_roster
     real_capture = build_site.capture_registry
     real_build = build_site.build_snapshot
     real_serialize = build_site.serialize_snapshot
     real_render = build_site.render_catalog_page
+    real_load_configs = config_loader.load_configs
+    real_build_providers = config_loader.build_providers
+    real_build_wiring = config_loader.build_gateway_wiring
+
+    def spy_load_configs():
+        calls["config_loads"] += 1
+        return real_load_configs()
+
+    def spy_build_providers(configs):
+        calls["registry"] = real_build_providers(configs)
+        return calls["registry"]
+
+    def spy_build_wiring(registry):
+        calls["wiring"] = real_build_wiring(registry)
+        return calls["wiring"]
 
     def spy_load(root):
         calls["load"] += 1
@@ -3302,11 +3096,13 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
         seen["wiring"] = copy.deepcopy(wiring)
         return real_capture(providers, wiring)
 
-    def spy_build(records, roster, *, cadence_s):
+    def spy_build(records, roster, *, cadence_s, catalog_formats=None):
         calls["build"] += 1
         calls["cadence"] = cadence_s
+        calls["formats"] = catalog_formats
         seen["roster"] = copy.deepcopy(roster)
-        snapshot = real_build(records, roster, cadence_s=cadence_s)
+        snapshot = real_build(records, roster, cadence_s=cadence_s,
+                              catalog_formats=catalog_formats)
         calls["snapshot"] = snapshot
         return snapshot
 
@@ -3337,8 +3133,10 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
                       ("render_catalog_page", spy_render)):
         monkeypatch.setattr(build_site, name, spy)
 
-    providers_before = copy.deepcopy(build_site.PROVIDERS)
-    wiring_before = copy.deepcopy(build_site.GATEWAY_WIRING)
+    monkeypatch.setattr(config_loader, "load_configs", spy_load_configs)
+    monkeypatch.setattr(config_loader, "build_providers", spy_build_providers)
+    monkeypatch.setattr(config_loader, "build_gateway_wiring", spy_build_wiring)
+
     roster_before = copy.deepcopy(PAIR_ROSTER)
 
     assert _run_cli(tmp_path) == 0
@@ -3348,6 +3146,14 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
 
     # --- one observation, one capture, one validated snapshot --------------
     assert calls["load"] == 1 and calls["capture"] == 1 and calls["build"] == 1
+    # Configuration is acquired EXACTLY ONCE per invocation, and the wiring /
+    # header metadata come from that same resolved mapping.
+    assert calls["config_loads"] == 1, "configuration must load exactly once"
+    registry = calls["registry"]
+    # The SAME resolved registry supplies the catalogue formats: the one
+    # nonlegacy config is named, and no second read produced this map.
+    assert calls["formats"]["vercel"] == "input-output-models"
+    assert set(calls["formats"]) == set(registry)
     # The maintained page sources are acquired ONCE per build and handed to
     # the renderer explicitly (never read from inside the pure renderer).
     assert calls["load_sources"] == 1
@@ -3362,11 +3168,12 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
     assert len(calls["sources"]) == 1 and calls["sources"][0] is not None
     assert [marker for marker, _ in calls["sources"][0]] == [
         "catalog-query", "webmcp"]
-    assert build_site.PROVIDERS == providers_before
-    assert build_site.GATEWAY_WIRING == wiring_before
+    assert registry, "the real roster must resolve to a non-empty registry"
     assert seen["roster"] == roster_before, "operational roster must be unmutated"
-    assert seen["providers"] == providers_before
-    assert seen["wiring"] == wiring_before
+    # The capture saw the SAME registry object the loader resolved, and
+    # rendering mutated neither it nor its wiring projection.
+    assert seen["providers"] == registry
+    assert seen["wiring"] == calls["wiring"] == real_build_wiring(registry)
 
     catalog_path, html_path = _targets(tmp_path)
     catalog_text = catalog_path.read_bytes().decode("utf-8")
@@ -3380,10 +3187,10 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
     published = validate_artifact_pair(catalog_text, html_text)
     assert published["snapshot_id"] == snapshot["snapshot_id"]
     assert published == snapshot
-    assert published["schema_version"] == 1
+    assert published["schema_version"] == 2
     assert published["cadence_s"] == 3600
     assert published["tick_epoch"] == 1787721434
-    assert published["provider_order"] == list(build_site.PROVIDERS)
+    assert published["provider_order"] == list(registry)
     assert published["providers"]["openrouter"]["model_ids"] == []
     assert published["providers"]["kilo"]["stale"] is True
     assert published["providers"]["nous"]["models"]["vendor-z/shared-free"][
@@ -3396,7 +3203,7 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
     for sentinel in PAIR_SENTINELS:
         assert sentinel not in catalog_text, sentinel
         assert sentinel not in html_text, sentinel
-    islands = _json_islands(html_text)
+    islands = _json_islands(script_elements(html_text))
     assert [attrs.get("id") for attrs, _ in islands] == list(_ISLAND_IDS)
     assert 'id="roster-data"' not in html_text
     assert len(re.findall(r"<script\b", html_text)) == 5
@@ -3434,7 +3241,7 @@ def test_cli_publishes_one_validated_public_pair(tmp_path, monkeypatch, capsys):
     empty_catalog, empty_html = (
         p.read_bytes().decode("utf-8") for p in _targets(empty))
     empty_published = validate_artifact_pair(empty_catalog, empty_html)
-    assert empty_published["provider_order"] == list(build_site.PROVIDERS)
+    assert empty_published["provider_order"] == list(registry)
     assert all(entry["model_ids"] == [] and entry["models"] == {}
                for entry in empty_published["providers"].values())
     assert empty_published["snapshot_id"] and empty_published["tick_epoch"] == 42
@@ -3532,10 +3339,12 @@ def test_cli_failure_retention_and_injected_write_failures(
         ("wrong-type-tool-resource",
          lambda root, patch: patch.setattr("build_site.TOOLS_REL", wrong_tools)),
         ("invalid-registry-wiring",
-         lambda root, patch: patch.setattr("build_site.GATEWAY_WIRING", {})),
+         lambda root, patch: patch.setattr(
+             "config_loader.build_gateway_wiring", lambda registry: {})),
         ("invalid-registry-config",
          lambda root, patch: patch.setattr(
-             "build_site.PROVIDERS", {"nous": "not-a-config"})),
+             "config_loader.build_providers",
+             lambda configs: {"nous": "not-a-config"})),
         ("invalid-snapshot",
          lambda root, patch: patch.setattr(
              "build_site.build_snapshot", _raise_catalog)),
@@ -4129,12 +3938,15 @@ def test_cli_failure_retention_and_injected_write_failures(
 def _rendered_other_pair(root):
     """A second, independently VALID pair (different snapshot id)."""
     import build_site
+    import config_loader
     from catalog_export import capture_registry, serialize_snapshot
 
     root.mkdir(parents=True, exist_ok=True)
     _seed_logo(root)
+    resolved = config_loader.build_providers(config_loader.load_configs())
     snapshot = build_site.build_snapshot(
-        capture_registry(build_site.PROVIDERS, build_site.GATEWAY_WIRING),
+        capture_registry(resolved,
+                         config_loader.build_gateway_wiring(resolved)),
         {"tick_epoch": 99, "providers": {"kilo": ["vendor-z/other-free"]}},
         cadence_s=3600)
     return (
@@ -4160,14 +3972,16 @@ def test_concurrent_publication_and_generated_file_ignore_rules(
 
     import build_site
     import catalog_export
+    import config_loader
 
     tool_contract = _pair_tool_contract()
-    registry = build_site.capture_registry(
-        build_site.PROVIDERS, build_site.GATEWAY_WIRING)
+    resolved = config_loader.build_providers(config_loader.load_configs())
+    records = build_site.capture_registry(
+        resolved, config_loader.build_gateway_wiring(resolved))
 
     def candidate(epoch):
         snapshot = build_site.build_snapshot(
-            registry,
+            records,
             {"tick_epoch": epoch,
              "providers": {"nous": [f"vendor-z/concurrent-{epoch}-free"]}},
             cadence_s=3600)
@@ -4267,3 +4081,320 @@ def test_concurrent_publication_and_generated_file_ignore_rules(
                       "site/catalog.json.4242.99.tmp", "site/other-public.json",
                       "state/roster.json"):
         assert ignored(generated), generated
+
+
+# ---------- catalogue format seam through build_public_pair (P1) ----------
+
+def test_build_public_pair_projects_the_vercel_format_without_a_second_read(
+        tmp_path, monkeypatch):
+    """The one resolved registry supplies the format map and the wiring.
+
+    A nonlegacy catalogue format therefore reaches the published snapshot, the
+    raw Vercel row is projected (context_window -> context_length), and no
+    second configuration/auth load happens on the public path.
+    """
+    import build_site
+    import config_loader
+
+    _seed_logo(tmp_path)
+    model_id = "example/unsuffixed-chat"
+    raw = {"id": model_id, "name": "Example Chat", "context_window": 64000,
+           "modalities": {"input": ["text"], "output": ["text"]},
+           "pricing": {"input": "0", "output": "0"}}
+    _write_roster(tmp_path, {
+        "tick_epoch": 1787721434,
+        "providers": {"vercel": [model_id]},
+        "provider_models": {"vercel": {model_id: raw}},
+    })
+    registry = {"vercel": {
+        "name": "Vercel AI Gateway",
+        "base_url": "https://ai-gateway.vercel.sh/v1",
+        "catalog_url": "https://ai-gateway.vercel.sh/v1/models",
+        "catalog_format": "input-output-models",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": "SENTINEL-PAIR-TOKEN",
+        "signup_url": "https://vercel.com/signup",
+        "limits_note": "note",
+    }}
+
+    calls = {"config": 0}
+
+    def explode(*args, **kwargs):
+        calls["config"] += 1
+        raise AssertionError("build_public_pair must not re-load configuration")
+
+    monkeypatch.setattr(config_loader, "load_configs", explode)
+    snapshot, catalog_text, html_text = build_site.build_public_pair(
+        tmp_path, registry)
+
+    model = snapshot["providers"]["vercel"]["models"][model_id]
+    assert model["context_length"] == 64000
+    assert model["architecture"] == {"input_modalities": ["text"],
+                                     "output_modalities": ["text"]}
+    assert model["name"] == "Example Chat"
+    assert calls["config"] == 0
+    assert "SENTINEL-PAIR-TOKEN" not in catalog_text
+    assert '"pricing"' not in catalog_text, "raw row must not be published"
+    assert "chat_completions_url" in snapshot["providers"]["vercel"]
+    assert snapshot["providers"]["vercel"]["chat_completions_url"] == (
+        "https://ai-gateway.vercel.sh/v1/chat/completions")
+    # Both artifacts still describe the same sealed public snapshot.
+    from catalog_export import validate_artifact_pair
+    assert validate_artifact_pair(catalog_text, html_text) == snapshot
+
+
+def test_build_public_pair_projects_the_felo_format_without_a_second_read(
+        tmp_path, monkeypatch):
+    """The same one-registry path carries the Felo metadata view.
+
+    `input_modalities`/`output_modalities` reach the public architecture, the
+    six-field model shape and the base-derived chat URL are unchanged, and the
+    raw channel/pricing rows never appear in the published artifacts.
+    """
+    import build_site
+    import config_loader
+
+    _seed_logo(tmp_path)
+    model_id = "example-vision:free"
+    raw = {"id": model_id, "name": "Example Vision", "context_length": 64000,
+           "input_modalities": ["text", "image", "video"],
+           "output_modalities": ["text"],
+           "channels": [{"standard_pricing": {"prompt": 0}}]}
+    _write_roster(tmp_path, {
+        "tick_epoch": 1787721434,
+        "providers": {"felo": [model_id]},
+        "provider_models": {"felo": {model_id: raw}},
+    })
+    registry = {"felo": {
+        "name": "Felo",
+        "base_url": "https://openapi.felo.ai/api/v1",
+        "catalog_url": "https://openapi.felo.ai/api/platform/model-catalog",
+        "catalog_format": "channel-catalog",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": "SENTINEL-PAIR-TOKEN",
+        "signup_url": "https://openapi.felo.ai/console/api-keys",
+        "limits_note": "note",
+    }}
+
+    calls = {"config": 0}
+
+    def explode(*args, **kwargs):
+        calls["config"] += 1
+        raise AssertionError("build_public_pair must not re-load configuration")
+
+    monkeypatch.setattr(config_loader, "load_configs", explode)
+    snapshot, catalog_text, html_text = build_site.build_public_pair(
+        tmp_path, registry)
+
+    model = snapshot["providers"]["felo"]["models"][model_id]
+    assert set(model) == {"id", "name", "description", "context_length",
+                          "architecture", "supported_parameters"}
+    assert model["context_length"] == 64000
+    assert model["architecture"] == {
+        "input_modalities": ["text", "image", "video"],
+        "output_modalities": ["text"]}
+    assert model["name"] == raw["name"]
+    assert calls["config"] == 0
+    assert "SENTINEL-PAIR-TOKEN" not in catalog_text
+    assert '"channels"' not in catalog_text, "raw rows must not be published"
+    assert '"standard_pricing"' not in catalog_text
+    assert snapshot["providers"]["felo"]["chat_completions_url"] == (
+        "https://openapi.felo.ai/api/v1/chat/completions")
+    from catalog_export import validate_artifact_pair
+    assert validate_artifact_pair(catalog_text, html_text) == snapshot
+
+
+def test_build_public_pair_projects_the_tokenra_format_without_a_second_read(
+        tmp_path, monkeypatch):
+    """The same one-registry path carries TokenRA's model_name metadata view.
+
+    A pricing-only row publishes exactly the six public fields with honest
+    nulls (no invented context, modality or parameter), the identity is the
+    literal `model_name`, the base-derived chat URL is unchanged, and the raw
+    pricing row never appears in the published artifacts.
+    """
+    import build_site
+    import config_loader
+
+    _seed_logo(tmp_path)
+    model_id = "example-chat"
+    raw = {"model_name": model_id, "quota_type": 0, "model_ratio": 0}
+    _write_roster(tmp_path, {
+        "tick_epoch": 1787721434,
+        "providers": {"tokenra": [model_id]},
+        "provider_models": {"tokenra": {model_id: raw}},
+    })
+    registry = {"tokenra": {
+        "name": "TokenRA",
+        "base_url": "https://tokenra.io/v1",
+        "catalog_url": "https://tokenra.io/api/pricing",
+        "catalog_format": "newapi-pricing",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": "SENTINEL-PAIR-TOKEN",
+        "signup_url": "https://tokenra.io/register",
+        "limits_note": "note",
+    }}
+
+    calls = {"config": 0}
+
+    def explode(*args, **kwargs):
+        calls["config"] += 1
+        raise AssertionError("build_public_pair must not re-load configuration")
+
+    monkeypatch.setattr(config_loader, "load_configs", explode)
+    snapshot, catalog_text, html_text = build_site.build_public_pair(
+        tmp_path, registry)
+
+    model = snapshot["providers"]["tokenra"]["models"][model_id]
+    assert set(model) == {"id", "name", "description", "context_length",
+                          "architecture", "supported_parameters"}
+    assert model["id"] == model_id and model["name"] == model_id
+    assert model["context_length"] is None
+    assert model["architecture"] == {"input_modalities": None,
+                                     "output_modalities": None}
+    assert model["supported_parameters"] is None
+    assert calls["config"] == 0
+    assert "SENTINEL-PAIR-TOKEN" not in catalog_text
+    assert '"quota_type"' not in catalog_text, "raw rows must not be published"
+    assert '"model_ratio"' not in catalog_text
+    assert snapshot["providers"]["tokenra"]["chat_completions_url"] == (
+        "https://tokenra.io/v1/chat/completions")
+    from catalog_export import validate_artifact_pair
+    assert validate_artifact_pair(catalog_text, html_text) == snapshot
+
+
+def test_build_public_pair_projects_the_infron_format_without_a_second_read(
+        tmp_path, monkeypatch):
+    """The same one-registry path carries Infron's provider-row metadata view.
+
+    The published model carries the display name, model context length and
+    direct modality lists, `supported_parameters` stays unknown (the feed has no
+    request-parameter vocabulary, only capability booleans), the six public
+    fields and the base-derived chat URL are unchanged, and the raw nested
+    provider/pricing row never appears in either artifact.
+    """
+    import build_site
+    import config_loader
+
+    _seed_logo(tmp_path)
+    model_id = "example/vision:free"
+    raw = {"id": model_id, "display_name": "Example Vision",
+           "description": "Synthetic multimodal model", "context_length": 64000,
+           "input_modalities": ["text", "image", "video"],
+           "output_modalities": ["text"], "min_prompt_price": 0,
+           "providers": [{"prompt_price": 0, "endpoint_name": "test-route"}]}
+    _write_roster(tmp_path, {
+        "tick_epoch": 1787721434,
+        "providers": {"infron": [model_id]},
+        "provider_models": {"infron": {model_id: raw}},
+    })
+    registry = {"infron": {
+        "name": "Infron",
+        "base_url": "https://llm.onerouter.pro/v1",
+        "catalog_url": "https://llm.onerouter.pro/v1/models",
+        "catalog_format": "provider-models",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": "SENTINEL-PAIR-TOKEN",
+        "signup_url": "https://infron.ai/login",
+        "limits_note": "note",
+    }}
+
+    calls = {"config": 0}
+
+    def explode(*args, **kwargs):
+        calls["config"] += 1
+        raise AssertionError("build_public_pair must not re-load configuration")
+
+    monkeypatch.setattr(config_loader, "load_configs", explode)
+    snapshot, catalog_text, html_text = build_site.build_public_pair(
+        tmp_path, registry)
+
+    model = snapshot["providers"]["infron"]["models"][model_id]
+    assert set(model) == {"id", "name", "description", "context_length",
+                          "architecture", "supported_parameters"}
+    assert model["name"] == "Example Vision"
+    assert model["description"] == "Synthetic multimodal model"
+    assert model["context_length"] == 64000
+    assert model["architecture"] == {
+        "input_modalities": ["text", "image", "video"],
+        "output_modalities": ["text"]}
+    assert model["supported_parameters"] is None
+    assert calls["config"] == 0
+    assert "SENTINEL-PAIR-TOKEN" not in catalog_text
+    assert "SENTINEL-PAIR-TOKEN" not in html_text
+    for leaked in ('"min_prompt_price"', '"prompt_price"', '"endpoint_name"',
+                   '"display_name": "Example Vision"'):
+        assert leaked not in catalog_text, leaked
+    assert snapshot["providers"]["infron"]["chat_completions_url"] == (
+        "https://llm.onerouter.pro/v1/chat/completions")
+    from catalog_export import validate_artifact_pair
+    assert validate_artifact_pair(catalog_text, html_text) == snapshot
+
+
+def test_build_public_pair_projects_the_aimlapi_format_without_a_second_read(
+        tmp_path, monkeypatch):
+    """The same one-registry path carries AI/ML API's typed-unit metadata view.
+
+    A synthetic roster tests metadata mapping, not free admission. The public
+    model shape and base-derived chat URL are intact; raw pricing is omitted.
+    """
+    import build_site
+    import config_loader
+
+    _seed_logo(tmp_path)
+    model_id = "example/typed-chat"
+    raw = {"id": model_id, "type": "openai/chat-completions",
+           "info": {"name": "Example Typed Chat", "contextLength": 64000},
+           "modalities": {"input": ["image", "text", "video"], "output": ["text"]},
+           "capabilities": ["tools"], "pricing": {"units": [{"price": 0}]}}
+    _write_roster(tmp_path, {
+        "tick_epoch": 1787721434,
+        "providers": {"aimlapi": [model_id]},
+        "provider_models": {"aimlapi": {model_id: raw}},
+    })
+    registry = {"aimlapi": {
+        "name": "AI/ML API",
+        "base_url": "https://api.aimlapi.com/v1",
+        "catalog_url": ("https://api.aimlapi.com/v1/models?include=pricing,"
+                        "modalities&type=openai/chat-completions"),
+        "catalog_format": "typed-unit-models",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": "SENTINEL-PAIR-TOKEN",
+        "signup_url": "https://aimlapi.com/app/sign-up",
+        "limits_note": "note",
+    }}
+
+    calls = {"config": 0}
+
+    def explode(*args, **kwargs):
+        calls["config"] += 1
+        raise AssertionError("build_public_pair must not re-load configuration")
+
+    monkeypatch.setattr(config_loader, "load_configs", explode)
+    snapshot, catalog_text, html_text = build_site.build_public_pair(
+        tmp_path, registry)
+
+    model = snapshot["providers"]["aimlapi"]["models"][model_id]
+    assert set(model) == {"id", "name", "description", "context_length",
+                          "architecture", "supported_parameters"}
+    assert model["name"] == "Example Typed Chat"
+    assert model["context_length"] == 64000
+    assert model["architecture"] == {
+        "input_modalities": ["image", "text", "video"],
+        "output_modalities": ["text"]}
+    assert model["supported_parameters"] is None
+    assert calls["config"] == 0
+    assert "SENTINEL-PAIR-TOKEN" not in catalog_text
+    assert "SENTINEL-PAIR-TOKEN" not in html_text
+    for leaked in ('"pricing"', '"units"', '"modalities"', '"capabilities"',
+                   '"contextLength"', '"price"'):
+        assert leaked not in catalog_text, leaked
+    assert snapshot["providers"]["aimlapi"]["chat_completions_url"] == (
+        "https://api.aimlapi.com/v1/chat/completions")
+    from catalog_export import validate_artifact_pair
+    assert validate_artifact_pair(catalog_text, html_text) == snapshot

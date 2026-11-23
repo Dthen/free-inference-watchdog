@@ -84,6 +84,12 @@ def test_load_bool_or_null_stamp_dropped(tmp_path):
     p.write_text(json.dumps({"amd": {"m": {"gone_since": None,
                                            "last_absent_seen": 100}}}))
     assert pr.load(p) == {"amd": {}}
+    # gone_since invalid first: old all(...) must short-circuit before the
+    # huge later integer is even considered (math.isfinite on 10**400 int
+    # would raise OverflowError), so the entry still drops normally.
+    p.write_text(json.dumps({"amd": {"m": {"gone_since": None,
+                                           "last_absent_seen": 10**400}}}))
+    assert pr.load(p) == {"amd": {}}
 
 
 def test_load_nonfinite_literals_dropped(tmp_path):

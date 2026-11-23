@@ -25,7 +25,7 @@ import notify
 import pending_removals
 import providers
 import state
-from config_loader import PROVIDERS, removal_hold
+from config_loader import removal_hold
 from envfile import parse_envfile
 from probe_zero_credit import probe_model, Result
 
@@ -101,7 +101,7 @@ monotonic = time.monotonic
 
 # ---------- provider plumbing ----------
 
-def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
+def build_fetch_all(registry, state_dir=None, now=None, sleep=time.sleep,
                     dry_run=False):
     """Return fetch_all() -> ({name: ids|None}, {name: meta_dict}).
 
@@ -113,6 +113,9 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
     verdicts persist via probe_state; the queue is probe_select-driven; the
     roster is verdict-filtered (ONLY FREE-verdict models).
 
+    registry: the ONE already-resolved provider-key -> config mapping the
+        caller loaded after argument parsing. Read here, never re-derived, so
+        this factory acquires no configuration of its own.
     state_dir: Path to the state directory (probe_state.json lives here).
     now: epoch value (int/float), or None for time.time().
     sleep: callable for throttle spacing (inject in tests).
@@ -129,7 +132,7 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
         # monotonic on purpose (duration, not date) — do NOT unify with
         # now_val above: that stamps real-world epochs into state files.
         probe_phase_start = monotonic()
-        for name, config in PROVIDERS.items():
+        for name, config in registry.items():
             try:
                 ids, meta = providers.fetch_provider(config)
                 if config.get("detection") == "zero-credit-probe" and ids:
@@ -216,17 +219,20 @@ def build_fetch_all(env, state_dir=None, now=None, sleep=time.sleep,
     return fetch_all
 
 
-def build_fetch_one(env, state_dir=None):
+def build_fetch_one(registry, state_dir=None):
     """Return fetch_one(name) -> (ids, meta_dict). Raises on failure.
 
     For zero-credit-probe providers, returns the VERDICT-FILTERED list from
     persisted probe state (no re-probing). The recheck must not re-fire probes.
+
+    registry: the caller's already-resolved mapping; a name outside it is a
+    programming error, exactly as the removed module global was.
     """
     state_dir = Path(state_dir) if state_dir else (Path(__file__).resolve().parent / "state")
     probe_state_path = state_dir / "probe_state.json"
 
     def fetch_one(name):
-        config = PROVIDERS[name]
+        config = registry[name]
         ids, meta = providers.fetch_provider(config)
         if config.get("detection") == "zero-credit-probe":
             # Recheck path: derive from persisted verdicts, do NOT re-probe
@@ -249,7 +255,7 @@ def build_resolver(state_dir, fetch_one, registry):
     """Build resolve_pending — the guts of the --resolve CLI path.
 
     Injection style matches run_tick/build_fetch_*: everything arrives as a
-    parameter (no module-global PROVIDERS reads). This is EXPLICITLY the sole
+    parameter (no module-global registry reads). This is EXPLICITLY the sole
     user of pending_removals.settle on this path — the hourly tick does NOT
     call resolve_pending (T4 shares settle() instead). Lock-free by design:
     resolve_pending itself takes no lock — run_resolve (below) owns
@@ -258,8 +264,8 @@ def build_resolver(state_dir, fetch_one, registry):
     state_dir: dir holding roster.json, pending_alerts.json and the hold
         queue (pending_removals.path_in).
     fetch_one: callable name -> (ids, meta); providers.FetchError = failure.
-    registry: dict provider-key -> config dict (production passes
-        config_loader.PROVIDERS); each hold read via removal_hold().
+    registry: dict provider-key -> config dict (the CLI's ONE resolved
+        mapping); each hold read via removal_hold().
 
     Returns resolve_pending(now, dry_run=False, webhook_url=None,
     fetches=None) -> {"fired": bool, "changed": bool}:
@@ -294,7 +300,7 @@ def build_resolver(state_dir, fetch_one, registry):
         # settle() mutates entries IN PLACE — fork with deepcopy, never dict().
         held = copy.deepcopy(snapshot)
         # Orphan guard BEFORE any fetch: a held provider evicted from the
-        # registry would make build_fetch_one's PROVIDERS[name] raise
+        # registry would make build_fetch_one's registry lookup raise
         # KeyError → the FATAL exit-2 loop. Drop it from the queue, note it,
         # never fetch it, never touch the roster.
         for provider in [p for p in held if p not in registry]:
@@ -759,18 +765,24 @@ def main(argv=None):
         Path(__file__).resolve().parent / "state")
     env = parse_envfile()
     webhook = env.get("DISCORD_WEBHOOK_INFERENCE_WATCHDOG") or None
-    fetch_all = build_fetch_all(env, state_dir=state_dir, now=time.time(),
+    # Configuration is acquired EXACTLY ONCE per invocation, after both the
+    # parse and the argument-conflict validation above: --help and a bad
+    # argument pair never reach this line, so neither discovers a provider,
+    # resolves a credential or prints a config warning. The SAME resolved
+    # mapping goes to both fetch factories and to the tick/resolve body.
+    registry = config_loader.build_providers(config_loader.load_configs())
+    fetch_all = build_fetch_all(registry, state_dir=state_dir, now=time.time(),
                                  sleep=time.sleep, dry_run=args.dry_run)
-    fetch_one = build_fetch_one(env, state_dir=state_dir)
+    fetch_one = build_fetch_one(registry, state_dir=state_dir)
 
     if args.init:
-        return run_tick(state_dir, PROVIDERS, fetch_all, fetch_one,
+        return run_tick(state_dir, registry, fetch_all, fetch_one,
                         webhook_url=None, sleep=lambda s: None, now=time.time(),
                         recheck_delay=0, dry_run=False, init=True)
     if args.resolve:
-        return run_resolve(state_dir, PROVIDERS, fetch_one,
+        return run_resolve(state_dir, registry, fetch_one,
                            webhook_url=webhook, dry_run=args.dry_run)
-    return run_tick(state_dir, PROVIDERS, fetch_all, fetch_one,
+    return run_tick(state_dir, registry, fetch_all, fetch_one,
                     webhook_url=webhook, sleep=time.sleep, now=time.time(),
                     recheck_delay=args.recheck_delay,
                     cadence_s=args.cadence_hours * 3600, dry_run=args.dry_run)

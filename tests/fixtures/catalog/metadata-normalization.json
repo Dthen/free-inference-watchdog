@@ -1,5 +1,5 @@
 {
-  "description": "Hand-authored upstream capability-fragment table for the unit 1c-b1 nullability and normalization rules. NOT a catalogue snapshot and NOT a public query response: it carries no top-level snapshot fields. Each row names a raw upstream capability fragment (`raw`), the literal expected public capability projection (`projected`), the literal expected normalized capability data (`normalized`, including `unknown_fields`), and the deduplicated warning codes (`warnings`). A key absent from `raw` means the field was missing upstream; an explicit JSON `null` means the field was present but null. The values here are illustrative fixture data — no real upstream or private data is included. The test-local restatement of the projection/normalization rules is a fixture checker, never production normalization.",
+  "description": "Hand-authored upstream capability-fragment table for the unit 1c-b1 nullability and normalization rules. NOT a catalogue snapshot and NOT a public query response: it carries no top-level snapshot fields. Each row names a raw upstream capability fragment (`raw`), the literal expected public capability projection (`projected`), the literal expected normalized capability data (`normalized`, exactly the four capability values with no unknown-field list), and the deduplicated warning codes (`warnings`). A key absent from `raw` means the field was missing upstream; an explicit JSON `null` means the field was present but null. The values here are illustrative fixture data — no real upstream or private data is included. The test-local restatement of the projection/normalization rules is a fixture checker, never production normalization.",
   "kind": "upstream-capability-fragment-table",
   "not_a_snapshot": true,
   "capability_fields": [
@@ -30,8 +30,7 @@
         "context_length": null,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["context_length"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_missing"]
     },
@@ -52,8 +51,7 @@
         "context_length": null,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["context_length"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_missing"]
     },
@@ -74,8 +72,7 @@
         "context_length": null,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["context_length"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_invalid"]
     },
@@ -96,8 +93,7 @@
         "context_length": null,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["context_length"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_invalid"]
     },
@@ -118,8 +114,7 @@
         "context_length": null,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["context_length"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_invalid"]
     },
@@ -140,8 +135,7 @@
         "context_length": null,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["context_length"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_invalid"]
     },
@@ -162,8 +156,7 @@
         "context_length": 9007199254740991,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": []
+        "supported_parameters": ["temperature"]
       },
       "warnings": []
     },
@@ -184,8 +177,7 @@
         "context_length": 0,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": []
+        "supported_parameters": ["temperature"]
       },
       "warnings": []
     },
@@ -206,8 +198,7 @@
         "context_length": 65536,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": []
+        "supported_parameters": ["temperature"]
       },
       "warnings": []
     },
@@ -226,8 +217,7 @@
         "context_length": 4096,
         "input_modalities": null,
         "output_modalities": null,
-        "supported_parameters": null,
-        "unknown_fields": ["input_modalities", "output_modalities", "supported_parameters"]
+        "supported_parameters": null
       },
       "warnings": ["metadata_missing"]
     },
@@ -248,8 +238,7 @@
         "context_length": 4096,
         "input_modalities": null,
         "output_modalities": null,
-        "supported_parameters": null,
-        "unknown_fields": ["input_modalities", "output_modalities", "supported_parameters"]
+        "supported_parameters": null
       },
       "warnings": ["metadata_missing"]
     },
@@ -270,8 +259,7 @@
         "context_length": 4096,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": null,
-        "unknown_fields": ["supported_parameters"]
+        "supported_parameters": null
       },
       "warnings": ["metadata_invalid"]
     },
@@ -292,8 +280,7 @@
         "context_length": 4096,
         "input_modalities": null,
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["input_modalities"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_invalid"]
     },
@@ -314,8 +301,7 @@
         "context_length": 4096,
         "input_modalities": ["text"],
         "output_modalities": null,
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["output_modalities"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_invalid"]
     },
@@ -336,8 +322,7 @@
         "context_length": 4096,
         "input_modalities": null,
         "output_modalities": null,
-        "supported_parameters": ["temperature"],
-        "unknown_fields": ["input_modalities", "output_modalities"]
+        "supported_parameters": ["temperature"]
       },
       "warnings": ["metadata_invalid"]
     },
@@ -358,8 +343,7 @@
         "context_length": 4096,
         "input_modalities": [],
         "output_modalities": [],
-        "supported_parameters": [],
-        "unknown_fields": []
+        "supported_parameters": []
       },
       "warnings": []
     },
@@ -380,8 +364,7 @@
         "context_length": 4096,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature", "max_tokens"],
-        "unknown_fields": []
+        "supported_parameters": ["temperature", "max_tokens"]
       },
       "warnings": []
     },
@@ -402,8 +385,7 @@
         "context_length": 4096,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": ["text"],
-        "unknown_fields": []
+        "supported_parameters": ["text"]
       },
       "warnings": []
     },
@@ -424,8 +406,7 @@
         "context_length": 4096,
         "input_modalities": ["É", "é"],
         "output_modalities": ["text"],
-        "supported_parameters": ["temperature"],
-        "unknown_fields": []
+        "supported_parameters": ["temperature"]
       },
       "warnings": []
     },
@@ -446,8 +427,7 @@
         "context_length": 4096,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": [" text "],
-        "unknown_fields": []
+        "supported_parameters": [" text "]
       },
       "warnings": []
     },
@@ -468,14 +448,13 @@
         "context_length": null,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "supported_parameters": null,
-        "unknown_fields": ["context_length", "supported_parameters"]
+        "supported_parameters": null
       },
       "warnings": ["metadata_missing", "metadata_invalid"]
     },
     {
       "id": "warnings_invalid_dedup_multiple",
-      "note": "two malformed arrays collapse to ONE metadata_invalid code; unknown_fields keeps canonical order.",
+      "note": "two malformed arrays collapse to ONE metadata_invalid code.",
       "raw": {
         "context_length": 4096,
         "architecture": {"input_modalities": "text", "output_modalities": ["text"]},
@@ -490,8 +469,7 @@
         "context_length": 4096,
         "input_modalities": null,
         "output_modalities": ["text"],
-        "supported_parameters": null,
-        "unknown_fields": ["input_modalities", "supported_parameters"]
+        "supported_parameters": null
       },
       "warnings": ["metadata_invalid"]
     }

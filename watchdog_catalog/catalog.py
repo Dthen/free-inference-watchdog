@@ -214,9 +214,9 @@ def canonical_bytes(value):
 # ---------- strict structural validation of a published snapshot ----------
 
 #: The only published schema version this module understands.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-# The exact v1 field sets. Every container is guarded BEFORE any set/sort/index/
+# The exact v2 field sets. Every container is guarded BEFORE any set/sort/index/
 # hash use, so a malformed JSON-compatible object yields the frozen structural
 # envelope and never an incidental TypeError/KeyError.
 _TOP_LEVEL_FIELDS = frozenset({
@@ -229,10 +229,9 @@ _PROVIDER_FIELDS = frozenset({
 })
 _MODEL_FIELDS = frozenset({
     "id", "name", "description", "context_length",
-    "architecture", "supported_parameters", "pricing",
+    "architecture", "supported_parameters",
 })
 _ARCHITECTURE_FIELDS = frozenset({"input_modalities", "output_modalities"})
-_PRICING_FIELDS = frozenset({"prompt", "completion"})
 
 #: The frozen warning vocabulary, in its deduplicated publication ORDER.
 _WARNING_ORDER = ("tick_epoch_unknown", "metadata_missing", "metadata_invalid")
@@ -250,38 +249,6 @@ def _is_strict_int(value):
 def _is_safe_nonneg_int(value):
     """A strict non-negative integer inside the JSON-safe range."""
     return _is_strict_int(value) and 0 <= value <= MAX_SAFE_INT
-
-
-def _is_finite_scalar(value):
-    """The projected pricing-scalar predicate, matching the contract exactly.
-
-    `None` (unknown) and a finite numeric or numeric-string scalar are accepted;
-    a `bool` is never a number. A native numeric must be finite AND raw-safe
-    when it is integer-valued (ordinary non-integral float rounding is
-    unchanged). A string is only probed with `float()` -- whitespace,
-    underscores and Unicode decimal digits parse, which is exactly the frozen
-    permissive edge -- and its ORIGINAL spelling is never converted or
-    normalized.
-    """
-    if value is None:
-        return True
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, int):
-        return -MAX_SAFE_INT <= value <= MAX_SAFE_INT
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return False
-        if value == math.trunc(value) and not (
-                -MAX_SAFE_INT <= value <= MAX_SAFE_INT):
-            return False
-        return True
-    if isinstance(value, str):
-        try:
-            return math.isfinite(float(value))
-        except (ValueError, OverflowError):
-            return False
-    return False
 
 
 def _is_wiring_url(url):
@@ -327,15 +294,6 @@ def _is_string_list_or_null(value):
     return all(isinstance(item, str) and item for item in value)
 
 
-def _is_pricing(value):
-    """`null`, or exactly `prompt`+`completion` with finite scalars."""
-    if value is None:
-        return True
-    if not isinstance(value, dict) or set(value) != _PRICING_FIELDS:
-        return False
-    return all(_is_finite_scalar(item) for item in value.values())
-
-
 def _is_model(raw_id, model):
     """The exact projected-model field set, types and id/map-key identity."""
     if not isinstance(model, dict) or set(model) != _MODEL_FIELDS:
@@ -360,7 +318,7 @@ def _is_model(raw_id, model):
             return False
     if not _is_string_list_or_null(model["supported_parameters"]):
         return False
-    return _is_pricing(model["pricing"])
+    return True
 
 
 def _is_provider(entry):
@@ -397,7 +355,7 @@ def _is_provider(entry):
 
 
 def _is_body(snapshot):
-    """Every v1-specific body check, run BEFORE the hash computation.
+    """Every v2-specific body check, run BEFORE the hash computation.
 
     Because the schema is exact and shallow, each recursive position is reached
     only after its container and member types were asserted -- so an invalid,
@@ -452,7 +410,7 @@ def validate_snapshot(snapshot):
 
     Precedence, exactly as frozen: the top-level object, required-field-set and
     `schema_version`-TYPE gates, then the `schema_version` VALUE gate, then
-    every v1-specific body check, and only then the body-hash verification.
+    every v2-specific body check, and only then the body-hash verification.
 
     Domain: JSON-compatible native values -- what :func:`load_json` (or
     ``json.loads``) returns. A tuple/bytes/``UserDict`` root, a non-string key,
@@ -520,13 +478,6 @@ def snapshot_hash(snapshot):
 # `normalize_capabilities` derives the query shape from an already-valid
 # projection. They reuse the module's strict validators without changing their
 # accepted meanings and add no I/O, clock, environment or network access.
-
-#: The four normalized capability fields, in their frozen order; `unknown_fields`
-#: names exactly these, in exactly this order.
-_CAPABILITY_FIELD_ORDER = (
-    "context_length", "input_modalities", "output_modalities",
-    "supported_parameters",
-)
 
 #: The capability-only warning vocabulary, in deduplicated publication order.
 #: `tick_epoch_unknown` is a snapshot-level code and never arises here.
@@ -650,18 +601,17 @@ def normalize_capabilities(projected):
 
     Precondition: a valid public capability projection -- either the
     ``projected`` half of :func:`project_capabilities` or a validated public
-    model object, whose extra identity/display/pricing members are ignored.
+    model object, whose extra identity/display members are ignored.
     This is NOT a second raw projection or validator.
 
     The result is a NEW mapping with exactly ``context_length``,
-    ``input_modalities``, ``output_modalities``, ``supported_parameters`` and
-    ``unknown_fields``. Context is unchanged; each known array is ASCII-folded
-    and first-occurrence deduplicated into a new list; ``None`` stays ``None``.
-    ``unknown_fields`` lists exactly the capability fields whose normalized
-    value is ``None``, in the frozen order -- a known empty ``[]`` is not
-    unknown. The input mapping is never normalized in place.
+    ``input_modalities``, ``output_modalities`` and ``supported_parameters``.
+    Context is unchanged; each known array is ASCII-folded and
+    first-occurrence deduplicated into a new list; ``None`` stays unknown
+    (``null``) while a known empty ``[]`` stays ``[]``. No ``unknown_fields``
+    member is reported. The input mapping is never normalized in place.
     """
-    normalized = {
+    return {
         "context_length": projected["context_length"],
         "input_modalities": _normalize_capability_array(
             projected["architecture"]["input_modalities"]),
@@ -670,51 +620,16 @@ def normalize_capabilities(projected):
         "supported_parameters": _normalize_capability_array(
             projected["supported_parameters"]),
     }
-    normalized["unknown_fields"] = [
-        field for field in _CAPABILITY_FIELD_ORDER
-        if normalized[field] is None]
-    return normalized
 
 
 # ---------- full public model projection ----------
 #
-# `project_model` composes the accepted capability projection with the identity,
-# display and pricing members into one complete public model object. It is a
+# `project_model` composes the accepted capability projection with the identity
+# and display members into one complete public model object. It is a
 # PURE function: no I/O, clock, environment, network or application import, and
 # it never mutates or aliases its inputs. Unknown/malformed OPTIONAL metadata
 # degrades to ``null`` (unknown) and never drops the endpoint, coerces a value
 # or leaks a private field.
-
-def _project_pricing_scalar(value):
-    """One projected pricing scalar: the value preserved VERBATIM when the
-    frozen :func:`_is_finite_scalar` predicate accepts it, else ``None``.
-
-    `None` (individually unknown) and a finite numeric or numeric-string scalar
-    are retained with their ORIGINAL type and spelling; a `bool`, a non-finite
-    number, a native unsafe integer/integral-unsafe float and any non-scalar are
-    invalid and become ``None``. No coercion, string rewrite, zero default or
-    free-price inference is ever performed.
-    """
-    return value if _is_finite_scalar(value) else None
-
-
-def _project_pricing(value):
-    """Project an upstream ``pricing`` member to the public pricing shape.
-
-    Absent, explicitly-``null`` or non-object pricing is unknown OVERALL and
-    projects to the whole-object ``None``. A mapping -- even an empty one, even
-    with both scalars ``null`` -- projects to a NEW mapping with EXACTLY
-    ``prompt`` and ``completion``: each scalar is projected individually, so a
-    valid sibling survives an invalid one. Extra upstream keys are discarded,
-    never leaked or interpreted.
-    """
-    if not isinstance(value, dict):
-        return None
-    return {
-        "prompt": _project_pricing_scalar(value.get("prompt")),
-        "completion": _project_pricing_scalar(value.get("completion")),
-    }
-
 
 def _project_name(raw_id, fragment):
     """The public display name: the upstream value iff a NONEMPTY string (kept
@@ -749,16 +664,16 @@ def project_model(raw_id, raw=None):
     roster carries no object for this tracked id. The result is a NEW
     ``(model, warnings)`` pair. ``model`` has exactly ``id``, ``name``,
     ``description``, ``context_length``, ``architecture``,
-    ``supported_parameters`` and ``pricing``; the four capability members come
-    from ONE :func:`project_capabilities` call and every container/list is
-    freshly allocated.
+    ``supported_parameters``; the four capability members come from ONE
+    :func:`project_capabilities` call and every container/list is freshly
+    allocated.
 
     ``warnings`` carries the capability warning codes ONLY (a fresh,
     deduplicated list in the frozen vocabulary order). A missing/absent/empty
     model metadata container is ``metadata_missing``; a non-null NON-DICT
     container is MALFORMED and is ``metadata_invalid`` ALONE -- never
-    manufactured missing-field warnings. Name, description and pricing
-    degradation never contribute a code.
+    manufactured missing-field warnings. Name and description degradation
+    never contribute a code.
     """
     if not isinstance(raw_id, str) or not raw_id:
         raise TypeError(
@@ -781,7 +696,6 @@ def project_model(raw_id, raw=None):
         "context_length": projected["context_length"],
         "architecture": projected["architecture"],
         "supported_parameters": projected["supported_parameters"],
-        "pricing": _project_pricing(fragment.get("pricing")),
     }
     warnings = (capability_warnings if override_warnings is None
                 else override_warnings)

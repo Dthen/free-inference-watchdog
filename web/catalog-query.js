@@ -42,7 +42,7 @@
   var MAX_JSON_DEPTH = 64;
 
   //: The only published schema version this module understands.
-  var SCHEMA_VERSION = 1;
+  var SCHEMA_VERSION = 2;
 
   //: The frozen error codes and their literal public messages.
   var ERROR_MESSAGES = {
@@ -729,10 +729,9 @@
   ];
   var _MODEL_FIELDS = [
     "architecture", "context_length", "description", "id", "name",
-    "pricing", "supported_parameters"
+    "supported_parameters"
   ];
   var _ARCHITECTURE_FIELDS = ["input_modalities", "output_modalities"];
-  var _PRICING_FIELDS = ["completion", "prompt"];
 
   //: The frozen warning vocabulary in its deduplicated publication ORDER.
   var _WARNING_ORDER = [
@@ -770,97 +769,6 @@
 
   function _isNonEmptyString(value) {
     return typeof value === "string" && value.length > 0;
-  }
-
-  // Python whitespace: str.strip() removes exactly these code points.
-  var _PY_WHITESPACE_CODES = [
-    "\\t", "\\n", "\\u000b", "\\u000c", "\\r", " ", "\\u0085", "\\u00a0",
-    "\\u1680", "\\u2000-\\u200a", "\\u2028", "\\u2029", "\\u202f",
-    "\\u205f", "\\u3000"
-  ].join("");
-  var _PY_WHITESPACE = new RegExp(
-    "^[" + _PY_WHITESPACE_CODES + "]+|[" + _PY_WHITESPACE_CODES + "]+$", "g");
-
-  function _decimalDigitValue(character) {
-    if (!/\p{Nd}/u.test(character)) {
-      return -1;
-    }
-    // Nd characters always form contiguous runs of ten starting at zero, so
-    // walking back to the run start yields the digit value.
-    var code = character.codePointAt(0);
-    var start = code;
-    while (start > 0 && /\p{Nd}/u.test(String.fromCodePoint(start - 1))) {
-      start -= 1;
-    }
-    return code - start;
-  }
-
-  /**
-   * Python `float(text)` acceptance, reduced to the question the pricing
-   * predicate asks: does the string parse to a FINITE binary64 value?
-   *
-   * Surrounding Python whitespace is stripped, a single underscore is allowed
-   * between digits, Unicode decimal digits are accepted, and the special
-   * `inf`/`infinity`/`nan` spellings parse but are not finite.
-   */
-  function _numericStringIsFinite(text) {
-    var stripped = text.replace(_PY_WHITESPACE, "");
-    if (stripped.length === 0) {
-      return false;
-    }
-    var body = stripped;
-    if (body.charAt(0) === "+" || body.charAt(0) === "-") {
-      body = body.slice(1);
-    }
-    if (/^(inf|infinity|nan)$/i.test(body)) {
-      return false;
-    }
-    var folded = "";
-    for (const character of body) {
-      var digit = _decimalDigitValue(character);
-      folded += digit >= 0 ? String(digit) : character;
-    }
-    // Underscores are legal ONLY between digits.
-    if (folded.indexOf("_") !== -1) {
-      if (/(^|[^0-9])_|_([^0-9]|$)/.test(folded)) {
-        return false;
-      }
-      folded = folded.replace(/_/g, "");
-    }
-    if (!/^([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(folded)) {
-      return false;
-    }
-    return isFinite(Number((stripped.charAt(0) === "-" ? "-" : "") + folded));
-  }
-
-  function _isFiniteScalar(value) {
-    if (value === null) {
-      return true;
-    }
-    if (typeof value === "boolean") {
-      return false;
-    }
-    if (value instanceof JsonFloat) {
-      return _isFiniteNumber(value.value);
-    }
-    if (typeof value === "number") {
-      return _isFiniteNumber(value);
-    }
-    if (typeof value === "string") {
-      return _numericStringIsFinite(value);
-    }
-    return false;
-  }
-
-  function _isFiniteNumber(value) {
-    if (!isFinite(value)) {
-      return false;
-    }
-    if (value === Math.trunc(value) &&
-        !(-MAX_SAFE_INT <= value && value <= MAX_SAFE_INT)) {
-      return false;
-    }
-    return true;
   }
 
   // ---- bracketed authority hosts -----------------------------------------
@@ -1123,16 +1031,6 @@
     return value.every((item) => _isNonEmptyString(item));
   }
 
-  function _isPricing(value) {
-    if (value === null) {
-      return true;
-    }
-    if (!_isPlainObject(value) || !_hasExactFields(value, _PRICING_FIELDS)) {
-      return false;
-    }
-    return _isFiniteScalar(value.prompt) && _isFiniteScalar(value.completion);
-  }
-
   function _isModel(rawId, model) {
     if (!_isPlainObject(model) || !_hasExactFields(model, _MODEL_FIELDS)) {
       return false;
@@ -1160,7 +1058,7 @@
         !_isStringListOrNull(model.supported_parameters)) {
       return false;
     }
-    return _isPricing(model.pricing);
+    return true;
   }
 
   function _sameStringSequence(left, right) {
@@ -1266,7 +1164,7 @@
    *
    * Precedence, exactly as frozen: top-level object, required-field set and
    * `schema_version` TYPE gates, then the `schema_version` VALUE gate, then
-   * every v1-specific body check, and only then the body-hash verification.
+   * every v2-specific body check, and only then the body-hash verification.
    */
   function validateSnapshot(snapshot) {
     if (!_isPlainObject(snapshot)) {
@@ -1311,10 +1209,6 @@
   // field -- and `normalizeCapabilities` derives the query shape from an
   // already-valid projection. Neither reads a clock, file, network or config.
 
-  var _CAPABILITY_FIELD_ORDER = [
-    "context_length", "input_modalities", "output_modalities",
-    "supported_parameters"
-  ];
   var _CAPABILITY_WARNING_ORDER = ["metadata_missing", "metadata_invalid"];
   //: Distinguishes an ABSENT upstream member from an explicit JSON null.
   var _MISSING = {};
@@ -1431,12 +1325,13 @@
    * Precondition: a valid public capability projection (or a validated public
    * model object, whose extra members are ignored). The result is a NEW
    * mapping with exactly `context_length`, `input_modalities`,
-   * `output_modalities`, `supported_parameters` and `unknown_fields`. Known
-   * arrays are ASCII-folded and first-occurrence deduplicated; null stays
-   * null; a known empty `[]` is not unknown. The input is never mutated.
+   * `output_modalities` and `supported_parameters`. Known arrays are
+   * ASCII-folded and first-occurrence deduplicated; null stays unknown and a
+   * known empty `[]` stays `[]`; no `unknown_fields` member is reported. The
+   * input is never mutated.
    */
   function normalizeCapabilities(projected) {
-    var normalized = {
+    return {
       context_length: projected.context_length,
       input_modalities: _normalizeCapabilityArray(
         projected.architecture.input_modalities),
@@ -1445,29 +1340,9 @@
       supported_parameters: _normalizeCapabilityArray(
         projected.supported_parameters)
     };
-    normalized.unknown_fields = _CAPABILITY_FIELD_ORDER.filter(
-      (field) => normalized[field] === null);
-    return normalized;
   }
 
   // ---------- full public model projection -------------------------------
-
-  function _projectPricingScalar(value) {
-    // Preserved VERBATIM -- original type and spelling -- or null when the
-    // frozen finite-scalar predicate rejects it.
-    return _isFiniteScalar(value) ? value : null;
-  }
-
-  function _projectPricing(value) {
-    if (!_isPlainObject(value)) {
-      // Absent, null or non-object pricing is unknown OVERALL.
-      return null;
-    }
-    return {
-      prompt: _projectPricingScalar(_member(value, "prompt")),
-      completion: _projectPricingScalar(_member(value, "completion"))
-    };
-  }
 
   function _projectName(rawId, fragment) {
     var name = _readMember(fragment, "name");
@@ -1488,8 +1363,8 @@
    * `rawId` is the TRACKED key and is authoritative: an upstream `id` member
    * is ignored regardless of value, type or absence. The result is a NEW
    * `[model, warnings]` pair whose model carries exactly `id`, `name`,
-   * `description`, `context_length`, `architecture`, `supported_parameters`
-   * and `pricing`. Warnings describe ONLY the four capability fields: a
+   * `description`, `context_length`, `architecture` and
+   * `supported_parameters`. Warnings describe ONLY the four capability fields: a
    * missing/null metadata container is `metadata_missing`; a non-null
    * non-object container is `metadata_invalid` alone.
    */
@@ -1519,8 +1394,7 @@
       description: _projectDescription(fragment),
       context_length: projected.context_length,
       architecture: projected.architecture,
-      supported_parameters: projected.supported_parameters,
-      pricing: _projectPricing(_readMember(fragment, "pricing"))
+      supported_parameters: projected.supported_parameters
     };
     return [model, overrideWarnings === null ? pair[1] : overrideWarnings];
   }
@@ -1528,12 +1402,12 @@
   // ---------- pure ordering and free-marker helpers -----------------------
   //
   // Ports of the dependency-free primitives in `watchdog_catalog/query.py`:
-  // `strip_free_marker`, `natural_key` and `endpoint_key` (README, "Total
-  // ordering rule" and "Natural comparator"). They are PURE: each reads only
-  // its arguments, returns fresh data, never mutates its inputs and never
-  // touches a clock, the environment, configuration, the network or a
-  // provider SDK. They carry no tool-argument validation or error envelope --
-  // that belongs to the later query units.
+  // `strip_free_marker` and `natural_key` (README, "Total ordering rule" and
+  // "Natural comparator"). They are PURE: each reads only its arguments,
+  // returns fresh data, never mutates its inputs and never touches a clock, the
+  // environment, configuration, the network or a provider SDK. They carry no
+  // tool-argument validation or error envelope -- that belongs to the later
+  // query units.
 
   //: Python `$` (non-MULTILINE) also matches before ONE final LF, while JS `$`
   //: is strict end-of-input; `(?=\n?$)` restores the reference semantics.
@@ -1619,47 +1493,10 @@
     return _compareNaturalKeys(naturalKey(left), naturalKey(right));
   }
 
-  /**
-   * The sort key for the `(provider, raw model id)` endpoint identity:
-   * `[providerOrder index, naturalKey(rawId)]`.
-   *
-   * `providerOrder` is the caller's already-validated ordered list of
-   * registered provider keys, and precedence is that list's INDEX -- never
-   * alphabetic key order, provider-map insertion order or global raw-ID order.
-   * A raw id shared by two providers stays TWO distinct pairs ordered by
-   * provider precedence. An unregistered provider is outside the documented
-   * precondition and is rejected instead of silently ranking at -1.
-   */
-  function endpointKey(providerOrder, provider, rawId) {
-    var index = providerOrder.indexOf(provider);
-    if (index === -1) {
-      throw new TypeError("endpointKey() requires a registered provider");
-    }
-    return [index, naturalKey(rawId)];
-  }
-
-  /**
-   * Compare two `[provider, rawId]` pairs by supplied provider precedence and
-   * then by natural raw-ID order; identical pairs compare zero.
-   */
-  function compareEndpointPairs(providerOrder, leftPair, rightPair) {
-    var left = endpointKey(providerOrder, leftPair[0], leftPair[1]);
-    var right = endpointKey(providerOrder, rightPair[0], rightPair[1]);
-    if (left[0] !== right[0]) {
-      return left[0] < right[0] ? -1 : 1;
-    }
-    return _compareNaturalKeys(left[1], right[1]);
-  }
-
-  // ---------- pure bulk list/endpoint queries ---------------------------
+  // ---------- shared query-result helpers --------------------------------
   //
-  // The dependency-free counterpart of the pure `list_free_models` and
-  // `list_endpoints` cores in `watchdog_catalog/query.py`. Both take an
-  // already-VALIDATED public snapshot -- the load/validate boundary owns raw,
-  // structural and hash checks, so nothing here re-validates, rehashes, reads a
-  // clock or performs I/O -- plus the whole DECODED argument object (never a
-  // splatted provider and never an adapter wrapper). Both return the frozen
-  // payload directly and never raise into the caller for a malformed argument.
+  // Small dependency-free helpers shared by the public query cores below.
+  // They never re-validate, rehash, read a clock or perform I/O.
 
   //: The two frozen argument-error codes and their literal public messages.
   var INVALID_ARGUMENTS = "invalid_arguments";
@@ -1686,93 +1523,9 @@
                     parameter: parameter}};
   }
 
-  /**
-   * The frozen provider-argument boundary shared by the two bulk queries.
-   *
-   * Deterministic and in the frozen order: the argument must be a JSON object;
-   * then ANY unknown key rejects with `parameter` `null`; then a non-`null`
-   * provider that is not a string is `invalid_arguments`; then a string absent
-   * from this snapshot's exact `provider_order` is `unknown_provider`. Empty,
-   * padded and wrong-case keys are never repaired, and membership is driven by
-   * the snapshot's ordered data alone -- never a provider enum, truthiness or
-   * an object prototype member. `undefined` is this language's absent value and
-   * is treated exactly like an omitted or `null` provider.
-   */
-  function _providerSelection(snapshot, args) {
-    if (!_isPlainObject(args)) {
-      return {error: _argumentError(INVALID_ARGUMENTS, null)};
-    }
-    var keys = Object.keys(args);
-    for (var index = 0; index < keys.length; index += 1) {
-      // `limit`/`offset` are unknown here, not bulk truncation controls.
-      if (keys[index] !== "provider") {
-        return {error: _argumentError(INVALID_ARGUMENTS, null)};
-      }
-    }
-    var supplied = _member(args, "provider");
-    var provider = supplied === _MISSING || supplied === null ||
-                   supplied === undefined ? null : supplied;
-    if (provider !== null && typeof provider !== "string") {
-      return {error: _argumentError(INVALID_ARGUMENTS, "provider")};
-    }
-    if (provider !== null && snapshot.provider_order.indexOf(provider) === -1) {
-      return {error: _argumentError(UNKNOWN_PROVIDER, "provider")};
-    }
-    return {error: null, provider: provider};
-  }
-
   /** A fresh naturally ordered copy of one provider's raw-ID array. */
   function _naturalIds(modelIds) {
     return modelIds.slice().sort(compareNaturalIds);
-  }
-
-  /**
-   * A fresh deep copy of one JSON-shaped value.
-   *
-   * Strings, booleans, `null` and numbers are immutable and are returned as-is;
-   * an accepted typed `JsonFloat` gets its own wrapper so a caller mutating a
-   * result can never reach the snapshot's typed representation. Arrays and
-   * plain objects are copied member by member through `_defineMember`, so an
-   * own `__proto__` member survives as data instead of becoming a prototype.
-   */
-  function _copyValue(value) {
-    if (value === null || typeof value !== "object") {
-      return value;
-    }
-    if (value instanceof JsonFloat) {
-      return new JsonFloat(value.value);
-    }
-    if (Array.isArray(value)) {
-      var items = [];
-      for (var index = 0; index < value.length; index += 1) {
-        items.push(_copyValue(value[index]));
-      }
-      return items;
-    }
-    var copy = {};
-    var keys = Object.keys(value);
-    for (var position = 0; position < keys.length; position += 1) {
-      _defineMember(copy, keys[position], _copyValue(value[keys[position]]));
-    }
-    return copy;
-  }
-
-  /**
-   * The flat `rawId -> projected public model` map for ONE provider.
-   *
-   * Members follow the provider's own `model_ids` order, exactly like the
-   * reference comprehension, and each value (with its nested architecture,
-   * parameter and pricing containers) is deep-copied verbatim -- never
-   * reprojected, re-derived from raw provider state or stringified/parsed away.
-   * Model-map key order is not semantic; the raw-ID array order is.
-   */
-  function _modelMap(entry) {
-    var models = {};
-    var ids = entry.model_ids;
-    for (var index = 0; index < ids.length; index += 1) {
-      _defineMember(models, ids[index], _copyValue(entry.models[ids[index]]));
-    }
-    return models;
   }
 
   /** A fresh `{provider: staleFlag}` map over the selected providers. */
@@ -1784,175 +1537,21 @@
     return flags;
   }
 
-  /**
-   * The pure core of the frozen BULK `list_free_models` tool.
-   *
-   * With `provider` omitted or `null` the all-provider export carries exactly
-   * `ok`, `providers`, `models`, `counts`, `total_ids`, `n_gateways`,
-   * `snapshot_id`, `tick_epoch` and `provider_staleness`; with one exact
-   * registered `provider` the one-provider export carries exactly `ok`,
-   * `provider`, `model_ids`, `models`, `count`, `snapshot_id`, `tick_epoch` and
-   * `provider_staleness`.
-   *
-   * `providers`/`models`/`counts`/`provider_staleness` carry the SAME provider
-   * set -- every `provider_order` key, a registered zero-ID provider included
-   * (as an empty array, an empty map and count `0`). `total_ids` is the count
-   * of distinct LITERAL raw-ID strings across the selected registry, never the
-   * endpoint-pair count and never a marker-label count, and `n_gateways` is
-   * `provider_order`'s length including zero-ID providers. Metadata stays
-   * attached to its own `(provider, rawId)` pair, so two providers sharing an
-   * ID keep their own conflicting projected objects.
-   *
-   * Every returned container, array and copied model object is freshly
-   * allocated, the inputs are never mutated, and raw-ID arrays are in the
-   * accepted natural order -- never the legacy sort and never the snapshot's
-   * literal code-point order.
-   */
-  function listFreeModels(snapshot, args) {
-    var selection = _providerSelection(snapshot, args);
-    if (selection.error) {
-      return selection.error;
-    }
-    var provider = selection.provider;
-    var order = snapshot.provider_order;
-    var providers = snapshot.providers;
-    if (provider !== null) {
-      var entry = providers[provider];
-      var modelIds = _naturalIds(entry.model_ids);
-      return {
-        ok: true,
-        provider: provider,
-        model_ids: modelIds,
-        models: _modelMap(entry),
-        count: modelIds.length,
-        snapshot_id: snapshot.snapshot_id,
-        tick_epoch: snapshot.tick_epoch,
-        provider_staleness: _staleFlags(providers, [provider])
-      };
-    }
-    var providerMap = {};
-    var models = {};
-    var counts = {};
-    var totalIds = new Set();
-    for (var index = 0; index < order.length; index += 1) {
-      var key = order[index];
-      var current = providers[key];
-      _defineMember(providerMap, key, _naturalIds(current.model_ids));
-      _defineMember(models, key, _modelMap(current));
-      _defineMember(counts, key, current.model_ids.length);
-      for (var position = 0; position < current.model_ids.length;
-           position += 1) {
-        totalIds.add(current.model_ids[position]);
-      }
-    }
-    return {
-      ok: true,
-      providers: providerMap,
-      models: models,
-      counts: counts,
-      total_ids: totalIds.size,
-      n_gateways: order.length,
-      snapshot_id: snapshot.snapshot_id,
-      tick_epoch: snapshot.tick_epoch,
-      provider_staleness: _staleFlags(providers, order)
-    };
-  }
-
-  /**
-   * The pure core of the frozen `list_endpoints` tool.
-   *
-   * BOTH variants carry exactly `ok`, `gateways`, `counts`, `provider`,
-   * `snapshot_id`, `tick_epoch` and `provider_staleness`; `provider` is `null`
-   * for the all-provider form and the exact selected key otherwise.
-   *
-   * `gateways` and `provider_staleness` contain exactly the SELECTED providers
-   * (all `provider_order` keys, or the one known selection, a registered
-   * zero-ID provider included). Each gateway entry carries exactly
-   * `chat_completions_url`, `api_type`, `model_ids` and `models`: wiring from
-   * that same snapshot provider, its complete naturally ordered raw-ID array
-   * (unchanged literal ids, never marker labels) and the complete projected
-   * metadata for each of its own endpoints.
-   *
-   * `counts` carries exactly `gateways` (selected providers), `endpoints`
-   * (selected `(provider, rawId)` pairs), `distinct_raw_ids` (selected literal
-   * raw strings), `marker_group_labels` (selected delimiter-stripped labels via
-   * the accepted `stripFreeMarker` guard) and the documented legacy `models`
-   * alias equal to `marker_group_labels` -- a label count, never a verified
-   * model identity and never the endpoint count. Counts describe the SELECTED
-   * scope: a filtered response leaks no registry-wide total, and a zero-ID
-   * single selection yields `gateways` 1 with every other count zero.
-   */
-  function listEndpoints(snapshot, args) {
-    var selection = _providerSelection(snapshot, args);
-    if (selection.error) {
-      return selection.error;
-    }
-    var provider = selection.provider;
-    var order = snapshot.provider_order;
-    var providers = snapshot.providers;
-    var selected = provider === null ? order.slice() : [provider];
-    var gateways = {};
-    var endpoints = 0;
-    var distinctRawIds = new Set();
-    var markerGroupLabels = new Set();
-    for (var index = 0; index < selected.length; index += 1) {
-      var key = selected[index];
-      var entry = providers[key];
-      _defineMember(gateways, key, {
-        chat_completions_url: entry.chat_completions_url,
-        api_type: entry.api_type,
-        model_ids: _naturalIds(entry.model_ids),
-        models: _modelMap(entry)
-      });
-      for (var position = 0; position < entry.model_ids.length;
-           position += 1) {
-        var rawId = entry.model_ids[position];
-        endpoints += 1;
-        distinctRawIds.add(rawId);
-        markerGroupLabels.add(stripFreeMarker(rawId));
-      }
-    }
-    var labels = markerGroupLabels.size;
-    return {
-      ok: true,
-      gateways: gateways,
-      counts: {
-        gateways: selected.length,
-        endpoints: endpoints,
-        distinct_raw_ids: distinctRawIds.size,
-        marker_group_labels: labels,
-        models: labels
-      },
-      provider: provider,
-      snapshot_id: snapshot.snapshot_id,
-      tick_epoch: snapshot.tick_epoch,
-      provider_staleness: _staleFlags(providers, selected)
-    };
-  }
-
-  // ---------- pure exact/marker lookup query ------------------------------
+  // ---------- pure exact get_model query --------------------------------
   //
   // The dependency-free counterpart of the pure `get_model` core in
-  // `watchdog_catalog/query.py`. Like the bulk queries it takes an
-  // already-VALIDATED public snapshot (nothing here re-validates, rehashes,
-  // reads a clock or performs I/O) plus the whole DECODED argument object, and
-  // returns the frozen payload directly -- never raising into the caller for a
-  // malformed argument.
+  // `watchdog_catalog/query.py`. It takes an already-VALIDATED public snapshot
+  // (nothing here re-validates, rehashes, reads a clock or performs I/O) plus
+  // the whole DECODED argument object, and returns the frozen payload directly
+  // -- never raising into the caller for a malformed argument.
 
   //: The explicit ASCII blank set the required `model_id` predicate uses:
   //: U+0009..U+000D (tab, LF, VT, FF, CR) and U+0020 (space). It is NEVER
   //: widened with `String.prototype.trim` or a `\s` class: MDN defines those
   //: over WhiteSpace plus LineTerminator, so they also strip NBSP (U+00A0),
   //: EM SPACE (U+2003), U+2028/U+2029, U+3000 and a BOM -- every one of which
-  //: is a literal, NONBLANK query here.
+  //: is a literal, NONBLANK id here.
   var _ASCII_BLANKS = " \t\n\r\u000b\f";
-
-  //: The frozen absence caveat carried on EVERY `getModel` success payload --
-  //: including a no-match success. It is a labelling caution, never a proof of
-  //: cross-gateway model identity.
-  var ABSENCE_CAVEAT = "Cross-gateway ABSENCE is unreliable: gateways rename " +
-    "inconsistently, so a missing exact id does NOT prove the model is " +
-    "unavailable there.";
 
   /** True iff every code unit belongs to the explicit ASCII blank set. */
   function _isAsciiBlankOnly(text) {
@@ -1964,37 +1563,62 @@
     return true;
   }
 
+  /** The frozen `not_found` envelope: no `parameter`, no echoed value. */
+  function _notFoundError() {
+    return {
+      ok: false,
+      error: {code: "not_found", message: "Model not found."}
+    };
+  }
+
+  /** The shared flat search-row projection of one tracked endpoint. */
+  function _endpointSummary(providerKey, rawId, model) {
+    var normalized = normalizeCapabilities(model);
+    return {
+      provider: providerKey,
+      model_id: rawId,
+      name: model.name,
+      context_length: normalized.context_length,
+      input_modalities: normalized.input_modalities,
+      output_modalities: normalized.output_modalities,
+      supported_parameters: normalized.supported_parameters
+    };
+  }
+
+  /** The `get_model` details row: a summary plus description and wiring. */
+  function _endpointDetails(providerKey, entry, rawId, model) {
+    var summary = _endpointSummary(providerKey, rawId, model);
+    return {
+      provider: summary.provider,
+      model_id: summary.model_id,
+      name: summary.name,
+      description: model.description,
+      context_length: summary.context_length,
+      input_modalities: summary.input_modalities,
+      output_modalities: summary.output_modalities,
+      supported_parameters: summary.supported_parameters,
+      chat_completions_url: entry.chat_completions_url,
+      api_type: entry.api_type
+    };
+  }
+
   /**
-   * The pure core of the frozen `get_model` tool.
+   * The pure core of the `get_model` tool: exact provider + raw id.
    *
-   * The success payload carries exactly `ok`, `query`, `snapshot_id`,
-   * `tick_epoch`, `exact_matches`, `exact_gateways`, `provider_staleness`,
-   * `endpoints`, `caveats` and `counts`; `ok` is exactly `true` even when the
-   * lookup finds nothing, and the retained `query` is the raw argument verbatim
-   * (never trimmed, case-folded or repaired). Snapshot provenance is echoed
-   * literally, a `null` epoch included -- no current/fetch clock and no
-   * invented freshness.
+   * The success payload carries exactly `ok`, `snapshot_id`, `tick_epoch`,
+   * `provider_staleness` and `endpoint`. `provider_staleness` covers exactly
+   * the requested provider, and `endpoint` is the flat details row for that one
+   * `(provider, rawId)` pair. Snapshot provenance is echoed literally; no
+   * current/fetch clock is read and no freshness is invented.
    *
-   * `exact_matches` is LITERAL raw-ID membership -- case-sensitive, unpadded,
-   * exact -- one entry per `provider_order` key including zero-ID providers;
-   * `exact_gateways` lists the true providers in that declared display order.
-   * `endpoints` is the SEPARATE marker-insensitive lookup: every tracked
-   * `(provider, rawId)` pair whose accepted `stripFreeMarker` label equals the
-   * stripped query, ordered by provider display order then the accepted natural
-   * raw-ID order, with raw strings unchanged and the complete projected
-   * metadata of its OWN pair attached. A marker match is never proof of
-   * cross-gateway identity, so it never feeds `exact_matches`.
-   *
-   * `provider_staleness` covers EVERY snapshot provider with its carried-
-   * forward snapshot stale flag (provider staleness, never tick age). `counts`
-   * describes only the returned lookup -- matching gateways, endpoint pairs,
-   * distinct literal raw ids and distinct marker labels -- and `caveats`
-   * carries the frozen absence caveat on every success. Argument validation is
-   * the frozen order: object, then ANY unknown key (parameter `null`), then the
-   * required string `model_id` with at least one character outside the explicit
-   * ASCII blank set. Every returned container, endpoint and metadata object
-   * (nested architecture/parameter/pricing containers and typed `JsonFloat`
-   * wrappers included) is freshly allocated; the inputs are never mutated.
+   * Argument validation is the frozen order: object, ANY unknown key
+   * (parameter `null`), `provider` presence/type, `provider` membership
+   * (`unknown_provider`), then `model_id` presence/type/ASCII blankness. The
+   * raw id is never trimmed, case-folded, marker-stripped or repaired, and
+   * there is no cross-provider or marker-insensitive lookup. A known provider
+   * with an absent exact id returns the `not_found` envelope, which echoes no
+   * caller value. Every returned container is freshly allocated and the inputs
+   * are never mutated.
    */
   function getModel(snapshot, args) {
     if (!_isPlainObject(args)) {
@@ -2002,68 +1626,36 @@
     }
     var keys = Object.keys(args);
     for (var key = 0; key < keys.length; key += 1) {
-      // `provider`/`limit`/`offset`/`query` are unknown here, not aliases.
-      if (keys[key] !== "model_id") {
+      if (keys[key] !== "provider" && keys[key] !== "model_id") {
         return _argumentError(INVALID_ARGUMENTS, null);
       }
     }
-    var supplied = _member(args, "model_id");
-    if (supplied === _MISSING || typeof supplied !== "string" ||
-        _isAsciiBlankOnly(supplied)) {
+    var suppliedProvider = _member(args, "provider");
+    if (suppliedProvider === _MISSING || typeof suppliedProvider !== "string") {
+      return _argumentError(INVALID_ARGUMENTS, "provider");
+    }
+    var provider = suppliedProvider;
+    var order = snapshot.provider_order;
+    if (order.indexOf(provider) === -1) {
+      return _argumentError(UNKNOWN_PROVIDER, "provider");
+    }
+    var suppliedModel = _member(args, "model_id");
+    if (suppliedModel === _MISSING || typeof suppliedModel !== "string" ||
+        _isAsciiBlankOnly(suppliedModel)) {
       return _argumentError(INVALID_ARGUMENTS, "model_id");
     }
-    var query = supplied;
-    var order = snapshot.provider_order;
     var providers = snapshot.providers;
-    var markerQuery = stripFreeMarker(query);
-    var exactMatches = {};
-    var exactGateways = [];
-    var endpoints = [];
-    var distinctRawIds = new Set();
-    var markerLabels = new Set();
-    for (var index = 0; index < order.length; index += 1) {
-      var provider = order[index];
-      var entry = providers[provider];
-      var matched = entry.model_ids.indexOf(query) !== -1;
-      _defineMember(exactMatches, provider, matched);
-      if (matched) {
-        exactGateways.push(provider);
-      }
-      var ids = _naturalIds(entry.model_ids);
-      for (var position = 0; position < ids.length; position += 1) {
-        var rawId = ids[position];
-        var label = stripFreeMarker(rawId);
-        if (label !== markerQuery) {
-          continue;
-        }
-        endpoints.push({
-          provider: provider,
-          model_id: rawId,
-          chat_completions_url: entry.chat_completions_url,
-          api_type: entry.api_type,
-          stale: entry.stale,
-          metadata: _copyValue(entry.models[rawId])
-        });
-        distinctRawIds.add(rawId);
-        markerLabels.add(label);
-      }
+    var entry = _member(providers, provider);
+    if (entry.model_ids.indexOf(suppliedModel) === -1) {
+      return _notFoundError();
     }
     return {
       ok: true,
-      query: query,
       snapshot_id: snapshot.snapshot_id,
       tick_epoch: snapshot.tick_epoch,
-      exact_matches: exactMatches,
-      exact_gateways: exactGateways,
-      provider_staleness: _staleFlags(providers, order),
-      endpoints: endpoints,
-      caveats: [ABSENCE_CAVEAT],
-      counts: {
-        exact_matches: exactGateways.length,
-        endpoints: endpoints.length,
-        distinct_raw_ids: distinctRawIds.size,
-        marker_group_labels: markerLabels.size
-      }
+      provider_staleness: _staleFlags(providers, [provider]),
+      endpoint: _endpointDetails(provider, entry, suppliedModel,
+                                 _member(entry.models, suppliedModel))
     };
   }
 
@@ -2395,7 +1987,7 @@
    * never narrowed, rejected or rewritten to get that agreement. There is no
    * regular expression, fuzzy alias, marker stripping or JSON/metadata
    * serialization: capability arrays,
-   * pricing, wiring URLs, provider keys and object key names are never searched,
+   * wiring URLs, provider keys and object key names are never searched,
    * a query spanning two separately concatenated fields never matches, and one
    * pair's fields are never borrowed from a sibling provider. Null or `""`
    * applies no text constraint; a whitespace-only query is a literal constraint.
@@ -2537,7 +2129,7 @@
    * The result keeps only supplied pairs whose OWN
    * `architecture.input_modalities` is known and contains EVERY ASCII-folded
    * requested token. Output modalities, names, descriptions, raw ids, provider
-   * keys, pricing and supported parameters are never substitutes, and a pair's
+   * keys and supported parameters are never substitutes, and a pair's
    * capability is never borrowed from a sibling provider sharing its raw id.
    * See `_filterByCapability()` for the shared null/empty, known-vs-unknown,
    * duplicate-idempotent and order/multiplicity rules.
@@ -2577,7 +2169,7 @@
   ];
 
   //: The frozen pagination defaults and inclusive maximum.
-  var SEARCH_DEFAULT_LIMIT = 50;
+  var SEARCH_DEFAULT_LIMIT = 5;
   var SEARCH_DEFAULT_OFFSET = 0;
   var SEARCH_MAX_LIMIT = 200;
 
@@ -2588,7 +2180,7 @@
    * A JSON integer argument is a finite numeric value with zero fractional part
    * in `0..MAX_SAFE_INT`, so the numeric `1.0` IS the integer `1` -- including a
    * typed `JsonFloat` decoded argument, whose wrapper keeps the token a float
-   * for the raw `filters` echo while validating by value. A bool is rejected
+   * while validating by value. A bool is rejected
    * BEFORE the number branch (`true` is never `1`); a numeric string, fraction,
    * unsafe/huge numeric and non-finite value are rejected too. `Number.isInteger`
    * alone is NOT a safe test -- MDN documents that values around 2**53 lose
@@ -2657,12 +2249,12 @@
    * `min_context_length` is omitted/null or a safe non-negative integer value;
    * the two capability arrays are omitted/null or arrays of nonempty strings
    * (invalid members reject the WHOLE parameter, never a partial salvage);
-   * `limit` is omitted (50) or an integer 1..200 (explicit null is invalid);
+   * `limit` is omitted (5) or an integer 1..200 (explicit null is invalid);
    * `offset` is omitted (0) or a safe integer (explicit null is invalid). A
    * numeric `1.0` -- including a typed `JsonFloat` decoded argument -- is
    * accepted as the integer VALUE while a bool, numeric string, fraction,
    * unsafe integer or non-finite number is rejected with its own parameter
-   * name; the RAW supplied value is still echoed in `filters`.
+   * name.
    *
    * Only after EVERY argument validates does it compose the accepted stages in
    * order -- `searchTextProviderPairs`, `searchMinContextPairs`,
@@ -2673,32 +2265,20 @@
    * never capped by a stage; `slice` clamps a start at or beyond the end to an
    * empty page, exactly like Python slicing.
    *
-   * The success payload carries exactly `ok`, `query`, `filters`, `limit`,
-   * `offset`, `snapshot_id`, `tick_epoch`, `provider_staleness`, `endpoints`,
-   * `total_matches`, `returned_count`, `next_offset`, `counts` and `caveats`.
-   * `query` and every `filters` member echo the RAW supplied value (arrays
-   * freshly copied, order/case/duplicates preserved, `[]` distinct from null)
-   * while `limit`/`offset` echo the effective strict integer.
-   * `provider_staleness` covers every `provider_order` key when `provider` is
-   * omitted, else exactly the selected key -- retained on empty, exhausted and
-   * beyond-end pages. `endpoints` is the returned page with the exact fourteen
-   * projected fields: pair-specific wiring and display values, the raw id
-   * unchanged, the five normalized capability fields from
-   * `normalizeCapabilities` and `metadata` as a deep copy of that pair's
-   * complete projected public model (original casing/order/duplicates, pricing
-   * types and typed `JsonFloat` wrappers included). `next_offset` is
-   * `offset + returned_count` only when that is LESS than `total_matches`, else
-   * null. `counts` is PAGE scoped -- exactly `gateways`, `endpoints`,
-   * `distinct_raw_ids` and `marker_group_labels` -- and all-zero on an empty
-   * page even when matches exist; marker labels are the frozen
-   * `stripFreeMarker` labels, never verified model identities. `caveats`
-   * freshly carries the accepted absence caveat.
+   * The success payload carries exactly `ok`, `snapshot_id`, `tick_epoch`,
+   * `provider_staleness`, `total_matches`, `next_offset` and `endpoints`.
+   * Filters, page size/offset and the matched text are never echoed; `ok` is
+   * exactly `true` even when nothing matches. `provider_staleness` covers
+   * every `provider_order` key when `provider` is omitted, else exactly the
+   * selected key. `endpoints` is the returned page of flat summary rows --
+   * provider, raw id, name and the four normalized capability values;
+   * description, wiring and metadata belong to `getModel` details only.
+   * `next_offset` is `offset + len(endpoints)` only when that is LESS than
+   * `total_matches`, else null.
    *
-   * Every returned container, array, row, filter echo, caveat and metadata
-   * object (with its nested architecture/parameter/pricing containers) is
-   * freshly allocated, so a caller mutating a result can never corrupt the
-   * snapshot, the argument object or another call. The inputs are never
-   * mutated.
+   * Every returned container, array and row is freshly allocated, so a caller
+   * mutating a result can never corrupt the snapshot, the argument object or
+   * another call. The inputs are never mutated.
    */
   function searchModels(snapshot, args) {
     if (!_isPlainObject(args)) {
@@ -2788,69 +2368,26 @@
     for (var index = 0; index < page.length; index += 1) {
       var providerKey = page[index][0];
       var rawId = page[index][1];
-      var entry = _member(providers, providerKey);
-      var model = _member(entry.models, rawId);
-      var normalized = normalizeCapabilities(model);
-      endpoints.push({
-        provider: providerKey,
-        model_id: rawId,
-        chat_completions_url: entry.chat_completions_url,
-        api_type: entry.api_type,
-        stale: entry.stale,
-        name: model.name,
-        description: model.description,
-        context_length: normalized.context_length,
-        input_modalities: normalized.input_modalities,
-        output_modalities: normalized.output_modalities,
-        supported_parameters: normalized.supported_parameters,
-        unknown_fields: normalized.unknown_fields,
-        metadata: _copyValue(model)
-      });
+      endpoints.push(_endpointSummary(
+        providerKey, rawId, _member(_member(providers, providerKey).models,
+                                    rawId)));
     }
 
-    var returnedCount = endpoints.length;
-    var nextOffset = offset + returnedCount;
+    var nextOffset = offset + endpoints.length;
     if (nextOffset >= totalMatches) {
       nextOffset = null;
     }
 
     var selected = provider === null ? order.slice() : [provider];
-    var gateways = new Set();
-    var distinctRawIds = new Set();
-    var markerLabels = new Set();
-    for (var row = 0; row < endpoints.length; row += 1) {
-      gateways.add(endpoints[row].provider);
-      distinctRawIds.add(endpoints[row].model_id);
-      markerLabels.add(stripFreeMarker(endpoints[row].model_id));
-    }
 
     return {
       ok: true,
-      query: query,
-      filters: {
-        provider: provider,
-        min_context_length: _copyValue(rawMinContext),
-        input_modalities: requested.input_modalities === null
-          ? null : requested.input_modalities.slice(),
-        supported_parameters: requested.supported_parameters === null
-          ? null : requested.supported_parameters.slice()
-      },
-      limit: limit,
-      offset: offset,
       snapshot_id: snapshot.snapshot_id,
       tick_epoch: snapshot.tick_epoch,
       provider_staleness: _staleFlags(providers, selected),
-      endpoints: endpoints,
       total_matches: totalMatches,
-      returned_count: returnedCount,
       next_offset: nextOffset,
-      counts: {
-        gateways: gateways.size,
-        endpoints: returnedCount,
-        distinct_raw_ids: distinctRawIds.size,
-        marker_group_labels: markerLabels.size
-      },
-      caveats: [ABSENCE_CAVEAT]
+      endpoints: endpoints
     };
   }
 
@@ -2874,10 +2411,6 @@
     stripFreeMarker: stripFreeMarker,
     naturalKey: naturalKey,
     compareNaturalIds: compareNaturalIds,
-    endpointKey: endpointKey,
-    compareEndpointPairs: compareEndpointPairs,
-    listFreeModels: listFreeModels,
-    listEndpoints: listEndpoints,
     getModel: getModel,
     watchdogStatus: watchdogStatus,
     searchTextProviderPairs: searchTextProviderPairs,

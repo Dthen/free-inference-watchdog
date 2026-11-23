@@ -91,8 +91,6 @@ const MODULE_PATH = path.join(__dirname, "..", "..", "web", "catalog-query.js");
 const TOOL_EXPORTS = {
   search_models: "searchModels",
   get_model: "getModel",
-  list_free_models: "listFreeModels",
-  list_endpoints: "listEndpoints",
   watchdog_status: "watchdogStatus"
 };
 

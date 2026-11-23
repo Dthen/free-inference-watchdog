@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "snapshot_id": "997d9e5e576f4c328063856d91266827a494dbddbdca35e0a0f4ba48c8927661",
+  "schema_version": 2,
+  "snapshot_id": "10aa99674da17360b123d74abad56b35240de93e20b10e5d7ebebe8d9ae02bfc",
   "tick_epoch": null,
   "cadence_s": 3600,
   "provider_order": [
@@ -26,11 +26,7 @@
             "input_modalities": [],
             "output_modalities": []
           },
-          "supported_parameters": [],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          "supported_parameters": []
         },
         "vendor/unknown-capabilities": {
           "id": "vendor/unknown-capabilities",
@@ -41,8 +37,7 @@
             "input_modalities": null,
             "output_modalities": null
           },
-          "supported_parameters": null,
-          "pricing": null
+          "supported_parameters": null
         }
       },
       "stale": false

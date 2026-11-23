@@ -1,0 +1,11 @@
+{
+  "name": "TokenRA",
+  "base_url": "https://tokenra.io/v1",
+  "catalog_url": "https://tokenra.io/api/pricing",
+  "catalog_format": "newapi-pricing",
+  "detection": "catalog-pricing",
+  "auth": { "method": "none" },
+  "display": 9,
+  "signup_url": "https://tokenra.io/register",
+  "limits_note": "Advertised $0 token prices need a funded account under current terms (no free signup credit; $10 minimum top-up; a $0 balance returns 403 insufficient_user_quota); RPM/TPM/RPD and concurrency are unpublished and a zero price is not an allowance; route availability, especially crouton-alpha, is not completion-verified; monitoring needs no key, top-up or completion (as of 2026-11-22)."
+}

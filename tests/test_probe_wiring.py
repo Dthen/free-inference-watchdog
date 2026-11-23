@@ -17,7 +17,11 @@ from probe_zero_credit import Result
 # ---------- helpers ----------
 
 def _bai_only_providers(model_ids):
-    """Build a PROVIDERS dict with only bai (zero-credit-probe)."""
+    """Build an explicit registry dict with only bai (zero-credit-probe).
+
+    Every case hands this straight to build_fetch_all/build_fetch_one: there
+    is no module-level registry to patch, so each test states its own inputs.
+    """
     mock = {
         "bai": {
             "base_url": "https://api.example.com",
@@ -58,7 +62,7 @@ def test_probes_called_serially_with_5s_gaps(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2", "m3"]))
+    registry = _bai_only_providers(["m1", "m2", "m3"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1", "m2", "m3"]))
 
@@ -67,7 +71,7 @@ def test_probes_called_serially_with_5s_gaps(monkeypatch, tmp_path):
         sleep_calls.append(s)
         # Don't actually sleep in tests
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000, sleep=fake_sleep)
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000, sleep=fake_sleep)
     results, metas = fetch_all_fn()
 
     # All 3 probed
@@ -96,11 +100,11 @@ def test_probes_no_overlap(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["a", "b", "c"]))
+    registry = _bai_only_providers(["a", "b", "c"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["a", "b", "c"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
     assert results["bai"] == ["a", "b", "c"]
@@ -124,11 +128,11 @@ def test_probe_forwards_config_probe_block(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2"]))
+    registry = _bai_only_providers(["m1", "m2"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1", "m2"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     fetch_all_fn()
 
@@ -144,11 +148,11 @@ def test_free_verdict_on_roster(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
     assert results["bai"] == ["m1"]
@@ -160,11 +164,11 @@ def test_paid_verdict_excluded(monkeypatch, tmp_path):
         return Result.PAID, {"http": 403}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
     assert results["bai"] == []
@@ -174,17 +178,18 @@ def test_defer_keeps_last_known_verdict(monkeypatch, tmp_path):
     """DEFER does NOT overwrite a prior 'free' verdict — roster still shows it."""
     state_path = tmp_path / "probe_state.json"
     # Pre-seed: m1 was previously free
-    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
+    probe_state.save_probe_state(
+        state_path, {"bai": {"m1": {"verdict": "free", "epoch": 999_000_000}}})
 
     def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.DEFER, {"http": 429}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
     # Sticky: prior "free" survives the DEFER
@@ -194,17 +199,18 @@ def test_defer_keeps_last_known_verdict(monkeypatch, tmp_path):
 def test_probe_exception_treated_as_defer(monkeypatch, tmp_path):
     """probe_model raising -> treated as DEFER (entry untouched)."""
     state_path = tmp_path / "probe_state.json"
-    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
+    probe_state.save_probe_state(
+        state_path, {"bai": {"m1": {"verdict": "free", "epoch": 999_000_000}}})
 
     def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
     assert results["bai"] == ["m1"]  # sticky free survives
@@ -217,20 +223,22 @@ def test_burst_kill_regression_no_defer_empties_roster(monkeypatch, tmp_path):
     of previously-free models. This is the b.ai 429 burst regression."""
     state_path = tmp_path / "probe_state.json"
     # Pre-seed several free models
-    for i in range(5):
-        probe_state.record_verdict(state_path, "bai", f"free-model-{i}", "free",
-                                   999_000_000 + i)
+    probe_state.save_probe_state(state_path, {
+        "bai": {
+            f"free-model-{i}": {"verdict": "free", "epoch": 999_000_000 + i}
+            for i in range(5)
+        }
+    })
 
     def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.DEFER, {"http": 429}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS",
-                        _bai_only_providers([f"free-model-{i}" for i in range(5)]))
+    registry = _bai_only_providers([f"free-model-{i}" for i in range(5)])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory([f"free-model-{i}" for i in range(5)]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
     # All 5 still on roster despite DEFER
@@ -242,18 +250,22 @@ def test_burst_kill_regression_no_defer_empties_roster(monkeypatch, tmp_path):
 def test_vanished_models_pruned_from_state(monkeypatch, tmp_path):
     """Models no longer in catalog are pruned from state after the tick."""
     state_path = tmp_path / "probe_state.json"
-    probe_state.record_verdict(state_path, "bai", "kept", "free", 999_000_000)
-    probe_state.record_verdict(state_path, "bai", "vanished", "free", 999_000_000)
+    probe_state.save_probe_state(state_path, {
+        "bai": {
+            "kept": {"verdict": "free", "epoch": 999_000_000},
+            "vanished": {"verdict": "free", "epoch": 999_000_000},
+        }
+    })
 
     def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["kept"]))
+    registry = _bai_only_providers(["kept"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["kept"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     fetch_all_fn()
 
@@ -274,11 +286,11 @@ def test_first_tick_full_catalog_queue(monkeypatch, tmp_path):
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
     model_ids = [f"m-{i}" for i in range(5)]
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(model_ids))
+    registry = _bai_only_providers(model_ids)
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(model_ids))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
 
@@ -296,11 +308,11 @@ def test_throttle_uses_injected_sleep(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["a", "b"]))
+    registry = _bai_only_providers(["a", "b"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["a", "b"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: sleep_calls.append(s))
     fetch_all_fn()
     # 2 models -> 1 sleep between them
@@ -315,8 +327,12 @@ def test_fetch_one_returns_verdict_filtered_ids(monkeypatch, tmp_path):
     NOT the raw catalog. No probe calls during recheck."""
     state_path = tmp_path / "probe_state.json"
     # m1 free, m2 paid
-    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
-    probe_state.record_verdict(state_path, "bai", "m2", "paid", 999_000_000)
+    probe_state.save_probe_state(state_path, {
+        "bai": {
+            "m1": {"verdict": "free", "epoch": 999_000_000},
+            "m2": {"verdict": "paid", "epoch": 999_000_000},
+        }
+    })
 
     probe_called = []
 
@@ -325,11 +341,11 @@ def test_fetch_one_returns_verdict_filtered_ids(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2"]))
+    registry = _bai_only_providers(["m1", "m2"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1", "m2"]))
 
-    fetch_one_fn = im.build_fetch_one({}, tmp_path)
+    fetch_one_fn = im.build_fetch_one(registry, tmp_path)
     ids, meta = fetch_one_fn("bai")
 
     # Only free verdict
@@ -340,11 +356,11 @@ def test_fetch_one_returns_verdict_filtered_ids(monkeypatch, tmp_path):
 
 def test_fetch_one_verdict_gap_returns_empty(monkeypatch, tmp_path):
     """State empty for provider -> fetch_one returns [] (not raw catalog)."""
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2"]))
+    registry = _bai_only_providers(["m1", "m2"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1", "m2"]))
 
-    fetch_one_fn = im.build_fetch_one({}, tmp_path)
+    fetch_one_fn = im.build_fetch_one(registry, tmp_path)
     ids, meta = fetch_one_fn("bai")
 
     assert ids == []
@@ -360,11 +376,11 @@ def test_state_written_once_per_tick(monkeypatch, tmp_path):
         return Result.PAID, {"http": 403}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2"]))
+    registry = _bai_only_providers(["m1", "m2"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1", "m2"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, _ = fetch_all_fn()
 
@@ -382,7 +398,8 @@ def test_fetch_error_state_touched_results_none(monkeypatch, tmp_path):
     """FetchError during fetch_all -> results None, state untouched."""
     state_path = tmp_path / "probe_state.json"
     # Pre-existing state
-    probe_state.record_verdict(state_path, "bai", "old", "free", 999_000_000)
+    probe_state.save_probe_state(
+        state_path, {"bai": {"old": {"verdict": "free", "epoch": 999_000_000}}})
     before = probe_state.load_probe_state(state_path)
 
     def fake_fetch_provider(config, getter=None):
@@ -390,7 +407,11 @@ def test_fetch_error_state_touched_results_none(monkeypatch, tmp_path):
 
     monkeypatch.setattr(providers, "fetch_provider", fake_fetch_provider)
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    # The registry is irrelevant here — every fetch raises — but it is still
+    # an explicit input, so state/bai is reachable and the failure path is the
+    # one under test rather than a missing key.
+    registry = _bai_only_providers([])
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, metas = fetch_all_fn()
 
@@ -406,8 +427,12 @@ def test_queue_respects_probe_select_order(monkeypatch, tmp_path):
     """Queue order: new arrivals first, then free, then stale paid."""
     state_path = tmp_path / "probe_state.json"
     # m1: free (tier 2), m2: paid stale (tier 3), m3: new (tier 1)
-    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
-    probe_state.record_verdict(state_path, "bai", "m2", "paid", 900_000_000)  # very stale
+    probe_state.save_probe_state(state_path, {
+        "bai": {
+            "m1": {"verdict": "free", "epoch": 999_000_000},
+            "m2": {"verdict": "paid", "epoch": 900_000_000},  # very stale
+        }
+    })
 
     call_order = []
 
@@ -416,11 +441,11 @@ def test_queue_respects_probe_select_order(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2", "m3"]))
+    registry = _bai_only_providers(["m1", "m2", "m3"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1", "m2", "m3"]))
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     fetch_all_fn()
 
@@ -441,10 +466,10 @@ def test_metas_preserved(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider", fake_fetch_provider)
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=lambda s: None)
     results, metas = fetch_all_fn()
 
@@ -460,12 +485,12 @@ def test_dry_run_does_not_write_probe_state(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1"]))
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None, dry_run=True)
+        registry, tmp_path, now=1_000_000_000, sleep=lambda s: None, dry_run=True)
     fetch_all_fn()
     assert not (tmp_path / "probe_state.json").exists()
 
@@ -473,18 +498,19 @@ def test_dry_run_does_not_write_probe_state(monkeypatch, tmp_path):
 def test_dry_run_leaves_pre_existing_state_untouched(monkeypatch, tmp_path):
     """--dry-run must NOT overwrite a pre-existing probe_state.json."""
     state_path = tmp_path / "probe_state.json"
-    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
+    probe_state.save_probe_state(
+        state_path, {"bai": {"m1": {"verdict": "free", "epoch": 999_000_000}}})
 
     def fake_probe(base_url, token, model_id, probe_cfg=None, timeout=30):
         return Result.PAID, {"http": 403}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1"]))
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None, dry_run=True)
+        registry, tmp_path, now=1_000_000_000, sleep=lambda s: None, dry_run=True)
     fetch_all_fn()
 
     # Pre-existing state untouched
@@ -506,12 +532,12 @@ def test_junk_provider_degrades_to_empty_roster(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1"]))
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        registry, tmp_path, now=1_000_000_000, sleep=lambda s: None)
     # Must not crash with AttributeError
     results, _ = fetch_all_fn()
     # Degraded roster
@@ -536,12 +562,12 @@ def test_junk_model_entry_excluded(monkeypatch, tmp_path):
         return Result.DEFER, {"http": 429}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1", "m2"]))
+    registry = _bai_only_providers(["m1", "m2"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1", "m2"]))
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        registry, tmp_path, now=1_000_000_000, sleep=lambda s: None)
     # Must not crash
     results, _ = fetch_all_fn()
     # m2 free, m1 excluded (junk entry untouched by DEFER)
@@ -565,8 +591,8 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
     clock = {"t": 0}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
-        [f"m{i}" for i in range(10)]))
+    registry = _bai_only_providers(
+        [f"m{i}" for i in range(10)])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(
                             [f"m{i}" for i in range(10)]))
@@ -579,7 +605,7 @@ def test_probe_phase_budget_caps_probes(monkeypatch, tmp_path):
     monkeypatch.setattr(im, "monotonic", advancing_monotonic)
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        registry, tmp_path, now=1_000_000_000, sleep=lambda s: None)
     results, _ = fetch_all_fn()
 
     # Budget 260s, 30s per probe. The budget check fires BEFORE each probe
@@ -610,14 +636,14 @@ def test_probe_phase_budget_skipped_providers_logged(monkeypatch, tmp_path,
     monkeypatch.setattr(im, "monotonic", advancing_monotonic)
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
-        [f"m{i}" for i in range(5)]))
+    registry = _bai_only_providers(
+        [f"m{i}" for i in range(5)])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(
                             [f"m{i}" for i in range(5)]))
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        registry, tmp_path, now=1_000_000_000, sleep=lambda s: None)
     fetch_all_fn()
 
     # 120s per probe: probe 1 at elapsed=120 < 260 fires, probe 2 at
@@ -718,11 +744,11 @@ def test_full_47_model_pass_clears_one_tick(monkeypatch, tmp_path):
 
     ids = [f"free-model-{i}" for i in range(47)]
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(ids))
+    registry = _bai_only_providers(ids)
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(ids))
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=fake_sleep)
+        registry, tmp_path, now=1_000_000_000, sleep=fake_sleep)
     results, _ = fetch_all_fn()
 
     # Replay the loop arithmetic exactly against the module's own constants:
@@ -793,14 +819,14 @@ def test_probe_phase_budget_truncated_tick_persists_subset(monkeypatch,
     monkeypatch.setattr(im, "monotonic", advancing_monotonic)
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
-        [f"m{i}" for i in range(5)]))
+    registry = _bai_only_providers(
+        [f"m{i}" for i in range(5)])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(
                             [f"m{i}" for i in range(5)]))
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        registry, tmp_path, now=1_000_000_000, sleep=lambda s: None)
     results, _ = fetch_all_fn()
 
     # 100s per probe, budget 260s: probes m0 (elapsed=100 < 260) and m1
@@ -861,14 +887,14 @@ def test_probe_phase_budget_immune_to_wall_clock_jumps(monkeypatch, tmp_path):
     monkeypatch.setattr(im, "monotonic", lambda: clock["t"])
     monkeypatch.setattr(im.time, "time", jumping_wall_time)
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(
-        [f"m{i}" for i in range(10)]))
+    registry = _bai_only_providers(
+        [f"m{i}" for i in range(10)])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(
                             [f"m{i}" for i in range(10)]))
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=fake_sleep)
+        registry, tmp_path, now=1_000_000_000, sleep=fake_sleep)
     results, _ = fetch_all_fn()
 
     # 10 models at 1s probes + 5s spacing = ~55s monotonic — well under the
@@ -888,7 +914,8 @@ def test_save_skip_when_unchanged(monkeypatch, tmp_path):
     the save must be skipped (no redundant atomic write)."""
     state_path = tmp_path / "probe_state.json"
     # Pre-seed with m1 free at 999_000_000
-    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
+    probe_state.save_probe_state(
+        state_path, {"bai": {"m1": {"verdict": "free", "epoch": 999_000_000}}})
 
     write_count = {"n": 0}
     orig_save = probe_state.save_probe_state
@@ -904,13 +931,13 @@ def test_save_skip_when_unchanged(monkeypatch, tmp_path):
         return Result.FREE, {"http": 200}
 
     monkeypatch.setattr(im, "probe_model", fake_probe)
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers(["m1"]))
+    registry = _bai_only_providers(["m1"])
     monkeypatch.setattr(providers, "fetch_provider",
                         _fake_fetch_provider_factory(["m1"]))
 
     # now matches the seeded epoch exactly so entry is byte-identical
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=999_000_000, sleep=lambda s: None)
+        registry, tmp_path, now=999_000_000, sleep=lambda s: None)
     fetch_all_fn()
 
     # When state is unchanged, save_probe_state should not be called
@@ -925,9 +952,10 @@ def test_empty_catalog_skips_drop_missing(monkeypatch, tmp_path):
     """Empty catalog: drop_missing must NOT prune (treat as anomalous fetch).
     P3 minor: explicit assertion of the documented guard."""
     state_path = tmp_path / "probe_state.json"
-    probe_state.record_verdict(state_path, "bai", "m1", "free", 999_000_000)
+    probe_state.save_probe_state(
+        state_path, {"bai": {"m1": {"verdict": "free", "epoch": 999_000_000}}})
 
-    monkeypatch.setattr(im, "PROVIDERS", _bai_only_providers([]))
+    registry = _bai_only_providers([])
 
     def fake_fetch_provider(config, getter=None):
         if config.get("detection") == "zero-credit-probe":
@@ -937,7 +965,7 @@ def test_empty_catalog_skips_drop_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(providers, "fetch_provider", fake_fetch_provider)
 
     fetch_all_fn = im.build_fetch_all(
-        {}, tmp_path, now=1_000_000_000, sleep=lambda s: None)
+        registry, tmp_path, now=1_000_000_000, sleep=lambda s: None)
     results, _ = fetch_all_fn()
 
     # roster is [] for this provider, state NOT pruned

@@ -1,0 +1,13 @@
+{
+  "name": "AI/ML API",
+  "base_url": "https://api.aimlapi.com/v1",
+  "catalog_url": "https://api.aimlapi.com/v1/models?include=pricing,modalities&type=openai/chat-completions",
+  "catalog_format": "typed-unit-models",
+  "detection": "catalog-pricing",
+  "display": 11,
+  "signup_url": "https://aimlapi.com/app/sign-up",
+  "limits_note": "General free tier paused; no qualifying fixed-zero Chat Completions quote in the 2026-11-22 capture. Variable-priced stealth campaigns are a monitoring blind spot and may need separate terms review; zero unit placeholders on a variable block are not a free quote. The dated Crouton preview prose and the contradicting 'no longer served' page are unresolved and establish no current free, paid, callable or retired verdict. Numeric account/inference quotas are unpublished and catalogue headers are not inference limits. Monitoring needs no key, funding or completion (as of 2026-11-22).",
+  "auth": {
+    "method": "none"
+  }
+}

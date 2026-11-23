@@ -1,38 +1,11 @@
 """Persisted zero-credit probe verdicts. Stdlib only.
 
-Atomic write pattern mirrors state.py: temp file + os.replace.
-Corrupt file degrades to {} (never fatal).
-DEFER never recorded as a verdict — only 'free'/'paid' strings are valid.
+Atomic writes and tolerant loads reuse state.py's primitives: temp file +
+os.replace, and a corrupt file degrades to {} (never fatal).
+DEFER is never stored as a verdict — only 'free'/'paid' strings are valid.
 """
 
-import json
-import math
-import os
-import threading
-
-
-# ---------- generic atomic write ----------
-
-def _atomic_write_json(path, data):
-    """Atomic write using temp file + os.replace (same pattern as state.py)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Unique per process + thread to avoid temp file collision races
-    tmp = path.with_name(
-        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
-    os.replace(tmp, path)  # atomic rename on local ext4
-
-
-def _load_json_or_default(path, default):
-    """Load JSON or return default on any error (corrupt, missing, etc.)."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, json.JSONDecodeError, RecursionError):
-        return default
-    return data
+from state import _atomic_write_json, _is_finite_number, _load_json_or_default
 
 
 # ---------- public API ----------
@@ -41,31 +14,6 @@ def load_probe_state(path):
     """Parsed probe state dict, or {} if missing/corrupt/not-a-dict."""
     data = _load_json_or_default(path, {})
     return data if isinstance(data, dict) else {}
-
-
-def record_verdict(path, provider, model_id, verdict, now, defer_epoch=None):
-    """Record one verdict atomically. verdict is 'free' or 'paid'.
-    
-    A defer_epoch may ride along when the verdict came from a tick where
-    other models deferred, but DEFER itself must NEVER overwrite a verdict
-    — pass verdict + defer_epoch from the same probe response.
-    
-    Raises ValueError if verdict is not 'free' or 'paid'.
-    """
-    if verdict not in ("free", "paid"):
-        raise ValueError(f"verdict must be 'free' or 'paid', got {verdict!r}")
-
-    state = load_probe_state(path)
-
-    if not isinstance(state.get(provider), dict):
-        state[provider] = {}
-
-    entry = {"verdict": verdict, "epoch": int(now)}
-    if defer_epoch is not None:
-        entry["defer_epoch"] = int(defer_epoch)
-
-    state[provider][model_id] = entry
-    _atomic_write_json(path, state)
 
 
 def save_probe_state(path, state):
@@ -99,14 +47,13 @@ def get_verdict(state, provider, model_id):
     if verdict not in ("free", "paid"):
         return None, None
 
-    # Validate epoch at the read boundary (mirror state.py load_alive):
+    # Validate epoch at the read boundary (shared state._is_finite_number):
     # non-numeric/bool/non-finite junk from a hand-edited file reads as
     # absent so it never reaches callers.
-    if isinstance(epoch, bool) or not isinstance(epoch, (int, float)) \
-            or not math.isfinite(epoch):
-        epoch = None
-    else:
+    if _is_finite_number(epoch):
         epoch = int(epoch)
+    else:
+        epoch = None
 
     return verdict, epoch
 

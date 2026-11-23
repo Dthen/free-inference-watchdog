@@ -4,7 +4,7 @@ Six unparametrized groups:
 
 1. ``test_typed_registration_discovery_contract`` builds the factory with a
    source double that fails if acquired and a clock that fails if read. It
-   discovers exactly the five reviewed names/descriptions/order, normalizes the
+   discovers exactly the three reviewed names/descriptions/order, normalizes the
    SDK's ACTUALLY advertised input schemas against the packaged ``tools.json``
    oracle, compares every advertised TOOL and PARAMETER description with the
    reviewed string by exact equality (separately from that structural
@@ -56,15 +56,19 @@ Six unparametrized groups:
    producer/config/state graph before the package imports and reports the
    child's real import origins, with a positive control showing the blocker
    raises and the package resolves to this tree in that same environment.
-   Initialize/initialized and tools/list are observable on the wire; all five
+   Initialize/initialized and tools/list are observable on the wire; all three
    tools, their reviewed descriptions and their SDK-advertised schemas are
    discovered, every tool is called and each decoded payload (text JSON, plus
    ``structured_content`` when present) is compared with the accepted pure core
-   plus source provenance. Invalid originals -- extras, absent/null/blank
-   lookups, wrong types, numeric strings/bools/fractions, page bounds, unsafe
-   integers and encoded-list strings -- are transmitted verbatim, rejected over
-   the wire, and followed by a still-usable session. The exact raw stdout bytes
-   of the whole session are retained and audited as protocol-only JSON-RPC, and
+   plus source provenance. The valid and invalid originals are REPRESENTATIVE
+   protocol probes, never a second semantic matrix: one callable route per
+   tool, a combined-filter search and a JSON-looking query string stay literal
+   on the wire, while unknown arguments, an absent required lookup, wrong
+   container types and bool/string-versus-collection noncoercion are
+   transmitted verbatim, rejected over the wire, and followed by a usable
+   session. The complete typed argument matrix belongs to the direct SDK group
+   above. The exact raw stdout bytes of the whole session are retained and
+   audited as protocol-only JSON-RPC, and
    stdin is closed so the child exits naturally with status 0. Every dynamic age
    is checked against the CALLER's own wall-clock bracket around that request,
    and the status wrapper's ``last_tick_age_s`` is an independently validated
@@ -293,7 +297,7 @@ def test_typed_registration_discovery_contract():
     tools = asyncio.run(server.list_tools())
 
     assert [tool.name for tool in tools] == names, (
-        "the five reviewed tools, in the reviewed order")
+        "the three reviewed tools, in the reviewed order")
     by_name = {tool.name: tool for tool in tools}
     described = set()
     for entry in contract:
@@ -316,7 +320,9 @@ def test_typed_registration_discovery_contract():
             f"{tool.name} pins a static provider enum instead of the snapshot")
         provider = tool.input_schema["properties"].get("provider")
         if provider is not None:
-            assert _canonical(provider)["type"] == ["null", "string"], (
+            expected_provider_type = ("string" if tool.name == "get_model"
+                                      else ["null", "string"])
+            assert _canonical(provider)["type"] == expected_provider_type, (
                 f"{tool.name}: provider stays a literal string, never an enum")
 
     reviewed_parameters_set = {(entry["name"], name) for entry in contract
@@ -335,7 +341,7 @@ def test_typed_registration_discovery_contract():
     assert search.get("required", []) == [], "absent required means []"
     assert search["additionalProperties"] is False
     assert _canonical(search["properties"]["limit"]) == {
-        "type": "integer", "minimum": 1, "maximum": 200, "default": 50}
+        "type": "integer", "minimum": 1, "maximum": 200, "default": 5}
     assert search["properties"]["offset"]["default"] == 0
     assert search["properties"]["offset"]["minimum"] == 0
     assert search["properties"]["offset"]["maximum"] == MAX_SAFE_INT
@@ -346,7 +352,8 @@ def test_typed_registration_discovery_contract():
         "type": ["array", "null"], "default": None,
         "items": {"type": "string", "minLength": 1}}
     lookup = by_name["get_model"].input_schema
-    assert lookup["required"] == ["model_id"]
+    assert lookup["required"] == ["provider", "model_id"]
+    assert _canonical(lookup["properties"]["provider"])["type"] == "string"
     assert lookup["properties"]["model_id"]["pattern"] == MODEL_ID_PATTERN
     for tool in tools:
         assert tool.input_schema["additionalProperties"] is False, (
@@ -514,16 +521,11 @@ def _expected(core, arguments, **kwargs):
 
 
 VALID_ROWS = [
-    ("list_free_models", {}, query.list_free_models),
-    ("list_free_models", {"provider": "synthetic-a"}, query.list_free_models),
-    ("list_free_models", {"provider": "synthetic-b"}, query.list_free_models),
-    ("list_free_models", {"provider": ""}, query.list_free_models),
-    ("list_endpoints", {}, query.list_endpoints),
-    ("list_endpoints", {"provider": "synthetic-b"}, query.list_endpoints),
-    ("get_model", {"model_id": "alpha-1:free"}, query.get_model),
-    ("get_model", {"model_id": "alpha-1"}, query.get_model),
-    ("get_model", {"model_id": "null"}, query.get_model),
-    ("get_model", {"model_id": "\u00a0"}, query.get_model),
+    ("get_model", {"provider": "synthetic-a", "model_id": "alpha-1:free"}, query.get_model),
+    ("get_model", {"provider": "synthetic-z", "model_id": "alpha-1:free"}, query.get_model),
+    ("get_model", {"provider": "synthetic-a", "model_id": "alpha-1"}, query.get_model),
+    ("get_model", {"provider": "synthetic-a", "model_id": "null"}, query.get_model),
+    ("get_model", {"provider": "synthetic-a", "model_id": "\u00a0"}, query.get_model),
     ("search_models", {}, query.search_models),
     ("search_models", {"query": ""}, query.search_models),
     ("search_models", {"query": "  "}, query.search_models),
@@ -558,25 +560,17 @@ VALID_ROWS = [
 ]
 
 INVALID_ROWS = {
-    "list_free_models": [
-        {"provider": 3},
-        {"provider": []},
-        {"provider": None, "bogus": 1},
-        {"bogus": 1},
-    ],
     "get_model": [
         {},
-        {"model_id": None},
-        {"model_id": 3},
-        {"model_id": ["alpha"]},
-        {"model_id": ""},
-        {"model_id": " \t\n\r\v\f"},
-        {"model_id": "alpha-1", "bogus": 1},
-    ],
-    "list_endpoints": [
-        {"provider": 1.5},
-        {"provider": {}},
-        {"bogus": 1},
+        {"provider": "synthetic-a"},
+        {"provider": None, "model_id": "alpha-1:free"},
+        {"provider": 3, "model_id": "alpha-1:free"},
+        {"provider": "synthetic-a", "model_id": None},
+        {"provider": "synthetic-a", "model_id": 3},
+        {"provider": "synthetic-a", "model_id": ["alpha"]},
+        {"provider": "synthetic-a", "model_id": ""},
+        {"provider": "synthetic-a", "model_id": " \t\n\r\v\f"},
+        {"provider": "synthetic-a", "model_id": "alpha-1", "bogus": 1},
     ],
     "watchdog_status": [
         {"now": STATUS_NOW},
@@ -637,11 +631,11 @@ async def _direct_calls():
     # Exactly one acquisition's provenance, detached: mutating a result cannot
     # reach the double's retained acquisition.
     before = source.calls
-    mutated = await _payload(server, "get_model", {"model_id": "alpha-1:free"})
+    mutated = await _payload(server, "get_model", {"provider": "synthetic-a", "model_id": "alpha-1:free"})
     mutated["source"]["warnings"].append("forged")
-    mutated["endpoints"].clear()
-    fresh = await _payload(server, "get_model", {"model_id": "alpha-1:free"})
-    assert fresh == _expected(query.get_model, {"model_id": "alpha-1:free"})
+    mutated["endpoint"]["input_modalities"].append("forged")
+    fresh = await _payload(server, "get_model", {"provider": "synthetic-a", "model_id": "alpha-1:free"})
+    assert fresh == _expected(query.get_model, {"provider": "synthetic-a", "model_id": "alpha-1:free"})
     assert source.calls == before + 2
 
     # Schema-invalid originals never reach the source seam.
@@ -704,9 +698,9 @@ async def _real_source(workspace):
     server = create_server(owner, wall_clock=lambda: STATUS_NOW)
 
     snapshot = catalog.load_snapshot(fixture.read_text(encoding="utf-8"))
-    lookup = await _payload(server, "get_model", {"model_id": "alpha-1:free"})
+    lookup = await _payload(server, "get_model", {"provider": "synthetic-a", "model_id": "alpha-1:free"})
     assert {key: value for key, value in lookup.items() if key != "source"} == (
-        query.get_model(snapshot, {"model_id": "alpha-1:free"}))
+        query.get_model(snapshot, {"provider": "synthetic-a", "model_id": "alpha-1:free"}))
     assert lookup["source"]["mode"] == "file"
     assert lookup["source"]["cached"] is False
     assert lookup["source"]["not_modified"] is False
@@ -1839,91 +1833,37 @@ def _assert_child_origin(child, report_path):
     return report
 
 
-#: Request rows exercised over the wire; every one is compared with the accepted
-#: pure core over the same validated fixture snapshot.
+#: Representative wire rows: one callable route per tool, a combined-filter
+#: search that carries every accepted argument, and a valid query string that
+#: LOOKS like encoded JSON and must stay a literal string on the wire. The
+#: argument-value and semantic matrix belongs to the direct SDK group; every
+#: row here is still compared with the accepted pure core over the same
+#: validated fixture snapshot.
 WIRE_VALID_ROWS = (
-    ("list_free_models", {}, query.list_free_models),
-    ("list_free_models", {"provider": "synthetic-a"}, query.list_free_models),
-    ("list_free_models", {"provider": "synthetic-b"}, query.list_free_models),
-    ("list_endpoints", {}, query.list_endpoints),
-    ("list_endpoints", {"provider": "synthetic-b"}, query.list_endpoints),
-    ("get_model", {"model_id": "alpha-1:free"}, query.get_model),
-    ("get_model", {"model_id": "alpha-1"}, query.get_model),
-    ("get_model", {"model_id": "null"}, query.get_model),
-    ("search_models", {}, query.search_models),
-    # valid strings that LOOK like encoded JSON must stay literal strings
-    ("search_models", {"query": "null"}, query.search_models),
-    ("search_models", {"query": "[]"}, query.search_models),
+    ("get_model", {"provider": "synthetic-a", "model_id": "alpha-1:free"}, query.get_model),
     ("search_models", {"query": '["text"]'}, query.search_models),
-    ("search_models", {"provider": "synthetic-a"}, query.search_models),
-    ("search_models", {"provider": "null"}, query.search_models),
-    ("search_models", {"input_modalities": []}, query.search_models),
-    ("search_models", {"supported_parameters": ["temperature"]},
-     query.search_models),
     ("search_models", {"query": "alpha", "provider": "synthetic-a",
                        "min_context_length": 8000,
                        "input_modalities": ["text"],
                        "supported_parameters": ["temperature"],
                        "limit": 1, "offset": 0}, query.search_models),
-    ("search_models", {"limit": 1, "offset": 1}, query.search_models),
-    ("search_models", {"limit": 200}, query.search_models),
-    ("search_models", {"provider": "unknown-gateway"}, query.search_models),
-    ("search_models", {"query": "definitely-absent"}, query.search_models),
     ("watchdog_status", {}, query.watchdog_status),
 )
 
-#: Invalid originals, all finite JSON values. Every row must be rejected over the
-#: wire AND appear verbatim (type included) in the recorded outbound frame.
+#: Representative invalid originals, all finite JSON values: unknown arguments
+#: (including on the zero-argument status tool), a required lookup absent and
+#: explicitly null, a wrong container type, and noncoercion -- a bool is not an
+#: integer, a numeric string is not an integer, an encoded-list STRING is not a
+#: list. Every row must be rejected over the wire AND appear verbatim (type
+#: included) in the recorded outbound frame; the full matrix stays direct.
 WIRE_INVALID_ROWS = (
-    # unknown arguments, including on the zero-argument status tool
-    ("watchdog_status", {"now": STATUS_NOW}),
     ("watchdog_status", {"x": 1}),
-    ("list_free_models", {"bogus": 1}),
-    ("list_endpoints", {"provider": None, "x": 0}),
-    ("get_model", {"model_id": "alpha-1", "bogus": 1}),
-    ("search_models", {"bogus": 1}),
-    # required lookup absent, null, empty and ASCII blank
     ("get_model", {}),
-    ("get_model", {"model_id": None}),
-    ("get_model", {"model_id": ""}),
-    ("get_model", {"model_id": " \t\n\r\v\f"}),
-    # wrong scalar/container types for string and array parameters
-    ("list_free_models", {"provider": 3}),
-    ("list_free_models", {"provider": []}),
-    ("list_endpoints", {"provider": 1.5}),
-    ("list_endpoints", {"provider": {}}),
-    ("get_model", {"model_id": 3}),
-    ("get_model", {"model_id": ["alpha"]}),
-    ("search_models", {"query": 1}),
-    ("search_models", {"query": ["text"]}),
-    ("search_models", {"provider": 3}),
-    # numeric strings, bools and fractions are not integers
-    ("search_models", {"limit": "5"}),
+    ("get_model", {"provider": "synthetic-a"}),
+    ("search_models", {"bogus": 1}),
     ("search_models", {"limit": True}),
-    ("search_models", {"limit": 5.5}),
-    ("search_models", {"min_context_length": "5"}),
-    ("search_models", {"min_context_length": True}),
-    ("search_models", {"min_context_length": 1.5}),
-    ("search_models", {"offset": "0"}),
-    ("search_models", {"offset": False}),
-    ("search_models", {"offset": 2.5}),
-    # page size: zero, above the cap and explicit null
-    ("search_models", {"limit": 0}),
-    ("search_models", {"limit": 201}),
-    ("search_models", {"limit": None}),
-    # unsafe per-page integers
-    ("search_models", {"min_context_length": -1}),
-    ("search_models", {"min_context_length": MAX_SAFE_INT + 1}),
-    ("search_models", {"offset": -1}),
-    ("search_models", {"offset": MAX_SAFE_INT + 1}),
-    # an encoded-list STRING is not a genuine list
+    ("search_models", {"limit": "5"}),
     ("search_models", {"input_modalities": "[]"}),
-    ("search_models", {"input_modalities": '["text"]'}),
-    ("search_models", {"supported_parameters": "[]"}),
-    ("search_models", {"input_modalities": [""]}),
-    ("search_models", {"input_modalities": ["text", 3]}),
-    ("search_models", {"supported_parameters": [""]}),
-    ("search_models", {"supported_parameters": [1]}),
 )
 
 
@@ -1965,10 +1905,10 @@ async def _file_stdio_session(child):
         # nullability, item types, numeric bounds and unknown-argument policy are
         # not taken only from the tools.json oracle.
         by_name = {tool.name: tool.input_schema for tool in listed.tools}
-        assert set(by_name) == set(names) and len(listed.tools) == 5
+        assert set(by_name) == set(names) and len(listed.tools) == 3
         search_schema = by_name["search_models"]
         assert search_schema.get("required", []) == []
-        assert search_schema["properties"]["limit"]["default"] == 50
+        assert search_schema["properties"]["limit"]["default"] == 5
         assert search_schema["properties"]["limit"]["minimum"] == 1
         assert search_schema["properties"]["limit"]["maximum"] == 200
         assert search_schema["properties"]["offset"]["default"] == 0
@@ -1982,7 +1922,9 @@ async def _file_stdio_session(child):
             "type": ["array", "null"], "default": None,
             "items": {"type": "string", "minLength": 1}}
         lookup_schema = by_name["get_model"]
-        assert lookup_schema["required"] == ["model_id"]
+        assert lookup_schema["required"] == ["provider", "model_id"]
+        assert _canonical(
+            lookup_schema["properties"]["provider"])["type"] == "string"
         assert lookup_schema["properties"]["model_id"]["pattern"] == (
             MODEL_ID_PATTERN)
         assert by_name["watchdog_status"]["properties"] == {}
@@ -2012,31 +1954,6 @@ async def _file_stdio_session(child):
                 payload, core, arguments, low=call_low, high=call_high,
                 source_epoch=source_epoch, label=label)
 
-        # Integral floats are preserved as ORIGINALS: they travel as JSON
-        # numbers with a fraction and the core's literal filter echo keeps the
-        # float, while the page integers normalise to ints.
-        label = "search_models integral floats"
-        result, float_low, float_high = await _call_with_bracket(
-            child, session, "search_models",
-            {"min_context_length": 1.0, "offset": 0.0, "limit": 1.0})
-        payload = _decoded_payload(result, label)
-        sent = json.loads(child.stdin_lines[-1].decode("utf-8"))["params"][
-            "arguments"]
-        assert type(sent["min_context_length"]) is float, sent
-        assert type(sent["offset"]) is float, sent
-        source = payload.pop("source")
-        source_epoch = _assert_provenance(
-            source, mode="file", url=None, cached=True, fetched_at=fetched_at,
-            low=float_low, high=float_high, warnings=["tick_stale"])
-        assert type(payload["filters"]["min_context_length"]) is float, (
-            "the raw filter echo was coerced to an integer")
-        assert payload["filters"]["min_context_length"] == 1.0
-        _assert_core_payload(
-            payload, query.search_models,
-            {"min_context_length": 1.0, "offset": 0.0, "limit": 1.0},
-            low=float_low, high=float_high, source_epoch=source_epoch,
-            label=label)
-
         # Every invalid original goes OVER the wire and is rejected there; the
         # session then still serves a valid request.
         for tool_name, arguments in WIRE_INVALID_ROWS:
@@ -2053,14 +1970,14 @@ async def _file_stdio_session(child):
             await _wire_call(child, session, "watchdog_status_typo", {}),
             "unknown tool name")
         result, final_low, final_high = await _call_with_bracket(
-            child, session, "get_model", {"model_id": "alpha-1:free"})
+            child, session, "get_model", {"provider": "synthetic-a", "model_id": "alpha-1:free"})
         final = _decoded_payload(result, "final valid call")
         source = final.pop("source")
         source_epoch = _assert_provenance(
             source, mode="file", url=None, cached=True, fetched_at=fetched_at,
             low=final_low, high=final_high, warnings=["tick_stale"])
         _assert_core_payload(
-            final, query.get_model, {"model_id": "alpha-1:free"},
+            final, query.get_model, {"provider": "synthetic-a", "model_id": "alpha-1:free"},
             low=final_low, high=final_high, source_epoch=source_epoch,
             label="final valid call")
 
@@ -2275,11 +2192,11 @@ class _LoopbackFeed:
         self._thread.join(10)
 
 
-#: The five-tool semantic sweep against a URL source.
-URL_VALID_ROWS = (
-    ("get_model", {"model_id": "alpha-1:free"}, query.get_model),
-    ("list_free_models", {}, query.list_free_models),
-    ("list_endpoints", {"provider": "synthetic-b"}, query.list_endpoints),
+#: The representative cached rows for a URL owner window: one query and the
+#: status/time boundary. The URL sessions own lazy acquisition, the cache
+#: window, last-good restart and source-versus-empty semantics; the tool
+#: argument matrix belongs to the direct SDK group and the file wire above.
+URL_CACHED_ROWS = (
     ("search_models", {"query": "alpha", "limit": 1, "offset": 0},
      query.search_models),
     ("watchdog_status", {}, query.watchdog_status),
@@ -2301,7 +2218,7 @@ async def _first_url_stdio_session(child, feed):
             "startup or tool discovery fetched the feed: %r" % (feed.requests,))
 
         result, first_low, first_high = await _call_with_bracket(
-            child, session, "get_model", {"model_id": "alpha-1:free"})
+            child, session, "get_model", {"provider": "synthetic-a", "model_id": "alpha-1:free"})
         first = _decoded_payload(result, "first acquisition")
         assert feed.requests == ["/catalog.json"], feed.requests
         source = first.pop("source")
@@ -2314,11 +2231,11 @@ async def _first_url_stdio_session(child, feed):
             fetched_at=fetched_at, low=first_low, high=first_high,
             warnings=["tick_stale"])
         _assert_core_payload(
-            first, query.get_model, {"model_id": "alpha-1:free"},
+            first, query.get_model, {"provider": "synthetic-a", "model_id": "alpha-1:free"},
             low=first_low, high=first_high, source_epoch=source_epoch,
             label="first acquisition")
 
-        for tool_name, arguments, core in URL_VALID_ROWS:
+        for tool_name, arguments, core in URL_CACHED_ROWS:
             label = f"{tool_name}({arguments!r})"
             result, call_low, call_high = await _call_with_bracket(
                 child, session, tool_name, arguments)
@@ -2328,6 +2245,8 @@ async def _first_url_stdio_session(child, feed):
                 source, mode="url", url=feed.url, cached=True,
                 fetched_at=fetched_at, low=call_low, high=call_high,
                 warnings=["tick_stale"])
+            assert source["observation_age_s"] > 300, (
+                "a fresh download must not imply a fresh observation tick")
             _assert_core_payload(
                 payload, core, arguments, low=call_low, high=call_high,
                 source_epoch=source_epoch, label=label)
@@ -2365,34 +2284,35 @@ async def _first_url_stdio_session(child, feed):
 
 async def _offline_url_stdio_session(child, fetched_at, warnings):
     """A fresh process must fail its refresh yet serve the validated last-good."""
-    observed_source = None
     async with child.session() as session:
         init = await session.initialize()
         assert init.server_info.name == SERVER_IDENTITY
         assert init.protocol_version in SUPPORTED_HANDSHAKE_VERSIONS
         await session.list_tools()
-        for tool_name, arguments, core in URL_VALID_ROWS:
+        # The same representative cached rows: this session owns the lazy
+        # last-good restart, the preserved persisted fetch time and the explicit
+        # source-versus-empty distinction.
+        for tool_name, arguments, core in URL_CACHED_ROWS:
             label = f"offline {tool_name}({arguments!r})"
             result, call_low, call_high = await _call_with_bracket(
                 child, session, tool_name, arguments)
             payload = _decoded_payload(result, label)
             source = payload.pop("source")
-            observed_source = source
             source_epoch = _assert_provenance(
                 source, mode="url", url=child.url, cached=True,
                 fetched_at=fetched_at, low=call_low, high=call_high,
                 warnings=warnings)
+            # The validated last-good snapshot is served verbatim.
             assert payload["snapshot_id"] == SNAPSHOT["snapshot_id"], label
             assert payload["tick_epoch"] == SNAPSHOT["tick_epoch"], label
+            # Retrieval and observation stay separate: a failed refresh
+            # preserves the original fetch time, and the old fixture tick is
+            # never made fresh.
+            assert source["fetch_age_s"] >= 0, label
+            assert source["observation_age_s"] > 300, label
             _assert_core_payload(
                 payload, core, arguments, low=call_low, high=call_high,
                 source_epoch=source_epoch, label=label)
-
-        # Retrieval and observation stay separate: a failed refresh preserves the
-        # original fetch time, and the old fixture tick is never made fresh.
-        assert observed_source["fetch_age_s"] >= 0
-        assert observed_source["observation_age_s"] > 300, (
-            "a fresh download must not imply a fresh observation tick")
 
         # A legitimate empty query on a VALID last-good snapshot is not a source
         # error.
@@ -2413,9 +2333,7 @@ async def _unavailable_stdio_session(child):
         assert init.server_info.name == SERVER_IDENTITY
         await session.list_tools()
         for tool_name, arguments in (
-                ("list_free_models", {}),
-                ("get_model", {"model_id": "alpha-1:free"}),
-                ("list_endpoints", {}),
+                ("get_model", {"provider": "synthetic-a", "model_id": "alpha-1:free"}),
                 ("watchdog_status", {}),
                 ("search_models", {})):
             label = f"unavailable {tool_name}"

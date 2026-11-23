@@ -1,0 +1,11 @@
+{
+  "name": "Infron",
+  "base_url": "https://llm.onerouter.pro/v1",
+  "catalog_url": "https://llm.onerouter.pro/v1/models",
+  "catalog_format": "provider-models",
+  "detection": "catalog-pricing",
+  "auth": { "method": "none" },
+  "display": 10,
+  "signup_url": "https://infron.ai/login",
+  "limits_note": "Advertised $0 token prices need an account holding at least $5 under the standard free policy; that balance is an anti-abuse floor and free usage never deducts from it. Standard free models share 1,000 requests/day per account (reset 00:00 UTC) and default per-account rate limits still apply; numeric RPM/TPM/concurrency are unpublished and a zero price is not an allowance. Special promotions may carry different balance/quota terms; the July 2026 uncapped promotion is historical, not current access. Free variants are served from a shared public pool with no SLA, and default routing balances price against uptime/throughput/latency rather than always choosing the cheapest provider, so only a wholly zero-priced provider set is tracked. Monitoring needs no key, funding, completion or routing header (as of 2026-11-22)."
+}

@@ -21,7 +21,7 @@
  *     two inert JSON islands `#catalog-data` / `#tool-contract`.
  *   * `catalog` — the shared query engine, i.e. the accepted
  *     `web/catalog-query.js` export (`globalThis.WatchdogCatalog` by default).
- *     It supplies the strict raw loader, the snapshot seal check and the five
+ *     It supplies the strict raw loader, the snapshot seal check and the three
  *     real query functions. The adapter never re-implements any of them.
  *   * `clock` — the wrapper-owned reference-time source for `watchdog_status`,
  *     returning epoch seconds. Default: whole-second wall time
@@ -151,10 +151,9 @@
  * OUTPUT SIZE: the current security guidance RECOMMENDS ~1.5K characters per
  * tool output; it is not a protocol cap. This adapter therefore NEVER truncates,
  * drops metadata, shortens an array or invents pagination to fit that
- * recommendation. `list_free_models` and `list_endpoints` are explicit bulk
- * exports and can legitimately exceed it; routine lookups belong in
- * `search_models` with a small `limit`. Oversized bulk output is a documented
- * usability limitation, not a hidden hard-cap violation.
+ * recommendation. Routine lookups belong in `search_models` with an explicit
+ * small `limit` (1-5) and then `get_model` for detail; `limit` bounds rows,
+ * never serialized characters.
  *
  * DESCRIPTOR PROVENANCE: names, descriptions and complete nested input schemas
  * are taken from the embedded `tool-contract` island (the shipped
@@ -178,23 +177,19 @@
 
   // ---------- the published shared contract identity ----------------------
   //
-  // The five tool names are the ONE piece of fixed knowledge this adapter
-  // carries: they bind the shared resource to the five real query functions.
+  // The three tool names are the ONE piece of fixed knowledge this adapter
+  // carries: they bind the shared resource to the three real query functions.
   // Every schema detail still comes from the embedded contract.
 
   var TOOL_NAMES = Object.freeze([
-    "list_free_models",
     "get_model",
-    "list_endpoints",
     "watchdog_status",
     "search_models"
   ]);
 
   /** Shared-contract tool name -> the accepted core function name. */
   var CORE_FUNCTIONS = Object.freeze({
-    list_free_models: "listFreeModels",
     get_model: "getModel",
-    list_endpoints: "listEndpoints",
     watchdog_status: "watchdogStatus",
     search_models: "searchModels"
   });
@@ -384,7 +379,7 @@
   }
 
   /**
-   * Shared-engine availability: the five real query functions, the two strict
+   * Shared-engine availability: the three real query functions, the two strict
    * loaders and the typed canonical encoder must exist.
    *
    * The adapter has no query and no encoder of its own: a missing engine member
@@ -419,7 +414,7 @@
   /**
    * Validate the parsed `tool-contract` resource structurally.
    *
-   * Returns null when the contract is exactly the five known tools with
+   * Returns null when the contract is exactly the three known tools with
    * unique names, usable descriptions and object-typed input schemas whose
    * required/declared properties agree and whose `additionalProperties` is a
    * boolean. Any fault aborts setup BEFORE registration: nothing is repaired,
@@ -529,7 +524,7 @@
    * serializer: the integer/float TOKEN distinction survives (`1.0` stays
    * `1.0`), the engine's internal float wrapper is never rendered, and the text
    * is pure ASCII. No length cap, no truncation and no re-pagination happens
-   * here — an oversized bulk export stays complete.
+   * here — a large search page stays complete.
    */
   function frame(catalog, payload) {
     return catalog.canonicalText(attachSource(payload));
@@ -655,7 +650,7 @@
   }
 
   /**
-   * Register the five shared tools against the loaded page snapshot.
+   * Register the three shared tools against the loaded page snapshot.
    *
    * Resolves — never rejects — with the small result described in the file
    * header, INCLUDING on a duplicate setup of the same document: the owned

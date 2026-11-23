@@ -1,0 +1,11 @@
+{
+  "name": "Felo",
+  "base_url": "https://openapi.felo.ai/api/v1",
+  "catalog_url": "https://openapi.felo.ai/api/platform/model-catalog",
+  "catalog_format": "channel-catalog",
+  "detection": "catalog-pricing",
+  "auth": { "method": "none" },
+  "display": 8,
+  "signup_url": "https://openapi.felo.ai/console/api-keys",
+  "limits_note": "Advertised free chat prices; zero balance is allowed, a negative balance blocks; numeric Model API quotas unpublished; optional cache/tool/service charges may differ; the gateway documents Chat Completions but current admitted models recommend Messages and omit supported_protocols, so per-model protocol compatibility is UNVERIFIED; monitoring needs no key, top-up, completion or routing header; missing fields do not imply model support or unlimited access (as of 2026-11-22)."
+}

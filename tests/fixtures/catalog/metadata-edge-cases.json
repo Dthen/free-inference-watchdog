@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+  "schema_version": 2,
+  "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
   "tick_epoch": 1759200000,
   "cadence_s": 3600,
   "provider_order": [
@@ -34,11 +34,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": 0
-          }
+          ]
         },
         "vendor/unknown-context": {
           "id": "vendor/unknown-context",
@@ -55,8 +51,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": null
+          ]
         },
         "vendor/unknown-description": {
           "id": "vendor/unknown-description",
@@ -73,11 +68,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": null,
-            "completion": null
-          }
+          ]
         },
         "vendor/zero-context": {
           "id": "vendor/zero-context",
@@ -94,11 +85,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": null,
-            "completion": "0"
-          }
+          ]
         }
       },
       "stale": false

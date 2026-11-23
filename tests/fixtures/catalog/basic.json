@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "snapshot_id": "4eafc72800506567368805dad7f6f354d87dc06049efd4d3902d8873198ea389",
+  "schema_version": 2,
+  "snapshot_id": "0c9a988d7d8f2803f323635e4083672de0396e789e7324d3830ce712d79a6ead",
   "tick_epoch": 1759200000,
   "cadence_s": 3600,
   "provider_order": [
@@ -33,11 +33,7 @@
           "supported_parameters": [
             "temperature",
             "max_tokens"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "alpha-2-free": {
           "id": "alpha-2-free",
@@ -54,11 +50,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         }
       },
       "stale": false

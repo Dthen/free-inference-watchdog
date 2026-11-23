@@ -1,410 +1,154 @@
 {
-  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone and never generated from an implementation. Unit 1b freezes the get_model exact-ID and marker-lookup cases against lookup.json (oracle case 1 scenario); later units append their own cases to 'cases'. The envelope-freeze correction froze the successful PURE get_model payload: the top-level field set (including provider_staleness), the endpoint field set and the counts cardinalities (exact_matches, endpoints, distinct_raw_ids, marker_group_labels) are final. Counts describe the returned lookup result only. The shared-ID correction gives the two providers tracking vendor/shared intentionally conflicting, valid per-provider metadata (synthetic-a: large text-only context; synthetic-b: image input with a smaller context) so that metadata attachment by (provider, raw model_id) is testable; every snapshot_id was recomputed from the lookup.json fixture body. Unit 1c-a appends four metadata edge-case goldens against metadata-edge-cases.json (unknown-context / known-context / zero-context / unknown-description, plus a stale zero-ID second provider), each with a complete literal payload whose snapshot_id is the real canonical hash of that fixture body. Unit 1c-b1 appends two capability goldens against capability-unknown.json (an all-null-capability model and a known-empty-lists model, plus a stale zero-ID second provider); the two ids are not free-marker variants, so each query returns exactly one endpoint, all four counts are 1, and both payloads preserve the null-versus-empty distinction. Unit 1c-b2 appends twenty-eight search_models goldens across four fixtures (metadata-edge-cases.json, capability-unknown.json, lookup.json and the new search-text.json): literal ASCII-folded substring search, provider-scoped staleness, minimum-context and capability-array AND filtering, a page crossing a provider boundary, exhausted and beyond-end pagination, and the frozen PAGE-scoped counts — each a complete literal payload whose snapshot_id is the real canonical hash of its fixture body. Unit 1c-c appends nine watchdog_status goldens: complete fixed-clock payloads (each with a case-level now epoch, never a tool argument) over capability-unknown.json, metadata-edge-cases.json, lookup.json and the new status-unknown-time.json (tick_epoch null) and status-short-cadence.json (cadence_s 120) — pinning the inclusive one-cadence freshness boundary, the tick_stale / tick_epoch_future / tick_epoch_unknown derivations, whole-catalogue counts, metadata coverage over the tracked-pair denominator, provider staleness independent of tick freshness, and the strictly-null unobservable fields.",
+  "description": "Hand-specified golden cases for the published catalogue tools, written from the contract text alone. Every get_model row pins the exact provider + literal raw-ID lookup, its flat details endpoint and the not_found envelope; every search_models row pins the compact flat page (no description, wiring, metadata, counts, caveats or request echoes), the default limit 5 and the page continuation next_offset. Every snapshot_id is the real canonical hash of its fixture body.",
   "fixture": "lookup.json",
   "cases": [
     {
-      "id": "get_model_marker_base_no_exact",
+      "id": "get_model_not_found_known_provider",
       "tool": "get_model",
-      "args": {"model_id": "vendor/model"},
+      "args": {
+        "provider": "synthetic-a",
+        "model_id": "vendor/model"
+      },
       "expect": {
-        "ok": true,
-        "query": "vendor/model",
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
-        "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
-        },
-        "exact_gateways": [],
-        "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
-        },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/model:free",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/model:free",
-              "name": "Vendor Model",
-              "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          },
-          {
-            "provider": "synthetic-b",
-            "model_id": "vendor/model-free",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/model-free",
-              "name": "Vendor Model Free",
-              "description": "Oracle case 1 beta endpoint: text input only.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 0,
-          "endpoints": 2,
-          "distinct_raw_ids": 2,
-          "marker_group_labels": 1
+        "ok": false,
+        "error": {
+          "code": "not_found",
+          "message": "Model not found."
         }
       }
     },
     {
-      "id": "get_model_exact_id_alpha_with_marker_endpoints",
+      "id": "get_model_exact_id_alpha",
       "tool": "get_model",
-      "args": {"model_id": "vendor/model:free"},
+      "args": {
+        "provider": "synthetic-a",
+        "model_id": "vendor/model:free"
+      },
       "expect": {
         "ok": true,
-        "query": "vendor/model:free",
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": false,
-          "synthetic-c": false
-        },
-        "exact_gateways": [
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/model:free",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/model:free",
-              "name": "Vendor Model",
-              "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          },
-          {
-            "provider": "synthetic-b",
-            "model_id": "vendor/model-free",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/model-free",
-              "name": "Vendor Model Free",
-              "description": "Oracle case 1 beta endpoint: text input only.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 1,
-          "endpoints": 2,
-          "distinct_raw_ids": 2,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/model:free",
+          "name": "Vendor Model",
+          "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
+          "context_length": 131072,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supported_parameters": [
+            "temperature",
+            "max_tokens"
+          ],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
     {
-      "id": "get_model_shared_raw_id_two_endpoints",
+      "id": "get_model_shared_raw_id_alpha",
       "tool": "get_model",
-      "args": {"model_id": "vendor/shared"},
+      "args": {
+        "provider": "synthetic-a",
+        "model_id": "vendor/shared"
+      },
       "expect": {
         "ok": true,
-        "query": "vendor/shared",
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": true,
-          "synthetic-c": false
-        },
-        "exact_gateways": [
-          "synthetic-a",
-          "synthetic-b"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          },
-          {
-            "provider": "synthetic-b",
-            "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "top_p"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 2,
-          "endpoints": 2,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/shared",
+          "name": "Vendor Shared",
+          "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
+          "context_length": 131072,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supported_parameters": [
+            "temperature",
+            "max_tokens"
+          ],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
     {
-      "id": "get_model_unrelated_renamed_model_exact_only",
+      "id": "get_model_renamed_exact_literal",
       "tool": "get_model",
-      "args": {"model_id": "vendor/model-renamed"},
+      "args": {
+        "provider": "synthetic-a",
+        "model_id": "vendor/model-renamed"
+      },
       "expect": {
         "ok": true,
-        "query": "vendor/model-renamed",
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": false,
-          "synthetic-c": false
-        },
-        "exact_gateways": [
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/model-renamed",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/model-renamed",
-              "name": "Vendor Model Renamed",
-              "description": null,
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/model-renamed",
+          "name": "Vendor Model Renamed",
+          "description": null,
+          "context_length": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supported_parameters": [
+            "temperature"
+          ],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
     {
-      "id": "get_model_unknown_id_empty_success",
+      "id": "get_model_unknown_id_not_found",
       "tool": "get_model",
-      "args": {"model_id": "vendor/does-not-exist"},
+      "args": {
+        "provider": "synthetic-a",
+        "model_id": "vendor/does-not-exist"
+      },
       "expect": {
-        "ok": true,
-        "query": "vendor/does-not-exist",
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
-        "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
-        },
-        "exact_gateways": [],
-        "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
-        },
-        "endpoints": [],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
+        "ok": false,
+        "error": {
+          "code": "not_found",
+          "message": "Model not found."
         }
       }
     },
     {
-      "id": "get_model_padded_query_not_trimmed",
+      "id": "get_model_padded_id_literal_not_found",
       "tool": "get_model",
-      "args": {"model_id": " vendor/model"},
+      "args": {
+        "provider": "synthetic-a",
+        "model_id": " vendor/model"
+      },
       "expect": {
-        "ok": true,
-        "query": " vendor/model",
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
-        "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
-        },
-        "exact_gateways": [],
-        "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
-        },
-        "endpoints": [],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
+        "ok": false,
+        "error": {
+          "code": "not_found",
+          "message": "Model not found."
         }
       }
     },
@@ -413,59 +157,33 @@
       "tool": "get_model",
       "fixture": "metadata-edge-cases.json",
       "args": {
+        "provider": "synthetic-a",
         "model_id": "vendor/unknown-context"
       },
       "expect": {
         "ok": true,
-        "query": "vendor/unknown-context",
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": false
-        },
-        "exact_gateways": [
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": true
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/unknown-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/unknown-context",
-              "name": "Vendor Unknown Context",
-              "description": "Synthetic unknown-context scenario: a reasoning model whose context length is not reported.",
-              "context_length": null,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": null
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/unknown-context",
+          "name": "Vendor Unknown Context",
+          "description": "Synthetic unknown-context scenario: a reasoning model whose context length is not reported.",
+          "context_length": null,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supported_parameters": [
+            "temperature"
+          ],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
@@ -474,62 +192,33 @@
       "tool": "get_model",
       "fixture": "metadata-edge-cases.json",
       "args": {
+        "provider": "synthetic-a",
         "model_id": "vendor/known-context"
       },
       "expect": {
         "ok": true,
-        "query": "vendor/known-context",
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": false
-        },
-        "exact_gateways": [
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": true
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/known-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/known-context",
-              "name": "Vendor Known Context",
-              "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": 0
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/known-context",
+          "name": "Vendor Known Context",
+          "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
+          "context_length": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supported_parameters": [
+            "temperature"
+          ],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
@@ -538,62 +227,33 @@
       "tool": "get_model",
       "fixture": "metadata-edge-cases.json",
       "args": {
+        "provider": "synthetic-a",
         "model_id": "vendor/zero-context"
       },
       "expect": {
         "ok": true,
-        "query": "vendor/zero-context",
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": false
-        },
-        "exact_gateways": [
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": true
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/zero-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/zero-context",
-              "name": "Vendor Zero Context",
-              "description": "Synthetic zero-context scenario: a reasoning model reporting a known zero context length.",
-              "context_length": 0,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": null,
-                "completion": "0"
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/zero-context",
+          "name": "Vendor Zero Context",
+          "description": "Synthetic zero-context scenario: a reasoning model reporting a known zero context length.",
+          "context_length": 0,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supported_parameters": [
+            "temperature"
+          ],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
@@ -602,62 +262,33 @@
       "tool": "get_model",
       "fixture": "metadata-edge-cases.json",
       "args": {
+        "provider": "synthetic-a",
         "model_id": "vendor/unknown-description"
       },
       "expect": {
         "ok": true,
-        "query": "vendor/unknown-description",
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": false
-        },
-        "exact_gateways": [
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": true
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/unknown-description",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/unknown-description",
-              "name": "Vendor Unknown Description",
-              "description": null,
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": null,
-                "completion": null
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/unknown-description",
+          "name": "Vendor Unknown Description",
+          "description": null,
+          "context_length": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supported_parameters": [
+            "temperature"
+          ],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
@@ -666,53 +297,27 @@
       "tool": "get_model",
       "fixture": "capability-unknown.json",
       "args": {
+        "provider": "synthetic-a",
         "model_id": "vendor/unknown-capabilities"
       },
       "expect": {
         "ok": true,
-        "query": "vendor/unknown-capabilities",
-        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "snapshot_id": "c3c9b6becd5ae5a8cf1fd02224b0089f14490ed6935fc9e9cace7143bd3477e9",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": false
-        },
-        "exact_gateways": [
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": true
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/unknown-capabilities",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/unknown-capabilities",
-              "name": "Vendor Unknown Capabilities",
-              "description": null,
-              "context_length": null,
-              "architecture": {
-                "input_modalities": null,
-                "output_modalities": null
-              },
-              "supported_parameters": null,
-              "pricing": null
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/unknown-capabilities",
+          "name": "Vendor Unknown Capabilities",
+          "description": null,
+          "context_length": null,
+          "input_modalities": null,
+          "output_modalities": null,
+          "supported_parameters": null,
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
@@ -721,56 +326,27 @@
       "tool": "get_model",
       "fixture": "capability-unknown.json",
       "args": {
+        "provider": "synthetic-a",
         "model_id": "vendor/known-empty-capabilities"
       },
       "expect": {
         "ok": true,
-        "query": "vendor/known-empty-capabilities",
-        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "snapshot_id": "c3c9b6becd5ae5a8cf1fd02224b0089f14490ed6935fc9e9cace7143bd3477e9",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-a": true,
-          "synthetic-b": false
-        },
-        "exact_gateways": [
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": true
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/known-empty-capabilities",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/known-empty-capabilities",
-              "name": "Vendor Known Empty Capabilities",
-              "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
-              "context_length": 0,
-              "architecture": {
-                "input_modalities": [],
-                "output_modalities": []
-              },
-              "supported_parameters": [],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/known-empty-capabilities",
+          "name": "Vendor Known Empty Capabilities",
+          "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
+          "context_length": 0,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supported_parameters": [],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
@@ -783,30 +359,19 @@
       },
       "expect": {
         "ok": true,
-        "query": "reasoning",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 3,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/known-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Known Context",
-            "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
             "context_length": 65536,
             "input_modalities": [
               "text"
@@ -816,38 +381,12 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/known-context",
-              "name": "Vendor Known Context",
-              "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": 0
-              }
-            }
+            ]
           },
           {
             "provider": "synthetic-a",
             "model_id": "vendor/unknown-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Unknown Context",
-            "description": "Synthetic unknown-context scenario: a reasoning model whose context length is not reported.",
             "context_length": null,
             "input_modalities": [
               "text"
@@ -857,37 +396,12 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [
-              "context_length"
-            ],
-            "metadata": {
-              "id": "vendor/unknown-context",
-              "name": "Vendor Unknown Context",
-              "description": "Synthetic unknown-context scenario: a reasoning model whose context length is not reported.",
-              "context_length": null,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": null
-            }
+            ]
           },
           {
             "provider": "synthetic-a",
             "model_id": "vendor/zero-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Zero Context",
-            "description": "Synthetic zero-context scenario: a reasoning model reporting a known zero context length.",
             "context_length": 0,
             "input_modalities": [
               "text"
@@ -897,42 +411,8 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/zero-context",
-              "name": "Vendor Zero Context",
-              "description": "Synthetic zero-context scenario: a reasoning model reporting a known zero context length.",
-              "context_length": 0,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": null,
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 3,
-        "returned_count": 3,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 3,
-          "distinct_raw_ids": 3,
-          "marker_group_labels": 3
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -946,30 +426,19 @@
       },
       "expect": {
         "ok": true,
-        "query": "reasoning",
-        "filters": {
-          "provider": null,
-          "min_context_length": 65536,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/known-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Known Context",
-            "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
             "context_length": 65536,
             "input_modalities": [
               "text"
@@ -979,42 +448,8 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/known-context",
-              "name": "Vendor Known Context",
-              "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": 0
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1028,30 +463,19 @@
       },
       "expect": {
         "ok": true,
-        "query": "reasoning",
-        "filters": {
-          "provider": null,
-          "min_context_length": 0,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 2,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/known-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Known Context",
-            "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
             "context_length": 65536,
             "input_modalities": [
               "text"
@@ -1061,38 +485,12 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/known-context",
-              "name": "Vendor Known Context",
-              "description": "Synthetic known-context scenario: a reasoning model with a reported 65536 context.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": 0
-              }
-            }
+            ]
           },
           {
             "provider": "synthetic-a",
             "model_id": "vendor/zero-context",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Zero Context",
-            "description": "Synthetic zero-context scenario: a reasoning model reporting a known zero context length.",
             "context_length": 0,
             "input_modalities": [
               "text"
@@ -1102,42 +500,8 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/zero-context",
-              "name": "Vendor Zero Context",
-              "description": "Synthetic zero-context scenario: a reasoning model reporting a known zero context length.",
-              "context_length": 0,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": null,
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 2,
-        "returned_count": 2,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 2,
-          "distinct_raw_ids": 2,
-          "marker_group_labels": 2
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1148,94 +512,33 @@
       "args": {},
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "snapshot_id": "c3c9b6becd5ae5a8cf1fd02224b0089f14490ed6935fc9e9cace7143bd3477e9",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 2,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/known-empty-capabilities",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Known Empty Capabilities",
-            "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
             "context_length": 0,
             "input_modalities": [],
             "output_modalities": [],
-            "supported_parameters": [],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/known-empty-capabilities",
-              "name": "Vendor Known Empty Capabilities",
-              "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
-              "context_length": 0,
-              "architecture": {
-                "input_modalities": [],
-                "output_modalities": []
-              },
-              "supported_parameters": [],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            "supported_parameters": []
           },
           {
             "provider": "synthetic-a",
             "model_id": "vendor/unknown-capabilities",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Unknown Capabilities",
-            "description": null,
             "context_length": null,
             "input_modalities": null,
             "output_modalities": null,
-            "supported_parameters": null,
-            "unknown_fields": [
-              "context_length",
-              "input_modalities",
-              "output_modalities",
-              "supported_parameters"
-            ],
-            "metadata": {
-              "id": "vendor/unknown-capabilities",
-              "name": "Vendor Unknown Capabilities",
-              "description": null,
-              "context_length": null,
-              "architecture": {
-                "input_modalities": null,
-                "output_modalities": null
-              },
-              "supported_parameters": null,
-              "pricing": null
-            }
+            "supported_parameters": null
           }
-        ],
-        "total_matches": 2,
-        "returned_count": 2,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 2,
-          "distinct_raw_ids": 2,
-          "marker_group_labels": 2
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1250,94 +553,33 @@
       },
       "expect": {
         "ok": true,
-        "query": "",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": [],
-          "supported_parameters": []
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "snapshot_id": "c3c9b6becd5ae5a8cf1fd02224b0089f14490ed6935fc9e9cace7143bd3477e9",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 2,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/known-empty-capabilities",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Known Empty Capabilities",
-            "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
             "context_length": 0,
             "input_modalities": [],
             "output_modalities": [],
-            "supported_parameters": [],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/known-empty-capabilities",
-              "name": "Vendor Known Empty Capabilities",
-              "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
-              "context_length": 0,
-              "architecture": {
-                "input_modalities": [],
-                "output_modalities": []
-              },
-              "supported_parameters": [],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            "supported_parameters": []
           },
           {
             "provider": "synthetic-a",
             "model_id": "vendor/unknown-capabilities",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Unknown Capabilities",
-            "description": null,
             "context_length": null,
             "input_modalities": null,
             "output_modalities": null,
-            "supported_parameters": null,
-            "unknown_fields": [
-              "context_length",
-              "input_modalities",
-              "output_modalities",
-              "supported_parameters"
-            ],
-            "metadata": {
-              "id": "vendor/unknown-capabilities",
-              "name": "Vendor Unknown Capabilities",
-              "description": null,
-              "context_length": null,
-              "architecture": {
-                "input_modalities": null,
-                "output_modalities": null
-              },
-              "supported_parameters": null,
-              "pricing": null
-            }
+            "supported_parameters": null
           }
-        ],
-        "total_matches": 2,
-        "returned_count": 2,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 2,
-          "distinct_raw_ids": 2,
-          "marker_group_labels": 2
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1352,36 +594,15 @@
       },
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": [
-            "text"
-          ],
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "snapshot_id": "c3c9b6becd5ae5a8cf1fd02224b0089f14490ed6935fc9e9cace7143bd3477e9",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
-        "endpoints": [],
         "total_matches": 0,
-        "returned_count": 0,
         "next_offset": null,
-        "counts": {
-          "gateways": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ]
+        "endpoints": []
       }
     },
     {
@@ -1395,36 +616,15 @@
       },
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": [
-            "temperature"
-          ]
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "snapshot_id": "c3c9b6becd5ae5a8cf1fd02224b0089f14490ed6935fc9e9cace7143bd3477e9",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
-        "endpoints": [],
         "total_matches": 0,
-        "returned_count": 0,
         "next_offset": null,
-        "counts": {
-          "gateways": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ]
+        "endpoints": []
       }
     },
     {
@@ -1436,63 +636,24 @@
       },
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": null,
-          "min_context_length": 0,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "snapshot_id": "c3c9b6becd5ae5a8cf1fd02224b0089f14490ed6935fc9e9cace7143bd3477e9",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/known-empty-capabilities",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Known Empty Capabilities",
-            "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
             "context_length": 0,
             "input_modalities": [],
             "output_modalities": [],
-            "supported_parameters": [],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/known-empty-capabilities",
-              "name": "Vendor Known Empty Capabilities",
-              "description": "Synthetic known-empty capabilities scenario: every capability is reported upstream and every one is empty.",
-              "context_length": 0,
-              "architecture": {
-                "input_modalities": [],
-                "output_modalities": []
-              },
-              "supported_parameters": [],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            "supported_parameters": []
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1506,31 +667,20 @@
       },
       "expect": {
         "ok": true,
-        "query": "shared",
-        "filters": {
-          "provider": null,
-          "min_context_length": 65536,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
             "context_length": 131072,
             "input_modalities": [
               "text"
@@ -1541,43 +691,8 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1594,34 +709,20 @@
       },
       "expect": {
         "ok": true,
-        "query": "shared",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": [
-            "text",
-            "IMAGE"
-          ],
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-b",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
             "context_length": 32768,
             "input_modalities": [
               "text",
@@ -1633,44 +734,8 @@
             "supported_parameters": [
               "temperature",
               "top_p"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "top_p"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1687,37 +752,16 @@
       },
       "expect": {
         "ok": true,
-        "query": "shared",
-        "filters": {
-          "provider": null,
-          "min_context_length": 65536,
-          "input_modalities": [
-            "image"
-          ],
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
-        "endpoints": [],
         "total_matches": 0,
-        "returned_count": 0,
         "next_offset": null,
-        "counts": {
-          "gateways": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ]
+        "endpoints": []
       }
     },
     {
@@ -1733,34 +777,20 @@
       },
       "expect": {
         "ok": true,
-        "query": "shared",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": [
-            "temperature",
-            "MAX_TOKENS"
-          ]
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
             "context_length": 131072,
             "input_modalities": [
               "text"
@@ -1771,43 +801,8 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1824,37 +819,16 @@
       },
       "expect": {
         "ok": true,
-        "query": "shared",
-        "filters": {
-          "provider": null,
-          "min_context_length": 65536,
-          "input_modalities": null,
-          "supported_parameters": [
-            "top_p"
-          ]
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
-        "endpoints": [],
         "total_matches": 0,
-        "returned_count": 0,
         "next_offset": null,
-        "counts": {
-          "gateways": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ]
+        "endpoints": []
       }
     },
     {
@@ -1867,29 +841,18 @@
       },
       "expect": {
         "ok": true,
-        "query": "shared",
-        "filters": {
-          "provider": "synthetic-b",
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-b": false
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-b",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
             "context_length": 32768,
             "input_modalities": [
               "text",
@@ -1901,44 +864,8 @@
             "supported_parameters": [
               "temperature",
               "top_p"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "top_p"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -1951,33 +878,14 @@
       },
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": "synthetic-c",
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-c": false
         },
-        "endpoints": [],
         "total_matches": 0,
-        "returned_count": 0,
         "next_offset": null,
-        "counts": {
-          "gateways": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ]
+        "endpoints": []
       }
     },
     {
@@ -1990,31 +898,20 @@
       },
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 2,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
+        "total_matches": 5,
+        "next_offset": 2,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/model-renamed",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Model Renamed",
-            "description": null,
             "context_length": 65536,
             "input_modalities": [
               "text"
@@ -2024,38 +921,12 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/model-renamed",
-              "name": "Vendor Model Renamed",
-              "description": null,
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           },
           {
             "provider": "synthetic-a",
             "model_id": "vendor/model:free",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Model",
-            "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
             "context_length": 131072,
             "input_modalities": [
               "text",
@@ -2067,44 +938,8 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/model:free",
-              "name": "Vendor Model",
-              "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 5,
-        "returned_count": 2,
-        "next_offset": 2,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 2,
-          "distinct_raw_ids": 2,
-          "marker_group_labels": 2
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2118,31 +953,20 @@
       },
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 2,
-        "offset": 2,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
+        "total_matches": 5,
+        "next_offset": 4,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
             "context_length": 131072,
             "input_modalities": [
               "text"
@@ -2153,39 +977,12 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           },
           {
             "provider": "synthetic-b",
             "model_id": "vendor/model-free",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Model Free",
-            "description": "Oracle case 1 beta endpoint: text input only.",
             "context_length": 32768,
             "input_modalities": [
               "text"
@@ -2195,42 +992,8 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/model-free",
-              "name": "Vendor Model Free",
-              "description": "Oracle case 1 beta endpoint: text input only.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 5,
-        "returned_count": 2,
-        "next_offset": 4,
-        "counts": {
-          "gateways": 2,
-          "endpoints": 2,
-          "distinct_raw_ids": 2,
-          "marker_group_labels": 2
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2244,31 +1007,20 @@
       },
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 2,
-        "offset": 4,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
+        "total_matches": 5,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-b",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
             "context_length": 32768,
             "input_modalities": [
               "text",
@@ -2280,44 +1032,8 @@
             "supported_parameters": [
               "temperature",
               "top_p"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "top_p"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 5,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2331,35 +1047,16 @@
       },
       "expect": {
         "ok": true,
-        "query": null,
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 2,
-        "offset": 99,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
-        "endpoints": [],
         "total_matches": 5,
-        "returned_count": 0,
         "next_offset": null,
-        "counts": {
-          "gateways": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ]
+        "endpoints": []
       }
     },
     {
@@ -2373,29 +1070,18 @@
       },
       "expect": {
         "ok": true,
-        "query": "",
-        "filters": {
-          "provider": "synthetic-a",
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 200,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false
         },
+        "total_matches": 3,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/model-renamed",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Model Renamed",
-            "description": null,
             "context_length": 65536,
             "input_modalities": [
               "text"
@@ -2405,38 +1091,12 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/model-renamed",
-              "name": "Vendor Model Renamed",
-              "description": null,
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           },
           {
             "provider": "synthetic-a",
             "model_id": "vendor/model:free",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Model",
-            "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
             "context_length": 131072,
             "input_modalities": [
               "text",
@@ -2448,40 +1108,12 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/model:free",
-              "name": "Vendor Model",
-              "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           },
           {
             "provider": "synthetic-a",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
             "context_length": 131072,
             "input_modalities": [
               "text"
@@ -2492,43 +1124,8 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 3,
-        "returned_count": 3,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 3,
-          "distinct_raw_ids": 3,
-          "marker_group_labels": 3
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2550,36 +1147,19 @@
       },
       "expect": {
         "ok": true,
-        "query": "REASONING",
-        "filters": {
-          "provider": null,
-          "min_context_length": 65536,
-          "input_modalities": [
-            "IMAGE",
-            "text",
-            "IMAGE"
-          ],
-          "supported_parameters": [
-            "TEMPERATURE"
-          ]
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+        "snapshot_id": "3dea42592cf95e1e70e82a5c56a73ef7b03fd5b765e795c8abe385c462c0cc33",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/literal[ab].*",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "ÉCHO TEXT",
-            "description": "Reasoning literal [ab].* token; synthetic prose.",
             "context_length": 65536,
             "input_modalities": [
               "text",
@@ -2591,46 +1171,8 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/literal[ab].*",
-              "name": "ÉCHO TEXT",
-              "description": "Reasoning literal [ab].* token; synthetic prose.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "TEXT",
-                  "Image",
-                  "text"
-                ],
-                "output_modalities": [
-                  "TEXT"
-                ]
-              },
-              "supported_parameters": [
-                "Temperature",
-                "MAX_TOKENS",
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2643,30 +1185,19 @@
       },
       "expect": {
         "ok": true,
-        "query": "ÉCHO",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+        "snapshot_id": "3dea42592cf95e1e70e82a5c56a73ef7b03fd5b765e795c8abe385c462c0cc33",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/literal[ab].*",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "ÉCHO TEXT",
-            "description": "Reasoning literal [ab].* token; synthetic prose.",
             "context_length": 65536,
             "input_modalities": [
               "text",
@@ -2678,46 +1209,8 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/literal[ab].*",
-              "name": "ÉCHO TEXT",
-              "description": "Reasoning literal [ab].* token; synthetic prose.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "TEXT",
-                  "Image",
-                  "text"
-                ],
-                "output_modalities": [
-                  "TEXT"
-                ]
-              },
-              "supported_parameters": [
-                "Temperature",
-                "MAX_TOKENS",
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2730,65 +1223,24 @@
       },
       "expect": {
         "ok": true,
-        "query": "écho",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+        "snapshot_id": "3dea42592cf95e1e70e82a5c56a73ef7b03fd5b765e795c8abe385c462c0cc33",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/plain",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "écho plain",
-            "description": "No capabilities inferred from branding.",
             "context_length": null,
             "input_modalities": null,
             "output_modalities": null,
-            "supported_parameters": null,
-            "unknown_fields": [
-              "context_length",
-              "input_modalities",
-              "output_modalities",
-              "supported_parameters"
-            ],
-            "metadata": {
-              "id": "vendor/plain",
-              "name": "écho plain",
-              "description": "No capabilities inferred from branding.",
-              "context_length": null,
-              "architecture": {
-                "input_modalities": null,
-                "output_modalities": null
-              },
-              "supported_parameters": null,
-              "pricing": null
-            }
+            "supported_parameters": null
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2801,30 +1253,19 @@
       },
       "expect": {
         "ok": true,
-        "query": "[ab].*",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+        "snapshot_id": "3dea42592cf95e1e70e82a5c56a73ef7b03fd5b765e795c8abe385c462c0cc33",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/literal[ab].*",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "ÉCHO TEXT",
-            "description": "Reasoning literal [ab].* token; synthetic prose.",
             "context_length": 65536,
             "input_modalities": [
               "text",
@@ -2836,46 +1277,8 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/literal[ab].*",
-              "name": "ÉCHO TEXT",
-              "description": "Reasoning literal [ab].* token; synthetic prose.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "TEXT",
-                  "Image",
-                  "text"
-                ],
-                "output_modalities": [
-                  "TEXT"
-                ]
-              },
-              "supported_parameters": [
-                "Temperature",
-                "MAX_TOKENS",
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2888,34 +1291,15 @@
       },
       "expect": {
         "ok": true,
-        "query": "Image",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+        "snapshot_id": "3dea42592cf95e1e70e82a5c56a73ef7b03fd5b765e795c8abe385c462c0cc33",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
-        "endpoints": [],
         "total_matches": 0,
-        "returned_count": 0,
         "next_offset": null,
-        "counts": {
-          "gateways": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ]
+        "endpoints": []
       }
     },
     {
@@ -2927,65 +1311,24 @@
       },
       "expect": {
         "ok": true,
-        "query": "vendor/plain",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+        "snapshot_id": "3dea42592cf95e1e70e82a5c56a73ef7b03fd5b765e795c8abe385c462c0cc33",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
+        "total_matches": 1,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/plain",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "écho plain",
-            "description": "No capabilities inferred from branding.",
             "context_length": null,
             "input_modalities": null,
             "output_modalities": null,
-            "supported_parameters": null,
-            "unknown_fields": [
-              "context_length",
-              "input_modalities",
-              "output_modalities",
-              "supported_parameters"
-            ],
-            "metadata": {
-              "id": "vendor/plain",
-              "name": "écho plain",
-              "description": "No capabilities inferred from branding.",
-              "context_length": null,
-              "architecture": {
-                "input_modalities": null,
-                "output_modalities": null
-              },
-              "supported_parameters": null,
-              "pricing": null
-            }
+            "supported_parameters": null
           }
-        ],
-        "total_matches": 1,
-        "returned_count": 1,
-        "next_offset": null,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 1,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -2998,34 +1341,15 @@
       },
       "expect": {
         "ok": true,
-        "query": " REASONING ",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 50,
-        "offset": 0,
-        "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+        "snapshot_id": "3dea42592cf95e1e70e82a5c56a73ef7b03fd5b765e795c8abe385c462c0cc33",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": true
         },
-        "endpoints": [],
         "total_matches": 0,
-        "returned_count": 0,
         "next_offset": null,
-        "counts": {
-          "gateways": 0,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ]
+        "endpoints": []
       }
     },
     {
@@ -3039,31 +1363,20 @@
       },
       "expect": {
         "ok": true,
-        "query": "shared",
-        "filters": {
-          "provider": null,
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 2,
-        "offset": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-a": false,
           "synthetic-b": false,
           "synthetic-c": false
         },
+        "total_matches": 2,
+        "next_offset": null,
         "endpoints": [
           {
             "provider": "synthetic-a",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
             "context_length": 131072,
             "input_modalities": [
               "text"
@@ -3074,39 +1387,12 @@
             "supported_parameters": [
               "temperature",
               "max_tokens"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           },
           {
             "provider": "synthetic-b",
             "model_id": "vendor/shared",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
             "name": "Vendor Shared",
-            "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
             "context_length": 32768,
             "input_modalities": [
               "text",
@@ -3118,44 +1404,8 @@
             "supported_parameters": [
               "temperature",
               "top_p"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "top_p"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 2,
-        "returned_count": 2,
-        "next_offset": null,
-        "counts": {
-          "gateways": 2,
-          "endpoints": 2,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
@@ -3167,7 +1417,7 @@
       "now": 1759200000,
       "expect": {
         "ok": true,
-        "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
+        "snapshot_id": "c3c9b6becd5ae5a8cf1fd02224b0089f14490ed6935fc9e9cace7143bd3477e9",
         "tick_epoch": 1759200000,
         "cadence_s": 3600,
         "last_tick_age_s": 0,
@@ -3210,7 +1460,7 @@
       "now": 1759203599,
       "expect": {
         "ok": true,
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
         "cadence_s": 3600,
         "last_tick_age_s": 3599,
@@ -3253,7 +1503,7 @@
       "now": 1759203600,
       "expect": {
         "ok": true,
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
         "cadence_s": 3600,
         "last_tick_age_s": 3600,
@@ -3296,7 +1546,7 @@
       "now": 1759203601,
       "expect": {
         "ok": true,
-        "snapshot_id": "f4ca48b6cf95032e9ce30d1a249d0c73f7d3ab26f9502fca056467556769b487",
+        "snapshot_id": "a158396c7524ddab14fb7292d0709de3506e200028ae336c51cd04406ed02e51",
         "tick_epoch": 1759200000,
         "cadence_s": 3600,
         "last_tick_age_s": 3601,
@@ -3340,7 +1590,7 @@
       "now": 1759203601,
       "expect": {
         "ok": true,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "cadence_s": 3600,
         "last_tick_age_s": 3601,
@@ -3385,7 +1635,7 @@
       "now": 1759199999,
       "expect": {
         "ok": true,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
         "tick_epoch": 1759200000,
         "cadence_s": 3600,
         "last_tick_age_s": null,
@@ -3430,7 +1680,7 @@
       "now": 1759203600,
       "expect": {
         "ok": true,
-        "snapshot_id": "997d9e5e576f4c328063856d91266827a494dbddbdca35e0a0f4ba48c8927661",
+        "snapshot_id": "10aa99674da17360b123d74abad56b35240de93e20b10e5d7ebebe8d9ae02bfc",
         "tick_epoch": null,
         "cadence_s": 3600,
         "last_tick_age_s": null,
@@ -3474,7 +1724,7 @@
       "now": 1759200120,
       "expect": {
         "ok": true,
-        "snapshot_id": "1a1b975930127c7de79e729ba64a83c704bfa7a120b938235e54d83e5d284712",
+        "snapshot_id": "fbb5a01c9c25b11bd3c84e5ac3e29b04a124781ea79be0e65c1e02413b8b6b7d",
         "tick_epoch": 1759200000,
         "cadence_s": 120,
         "last_tick_age_s": 120,
@@ -3517,7 +1767,7 @@
       "now": 1759200121,
       "expect": {
         "ok": true,
-        "snapshot_id": "1a1b975930127c7de79e729ba64a83c704bfa7a120b938235e54d83e5d284712",
+        "snapshot_id": "fbb5a01c9c25b11bd3c84e5ac3e29b04a124781ea79be0e65c1e02413b8b6b7d",
         "tick_epoch": 1759200000,
         "cadence_s": 120,
         "last_tick_age_s": 121,
@@ -3552,100 +1802,39 @@
           "tick_stale"
         ]
       }
-    }
-,
+    },
     {
-      "id": "get_model_ordering_identical_raw_id_provider_precedence",
+      "id": "get_model_ordering_raw_id_provider_scope",
       "tool": "get_model",
       "fixture": "ordering.json",
       "args": {
+        "provider": "synthetic-a",
         "model_id": "vendor/item2"
       },
       "expect": {
         "ok": true,
-        "query": "vendor/item2",
-        "snapshot_id": "2ce5d5e119b442d14e1bf95f7eede5229ea912a7a1fc801db8746b0df3f84d14",
+        "snapshot_id": "2177044250e992257a5142b9293d9825821517082e4ccea967e5cb7ff3a85aee",
         "tick_epoch": 1759200000,
-        "exact_matches": {
-          "synthetic-b": true,
-          "synthetic-a": true,
-          "synthetic-c": false
-        },
-        "exact_gateways": [
-          "synthetic-b",
-          "synthetic-a"
-        ],
         "provider_staleness": {
-          "synthetic-b": true,
-          "synthetic-a": false,
-          "synthetic-c": false
+          "synthetic-a": false
         },
-        "endpoints": [
-          {
-            "provider": "synthetic-b",
-            "model_id": "vendor/item2",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": true,
-            "metadata": {
-              "id": "vendor/item2",
-              "name": "Order B Item Two",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          },
-          {
-            "provider": "synthetic-a",
-            "model_id": "vendor/item2",
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": false,
-            "metadata": {
-              "id": "vendor/item2",
-              "name": "Order A Item Two",
-              "description": "Synthetic ordering fixture row for the alpha gateway.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          }
-        ],
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
-        ],
-        "counts": {
-          "exact_matches": 2,
-          "endpoints": 2,
-          "distinct_raw_ids": 1,
-          "marker_group_labels": 1
+        "endpoint": {
+          "provider": "synthetic-a",
+          "model_id": "vendor/item2",
+          "name": "Order A Item Two",
+          "description": "Synthetic ordering fixture row for the alpha gateway.",
+          "context_length": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "supported_parameters": [
+            "temperature"
+          ],
+          "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
+          "api_type": "openai"
         }
       }
     },
@@ -3661,29 +1850,18 @@
       },
       "expect": {
         "ok": true,
-        "query": "vendor/item",
-        "filters": {
-          "provider": "synthetic-b",
-          "min_context_length": null,
-          "input_modalities": null,
-          "supported_parameters": null
-        },
-        "limit": 2,
-        "offset": 1,
-        "snapshot_id": "2ce5d5e119b442d14e1bf95f7eede5229ea912a7a1fc801db8746b0df3f84d14",
+        "snapshot_id": "2177044250e992257a5142b9293d9825821517082e4ccea967e5cb7ff3a85aee",
         "tick_epoch": 1759200000,
         "provider_staleness": {
           "synthetic-b": true
         },
+        "total_matches": 5,
+        "next_offset": 3,
         "endpoints": [
           {
             "provider": "synthetic-b",
             "model_id": "vendor/item2",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": true,
             "name": "Order B Item Two",
-            "description": "Synthetic ordering fixture row for the beta gateway.",
             "context_length": 131072,
             "input_modalities": [
               "text"
@@ -3693,38 +1871,12 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/item2",
-              "name": "Order B Item Two",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           },
           {
             "provider": "synthetic-b",
             "model_id": "vendor/item02",
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "stale": true,
             "name": "Order B Item Zero Two",
-            "description": "Synthetic ordering fixture row for the beta gateway.",
             "context_length": 131072,
             "input_modalities": [
               "text"
@@ -3734,1383 +1886,175 @@
             ],
             "supported_parameters": [
               "temperature"
-            ],
-            "unknown_fields": [],
-            "metadata": {
-              "id": "vendor/item02",
-              "name": "Order B Item Zero Two",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+            ]
           }
-        ],
-        "total_matches": 5,
-        "returned_count": 2,
-        "next_offset": 3,
-        "counts": {
-          "gateways": 1,
-          "endpoints": 2,
-          "distinct_raw_ids": 2,
-          "marker_group_labels": 2
-        },
-        "caveats": [
-          "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."
         ]
       }
     },
     {
-      "id": "list_free_lookup_all",
-      "tool": "list_free_models",
-      "fixture": "lookup.json",
+      "id": "search_default_limit_five_rows",
+      "tool": "search_models",
+      "fixture": "ordering.json",
       "args": {},
       "expect": {
         "ok": true,
-        "providers": {
-          "synthetic-a": [
-            "vendor/model-renamed",
-            "vendor/model:free",
-            "vendor/shared"
-          ],
-          "synthetic-b": [
-            "vendor/model-free",
-            "vendor/shared"
-          ],
-          "synthetic-c": []
-        },
-        "models": {
-          "synthetic-a": {
-            "vendor/model-renamed": {
-              "id": "vendor/model-renamed",
-              "name": "Vendor Model Renamed",
-              "description": null,
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/model:free": {
-              "id": "vendor/model:free",
-              "name": "Vendor Model",
-              "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/shared": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "max_tokens"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          },
-          "synthetic-b": {
-            "vendor/model-free": {
-              "id": "vendor/model-free",
-              "name": "Vendor Model Free",
-              "description": "Oracle case 1 beta endpoint: text input only.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/shared": {
-              "id": "vendor/shared",
-              "name": "Vendor Shared",
-              "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
-              "context_length": 32768,
-              "architecture": {
-                "input_modalities": [
-                  "text",
-                  "image"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature",
-                "top_p"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          },
-          "synthetic-c": {}
-        },
-        "counts": {
-          "synthetic-a": 3,
-          "synthetic-b": 2,
-          "synthetic-c": 0
-        },
-        "total_ids": 4,
-        "n_gateways": 3,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+        "snapshot_id": "2177044250e992257a5142b9293d9825821517082e4ccea967e5cb7ff3a85aee",
         "tick_epoch": 1759200000,
         "provider_staleness": {
+          "synthetic-b": true,
           "synthetic-a": false,
-          "synthetic-b": false,
           "synthetic-c": false
-        }
-      }
-    },
-    {
-      "id": "list_free_lookup_provider_a",
-      "tool": "list_free_models",
-      "fixture": "lookup.json",
-      "args": {
-        "provider": "synthetic-a"
-      },
-      "expect": {
-        "ok": true,
-        "provider": "synthetic-a",
-        "model_ids": [
-          "vendor/model-renamed",
-          "vendor/model:free",
-          "vendor/shared"
-        ],
-        "models": {
-          "vendor/model-renamed": {
-            "id": "vendor/model-renamed",
-            "name": "Vendor Model Renamed",
-            "description": null,
-            "context_length": 65536,
-            "architecture": {
-              "input_modalities": [
-                "text"
-              ],
-              "output_modalities": [
-                "text"
-              ]
-            },
+        },
+        "total_matches": 10,
+        "next_offset": 5,
+        "endpoints": [
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/item1",
+            "name": "Order B Item One",
+            "context_length": 131072,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
             "supported_parameters": [
               "temperature"
-            ],
-            "pricing": {
-              "prompt": "0",
-              "completion": "0"
-            }
+            ]
           },
-          "vendor/model:free": {
-            "id": "vendor/model:free",
-            "name": "Vendor Model",
-            "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/item2",
+            "name": "Order B Item Two",
             "context_length": 131072,
-            "architecture": {
-              "input_modalities": [
-                "text",
-                "image"
-              ],
-              "output_modalities": [
-                "text"
-              ]
-            },
-            "supported_parameters": [
-              "temperature",
-              "max_tokens"
+            "input_modalities": [
+              "text"
             ],
-            "pricing": {
-              "prompt": "0",
-              "completion": "0"
-            }
+            "output_modalities": [
+              "text"
+            ],
+            "supported_parameters": [
+              "temperature"
+            ]
           },
-          "vendor/shared": {
-            "id": "vendor/shared",
-            "name": "Vendor Shared",
-            "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/item02",
+            "name": "Order B Item Zero Two",
             "context_length": 131072,
-            "architecture": {
-              "input_modalities": [
-                "text"
-              ],
-              "output_modalities": [
-                "text"
-              ]
-            },
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
             "supported_parameters": [
-              "temperature",
-              "max_tokens"
-            ],
-            "pricing": {
-              "prompt": "0",
-              "completion": "0"
-            }
-          }
-        },
-        "count": 3,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-a": false
-        }
-      }
-    },
-    {
-      "id": "list_free_lookup_zero_provider_c",
-      "tool": "list_free_models",
-      "fixture": "lookup.json",
-      "args": {
-        "provider": "synthetic-c"
-      },
-      "expect": {
-        "ok": true,
-        "provider": "synthetic-c",
-        "model_ids": [],
-        "models": {},
-        "count": 0,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-c": false
-        }
-      }
-    },
-    {
-      "id": "list_free_ordering_all",
-      "tool": "list_free_models",
-      "fixture": "ordering.json",
-      "args": {
-        "provider": null
-      },
-      "expect": {
-        "ok": true,
-        "providers": {
-          "synthetic-b": [
-            "vendor/item1",
-            "vendor/item2",
-            "vendor/item02",
-            "vendor/item10",
-            "vendor/item١",
-            "vendor/long9999999999999999999999999999999999999999999999999999999999999991",
-            "vendor/long9999999999999999999999999999999999999999999999999999999999999992",
-            "vendor/Ａ",
-            "vendor/😀"
-          ],
-          "synthetic-a": [
-            "vendor/item2"
-          ],
-          "synthetic-c": []
-        },
-        "models": {
-          "synthetic-b": {
-            "vendor/item1": {
-              "id": "vendor/item1",
-              "name": "Order B Item One",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/item2": {
-              "id": "vendor/item2",
-              "name": "Order B Item Two",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/item02": {
-              "id": "vendor/item02",
-              "name": "Order B Item Zero Two",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/item10": {
-              "id": "vendor/item10",
-              "name": "Order B Item Ten",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/item١": {
-              "id": "vendor/item١",
-              "name": "Order B Item Arabic One",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/long9999999999999999999999999999999999999999999999999999999999999991": {
-              "id": "vendor/long9999999999999999999999999999999999999999999999999999999999999991",
-              "name": "Order B Long Run One",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/long9999999999999999999999999999999999999999999999999999999999999992": {
-              "id": "vendor/long9999999999999999999999999999999999999999999999999999999999999992",
-              "name": "Order B Long Run Two",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/Ａ": {
-              "id": "vendor/Ａ",
-              "name": "Order B Fullwidth Letter",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            },
-            "vendor/😀": {
-              "id": "vendor/😀",
-              "name": "Order B Astral Emoji",
-              "description": "Synthetic ordering fixture row for the beta gateway.",
-              "context_length": 131072,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
+              "temperature"
+            ]
           },
-          "synthetic-a": {
-            "vendor/item2": {
-              "id": "vendor/item2",
-              "name": "Order A Item Two",
-              "description": "Synthetic ordering fixture row for the alpha gateway.",
-              "context_length": 65536,
-              "architecture": {
-                "input_modalities": [
-                  "text"
-                ],
-                "output_modalities": [
-                  "text"
-                ]
-              },
-              "supported_parameters": [
-                "temperature"
-              ],
-              "pricing": {
-                "prompt": "0",
-                "completion": "0"
-              }
-            }
-          },
-          "synthetic-c": {}
-        },
-        "counts": {
-          "synthetic-b": 9,
-          "synthetic-a": 1,
-          "synthetic-c": 0
-        },
-        "total_ids": 9,
-        "n_gateways": 3,
-        "snapshot_id": "2ce5d5e119b442d14e1bf95f7eede5229ea912a7a1fc801db8746b0df3f84d14",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-b": true,
-          "synthetic-a": false,
-          "synthetic-c": false
-        }
-      }
-    },
-    {
-      "id": "endpoints_lookup_all",
-      "tool": "list_endpoints",
-      "fixture": "lookup.json",
-      "args": {},
-      "expect": {
-        "ok": true,
-        "gateways": {
-          "synthetic-a": {
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [
-              "vendor/model-renamed",
-              "vendor/model:free",
-              "vendor/shared"
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/item10",
+            "name": "Order B Item Ten",
+            "context_length": 131072,
+            "input_modalities": [
+              "text"
             ],
-            "models": {
-              "vendor/model-renamed": {
-                "id": "vendor/model-renamed",
-                "name": "Vendor Model Renamed",
-                "description": null,
-                "context_length": 65536,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/model:free": {
-                "id": "vendor/model:free",
-                "name": "Vendor Model",
-                "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text",
-                    "image"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature",
-                  "max_tokens"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/shared": {
-                "id": "vendor/shared",
-                "name": "Vendor Shared",
-                "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature",
-                  "max_tokens"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              }
-            }
-          },
-          "synthetic-b": {
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [
-              "vendor/model-free",
-              "vendor/shared"
+            "output_modalities": [
+              "text"
             ],
-            "models": {
-              "vendor/model-free": {
-                "id": "vendor/model-free",
-                "name": "Vendor Model Free",
-                "description": "Oracle case 1 beta endpoint: text input only.",
-                "context_length": 32768,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/shared": {
-                "id": "vendor/shared",
-                "name": "Vendor Shared",
-                "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
-                "context_length": 32768,
-                "architecture": {
-                  "input_modalities": [
-                    "text",
-                    "image"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature",
-                  "top_p"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              }
-            }
-          },
-          "synthetic-c": {
-            "chat_completions_url": "https://synthetic-gamma.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [],
-            "models": {}
-          }
-        },
-        "counts": {
-          "gateways": 3,
-          "endpoints": 5,
-          "distinct_raw_ids": 4,
-          "marker_group_labels": 3,
-          "models": 3
-        },
-        "provider": null,
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
-        }
-      }
-    },
-    {
-      "id": "endpoints_lookup_provider_a",
-      "tool": "list_endpoints",
-      "fixture": "lookup.json",
-      "args": {"provider": "synthetic-a"},
-      "expect": {
-        "ok": true,
-        "gateways": {
-          "synthetic-a": {
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [
-              "vendor/model-renamed",
-              "vendor/model:free",
-              "vendor/shared"
-            ],
-            "models": {
-              "vendor/model-renamed": {
-                "id": "vendor/model-renamed",
-                "name": "Vendor Model Renamed",
-                "description": null,
-                "context_length": 65536,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/model:free": {
-                "id": "vendor/model:free",
-                "name": "Vendor Model",
-                "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text",
-                    "image"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature",
-                  "max_tokens"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/shared": {
-                "id": "vendor/shared",
-                "name": "Vendor Shared",
-                "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature",
-                  "max_tokens"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              }
-            }
-          }
-        },
-        "counts": {
-          "gateways": 1,
-          "endpoints": 3,
-          "distinct_raw_ids": 3,
-          "marker_group_labels": 3,
-          "models": 3
-        },
-        "provider": "synthetic-a",
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-a": false
-        }
-      }
-    },
-    {
-      "id": "endpoints_lookup_zero_provider_c",
-      "tool": "list_endpoints",
-      "fixture": "lookup.json",
-      "args": {"provider": "synthetic-c"},
-      "expect": {
-        "ok": true,
-        "gateways": {
-          "synthetic-c": {
-            "chat_completions_url": "https://synthetic-gamma.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [],
-            "models": {}
-          }
-        },
-        "counts": {
-          "gateways": 1,
-          "endpoints": 0,
-          "distinct_raw_ids": 0,
-          "marker_group_labels": 0,
-          "models": 0
-        },
-        "provider": "synthetic-c",
-        "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-c": false
-        }
-      }
-    },
-    {
-      "id": "endpoints_ordering_all",
-      "tool": "list_endpoints",
-      "fixture": "ordering.json",
-      "args": {"provider": null},
-      "expect": {
-        "ok": true,
-        "gateways": {
-          "synthetic-b": {
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [
-              "vendor/item1",
-              "vendor/item2",
-              "vendor/item02",
-              "vendor/item10",
-              "vendor/item١",
-              "vendor/long9999999999999999999999999999999999999999999999999999999999999991",
-              "vendor/long9999999999999999999999999999999999999999999999999999999999999992",
-              "vendor/Ａ",
-              "vendor/😀"
-            ],
-            "models": {
-              "vendor/item1": {
-                "id": "vendor/item1",
-                "name": "Order B Item One",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/item2": {
-                "id": "vendor/item2",
-                "name": "Order B Item Two",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/item02": {
-                "id": "vendor/item02",
-                "name": "Order B Item Zero Two",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/item10": {
-                "id": "vendor/item10",
-                "name": "Order B Item Ten",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/item١": {
-                "id": "vendor/item١",
-                "name": "Order B Item Arabic One",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/long9999999999999999999999999999999999999999999999999999999999999991": {
-                "id": "vendor/long9999999999999999999999999999999999999999999999999999999999999991",
-                "name": "Order B Long Run One",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/long9999999999999999999999999999999999999999999999999999999999999992": {
-                "id": "vendor/long9999999999999999999999999999999999999999999999999999999999999992",
-                "name": "Order B Long Run Two",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/Ａ": {
-                "id": "vendor/Ａ",
-                "name": "Order B Fullwidth Letter",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/😀": {
-                "id": "vendor/😀",
-                "name": "Order B Astral Emoji",
-                "description": "Synthetic ordering fixture row for the beta gateway.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              }
-            }
-          },
-          "synthetic-a": {
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [
-              "vendor/item2"
-            ],
-            "models": {
-              "vendor/item2": {
-                "id": "vendor/item2",
-                "name": "Order A Item Two",
-                "description": "Synthetic ordering fixture row for the alpha gateway.",
-                "context_length": 65536,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              }
-            }
-          },
-          "synthetic-c": {
-            "chat_completions_url": "https://synthetic-gamma.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [],
-            "models": {}
-          }
-        },
-        "counts": {
-          "gateways": 3,
-          "endpoints": 10,
-          "distinct_raw_ids": 9,
-          "marker_group_labels": 9,
-          "models": 9
-        },
-        "provider": null,
-        "snapshot_id": "2ce5d5e119b442d14e1bf95f7eede5229ea912a7a1fc801db8746b0df3f84d14",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-b": true,
-          "synthetic-a": false,
-          "synthetic-c": false
-        }
-      }
-    },
-    {
-      "id": "endpoints_extension_all",
-      "tool": "list_endpoints",
-      "fixture": "provider-extension.json",
-      "args": {},
-      "expect": {
-        "ok": true,
-        "gateways": {
-          "synthetic-d": {
-            "chat_completions_url": "https://synthetic-delta.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [
-              "vendor/shared"
-            ],
-            "models": {
-              "vendor/shared": {
-                "id": "vendor/shared",
-                "name": "Synthetic Delta Shared",
-                "description": "Synthetic delta endpoint with its own small context.",
-                "context_length": 8192,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "top_p"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              }
-            }
-          },
-          "synthetic-a": {
-            "chat_completions_url": "https://synthetic-alpha.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [
-              "vendor/model-renamed",
-              "vendor/model:free",
-              "vendor/shared"
-            ],
-            "models": {
-              "vendor/model-renamed": {
-                "id": "vendor/model-renamed",
-                "name": "Vendor Model Renamed",
-                "description": null,
-                "context_length": 65536,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/model:free": {
-                "id": "vendor/model:free",
-                "name": "Vendor Model",
-                "description": "Oracle case 1 alpha endpoint: sufficient context, image input.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text",
-                    "image"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature",
-                  "max_tokens"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/shared": {
-                "id": "vendor/shared",
-                "name": "Vendor Shared",
-                "description": "Synthetic-a scenario for the shared raw id: large 131072 context but text-only input.",
-                "context_length": 131072,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature",
-                  "max_tokens"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              }
-            }
-          },
-          "synthetic-b": {
-            "chat_completions_url": "https://synthetic-beta.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [
-              "vendor/model-free",
-              "vendor/shared"
-            ],
-            "models": {
-              "vendor/model-free": {
-                "id": "vendor/model-free",
-                "name": "Vendor Model Free",
-                "description": "Oracle case 1 beta endpoint: text input only.",
-                "context_length": 32768,
-                "architecture": {
-                  "input_modalities": [
-                    "text"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              },
-              "vendor/shared": {
-                "id": "vendor/shared",
-                "name": "Vendor Shared",
-                "description": "Synthetic-b scenario for the shared raw id: image input supported but only 32768 context.",
-                "context_length": 32768,
-                "architecture": {
-                  "input_modalities": [
-                    "text",
-                    "image"
-                  ],
-                  "output_modalities": [
-                    "text"
-                  ]
-                },
-                "supported_parameters": [
-                  "temperature",
-                  "top_p"
-                ],
-                "pricing": {
-                  "prompt": "0",
-                  "completion": "0"
-                }
-              }
-            }
-          },
-          "synthetic-c": {
-            "chat_completions_url": "https://synthetic-gamma.example/v1/chat/completions",
-            "api_type": "openai",
-            "model_ids": [],
-            "models": {}
-          }
-        },
-        "counts": {
-          "gateways": 4,
-          "endpoints": 6,
-          "distinct_raw_ids": 4,
-          "marker_group_labels": 3,
-          "models": 3
-        },
-        "provider": null,
-        "snapshot_id": "2755d9b9b6082fbafe30591fc5f045d23d2daa370528b50a3230abcbe5cda0fe",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-d": true,
-          "synthetic-a": false,
-          "synthetic-b": false,
-          "synthetic-c": false
-        }
-      }
-    },
-    {
-      "id": "list_free_extension_provider_d",
-      "tool": "list_free_models",
-      "fixture": "provider-extension.json",
-      "args": {"provider": "synthetic-d"},
-      "expect": {
-        "ok": true,
-        "provider": "synthetic-d",
-        "model_ids": [
-          "vendor/shared"
-        ],
-        "models": {
-          "vendor/shared": {
-            "id": "vendor/shared",
-            "name": "Synthetic Delta Shared",
-            "description": "Synthetic delta endpoint with its own small context.",
-            "context_length": 8192,
-            "architecture": {
-              "input_modalities": [
-                "text"
-              ],
-              "output_modalities": [
-                "text"
-              ]
-            },
             "supported_parameters": [
-              "top_p"
+              "temperature"
+            ]
+          },
+          {
+            "provider": "synthetic-b",
+            "model_id": "vendor/item١",
+            "name": "Order B Item Arabic One",
+            "context_length": 131072,
+            "input_modalities": [
+              "text"
             ],
-            "pricing": {
-              "prompt": "0",
-              "completion": "0"
-            }
+            "output_modalities": [
+              "text"
+            ],
+            "supported_parameters": [
+              "temperature"
+            ]
           }
-        },
-        "count": 1,
-        "snapshot_id": "2755d9b9b6082fbafe30591fc5f045d23d2daa370528b50a3230abcbe5cda0fe",
-        "tick_epoch": 1759200000,
-        "provider_staleness": {
-          "synthetic-d": true
-        }
+        ]
       }
     }
   ],
   "marker_strip_rule": [
-    {"raw_id": "vendor/model", "stripped": "vendor/model"},
-    {"raw_id": "vendor/model:free", "stripped": "vendor/model"},
-    {"raw_id": "vendor/model-free", "stripped": "vendor/model"},
-    {"raw_id": "vendor/model_free", "stripped": "vendor/model"},
-    {"raw_id": "free:vendor/model", "stripped": "vendor/model"},
-    {"raw_id": "free_vendor/model", "stripped": "vendor/model"},
-    {"raw_id": "free:vendor/model:free", "stripped": "vendor/model"},
-    {"raw_id": "vendor/model:FREE", "stripped": "vendor/model"},
-    {"raw_id": "vendor/modfree", "stripped": "vendor/modfree"},
-    {"raw_id": "vendor/free", "stripped": "vendor/free"},
-    {"raw_id": "vendor/freetier", "stripped": "vendor/freetier"},
-    {"raw_id": "vendor/free-model", "stripped": "vendor/free-model"},
-    {"raw_id": "freetier", "stripped": "freetier"},
-    {"raw_id": "free", "stripped": "free"},
-    {"raw_id": ":free", "stripped": ":free"},
-    {"raw_id": "free:", "stripped": "free:"},
-    {"raw_id": "vendor/model-renamed", "stripped": "vendor/model-renamed"}
+    {
+      "raw_id": "vendor/model",
+      "stripped": "vendor/model"
+    },
+    {
+      "raw_id": "vendor/model:free",
+      "stripped": "vendor/model"
+    },
+    {
+      "raw_id": "vendor/model-free",
+      "stripped": "vendor/model"
+    },
+    {
+      "raw_id": "vendor/model_free",
+      "stripped": "vendor/model"
+    },
+    {
+      "raw_id": "free:vendor/model",
+      "stripped": "vendor/model"
+    },
+    {
+      "raw_id": "free_vendor/model",
+      "stripped": "vendor/model"
+    },
+    {
+      "raw_id": "free:vendor/model:free",
+      "stripped": "vendor/model"
+    },
+    {
+      "raw_id": "vendor/model:FREE",
+      "stripped": "vendor/model"
+    },
+    {
+      "raw_id": "vendor/modfree",
+      "stripped": "vendor/modfree"
+    },
+    {
+      "raw_id": "vendor/free",
+      "stripped": "vendor/free"
+    },
+    {
+      "raw_id": "vendor/freetier",
+      "stripped": "vendor/freetier"
+    },
+    {
+      "raw_id": "vendor/free-model",
+      "stripped": "vendor/free-model"
+    },
+    {
+      "raw_id": "freetier",
+      "stripped": "freetier"
+    },
+    {
+      "raw_id": "free",
+      "stripped": "free"
+    },
+    {
+      "raw_id": ":free",
+      "stripped": ":free"
+    },
+    {
+      "raw_id": "free:",
+      "stripped": "free:"
+    },
+    {
+      "raw_id": "vendor/model-renamed",
+      "stripped": "vendor/model-renamed"
+    }
   ]
 }
