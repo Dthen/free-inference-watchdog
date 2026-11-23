@@ -1,0 +1,67 @@
+name: Pages visibility comparison sample
+
+on:
+  workflow_call:
+    inputs:
+      sample:
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+env:
+  PROBE_NAME: pages-visibility-probe-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.sample }}
+
+jobs:
+  upload:
+    name: Upload and immediate lookup
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
+      artifact_name: ${{ env.PROBE_NAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare the lookup SDK
+        working-directory: .github/actions/pages-visibility
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Create a synthetic Pages payload
+        run: |
+          mkdir "$RUNNER_TEMP/visibility-probe"
+          printf '<!doctype html><title>CI visibility probe</title>\n' > "$RUNNER_TEMP/visibility-probe/index.html"
+          printf '{"synthetic":true}\n' > "$RUNNER_TEMP/visibility-probe/catalog.json"
+      - name: Upload the synthetic Pages artifact
+        id: upload
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
+        with:
+          name: ${{ env.PROBE_NAME }}
+          path: ${{ runner.temp }}/visibility-probe
+          retention-days: 1
+      - name: Observe immediate lookup
+        uses: ./.github/actions/pages-visibility
+        with:
+          phase: immediate
+          artifact_name: ${{ env.PROBE_NAME }}
+          artifact_id: ${{ steps.upload.outputs.artifact_id }}
+
+  dependent:
+    name: Lookup from dependent job
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: upload
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare the lookup SDK
+        working-directory: .github/actions/pages-visibility
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Observe dependent lookup
+        uses: ./.github/actions/pages-visibility
+        with:
+          phase: dependent
+          artifact_name: ${{ needs.upload.outputs.artifact_name }}
+          artifact_id: ${{ needs.upload.outputs.artifact_id }}

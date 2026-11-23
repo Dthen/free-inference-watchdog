@@ -1,0 +1,23 @@
+name: Pages artifact visibility probe (no deployment)
+
+on:
+  push:
+    branches: [diag/pages-artifact-visibility]
+    paths:
+      - '.github/workflows/pages-visibility-probe.yml'
+      - '.github/workflows/pages-visibility-sample.yml'
+      - '.github/actions/pages-visibility/**'
+
+permissions:
+  contents: read
+
+jobs:
+  sample:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        sample: [1, 2, 3, 4, 5, 6, 7, 8]
+    uses: ./.github/workflows/pages-visibility-sample.yml
+    with:
+      sample: ${{ matrix.sample }}

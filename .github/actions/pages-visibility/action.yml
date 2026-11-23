@@ -1,0 +1,15 @@
+name: Observe Pages artifact visibility
+description: Inspect the runner-scoped artifact listing without deploying
+inputs:
+  phase:
+    description: Immediate or dependent lookup
+    required: true
+  artifact_name:
+    description: Exact synthetic artifact name
+    required: true
+  artifact_id:
+    description: Exact ID returned by the upload action
+    required: true
+runs:
+  using: node20
+  main: probe.cjs
