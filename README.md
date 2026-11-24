@@ -40,13 +40,12 @@ browser's in-page WebMCP API, within the limits in
 [the browser (WebMCP) tools](#browser-webmcp-tools-in-the-dashboard). That page
 is rendered HTML, not the JSON feed.
 
-### Install (unreleased v2 candidate)
+### Install (0.2.0)
 
-These instructions describe the **unreleased 0.2.0 v2 candidate**. Build from
-this checkout; the published 0.1.0 release has a different API.
+Build 0.2.0 from this checkout. The legacy 0.1.0 release has a different API.
 
 ```bash
-# from this checkout root (unreleased 0.2.0 candidate)
+# from this checkout root
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
@@ -98,10 +97,8 @@ published snapshot says nothing about provider health at the moment you read it.
 
 **Version caution.** 0.2.x requires v2; 0.1.x requires v1. The validator reports
 `unsupported_schema_version` for a mismatch; a consumer without a compatible
-cached snapshot reports `source_unavailable`. Before publishing, use
-`--catalog-file` with an absolute path to this checkout's rebuilt
-`site/catalog.json`, or the synthetic fixture below. Rebuilding locally does
-not update the remote feed.
+cached snapshot reports `source_unavailable`. Use `--catalog-file` to query a
+local snapshot without contacting the public feed.
 
 The portable part of every stdio client config is a named server with a
 `command` and an `args` array; the outer key and file format vary per client.
@@ -803,10 +800,7 @@ python -I tests/consumer_smoke.py \
 ## Published catalogue snapshot (v2)
 
 Version 2 removes projected `pricing` and is incompatible with v1 consumers
-and caches. This checkout's rebuilt `site/catalog.json` is v2; a local rebuild
-is not publication. Release the v2 feed, page and compatible 0.2.0 package
-together. See [Version caution](#choose-the-catalogue-source) before using the
-remote default with an unreleased build.
+and caches. See [Version caution](#choose-the-catalogue-source) when upgrading.
 
 ### Snapshot fields
 

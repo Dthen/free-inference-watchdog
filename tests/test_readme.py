@@ -464,11 +464,8 @@ def test_consumer_section_scopes_queries_away_from_inference():
     assert "--init" not in section, "consumer path must not mention --init"
 
 
-def test_install_documents_the_unreleased_v2_checkout():
-    """The examples describe the uncommitted 0.2.0 candidate, so the install
-    path must build THIS checkout. A floating ref is a regression, and the
-    published 0.1.0 release is isolated as legacy with its own tool surface
-    rather than presented as implementing the examples."""
+def test_install_builds_this_checkout_and_distinguishes_legacy():
+    """The install builds this checkout; the v1 release has a different API."""
     text = _readme()
     section = _section(text, CONSUMER_HEADING)
     lowered = _plain(section).lower()
@@ -476,8 +473,7 @@ def test_install_documents_the_unreleased_v2_checkout():
     for floating in ("@master", "@main", "@latest", "<sha>", "commit_sha"):
         assert floating not in lowered, f"floating install ref {floating!r} is back"
 
-    assert "unreleased" in lowered and "0.2.0" in lowered, \
-        "the install section never says which candidate it documents"
+
     install_blocks = [body for language, body in _fenced_languages(section)
                       if language == "bash"]
     assert install_blocks, "no install example"
