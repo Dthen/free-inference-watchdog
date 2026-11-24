@@ -43,6 +43,15 @@ def _load_json_or_default(path, default):
     return data
 
 
+def _is_finite_number(value):
+    """Non-bool int/float and finite — the numeric admission rule shared by
+    the storage boundaries. Zero, negative and fractional values are
+    legitimate; truncation stays with the callers that need an int."""
+    return (not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(value))
+
+
 # ---------- roster ----------
 
 def load_roster(path):
@@ -95,9 +104,7 @@ def load_alive(path):
     clean = dict(data)
     for field in ("last_tick_epoch", "last_output_epoch",
                   "dropped_alerts_total"):
-        if field in clean and not isinstance(clean[field], bool) \
-                and isinstance(clean[field], (int, float)) \
-                and math.isfinite(clean[field]):
+        if field in clean and _is_finite_number(clean[field]):
             clean[field] = int(clean[field])
         else:
             clean.pop(field, None)

@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "snapshot_id": "40ce6ccf6d37e2eb0b7ec7f9b60d6e1fe72520e66d9d2148fc5990c993556b9a",
+  "schema_version": 2,
+  "snapshot_id": "7c59e81194a017ccf500eabb2fd48f893f1daa795a835ebacaec3cb49ab6c0be",
   "tick_epoch": 1759200000,
   "cadence_s": 3600,
   "provider_order": [
@@ -34,11 +34,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/model:free": {
           "id": "vendor/model:free",
@@ -57,11 +53,7 @@
           "supported_parameters": [
             "temperature",
             "max_tokens"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/shared": {
           "id": "vendor/shared",
@@ -79,11 +71,7 @@
           "supported_parameters": [
             "temperature",
             "max_tokens"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         }
       },
       "stale": false
@@ -112,11 +100,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/shared": {
           "id": "vendor/shared",
@@ -135,11 +119,7 @@
           "supported_parameters": [
             "temperature",
             "top_p"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         }
       },
       "stale": false

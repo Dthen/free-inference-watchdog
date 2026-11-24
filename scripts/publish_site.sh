@@ -16,8 +16,9 @@
 #      --root with the selected interpreter, so the builder alone writes the
 #      site/catalog.json + site/index.html pair;
 #   3. read the EXACT final artifact bytes back, decode them as strict UTF-8
-#      and hand them to the builder's own validate_artifact_pair. This second
-#      gate is required independently of the builder's internal validation.
+#      and hand them to the real validate_artifact_pair (the ONE pair judgement
+#      in catalog_export, which build_site re-exports). This second gate is
+#      required independently of the builder's internal validation.
 #      Because a selected executable may simply ignore the Python program and
 #      return zero, that program emits ONE fixed private success receipt on its
 #      stdout ONLY after the real validator returned normally; the shell
@@ -127,9 +128,9 @@ readonly PROG="publish_site"
 
 # The ONE fixed private success receipt of the read-back validator (see stage 3
 # below). It is an internal handshake, never operational or public output, and
-# it MUST stay byte-identical to the single print() in the read-back program:
-# if the two ever drift apart every run fails CLOSED at stage=validate (the
-# gate never accepts a missing receipt), never open.
+# it MUST stay byte-identical to the single print() of the read-back check in
+# scripts/publication_checks.py: if the two ever drift apart every run fails
+# CLOSED at stage=validate (the gate never accepts a missing receipt), never open.
 readonly READBACK_RECEIPT='publish_site: read-back validation passed'
 
 # The receipt is extended into a strictly checked internal RECORD: the fixed
@@ -358,11 +359,16 @@ if [ "$build_rc" -ne 0 ]; then
 fi
 
 # --- independent read-back validation of the EXACT final artifact pair -----
-# The program is fed on stdin so no shell quoting can reshape it. It imports
-# from THIS helper's checkout only: the ambient path entry for the cwd and the
-# target root are dropped before the import, so a synthetic root cannot shadow
-# build_site or watchdog_catalog. It performs no JSON identity check of its own
-# -- the existing validator decides.
+# The three internal checks live in ONE stdlib module in THIS helper's
+# checkout, scripts/publication_checks.py. The bootstrap below is the only
+# Python this script carries: it is fed on stdin so no shell quoting can
+# reshape it, it makes that checkout's modules importable -- dropping the
+# ambient path entry for the cwd and the target root first, so neither a
+# synthetic root nor an installed package of the same name can shadow the
+# module -- and it dispatches on the selector argument. Every call still hands
+# the child the EXACT argument vector the separate programs used to receive.
+# The read-back stage performs no JSON identity check of its own -- the
+# existing validator decides.
 #
 # It reads each artifact ONCE, hashes those very bytes with stdlib SHA-256 and
 # validates the strings decoded FROM THOSE BYTES: the identities it reports are
@@ -382,59 +388,38 @@ fi
 # through a word-splitting ``read``, which would collapse runs of space and tab
 # and ignore leading/trailing whitespace, silently turning a corrupted record
 # back into the exact one.
-validate_rc=0
-validate_out=$("$python_bin" - "$root" "$repo_root" <<'PY'
-import hashlib
+
+# --- ONE bootstrap for all three internal checks ---------------------------
+# ``run_publication_check`` runs the module in THIS helper's checkout as a
+# plain top-level import (never as a submodule of the repository's ``scripts``
+# namespace, which an installed regular package could supersede). The checkout
+# directory is handed over through an environment value set by this helper for
+# that ONE command -- never ambient configuration, never an optional user
+# fallback -- and the read-back call has no selector, so its target is the
+# first argument rather than the second.
+run_publication_check() {
+    PUBLISH_SITE_CHECKOUT="$repo_root" "$python_bin" - "$@" <<'PY'
+import os
 import sys
-from pathlib import Path
 
-target = sys.argv[1]
-checkout = sys.argv[2]
-
-# Deliberate, predictable import: this helper's checkout first, and no ambient
-# cwd / target-root entry that could shadow the real modules.
+checkout = os.environ["PUBLISH_SITE_CHECKOUT"]
+args = sys.argv[1:]
+# A selector call ALWAYS carries 5 arguments (selector + 4 payload); anything
+# else is a read-back call whose target is the FIRST argument, even when that
+# root is literally named "identity" or "range".
+target = args[1] if len(args) == 5 and args[0] in ("identity", "range") else args[0]
 sys.path[:] = [entry for entry in sys.path
                if entry not in ("", ".", target)]
+sys.path.insert(0, os.path.join(checkout, "scripts"))
 sys.path.insert(0, checkout)
+from publication_checks import main
 
-site = Path(target) / "site"
-catalog_path = site / "catalog.json"
-html_path = site / "index.html"
-
-try:
-    catalog_bytes = catalog_path.read_bytes()
-    html_bytes = html_path.read_bytes()
-except OSError as exc:
-    print(f"publish_site: cannot read back artifacts: {exc}", file=sys.stderr)
-    raise SystemExit(2)
-
-try:
-    catalog_text = catalog_bytes.decode("utf-8", "strict")
-    html_text = html_bytes.decode("utf-8", "strict")
-except UnicodeDecodeError as exc:
-    print("publish_site: read-back artifacts are not valid UTF-8 "
-          f"({type(exc).__name__})", file=sys.stderr)
-    raise SystemExit(2)
-
-try:
-    from build_site import validate_artifact_pair
-
-    validate_artifact_pair(catalog_text, html_text)
-except Exception as exc:  # noqa: BLE001 - every rejection is a gate failure
-    print("publish_site: artifact pair rejected: "
-          f"{type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(2)
-
-# Success record: printed ONLY after the validator returned normally above, and
-# the only thing this program ever writes to stdout. The marker must stay
-# byte-identical to READBACK_RECEIPT in the shell; the two identities are the
-# raw SHA-256 of the bytes decoded and validated above, in catalogue,index
-# order, and are frozen for the whole Git phase.
-print("publish_site: read-back validation passed "
-      f"sha256 {hashlib.sha256(catalog_bytes).hexdigest()} "
-      f"{hashlib.sha256(html_bytes).hexdigest()}")
+raise SystemExit(main(args))
 PY
-) || validate_rc=$?
+}
+
+validate_rc=0
+validate_out=$(run_publication_check "$root" "$repo_root") || validate_rc=$?
 if [ "$validate_rc" -ne 0 ]; then
     stage_err validate "read-back validation failed (exit $validate_rc): $site_dir"
     exit 2
@@ -723,119 +708,8 @@ fi
 # reported and that commit is left for operator handling: nothing is reset,
 # repaired, retried, rewritten or pushed.
 identity_rc=0
-identity_out=$("$python_bin" - identity "$root_phys" "$candidate" \
-    "$catalog_digest" "$index_digest" <<'PY'
-import hashlib
-import os
-import stat
-import subprocess
-import sys
-from pathlib import Path
-
-if sys.argv[1] != "identity":
-    print("publish_site: unexpected identity-check invocation",
-          file=sys.stderr)
-    raise SystemExit(2)
-
-target = sys.argv[2]
-commit = sys.argv[3]
-expected = (
-    ("site/catalog.json", sys.argv[4]),
-    ("site/index.html", sys.argv[5]),
-)
-
-
-def sha256(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def working_bytes(target, rel):
-    """Exact bytes of a WORKING artifact that must be an ordinary regular file.
-
-    ``Path.read_bytes`` (and a plain ``open``) FOLLOW a final-component symbolic
-    link, so a completed ``post-commit`` hook could replace the validated
-    artifact with a link to a copy holding identical bytes and a byte-only
-    comparison of the working path would still pass. The file type is therefore
-    established WITHOUT following that link -- ``lstat`` first, then an open
-    that refuses a symlink -- and the OPENED descriptor is confirmed to be a
-    regular file before any byte is read. This inspects the artifacts the
-    synchronous hook already left behind; it is not a general hostile
-    filesystem race-hardening layer.
-    """
-    path = Path(target) / rel
-    try:
-        info = os.lstat(path)
-    except OSError as exc:
-        print("publish_site: cannot read the working artifact back: "
-              f"{rel}: {exc}", file=sys.stderr)
-        raise SystemExit(2)
-    if stat.S_ISLNK(info.st_mode):
-        detail = ("a symbolic link is rejected, even when its target holds "
-                  "the validated bytes")
-    elif stat.S_ISDIR(info.st_mode):
-        detail = "a directory is not a working artifact"
-    elif not stat.S_ISREG(info.st_mode):
-        detail = "only an ordinary regular file is accepted"
-    else:
-        detail = ""
-    if detail:
-        print("publish_site: the working artifact is not an ordinary regular "
-              f"file ({detail}): {rel}", file=sys.stderr)
-        raise SystemExit(2)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        handle = os.fdopen(os.open(str(path), flags), "rb")
-    except OSError as exc:
-        print("publish_site: cannot read the working artifact back: "
-              f"{rel}: {exc}", file=sys.stderr)
-        raise SystemExit(2)
-    with handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            print("publish_site: the working artifact is not an ordinary "
-                  f"regular file (it was not one when opened): {rel}",
-                  file=sys.stderr)
-            raise SystemExit(2)
-        return handle.read()
-
-
-# The committed bytes are checked first: when a hook substituted the pair, the
-# commit is what an operator has to deal with, and the diagnostic should say
-# so rather than blame the working tree.
-for rel, frozen in expected:
-    try:
-        proc = subprocess.run(
-            ["git", "-C", target, "cat-file", "blob", f"{commit}:{rel}"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except OSError as exc:
-        print("publish_site: cannot run git to read the committed artifact "
-              f"back: {rel}: {exc}", file=sys.stderr)
-        raise SystemExit(2)
-    if proc.returncode != 0:
-        detail = proc.stderr.decode("utf-8", "replace").strip()
-        print(f"publish_site: cannot read the committed artifact back: "
-              f"{rel}: {detail}", file=sys.stderr)
-        raise SystemExit(2)
-    committed = sha256(proc.stdout)
-    if committed != frozen:
-        print("publish_site: the committed artifact does not match the "
-              f"validated bytes: {rel} (validated sha256 {frozen}, "
-              f"committed sha256 {committed})", file=sys.stderr)
-        raise SystemExit(2)
-
-for rel, frozen in expected:
-    working = working_bytes(target, rel)
-    actual = sha256(working)
-    if actual != frozen:
-        print("publish_site: the working artifact does not match the "
-              f"validated bytes: {rel} (validated sha256 {frozen}, "
-              f"working sha256 {actual})", file=sys.stderr)
-        raise SystemExit(2)
-
-# Success receipt: the only thing this program ever writes to stdout, and it
-# must stay byte-identical to IDENTITY_RECEIPT in the shell.
-print("publish_site: artifact identities match")
-PY
-) || identity_rc=$?
+identity_out=$(run_publication_check identity "$root_phys" "$candidate" \
+    "$catalog_digest" "$index_digest") || identity_rc=$?
 if [ "$identity_rc" -ne 0 ]; then
     stage_err git/verify "the artifact bytes or working artifact types at the target commit do not match the frozen validated identities; a commit may already exist at $candidate and is left for operator handling (nothing was reset, repaired, retried or pushed): $root_phys"
     exit 2
@@ -1097,81 +971,8 @@ fi
 # Its stdout is captured, never forwarded: like the read-back gate it proves it
 # really executed through ONE fixed private receipt.
 range_rc=0
-range_out=$("$python_bin" - range "$root_phys" "$repo_root" "$remote_tip" "$candidate" <<'PY'
-import subprocess
-import sys
-
-MARKER = "publish_site: unpublished range verified commits"
-ARTIFACTS = ("site/catalog.json", "site/index.html")
-
-if sys.argv[1] != "range":
-    print("publish_site: unexpected range-check invocation", file=sys.stderr)
-    raise SystemExit(2)
-
-target = sys.argv[2]
-checkout = sys.argv[3]
-remote_tip = sys.argv[4]
-candidate = sys.argv[5]
-
-sys.path[:] = [entry for entry in sys.path if entry not in ("", ".", target)]
-sys.path.insert(0, checkout)
-
-
-def fail(message):
-    print(f"publish_site: unpublished range rejected: {message}", file=sys.stderr)
-    raise SystemExit(2)
-
-
-def git(*args):
-    proc = subprocess.run(["git", "-C", target, *args],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode != 0:
-        fail("git " + " ".join(args[:1]) + f" exited {proc.returncode}")
-    return proc.stdout
-
-
-try:
-    from build_site import validate_artifact_pair
-except Exception as exc:  # noqa: BLE001 - every import failure is a gate failure
-    fail(f"cannot import the real validator: {type(exc).__name__}: {exc}")
-
-raw = git("rev-list", "--reverse", "--topo-order", f"{remote_tip}..{candidate}")
-commits = [line for line in raw.decode("utf-8", "strict").splitlines() if line]
-if not commits:
-    fail("the unpublished range is empty although the destination tip differs "
-         "from the candidate")
-
-for commit in commits:
-    parents = git("rev-list", "--parents", "-n", "1", commit).decode().split()
-    if len(parents) != 2:
-        fail(f"unpublished commit {commit} is not an ordinary single-parent "
-             "commit")
-    raw_paths = git("diff-tree", "--no-commit-id", "--name-only", "-r",
-                    "--no-renames", commit)
-    paths = [line for line in raw_paths.decode("utf-8", "strict").splitlines()
-             if line]
-    if not paths:
-        fail(f"unpublished commit {commit} changes no path")
-    outside = sorted(set(paths) - set(ARTIFACTS))
-    if outside:
-        fail(f"unpublished commit {commit} changes paths outside the public "
-             "artifact pair: " + ", ".join(outside))
-    blobs = {rel: git("cat-file", "blob", f"{commit}:{rel}") for rel in ARTIFACTS}
-    try:
-        catalog_text = blobs[ARTIFACTS[0]].decode("utf-8", "strict")
-        html_text = blobs[ARTIFACTS[1]].decode("utf-8", "strict")
-    except UnicodeDecodeError:
-        fail(f"unpublished commit {commit} holds artifacts that are not valid "
-             "UTF-8")
-    try:
-        validate_artifact_pair(catalog_text, html_text)
-    except Exception as exc:  # noqa: BLE001 - the real validator decides
-        fail(f"unpublished commit {commit} does not hold a pair the real "
-             f"validator accepts: {type(exc).__name__}: {exc}")
-
-print(f"{MARKER} {len(commits)}")
-PY
-) || range_rc=$?
+range_out=$(run_publication_check range "$root_phys" "$repo_root" \
+    "$remote_tip" "$candidate") || range_rc=$?
 if [ "$range_rc" -ne 0 ]; then
     stage_err push/history "the unpublished commit range from the observed destination tip $remote_tip to the candidate $candidate was rejected (exit $range_rc); nothing was pushed: $root_phys"
     exit 2

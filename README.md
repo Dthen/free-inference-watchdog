@@ -9,110 +9,100 @@ tracks the changes and alerts on them.
 each tick.
 
 Stdlib-only Python, one tick per invocation, no LLM calls ever. Providers are
-**config-driven**: each gateway is a JSON file under
-[`providers/`](providers/). Adding or removing a provider is a file drop, not a
-code change.
+**config-driven**: each gateway is a JSON file under [`providers/`](providers/),
+so adding or removing one is a file drop, not a code change.
 
 | You want to… | Start at |
 |---|---|
-| query the free-model catalogue from an MCP client | [Query the catalogue over MCP](#query-the-catalogue-over-mcp) — no keys, no cron, no local roster, no alerting |
-| use the same five tools inside a browser page | [Browser (WebMCP) tools in the dashboard](#browser-webmcp-tools-in-the-dashboard) — the page's loaded snapshot; needs a browser that exposes the in-page API |
+| query the free-model catalogue from an MCP client | [Query the catalogue over MCP](#query-the-catalogue-over-mcp) — no keys, no cron, no local roster |
+| use the same three tools inside a browser page | [Browser (WebMCP) tools in the dashboard](#browser-webmcp-tools-in-the-dashboard) — the page's loaded snapshot |
 | run the watchdog yourself, alert on changes, self-host | [Self-hosting the watchdog](#self-hosting-the-watchdog) — provider keys, Discord webhook, cron host |
 
 ## Query the catalogue over MCP
 
 `free-inference-watchdog-mcp` is a read-only MCP server over the published
-catalogue, speaking MCP **stdio**. It exposes five tools — `search_models`,
-`get_model`, `list_endpoints`, `list_free_models` and `watchdog_status` — and
-answers from one validated catalogue snapshot.
+catalogue, speaking MCP **stdio**. It exposes three tools — `search_models`,
+`get_model` and `watchdog_status` — and answers from one validated snapshot.
 
 A consumer needs Python 3.11+ and an MCP client that can launch a local stdio
-server. A consumer does **not** need provider API keys, a Discord webhook, a
-cron job, `providers/`, `state/`, the watchdog tick, this checkout, or the
-Hermes agent: the installed package carries the query core, the reviewed tool
-contract and the stdio server, and nothing else. It is a plain Python package
-installed with `uv` or `pip` — not a Hermes feature, and not an agent skill.
+server. It does **not** need provider API keys, a Discord webhook, a cron job,
+`providers/`, `state/`, the watchdog tick, this checkout, or the Hermes agent:
+the installed package carries the query core, the reviewed tool contract, the
+stdio server and the one-shot native adapter, and nothing else.
 
-**Querying the catalogue is not inference.** Reading it never calls a provider,
-never spends a credit and never grants access to a model. To actually run a
-model you need your own credentials with that gateway, under that gateway's own
-rules and terms — nothing here supplies, proxies or bypasses them. Nor is this a
-hosted endpoint: the server is a LOCAL process that your MCP client launches
-over stdio. This ref exposes no remotely connectable MCP HTTP URL. Browser
-agents are served a different way and by a different artifact: the generated
-dashboard page embeds the same catalogue and registers the five read-only tools
-with the browser's in-page WebMCP API, within the availability limits described
-in [Browser (WebMCP) tools in the dashboard](#browser-webmcp-tools-in-the-dashboard).
-That page is a rendered document, not the JSON feed, and still not a hosted
-endpoint.
+Querying is not inference. Reading the catalogue never calls a provider, never
+spends a credit and never grants access to a model; to run one you need your
+own credentials with that gateway. This is also not a hosted endpoint — the
+server is a local process your client launches over stdio, and this ref exposes
+no remotely connectable MCP HTTP URL. Browser agents are served by a different
+artifact: the generated page registers the same three read-only tools with the
+browser's in-page WebMCP API, within the limits in
+[the browser (WebMCP) tools](#browser-webmcp-tools-in-the-dashboard). That page
+is rendered HTML, not the JSON feed.
 
-### Install the pinned commit
+### Install (0.2.0)
 
-Use the exact commit this page was verified against. A branch name is a moving
-target, so nothing below installs from `master`:
+Build 0.2.0 from this checkout. The legacy 0.1.0 release has a different API.
 
 ```bash
-# install once, as a tool on your PATH (uv)
-uv tool install "git+https://github.com/Dthen/free-inference-watchdog.git@bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc"
-
-# or with pip into the environment of your choice
-python3 -m pip install "free-inference-watchdog-mcp @ git+https://github.com/Dthen/free-inference-watchdog.git@bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc"
-
-# or run it once without installing
-uvx --from "git+https://github.com/Dthen/free-inference-watchdog.git@bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc" free-inference-watchdog-mcp --help
+# from this checkout root
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+python -m watchdog_catalog --help          # MCP stdio server
+python -m watchdog_catalog.cli --help      # one-shot native command
 ```
 
-All three install routes give the same two entry points: the console command
-`free-inference-watchdog-mcp`, and the equivalent module invocation
-`python3 -m watchdog_catalog`. `--help` needs no catalogue, no credentials and
-no network.
+The wheel declares two console commands: `free-inference-watchdog-mcp`
+(equivalently `python3 -m watchdog_catalog`) and the one-shot
+`free-inference-watchdog` (equivalently `python3 -m watchdog_catalog.cli`; see
+[Native command](#native-command)). `--help` needs no catalogue, credentials or
+network. A client that does not inherit this shell environment needs an absolute
+`command` path: expand the checkout-relative
+`.venv/bin/free-inference-watchdog-mcp`.
+
+**Legacy release — a different API.** Published `0.1.0` at commit
+`bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc` has five tools over v1 snapshots:
+`list_free_models`, `list_endpoints`, marker-group `get_model(model_id)`,
+`watchdog_status` and `search_models` (default page: 50). The instructions below
+are for 0.2.0, not that release.
 
 ### Choose the catalogue source
 
-Exactly one source is selected per launch, and the choice is a plain flag:
+One source is selected per launch, by a plain flag:
 
 | Selection | Meaning |
 |---|---|
 | `--catalog-url URL` | read the catalogue from this literal `http(s)` URL |
 | `--catalog-file PATH` | read the catalogue from this literal local JSON file |
-| neither | the published remote feed — the default source, rebuilt each tick (see [Public JSON feed](#public-json-feed)) |
+| neither | the published remote feed — the default source, rebuilt each tick |
 | `--cache-dir DIR` | optional; where the validated disk cache is kept |
 
 `--catalog-url` and `--catalog-file` are mutually exclusive, and the path or URL
-is used literally — no tilde expansion, no trimming, no substitution.
+is used literally — no tilde expansion, no trimming, no substitution. With no
+source flag the server reads
+`https://raw.githubusercontent.com/Dthen/free-inference-watchdog/master/site/catalog.json`.
+The Pages copy at <https://models.dthen.xyz/catalog.json> is the same document;
+pass it to `--catalog-url` explicitly if you prefer it. It is a mirror, never an
+implicit failover — the server does not fall back to a second URL.
 
-With no source flag the server reads the live public catalogue:
+"Live" names the default URL; it is not a promise that the URL always answers.
+With no validated snapshot cached yet, a failed fetch answers every tool call
+with the fixed `source_unavailable` error — a missing feed is never reported as
+an empty catalogue. A cached, validated last snapshot is served instead, with
+its real age plus `refresh_failed` and `cache_fallback` warnings. The live
+document also carries the producer's own `warnings` list (for example
+`metadata_missing`), so read `source.warnings` before trusting freshness. A
+published snapshot says nothing about provider health at the moment you read it.
 
-- **Raw GitHub — the default:**
-  <https://raw.githubusercontent.com/Dthen/free-inference-watchdog/master/site/catalog.json>
-- **Pages mirror:** <https://models.dthen.xyz/catalog.json> — the same document,
-  served by the GitHub Pages site. Pass it to `--catalog-url` explicitly if you
-  prefer it; it is never an implicit failover, because the server does not fall
-  back to a second URL.
+**Version caution.** 0.2.x requires v2; 0.1.x requires v1. The validator reports
+`unsupported_schema_version` for a mismatch; a consumer without a compatible
+cached snapshot reports `source_unavailable`. Use `--catalog-file` to query a
+local snapshot without contacting the public feed.
 
-"Live" names the default URL — it is not a promise that the URL always answers.
-The source contract is unchanged: a failed fetch with no validated snapshot
-cached yet answers every tool call with the fixed `source_unavailable` error —
-a missing feed is never reported as an empty catalogue — while a validated last
-snapshot that is still cached is served with its real age plus `refresh_failed`
-and `cache_fallback` warnings. The live document also carries the producer's own
-`warnings` list (for example `metadata_missing`), so read `source.warnings`
-before trusting freshness, and remember that a published snapshot says nothing
-about provider health at the moment you read it.
-
-The pinned synthetic preview below still works exactly as before; it is a
-reproducible example, not a substitute for the default. The first client block
-below passes no source flag and therefore reads the live catalogue.
-
-### Generic stdio client configuration
-
-This is the portable part of every stdio client config — a named server with a
-`command` and an argument array. Client-specific spelling (the outer key, the
-config file location, JSON-versus-TOML) varies per client, so check that
-client's own documentation; only `command` and `args` are portable.
-
-The live default needs no source flag, so the whole configuration is the
-command and an empty `args` array:
+The portable part of every stdio client config is a named server with a
+`command` and an `args` array; the outer key and file format vary per client.
+The live default needs no source flag:
 
 ```json
 {
@@ -125,9 +115,13 @@ command and an empty `args` array:
 }
 ```
 
-To reproduce the synthetic walkthrough below against fixed bytes — useful when
-you want exactly the snapshot this page prints, or you are working offline —
-point the same server at the pinned fixture instead:
+To reproduce the synthetic walkthrough below against fixed bytes — or to work
+offline — point the same server at this checkout's v2 fixture. It is a small
+hand-authored catalogue with fake gateways (`synthetic-a`, `synthetic-b`,
+`synthetic-c`): **synthetic preview, not live data**, and it does not describe
+real models. The path is literal (no tilde expansion or substitution), so
+replace it with the absolute path to this checkout's
+`tests/fixtures/catalog/lookup.json`.
 
 ```json
 {
@@ -135,56 +129,105 @@ point the same server at the pinned fixture instead:
     "free-inference-watchdog": {
       "command": "free-inference-watchdog-mcp",
       "args": [
-        "--catalog-url",
-        "https://raw.githubusercontent.com/Dthen/free-inference-watchdog/bd03dcbd8edcf72ceab0a322891fffc6ecb53ecc/tests/fixtures/catalog/lookup.json"
+        "--catalog-file",
+        "/absolute/path/to/free-inference-watchdog/tests/fixtures/catalog/lookup.json"
       ]
     }
   }
 }
 ```
 
-Two notes that save a support round-trip:
+If your client does not inherit your shell `PATH`, give `command` as the
+absolute path to the installed console. To use a different v2 snapshot, swap
+the path; never pass `--catalog-file` and `--catalog-url` together.
 
-- If your client does not inherit your shell `PATH`, give `command` as the
-  absolute path to the installed console instead of the bare name.
-- To read a downloaded copy instead of the URL, swap `--catalog-url` and its
-  value for `--catalog-file` and a path. The two flags are mutually exclusive;
-  do not pass both.
+### Native command
+
+`free-inference-watchdog` runs one operation per process over the same source
+and query core. It parses the command first, acquires one snapshot, answers once
+and exits; it never starts the stdio transport or imports the MCP SDK.
+
+| Command | Operation |
+|---|---|
+| `free-inference-watchdog search [QUERY] [OPTIONS]` | `search_models` |
+| `free-inference-watchdog get PROVIDER MODEL_ID [OPTIONS]` | `get_model` |
+| `free-inference-watchdog status [OPTIONS]` | `watchdog_status` |
+
+`--json`, the mutually exclusive `--catalog-file`/`--catalog-url` pair and
+`--cache-dir` apply to all three. `search` also takes `--provider`,
+`--min-context-length`, repeatable `--input-modality` and
+`--supported-parameter`, `--limit` and `--offset`. Values are literal: omit a
+filter to leave it unconstrained, and pass `--` before a positional value that
+begins with a dash.
+
+By default the command prints plain text rendering exactly the same result —
+every returned row or detail field, the real source freshness and any
+cache-fallback warnings, with `unknown` distinct from a known empty value and
+terminal control characters escaped for display only. `--json` prints the
+complete UTF-8 JSON document and also selects JSON errors; without it, errors
+are diagnostics on stderr. Exit status is 0 for every successful query
+(including no matches or a stale snapshot), 2 for a malformed invocation or an
+invalid/unknown argument, 1 for `not_found`, an unavailable source or an output
+failure, and 130 when interrupted.
+
+```bash
+python3 -m watchdog_catalog.cli search "reasoning" --catalog-file tests/fixtures/catalog/search-text.json --limit 1
+python3 -m watchdog_catalog.cli search "reasoning" --catalog-file tests/fixtures/catalog/search-text.json --limit 1 --json
+```
+
+`free-inference-watchdog` is the installed spelling of these commands;
+`python3 -m watchdog_catalog.cli` is the checkout spelling. Both accept the same
+operations, flags and argument order.
+
+Every invocation is a fresh process and always **attempts a refresh** of the
+selected source. With a URL source, a slow or unreachable feed is only found at
+run time: the attempt may wait for the existing **socket-operation timeout** (10
+seconds by default) before a validated snapshot from `--cache-dir` is served as
+last-good fallback with `refresh_failed` and `cache_fallback`. A cached snapshot
+is therefore **not a guaranteed offline read** — no flag skips the refresh — and
+that timeout bounds individual blocking socket operations, not the whole
+command.
 
 ### A worked example (synthetic preview, not live data)
 
-The `--catalog-url` value in the second client block above is the repository's
-pinned **synthetic** fixture: a small, hand-authored catalogue with fake
-gateways (`synthetic-a`, `synthetic-b`, `synthetic-c`). It is published so this
-walkthrough is executable everywhere and prints the same values; it is not live
-catalogue data and it does not describe real models. The live default feed needs
-no flag at all — see *Choose the catalogue source* above — and its
-`snapshot_id`, `tick_epoch` and providers move with every publication, so this
-page cannot print them.
-
-The output below is from the installed server at the pinned commit, called
-through a real MCP stdio session. Values are trimmed to the fields that matter
-and are literal — no output is invented:
+The output below is `search_models({"query": "shared"})` from this checkout's
+0.2.0 candidate over a real MCP stdio session against that fixture
+(`source.mode` is `file`). Values are
+**selected fields, not a complete document**: `source` is trimmed to its stable
+provenance fields and the per-source timestamps are omitted.
 
 ```json
 {
   "ok": true,
-  "query": "shared",
-  "returned_count": 2,
   "total_matches": 2,
-  "counts": {
-    "gateways": 2,
-    "endpoints": 2,
-    "distinct_raw_ids": 1,
-    "marker_group_labels": 1
-  },
+  "next_offset": null,
   "provider_staleness": {
     "synthetic-a": false,
     "synthetic-b": false,
     "synthetic-c": false
   },
+  "endpoints": [
+    {
+      "provider": "synthetic-a",
+      "model_id": "vendor/shared",
+      "name": "Vendor Shared",
+      "context_length": 131072,
+      "input_modalities": ["text"],
+      "output_modalities": ["text"],
+      "supported_parameters": ["temperature", "max_tokens"]
+    },
+    {
+      "provider": "synthetic-b",
+      "model_id": "vendor/shared",
+      "name": "Vendor Shared",
+      "context_length": 32768,
+      "input_modalities": ["text", "image"],
+      "output_modalities": ["text"],
+      "supported_parameters": ["temperature", "top_p"]
+    }
+  ],
   "source": {
-    "mode": "url",
+    "mode": "file",
     "cached": false,
     "observation_fresh": false,
     "warnings": ["tick_stale"]
@@ -192,27 +235,25 @@ and are literal — no output is invented:
 }
 ```
 
-What to read out of it: the raw id `vendor/shared` is tracked by two gateways,
-so one search row per gateway is two endpoints but only one distinct raw id. The
-`source` block is provenance, not payload — and it says the observation is
-stale, because the fixture's `tick_epoch` is frozen at the test clock. A stale
-observation is still answered; it is just labelled. `ok: true` plus a `source`
-block means a **validated snapshot was returned** — it does not mean this
-launch's refresh succeeded. A last-known-good replay also returns `ok: true`
-and a `source` block, but **not the same block**: `source.cached` turns `true`,
-`source.not_modified` stays `false`, `source.fetch_age_s` and
-`source.observation_age_s` keep counting from the original fetch and the
-original observation instead of restarting, and `refresh_failed` plus `cache_fallback` join `source.warnings` to
-mark a failed refresh served from memory. Read `source.warnings` before
-trusting freshness.
+One raw id tracked by two gateways is one search row per gateway: two endpoints,
+one distinct raw id. Rows are compact by design; call `get_model` for a
+description or wiring URL. Read the `source` block as provenance, not payload:
+`ok: true` plus a `source` block means a validated snapshot was returned — not
+that this launch's refresh succeeded. A last-known-good replay also returns
+`ok: true`, but it is not the same block: `source.cached` turns true,
+`source.not_modified` stays false, the fetch and observation ages keep counting
+from the original fetch and observation, and `refresh_failed` plus
+`cache_fallback` mark a failed refresh served from memory. A stale observation
+is still answered; it is just labelled.
 
-`get_model` returns one row per `(provider, raw model_id)` pair. Two lookups run
-at once: `exact_matches` is **literal** raw-id membership — case, padding and
-delimiters all matter — while `endpoints` is the separate marker-insensitive
-lookup described in *What the catalogue cannot tell you*. Every `get_model`
-success payload carries the absence caveat: gateways rename models
-inconsistently, so a missing exact id does not prove the model is unavailable
-elsewhere.
+`get_model(provider, model_id)` requires **both** an exact registered provider
+key and a **literal raw id** tracked by that provider. It returns one flat
+details endpoint — the same capability values plus `description`,
+`chat_completions_url` and `api_type` — and scopes `provider_staleness` to that
+provider. `get_model("synthetic-a", "vendor/model")` is `not_found` even though
+synthetic-a tracks `vendor/model:free`: there is no marker stripping and no
+cross-provider lookup. A known provider with an absent exact id is `not_found`;
+an unregistered provider is `unknown_provider`.
 
 ### Metadata search semantics
 
@@ -222,21 +263,17 @@ merged view of two gateways.
 
 - `query` matches a **literal substring** of the raw id, name or description,
   ASCII case-insensitive only (A–Z folds to a–z; every other code point stays
-  literal). There is no regular expression, fuzzy or alias matching, and
-  capability arrays, pricing, provider keys and object keys are never
-  text-searched — use the filters below for those. Omitted or `""` applies no
-  text constraint; a whitespace-only query is a literal one. Queries and ids
-  are never trimmed: `" REASONING "` is a different query from `"REASONING"`,
-  and a padded id is a different id.
+  literal). There is no regular expression, fuzzy or alias matching; capability
+  arrays, provider keys and object keys are never text-searched. Omitted or `""`
+  applies no text constraint; a whitespace-only query is a literal one. Queries
+  and ids are never trimmed.
 - `provider` takes **one exact key** from the snapshot's `provider_order`. A
   registered gateway that tracks zero ids is valid and answers with an empty
   page; an empty, padded, wrong-case or unknown key is the `unknown_provider`
   argument error — keys are never repaired.
 - `min_context_length` compares **inclusively** (`>=`) against each pair's own
-  known context: a `65536` threshold keeps an endpoint whose context is exactly
-  65536, while a `65537` threshold drops that endpoint. An unknown (`null`) context fails the filter
-  rather than counting as zero; `0` keeps a known `0` and still rejects the
-  unknown one.
+  known context. An unknown (`null`) context fails the filter rather than
+  counting as zero; `0` keeps a known `0` and still rejects the unknown one.
 - `input_modalities` and `supported_parameters` take arrays of non-empty
   strings. **Every** requested entry must be present in that same endpoint's
   validated array — AND, never OR — compared ASCII case-insensitively, with
@@ -245,22 +282,19 @@ merged view of two gateways.
   constraint.
 - Unknown metadata fails a filter that tests it, but never removes an endpoint
   from a search that does not test that field.
-- `limit` is an integer 1–200 (default 50) and `offset` an integer `>= 0`
+- `limit` is an integer 1–200 (default **5**) and `offset` an integer `>= 0`
   (default 0). Sorting happens first and the page is a slice of the sorted
   matches, so paging narrows what is *returned*, never what is *matched*:
-  `total_matches` counts every match before the slice, `returned_count` is the
-  page you got, and `next_offset` is `offset + returned_count` while matches
-  remain, else `null`. A beyond-end page is a success with an empty
-  `endpoints` array.
-- `counts` describes the **returned page only** — all zeros on an empty page
-  even when `total_matches` is positive. `marker_group_labels` counts distinct
-  delimiter-stripped labels, so `vendor/model:free` and `vendor/model-free`
-  contribute one label between them; it is a labelling count, never a count of
-  verified underlying models.
+  `total_matches` counts every match before the slice, and `next_offset` is
+  `offset + len(endpoints)` while matches remain, else `null`.
+- Rows are compact: `provider`, `model_id`, `name`, `context_length`,
+  `input_modalities`, `output_modalities` and `supported_parameters`, with
+  `description`, `chat_completions_url` and `api_type` only on `get_model`
+  details. There are no per-row `stale` flags, `metadata` objects, `counts`,
+  `caveats` or request echoes.
 
-A worked filter example over the pinned synthetic fixture above
-(`lookup.json`), one filter added per row. `none` means no endpoint satisfied
-every argument in that row:
+A worked filter progression over `lookup.json`, one filter added per row.
+`none` means no endpoint satisfied every argument in that row:
 
 | Arguments | Matched endpoints (`provider / raw id`) |
 |---|---|
@@ -271,48 +305,40 @@ every argument in that row:
 | `{"query": "renamed", "min_context_length": 65536}` | `synthetic-a / vendor/model-renamed` |
 | `{"query": "renamed", "min_context_length": 65537}` | `none` |
 
-Row four is the whole point: synthetic-a serves `vendor/shared` with a
-131072-token context but text-only input, while synthetic-b serves the same raw
-id with image input and only 32768 tokens. Each filter matches a different
-gateway and both together match neither — a result that merged them would
-describe a model nobody serves. Rows five and six differ by a single token and
-show that the threshold is inclusive.
+Row four is the point: synthetic-a serves `vendor/shared` with a 131072-token
+context but text-only input, while synthetic-b serves the same raw id with image
+input and only 32768 tokens. Each filter matches a different gateway and both
+together match neither — a merged result would describe a model nobody serves.
+The last two rows differ by one token and show the threshold is inclusive.
 
-The same fixture, one page into a three-match search (`endpoints` is trimmed to
-the fields this example is about; every value below is real output):
+The same fixture, one page into a three-match search:
 
 ```json
 {
   "ok": true,
-  "query": "model",
-  "limit": 1,
-  "offset": 1,
   "total_matches": 3,
-  "returned_count": 1,
   "next_offset": 2,
   "endpoints": [
     {
       "provider": "synthetic-a",
       "model_id": "vendor/model:free",
+      "name": "Vendor Model",
       "context_length": 131072,
       "input_modalities": ["text", "image"],
-      "supported_parameters": ["temperature", "max_tokens"],
-      "unknown_fields": []
+      "output_modalities": ["text"],
+      "supported_parameters": ["temperature", "max_tokens"]
     }
-  ],
-  "counts": {"gateways": 1, "endpoints": 1, "distinct_raw_ids": 1, "marker_group_labels": 1},
-  "caveats": ["Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a missing exact id does NOT prove the model is unavailable there."]
+  ]
 }
 ```
 
-Three endpoints match `model`, this page carries the second of them, and
-`next_offset: 2` is where the next page starts. Ask for `offset: 4` instead and
-the answer is still a success — `returned_count: 0`, empty `endpoints`,
-`next_offset: null`.
+Three endpoints match `model`, this page carries the second (`limit: 1,
+offset: 1`), and `next_offset: 2` is where the next page starts. Ask for
+`offset: 4` instead and the answer is still a success — empty `endpoints`,
+`next_offset: null`. A default search returns at most five rows.
 
-The complete field-by-field rules — exact envelopes, ordering, warning
-vocabulary and error shapes — are frozen in *Published catalogue snapshot (v1)
-— contract draft* below.
+Full envelopes, ordering, warning vocabulary and error shapes are in
+[Published catalogue snapshot (v2)](#published-catalogue-snapshot-v2).
 
 ### What the catalogue cannot tell you
 
@@ -320,230 +346,170 @@ vocabulary and error shapes — are frozen in *Published catalogue snapshot (v1)
   process.** `watchdog_status()` derives `last_tick_age_s` and `tick_fresh`
   from `tick_epoch` and the snapshot's own `cadence_s`, while `source.fetched_at`
   and `source.fetch_age_s` only say how long ago this process fetched the bytes.
-  A fresh download of an old `tick_epoch` is still stale — the two ages are
-  reported separately and neither stands in for the other.
+  A fresh download of an old `tick_epoch` is still stale.
 - **Provider staleness is not tick age.** A provider can be stale during a
   fresh tick (its fetch failed and last-known-good ids were carried forward),
-  and every provider can be healthy during an old one. "Not fresh" itself has
-  three distinct shapes: a `null` `tick_epoch` gives `last_tick_age_s: null`
-  plus `tick_epoch_unknown`, a future one gives `tick_epoch_future`, and only a
-  known age beyond `cadence_s` gives `tick_stale`. `ok: true` from
+  and every provider can be healthy during an old one. "Not fresh" has three
+  shapes: a `null` `tick_epoch` gives `last_tick_age_s: null` plus
+  `tick_epoch_unknown`, a future one gives `tick_epoch_future`, and only a known
+  age beyond `cadence_s` gives `tick_stale`. `ok: true` from
   `watchdog_status()` means the snapshot was queried, never that its
-  observations are fresh. Neither signal involves a provider probe.
+  observations are fresh.
 - **Unknown is not zero, and not empty.** A `null` `context_length`, modality
   list or `supported_parameters` array means the provider did not say — it is
-  never rendered as `0` or `[]`. A known `0` and a known `[]` are real values,
-  and `unknown_fields` names exactly the capability fields that are unknown, so
-  `"unknown_fields": []` means all four were stated.
-- **Marker lookups are labels, not identity.** The marker-insensitive
-  `get_model` lookup strips a `free` segment only at the **start or end** of an
-  id, delimited by `-`, `:` or `_` (case-insensitive) — `vendor/model:free` and
-  `free-vendor-model` strip, `vendor/freetier` does not, and both ends strip
-  when an id carries both. Raw ids in the results stay unchanged, a strip that
-  would empty the id is ignored, and a marker match is not proof that two
-  gateways serve the same underlying model.
-- **Exact ids are literal.** `exact_matches` is raw-id membership: case,
-  padding and delimiters matter, and a lookup is never repaired into a near
-  match.
-- **Absence is weak evidence.** Gateways rename models inconsistently, so a
-  missing exact id does not prove the model is absent elsewhere; every
-  `get_model` and `search_models` success payload carries that caveat rather
-  than implying a negative result is authoritative.
+  never rendered as `0` or `[]`. A known `0` and a known `[]` are real values;
+  neither payload adds an `unknown_fields` list, so the value itself is the only
+  signal.
+- **Identity is exact.** `get_model` requires one exact registered provider and
+  one literal raw id: case, padding and delimiters matter. There is no marker
+  stripping and no cross-provider relay — `vendor/model` does not resolve to
+  `vendor/model:free`. Endpoint identity is `(provider, raw model_id)`, so the
+  same raw id on two providers is two independent rows.
+- **Marker labels remain a status count.** `watchdog_status.counts.
+  marker_group_labels` counts distinct delimiter-stripped labels catalogue-wide;
+  `vendor/model:free` and `vendor/model-free` contribute one label between them.
+  It is a labelling count, never a count of verified underlying models, and no
+  tool payload resolves a label back to endpoints.
+- **Absence is weak evidence, and not an error.** Gateways rename models
+  inconsistently, so a missing exact id does not prove the model is absent
+  elsewhere. `get_model` says only `not_found` for that provider and never
+  echoes the caller's value.
 - **A cached answer says so.** `source.cached` is `true` whenever the body came
-  from retained memory instead of a fresh download. `source.not_modified` marks
-  a successful 304 revalidation that re-used it, while
-  `refresh_failed` + `cache_fallback` mark a **failed** refresh served from the
-  last good copy, and `cache_write_failed` marks a snapshot that was served but
-  not persisted. A failed refresh with a valid last-good snapshot returns it
-  with its **real** age and those warnings; with nothing valid retained you get
-  the structured `source_unavailable` error instead. There is no implicit
-  fallback to another URL or to a local file, and a failure is never reported
-  as an empty catalogue.
-- **Counts answer different questions.** `search_models.counts` is page-scoped,
-  `list_endpoints.counts` covers the selected scope (its legacy `models`
-  member is the documented alias of `marker_group_labels`),
-  `watchdog_status.counts` is whole-catalogue including zero-id gateways, and
-  `list_free_models.total_ids` is the literal count of distinct raw ids. None
-  of them is a count of verified models.
+  from retained memory instead of a fresh download, `source.not_modified` marks
+  a successful 304 revalidation, `cache_write_failed` marks a snapshot served
+  but not persisted, and `refresh_failed` + `cache_fallback` mark a **failed**
+  refresh served from the last good copy. There is no implicit fallback to
+  another URL or to a local file, and a failure is never reported as an empty
+  catalogue.
 - **Operator state is not observable here.** `watchdog_status()` reports
-  `pending_alerts`, `site_published` and `site_publish_age_s` as `null`: a
-  published or browser source cannot see the operator's alert queue or site,
-  and the published payload never guesses. A wrapper may add explicitly
-  labelled diagnostics outside this payload. `metadata_coverage` counts
-  stated metadata fields only, never provider health.
+  `pending_alerts`, `site_published` and `site_publish_age_s` as null: a
+  published or browser source cannot see the operator's alert queue or site, and
+  the payload never guesses. `metadata_coverage` counts stated metadata fields
+  only, never provider health.
 
 ### Public JSON feed
 
-The same catalogue ships as one public JSON document (`site/catalog.json`,
-`schema_version` 1): an integrity-hashed `snapshot_id`, the observation epoch
-`tick_epoch`, the cadence it was measured against, `provider_order`, a
-`providers` map of credential-free projected metadata, and a frozen `warnings`
-list. It is the credential-free contract the MCP server and the dashboard's
-in-page browser tools consume.
+The catalogue is one public JSON document (`site/catalog.json`):
+`schema_version` (2 in this checkout), an integrity-hashed `snapshot_id`, the
+observation epoch `tick_epoch`, the `cadence_s` it was measured against,
+`provider_order`, a `providers` map of
+credential-free projected metadata, and a frozen `warnings` list. It is the
+contract the MCP server and the dashboard's in-page tools consume. Both routes
+serve the same document, rebuilt and published by the tick:
 
-**Where it lives.** Both routes serve the same document, rebuilt and published
-by the hourly tick:
+| Route | Role |
+|---|---|
+| GitHub raw, `site/catalog.json` | the default: what a launch with no source flag reads |
+| <https://models.dthen.xyz/catalog.json> | explicit `--catalog-url` alternative; never an automatic fallback |
 
-| Route | URL | Role |
-|---|---|---|
-| raw GitHub | <https://raw.githubusercontent.com/Dthen/free-inference-watchdog/master/site/catalog.json> | the default: what a launch with no source flag reads |
-| Pages mirror | <https://models.dthen.xyz/catalog.json> | explicit `--catalog-url` alternative; never an automatic fallback |
+The dashboard at <https://models.dthen.xyz> is rendered HTML, not the feed —
+same catalogue, different artifact. `snapshot_id` and `tick_epoch` move with
+every publication, so read them from the document you fetched. Any URL serving a
+valid snapshot works with `--catalog-url`, so your own served copy behaves the
+same.
 
-The dashboard at <https://models.dthen.xyz> is a rendered HTML page, not the
-feed — same catalogue, different artifact, and only one of them is JSON.
-`snapshot_id` and `tick_epoch` move with every publication, so read them from
-the document you fetched rather than copying values from this page.
-
-**Reachability is not guaranteed.** A published URL can be unreachable: with no
-validated snapshot cached the tool call answers the fixed `source_unavailable`
-error, and a validated last snapshot is served from cache with
-`refresh_failed`/`cache_fallback` warnings and its real age. No provider is
+Reachability is not guaranteed: with no validated snapshot cached the tool call
+answers `source_unavailable`, and a validated last snapshot is served from cache
+with `refresh_failed`/`cache_fallback` and its real age. No provider is
 contacted on any of those paths, and a readable snapshot is never a statement
 about current gateway health.
-
-`--catalog-url` is not limited to these two routes: any URL that serves a valid
-snapshot works, so your own served copy behaves the same. Field definitions,
-nullability and validation rules are in *Published catalogue snapshot (v1) —
-contract draft* below.
 
 ### Browser (WebMCP) tools in the dashboard
 
 The dashboard page carries the catalogue and the shared tool definitions as two
-inert JSON islands, and — when the browser exposes the in-page WebMCP API
-(`document.modelContext.registerTool`) — registers the **same five read-only
-tools**: `search_models`, `get_model`, `list_endpoints`, `list_free_models` and
-`watchdog_status`. That integration is implemented in this ref: the maintained
+inert JSON islands and — when the browser exposes the in-page WebMCP API
+(`document.modelContext.registerTool`) — registers the **same three read-only
+tools**: `search_models`, `get_model` and `watchdog_status`. The maintained
 `web/catalog-query.js` engine and `web/webmcp.js` adapter plus one bootstrap
-call are inlined into `site/index.html` by the page builder. It is a
-progressive enhancement, not a requirement: with no API, with JavaScript
-disabled, or after a failed registration the ordinary matrix and its row
-expansion render exactly as before.
+call are inlined into `site/index.html` by the page builder. It is a progressive
+enhancement: with no API, with JavaScript disabled, or after a failed
+registration the ordinary matrix and its row expansion render as before.
 
 **Availability is conditional — there is no universal browser support.**
 
 | Situation | What is required |
 |---|---|
-| local development, or an ordinary visitor | Chrome with `chrome://flags/#enable-webmcp-testing` set to **Enabled** and the browser relaunched |
-| a public origin, without that flag | the origin enrolled in the WebMCP origin trial (available from Chrome 149) |
-| every case | a secure context: `https://`, `http://localhost`/`127.0.0.1`, or a `file://` open of the built page — an opaque origin has no API even with the flag |
-| a cross-origin iframe | the `tools` Permissions Policy delegated (`<iframe allow="tools">`); the default is `self`, so cross-origin frames get nothing |
+| local development, or an ordinary visitor | Chrome with `chrome://flags/#enable-webmcp-testing` enabled and the browser relaunched |
+| a public origin, without that flag | the origin enrolled in the WebMCP origin trial (from Chrome 149) |
+| every case | a secure context: `https://`, `http://localhost`/`127.0.0.1`, or a `file://` open of the built page |
+| a cross-origin iframe | the `tools` Permissions Policy delegated (`<iframe allow="tools">`); the default is `self` |
 
 Enrolling a public origin in the trial is optional and separately authorized:
-nothing in this repository, its build or its deploy path enrols one. Static
-hosting needs no trial for a visitor who enables the flag, but ordinary
-visitors of a public origin get no API without either. Chrome's own
-documentation calls WebMCP a proposed standard under active change — see
-[WebMCP](https://developer.chrome.com/docs/ai/webmcp) (updated 2026-10-07), the
-[Imperative API](https://developer.chrome.com/docs/ai/webmcp/imperative-api)
-(2026-10-16), [tool security](https://developer.chrome.com/docs/ai/webmcp/secure-tools)
-(2026-09-01) and the [DevTools WebMCP panel](https://developer.chrome.com/docs/devtools/application/webmcp)
-(2026-05-12) — and the version you run may differ from the one described here.
+nothing in this repository, its build or its deploy path enrols one. Chrome
+calls WebMCP a proposed standard under active change; see
+[WebMCP](https://developer.chrome.com/docs/ai/webmcp), the
+[Imperative API](https://developer.chrome.com/docs/ai/webmcp/imperative-api),
+[tool security](https://developer.chrome.com/docs/ai/webmcp/secure-tools) and
+the [DevTools WebMCP panel](https://developer.chrome.com/docs/devtools/application/webmcp).
+The version you run may differ from the one described here.
 
-**Setup, exercised on a fresh build of this checkout** (Chrome for Testing
-156.0.8078.4, over `http://127.0.0.1` and over `file://`; without the flag
-`document.modelContext` is absent and setup reports `unsupported`, with it five
-tools are discovered and run):
-
-1. Open a page built from this ref — run the builder, then open
-   `site/index.html` (a `file://` open works because the page is
-   self-contained), or a copy you published from it. The deployed dashboard at
-   <https://models.dthen.xyz> carries these tools only once the published page
-   is a build from this ref; see *Publication status* below.
-2. Enable `chrome://flags/#enable-webmcp-testing` → **Enabled** → relaunch
-   Chrome.
-3. Confirm in DevTools → **Application** → **WebMCP**: *Available Tools* lists
-   the five tools and an invocation counter, *Invoked Tools* logs each call
-   with its input, output and status, and the panel's manual test area runs a
-   tool without an agent. The Model Context Tool Inspector extension is the
-   documented alternative for prompting a model against them.
+Setup: open a page built from this ref (run the builder and open
+`site/index.html`; a `file://` open works because the page is self-contained),
+enable `chrome://flags/#enable-webmcp-testing` → **Enabled**, relaunch Chrome,
+then confirm in DevTools → **Application** → **WebMCP** that *Available Tools*
+lists the three tools. A page published from an older build has none; see
+*Publication status*.
 
 The browser tools answer from the snapshot embedded in the page when it loaded.
-Arguments, payloads, ordering, errors and caveats are the ones documented in
-*Metadata search semantics* and the envelopes below — no browser-only fields
-and no browser-only truncation — with one addition: every returned payload,
-success or argument error, carries `source: {"mode": "browser"}`. Browser mode
-is not an HTTP refresh, a cache hit or a monitor tick: opening a tab starts no
-monitoring job, no cron tick and no provider request, and the page never asks
-for a provider key. Each descriptor also carries three advisory hints —
-`readOnlyHint: true` (the tools only read an immutable snapshot),
-`untrustedContentHint: true` (upstream model text is untrusted data) and
-`consequentialHint: false` (nothing is booked, bought or written). Hints are
-metadata for the agent and the browser; they never sanitize upstream text.
+Arguments, payloads, ordering and errors are the ones documented above — no
+browser-only fields and no browser-only truncation — with one addition: every
+returned payload, success or argument error, carries `source: {"mode": "browser"}`.
+Browser mode is not an HTTP refresh, a cache hit or a monitor tick: opening a
+tab starts no monitoring job, no tick and no provider request, and the page
+never asks for a provider key. Each descriptor also carries three advisory
+hints — `readOnlyHint: true`, `untrustedContentHint: true` (upstream model text
+is untrusted data) and `consequentialHint: false`. Hints inform the agent; they
+never sanitize upstream text.
 
 **Output size: a recommendation, not a cap.** Chrome's security guidance
 *recommends* about 1.5K characters per individual tool output; it is not a
-protocol limit. This page never truncates, drops metadata, shortens an array or
-invents pagination to fit it. `list_free_models` and `list_endpoints` are
-deliberate bulk exports and routinely exceed it — a synthetic 120-id catalogue
-produced 47,487 characters of `list_free_models` text in verification — and one
-large upstream description can push even a two-row `search_models` page past it
-(12,138 characters on that same synthetic catalogue). Read that as a known
-usability limitation of the bulk tools, not a hidden hard cap. Routine agent
-lookups belong in `search_models` with an explicit small `limit` (1–5), a
-provider filter where useful, then `get_model` for details; `limit` bounds rows,
-never serialized characters.
+protocol limit. This page never truncates, drops fields or invents pagination to
+fit it, and a `get_model` details payload with a large upstream description can
+exceed that recommendation. Routine agent lookups belong in `search_models`
+with a small `limit` (1–5), a provider filter where useful, then `get_model` for
+details; `limit` bounds rows, never serialized characters.
 
-To be explicit about a common mix-up: WebMCP is an **in-page** browser API. It
-is **not** a remotely connectable MCP HTTP URL, and it does not turn this
-package into a hosted server you can point a remote client at. A browser-side
-agent that already has the page open calls these tools in that page; the only
-transport this ref ships is local stdio, and the two routes share tool
-definitions and payload semantics, not a process.
+WebMCP is an **in-page** browser API: it is **not** a remotely connectable MCP HTTP URL
+and does not make this package a hosted server. The only transport this ref ships
+is local stdio; the two routes share tool definitions and payload semantics, not
+a process.
 
-**Publication status.** The tracked `site/index.html` and the deployed
-dashboard show the last page that was PUBLISHED; publishing a regenerated page
-is a separate, separately authorized step, and a local build is never
-publication. Read the copy in front of you rather than this paragraph: every
-build from this ref carries the inlined `catalog-query`, `webmcp` and bootstrap
-scripts as `data-watchdog` script islands, and with those in place DevTools →
-**Application** → **WebMCP** lists the five tools. A copy without those islands
-is an older page — open a fresh build of this checkout for the setup above
-instead, and never read that absence as this ref lacking the browser route.
+**Publication status.** The tracked `site/index.html` and the deployed dashboard
+show the last page that was PUBLISHED; publishing a regenerated page is a
+separate, separately authorized step, and a local build is never publication.
+Every build from this ref carries the inlined `catalog-query`, `webmcp` and
+bootstrap scripts as `data-watchdog` script islands, so read the copy in front
+of you rather than this paragraph.
 
 ---
 
 ## Self-hosting the watchdog
 
-Everything above is for consumers querying a published catalogue. Everything
-below is the operator path: run the monitor yourself, page a Discord channel on
-changes, and keep the schedule healthy. It needs provider credentials, a
-webhook and a cron host — a catalogue consumer needs none of them, and following
-these steps will not make the standalone MCP work any differently.
+Everything here is the operator path: run the monitor yourself, page a Discord
+channel on changes, keep the schedule healthy. It needs provider credentials, a
+webhook and a cron host; a catalogue consumer needs none of them.
 
 ### What it does
 
-Every hour (cadence comes from the cron schedule; `--recheck-delay` only
-sets the ~3-minute confirm nap before a diff is believed), the monitor:
+Every tick (hourly by default; the cron schedule sets the cadence and
+`--recheck-delay` only sets the ~3-minute confirm nap):
 
-1. Loads every `providers/*.json` config and fetches free-model rosters
-   from every configured gateway. Which ids count as free is decided per
-   provider by its `detection` method (see [Architecture](#architecture)).
-2. Carries forward last-known-good IDs on provider failure (sticky silence —
-   an outage never looks like a mass removal).
+1. Loads every `providers/*.json` config and fetches free-model rosters from
+   each gateway. Which ids count as free is decided **per provider** by that
+   provider's `detection` method.
+2. Carries forward last-known-good ids on provider failure: a failed provider
+   retains its last-known models; it does not create mass removals.
 3. Set-diffs against the previous `roster.json`.
-4. Re-fetches affected providers ~3 min later to confirm (kills transient flaps).
-5. Delivers the alert via the `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` webhook
-   (kennel channel). Failed POSTs queue in `state/pending_alerts.json` and
-   retry automatically on the next tick. Stdout stays local — the process is
-   silent unless something goes catastrophically wrong (stderr).
-6. Writes an alive ping to silence the "is it dead?" question.
-
-### Why no Ollama?
-
-Ollama Cloud has no free-model concept to track. Cloud usage is metered by
-GPU-time against account plans ($0 Free / $20 Pro / $100 Max) rather than
-per-model pricing — every cloud model burns the same quota currency, larger
-models are gated behind paid plans, and none of this is exposed via the API.
-A "free roster" is therefore undefinable for Ollama, so the provider was
-dropped entirely (2026-08-25).
+4. Re-fetches affected providers ~3 minutes later to confirm, killing
+   transient flaps.
+5. Delivers the alert through `DISCORD_WEBHOOK_INFERENCE_WATCHDOG`. Failed
+   POSTs queue in `state/pending_alerts.json` and retry on the next tick.
+6. Writes an alive ping. Stdout stays empty; diagnostics go to stderr.
 
 ### Quick start
 
-Self-hosting, operator shell — every command below runs with the repository
-clone as its working directory (`.env`, `providers/` and `state/` are resolved
-from there, never from wherever the shell happened to start). Consumers who
-only want to query a catalogue can stop reading here and use the
-[MCP quick start](#query-the-catalogue-over-mcp).
+Self-hosting steps, run from the clone — `.env`, `providers/` and `state/`
+resolve from the working directory, not from wherever the shell started:
 
 ```bash
 # EDIT ME: path to your clone. Quoted, so a path containing spaces works.
@@ -555,40 +521,28 @@ python3 inference_watchdog.py --init             # bootstrap roster.json
 python3 inference_watchdog.py                    # one tick (cron does this)
 ```
 
-Change that one quoted line for a different checkout — the same convention the
-cron wrappers below use. Keep the quotes: an unquoted path containing spaces
-splits into several arguments and the `cd` fails. `WATCHDOG_HOME` itself is a
-shell variable in these snippets, not a watchdog option: there is no path flag
-on the CLI, and `--state-dir` only relocates `state/`.
+Change that one quoted line for a different checkout. Keep the quotes: an
+unquoted path containing spaces splits into several arguments and the `cd`
+fails. `WATCHDOG_HOME` is a shell variable in these snippets, not a watchdog
+option — there is no path flag on the CLI, and `--state-dir` only relocates
+`state/`.
 
-## Cron registration
+### Cron registration
 
-The monitor runs as a silent cron script-mode job (`--no-agent`: no LLM
-is woken — the wrapper script IS the job). It is **not** a delivery channel:
-the webhook in `.env` delivers alerts; cron output stays local. In script mode
-a job's stdout is the delivered message, so the wrappers below write nothing to
-it — every diagnostic goes to stderr, which the scheduler logs rather than
-sends.
+The monitor runs as a silent script-mode job (`--no-agent`: no LLM is woken —
+the wrapper script IS the job). It is not a delivery channel: the webhook
+delivers alerts, and a job's stdout would be delivered verbatim, so the wrappers
+write nothing to stdout and every diagnostic goes to stderr.
 
-Hermes cron is the advanced scheduler this deployment happens to use; it is not
-a prerequisite for consumers, and nothing above needs it. Both wrappers are
-plain bash, so any scheduler that can run a shell script on a clock drives the
-same two jobs.
-
-### Script location and wrapper-local settings
-
-Both wrappers live in the **active Hermes home's** scripts directory —
-`$HERMES_HOME/scripts/` (`~/.hermes/scripts/` on a default install) — and are
-registered by bare filename: `--script` takes a file name that must resolve
-inside that directory. It is never a command line and never a path relative to
-your shell's working directory, which is why the wrapper carries the checkout
-path itself.
-
-Each wrapper therefore holds its own configuration: the clone path and the
-interpreter are assigned at the top of the file, and those are the lines to
-edit. Do not export them from your interactive shell instead — the scheduler
-sanitizes the environment it hands a script, so an exported variable is not
-guaranteed to arrive.
+Hermes cron is one scheduler that can run these wrappers; it is not a
+prerequisite for consumers, and both wrappers are plain bash, so any scheduler
+that runs a shell script on a clock drives the same jobs. A Hermes wrapper lives
+in the **active Hermes home's** scripts directory — `$HERMES_HOME/scripts/`
+(`~/.hermes/scripts/` on a default install) — and is registered by bare
+filename: `--script` takes a name that must resolve inside that directory, never
+a command line or a shell-relative path. Each wrapper therefore carries its own
+clone path and interpreter; do not export them from your shell instead, because
+the scheduler sanitizes the environment it hands a script.
 
 Create `~/.hermes/scripts/inference-watchdog-tick.sh`:
 
@@ -598,7 +552,7 @@ Create `~/.hermes/scripts/inference-watchdog-tick.sh`:
 # routine partial-outage status; diagnostics go to stderr, never stdout.
 set -u
 
-# EDIT ME: absolute path to your clone. Quoted, so a path with spaces works.
+# EDIT ME: absolute path to your clone. Quoted, so a path containing spaces works.
 WATCHDOG_HOME="$HOME/projects/free-inference-watchdog"
 # EDIT ME only if `python3` on the scheduler's PATH is not the one you want.
 PYTHON="python3"
@@ -615,8 +569,7 @@ cd "$WATCHDOG_HOME" || { echo "inference-watchdog FAILED (cannot cd to $WATCHDOG
 "$PYTHON" inference_watchdog.py || { c=$?; [ "$c" -eq 1 ] || { echo "inference-watchdog FAILED (exit $c)" >&2; exit "$c"; }; }
 ```
 
-Then register it on the cadence (the schedule below is what sets the 1-hour
-tick — there is no cadence flag on the job itself):
+Register it, hourly for example:
 
 ```bash
 hermes cron create "17 */1 * * *" \
@@ -626,1030 +579,149 @@ hermes cron create "17 */1 * * *" \
   --deliver local
 ```
 
-`--deliver local` keeps job output in local files only — a wrapper that fails
-does not page anyone, so the `.env` webhook stays the single alert path. The
-15-minute removal resolver is the same wrapper with `--resolve` added to the
-monitor invocation: see [Removal resolver](#removal-resolver).
+`--deliver local` keeps job output in local files only, so the webhook stays the
+single alert path. The two stages exist because bash reports a failed `cd` as
+exit 1 — the same status a routine partial outage uses. One combined
+`cd … && python3 …` clause could not tell them apart, so a moved checkout would
+look like a normal quiet tick forever.
 
-### Why the wrapper has two failure stages
+### Environment variables
 
-The split keeps a failure diagnosable without spamming Discord. Bash reports a
-failed `cd` as exit 1 — the same status the monitor uses for a routine partial
-provider outage — so a single `cd … && python3 …` clause with one exit-1
-exemption cannot tell the two apart: a checkout that moved would look like a
-normal quiet tick forever, and the dead monitor would be indistinguishable from
-silence. Selecting the directory first makes the stages separable: stage 1
-always exits non-zero with a diagnostic and never launches the monitor, while
-stage 2 passes the monitor's own status through — 0 success, 1 tolerated
-silently, anything else re-raised with its original code and a stderr note.
-
-## Environment variables
-
-Secrets live in a **project-local `.env`** (gitignored) — not in a shared
-home/profile env file. This keeps the repo agent-agnostic: copy
-[`.env.example`](.env.example) to `.env` and fill in your keys the same way on
-any host.
+Secrets live in a project-local `.env` (gitignored), not a shared profile file:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | yes (for alerts) | Kennel/alerts channel webhook — the only delivery path. |
-| `NOUS_AUTH_FILE` | yes (for Nous) | Path to the auth JSON file Hermes refreshes; `providers.nous.access_token` is read from it at tick time (see [Nous auth](#nous-auth)). |
+| `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` | yes (for alerts) | Alerts channel webhook — the only delivery path. |
+| `NOUS_AUTH_FILE` | yes (for Nous) | Path to the auth JSON file; `providers.nous.access_token` is read from it at tick time. |
 | `TOKENROUTER_API_KEY` | no | TokenRouter gateway auth. |
-| `KILOCODE_API_KEY` | no | Kilo fetcher — endpoint also serves its roster keyless; a key buys authenticated/higher-limit access. |
+| `KILOCODE_API_KEY` | no | Kilo auth; the endpoint also serves its roster keyless. |
 | `AMD_API_KEY` | no | AMD Radeon gateway auth. |
-| `BAI_API_KEY` | no | B.AI gateway auth — required for the `zero-credit-probe` detection method. |
-| `NVIDIA_API_KEY` | no | NVIDIA NIM gateway auth — on this box the key lives in `~/.hermes/.env`, not the project `.env`. |
+| `BAI_API_KEY` | no | B.AI auth — required for the `zero-credit-probe` method. |
+| `NVIDIA_API_KEY` | no | NVIDIA NIM auth. |
 
-OpenRouter needs no key — its models endpoint is public. The code treats the
-TokenRouter/Kilo/AMD/NIM keys as optional too (missing key ⇒ fetch with no
-auth header), so those watchdog paths work with neither set.
+OpenRouter, Vercel AI Gateway, Felo, TokenRA, Infron and AI/ML API need no key. Missing TokenRouter/Kilo/AMD/NIM
+keys mean the fetch sends no auth header, so those paths work unauthenticated.
 
-### Webhook rotation
+Nous auth is a **path pointer, never a token copy**: `NOUS_AUTH_FILE` names a
+JSON file Hermes keeps refreshed, and the token is read at tick time. A
+mid-token expiry looks like a provider failure (sticky carry-forward) and the
+next tick picks up the fresh token.
 
-1. Update `DISCORD_WEBHOOK_INFERENCE_WATCHDOG` in `.env`.
-2. Undelivered alerts queue in `state/pending_alerts.json` — drain manually:
+After rotating the webhook, inspect the queue with
+`python3 -m json.tool state/pending_alerts.json`; it drains on the next
+successful tick.
 
-```bash
-python3 -m json.tool state/pending_alerts.json    # inspect queue
-```
+### Provider configuration
 
-The queue auto-drains on the next successful tick.
+Each `providers/*.json` is validated at startup. A file the loader cannot use is
+skipped with a `config: skipping ...` stderr warning and costs exactly that
+provider.
 
-### Nous auth
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `name` | string | yes | Human-readable name |
+| `base_url` | string | yes | API base URL (no trailing `/`) |
+| `detection` | string | yes | Free-model detection method for this provider |
+| `catalog_url` | string | no | Absolute literal `https://` discovery URL (query allowed). Defaults to `base_url` + `/models`; never changes the published inference URL |
+| `catalog_format` | string | no | Catalogue family used by `catalog-pricing`: `openai-models` (the default), `input-output-models`, `channel-catalog`, `newapi-pricing`, `provider-models` or `typed-unit-models`. Any other name is rejected |
+| `auth` | object | yes | `{method: env_var\|token_file\|none, ...}` |
+| `display` | int | no | Column order (0 = first; default 0) |
+| `signup_url` | string | no | Signup link shown on the dashboard (only `https://` is linked) |
+| `limits_note` | string | no | Free-tier limits footnote shown as the dashboard tooltip |
+| `roster_key` | string | no | Roster-key override; defaults to the config file's stem |
+| `ignored_slugs` | list of strings | no | Exact model ids excluded after detection |
+| `probe` | object | no | Zero-credit-probe dialect: `max_tokens` + `paid_signals` |
+| `removal_hold_seconds` | int | no | Hold confirmed removals this many seconds before alerting |
+| `enabled` | bool | no | `false` untracks the provider while keeping the file. Must be a real JSON boolean |
 
-Nous auth is a **path pointer, never a token copy**. The watchdog reads the
-token from a JSON file at tick time — the file Hermes keeps refreshed — so the
-token is always fresh and never stale-copied into this repo. Set the env var
-`NOUS_AUTH_FILE` to the path of that file, and the committed `providers/nous.json` resolves
-`providers.nous.access_token` from it:
+Detection is per provider, dispatched by string key:
 
-```bash
-# in .env
-NOUS_AUTH_FILE=~/.hermes/auth.json
-```
+- `api-pricing` — free when `pricing.prompt` and `pricing.completion` are both
+  zero.
+- `api-flag` — free when `isFree == true`.
+- `id-suffix` — free when the id ends with `:free`/`-free` or contains `free`.
+- `all-free` — every model in the catalog is free.
+- `zero-credit-probe` — fire a minimal completion per model and classify by
+  response; only `free` verdicts enter the roster.
+- `catalog-pricing` — tracks chat offers only when the selected adapter proves
+  ordinary token and request charges are zero across applicable tiers and
+  runnable routes. Missing or variable pricing is not a free quote.
 
-The pointer is read at tick time, so a mid-token expiry just looks like a
-provider failure (sticky carry-forward) — the next tick picks up the fresh
-token naturally. A different deployment points `NOUS_AUTH_FILE` elsewhere and
-the repo stays agent-agnostic.
-
-## Roster.json fields
-
-| Field | Meaning |
+| Gateway | `catalog_format` |
 |---|---|
-| `providers` | `{name: [ids]}` — current known-free model IDs per provider |
-| `provider_models` | `{name: {id: <raw API model object>}}` — full metadata for tracked ids only (passive; legacy rosters omit it) |
-| `stale_providers` | Provider names whose fetch failed this tick (carried forward) |
-| `transients` | Rebuilt every tick. Diffs that appeared then vanished on recheck. |
-| `unconfirmed` | Rebuilt every tick. Diffs whose recheck itself failed (signal may resurface). |
-| `ratelimits` | Per-gateway passive x-ratelimit headers from this tick (`{}` for succeeded gateways with none; absent = fetch failed) |
-| `tick_epoch` | Unix epoch of this tick |
-
-All per-tick fields are **rebuilt** (never appended to). The only persistent
-counter is `dropped_alerts_total` in `alive.json`, surfaced by the alive ping.
-
-## Published catalogue snapshot (v1) — contract draft
-
-**Status: frozen for contract review (unit 1a; the `get_model` success
-envelope and its count vocabulary were frozen by the envelope-freeze
-correction).** This section is the human half of the executable
-specification: `tests/test_catalog.py` pins it against synthetic fixtures
-under `tests/fixtures/catalog/`. Query and tool behaviour freezes with its
-implementation units (Tasks 2/3); nothing here is shipped code.
-`site/catalog.json` (declared in AGENTS.md) is the produced artifact: a
-generated, tracked, credential-free public snapshot consumed by the
-standalone `watchdog_catalog` package and the browser adapters. Provider
-config is used only at export time.
-
-### Top-level fields (exact set)
-
-| Field | Type | Definition |
-|---|---|---|
-| `schema_version` | int | Exactly `1`. |
-| `snapshot_id` | string | SHA-256 (64 lowercase hex chars) of the canonical snapshot body excluding this field. Canonical encoding: UTF-8, sorted object keys, compact separators (`,`/`:`), finite JSON values, `ensure_ascii=True`. The raw observation epoch is part of the hashed body; wall-clock build times and machine paths are never included. |
-| `tick_epoch` | int or null | Non-negative integer observation time; `null` (with a `tick_epoch_unknown` warning) when unknown. Freshness is never inferred from HTTP download time. |
-| `cadence_s` | int | Positive integer observation cadence (initially 3600), exposed explicitly rather than duplicated inside clients. |
-| `provider_order` | list of string | Active configured provider keys in display order; includes providers with zero tracked IDs. |
-| `providers` | map | One entry per active provider, keyed by provider key (below). |
-| `warnings` | list of string | Stable warning codes (frozen vocabulary below); never private paths or exception dumps. |
-
-### Provider entry (exact set)
-
-| Field | Type | Definition |
-|---|---|---|
-| `display_name` | string | Human-readable provider name. |
-| `chat_completions_url` | string | Chat-completions endpoint URL. |
-| `api_type` | string | API dialect (e.g. `openai`). |
-| `model_ids` | list of string | Raw tracked IDs, sorted and deduplicated by literal code-point string order (never natural order). |
-| `models` | map | Projected model objects keyed by tracked raw ID (exact field set below). |
-| `stale` | bool | Derived from the roster's stale-provider list. |
-
-### Projected model fields (exact set)
-
-Only these fields are exposed. Provider-returned values are preserved
-for retained fields; validated search values attach separately at query
-time. New public metadata fields require a deliberate schema/projection
-test — arbitrary upstream objects are never exposed automatically.
-
-| Field | Type | Definition |
-|---|---|---|
-| `id` | string | The raw model ID; equals the enclosing map key. |
-| `name` | string | Display name. |
-| `description` | string or null | `null` when unknown. |
-| `context_length` | int or null | Non-negative safe integer (at most 2^53-1; booleans excluded); `null` when missing, malformed or otherwise unknown. `0` is a KNOWN zero. |
-| `architecture` | object | Exactly `input_modalities` + `output_modalities`, each a list of nonempty strings or `null` when unknown. |
-| `supported_parameters` | list of nonempty string or null | e.g. `temperature`, `max_tokens`; `null` when unknown. |
-| `pricing` | object or null | `null` as the **whole object** when pricing is unknown overall. Otherwise **exactly** `prompt` + `completion`, each a finite scalar preserved as returned (number or numeric string) or `null` when that scalar is **individually unknown**. Booleans and non-finite numbers are invalid. |
-
-### Optional capability nullability and normalization (unit 1c-b1 amendment)
-
-This deliberately amends the optional capability types before publication:
-`architecture.input_modalities`, `architecture.output_modalities` and
-`supported_parameters` are each a list of nonempty strings or `null`.
-Null means UNKNOWN, never empty: unknown, missing or malformed optional
-upstream metadata projects to `null`; a valid empty upstream array projects
-to `[]` and is KNOWN empty; and `[]` is never used to conceal unknown data or
-to drop an endpoint. The snapshot/model/provider field sets and the
-`get_model` success envelope are unchanged; no schema-version bump is needed
-for this unpublished draft, and this nullable-type clarification is recorded
-here so future code cannot silently revert it.
-
-- **Context** — a valid context is a safe non-negative integer (at most
-  2^53-1), booleans excluded; `0` is known. Missing, `null`, numeric-string,
-  boolean, negative and unsafe-integer contexts all project to `null`
-  (unknown), never coerced to a number.
-- **Arrays** — a missing or `null` array is unknown. A bare string, a
-  mixed-type array, or an array containing an empty string is malformed and
-  rejected whole (never partially salvaged) and becomes `null`. An invalid
-  `architecture` parent (not an object) makes both its `input_modalities` and
-  `output_modalities` children unknown. Valid retained array strings keep
-  their original casing, order and duplicates in public metadata; normalized
-  query values attach separately.
-- **Warnings** — absent or explicit-`null` optional capability data uses
-  `metadata_missing`; malformed non-`null` data uses `metadata_invalid`;
-  codes are deduplicated in frozen vocabulary order (`tick_epoch_unknown`,
-  `metadata_missing`, `metadata_invalid`).
-- **Normalization** — normalized capability fields are `context_length`, `input_modalities`, `output_modalities`, `supported_parameters` plus `unknown_fields`. Unknown values stay `null`, never `0` or `[]`. Known arrays are ASCII-only lowercased and first-occurrence deduplicated after folding; non-ASCII code points remain literal — neither whitespace trimming nor Unicode casefolding repairs a token. `unknown_fields` lists only these four capability fields (in that stated order) whose normalized value is `null`; it does not enumerate description or pricing metadata, and a known empty `[]` produces no unknown flag.
-- **Filter semantics** — an empty FILTER array applies no constraint; a
-  known empty upstream array satisfies no nonempty requested capability list.
-
-`tests/fixtures/catalog/metadata-normalization.json` is the independent
-raw-input to expected-projection to expected-normalized data table for these
-rules (an upstream capability fragment, never a valid snapshot or public
-query response); `tests/fixtures/catalog/capability-unknown.json` is the
-valid synthetic snapshot that distinguishes unknown from known-empty.
-
-Full-model projection takes the tracked map key as the authoritative `id`; a
-missing, empty or non-string display name falls back to that key, while any
-description string (including `""`) is retained. Missing, null or non-object
-pricing is whole-null; a pricing object is projected per scalar, including `{}`
-to `{"prompt":null,"completion":null}`.
-
-For a model metadata object, warning codes describe its four capability fields,
-not name/description/pricing degradation. A missing/null model metadata
-container is `metadata_missing`; a non-null, non-object container is
-`metadata_invalid`, without manufacturing additional missing-field warnings.
-
-### Warning codes (frozen vocabulary)
-
-| Code | Meaning |
-|---|---|
-| `tick_epoch_unknown` | Observation epoch missing or invalid — tick age unknown, never a healthy tick. |
-| `metadata_missing` | Optional metadata field absent upstream. |
-| `metadata_invalid` | Optional metadata present but malformed or unusable. |
-
-### Error and degradation rules
-
-- **Structural errors fail export** and retain the last published artifact:
-  wrong provider map, invalid ID lists, invalid wiring, duplicate registry keys.
-- **Optional degradation is unknown, never loss:** missing or malformed
-  OPTIONAL metadata degrades to `null`/unknown, not loss of the endpoint;
-  invalid optional timestamps become unknown, not a healthy tick.
-- **Public JSON parsing rejections** (Python and JS share these
-  expectations): `NaN`/`Infinity`, unreasonable nesting, unsafe integers.
-- **Never serialized:** config dicts, `_token`, auth blocks, token-file
-  paths, local env, pending alerts, ratelimit headers, probe internals,
-  untracked IDs, and unknown/disabled provider entries. No shipped path
-  restores the original raw upstream metadata: the retired root local-state
-  server was the only one that did. In the frozen public payload the name
-  `metadata` carries **only the projected public model object** of the exact
-  `(provider, raw model_id)` pair, **never raw upstream metadata**.
-
-**The local compatibility surface is retired, not preserved.**
-The former root `python3 mcp_server.py [--root ...]` script is gone. Its
-raw-metadata restoration, its local `models`/`gateway` nesting diagnostics and
-its local `watchdog_status` observations (pending-alert depth, site mtime,
-roster stale-provider names, an injectable `now`) are gone with it, because
-they were private-state views no published consumer can serve. There is no
-second Python MCP server, forwarding shim, deprecated variant or local-state
-fallback: the installed command and `python -m watchdog_catalog` are the only
-Python surfaces, and both answer from ONE selected published snapshot using the
-frozen public payload documented here. A client configuration that still
-launches the old root script now fails with a missing file instead of being
-silently served a compatibility view; switching such a client to the installed
-command is a separate, explicitly authorized operator action.
-
-### Structural validation of published snapshots (frozen rules)
-
-A published snapshot **object** is validated strictly, independently of the
-producer. Every structural failure uses one shared envelope: top-level fields
-are **exactly** `ok` and `error`, `ok` strictly `false`, and `error` carrying
-**exactly** `code` and `message` — never a `parameter`, raw value, local path,
-source/cache datum or partial payload. Two literals exist: `invalid_snapshot` /
-`Invalid catalogue snapshot.` and `unsupported_schema_version` /
-`Unsupported catalogue schema version.`
-
-- **Order of checks.** A non-object snapshot, a wrong required-field set and a
-  non-strict-integer `schema_version` (bool, string or `null`) are all
-  `invalid_snapshot`. `unsupported_schema_version` applies **only** when a
-  well-typed strict integer version differs from `1`. The top-level
-  object/required-field/version-TYPE checks precede the version VALUE check,
-  which precedes every v1-specific body check.
-- **Strict published-object rejection versus producer projection.** An
-  already-PUBLISHED snapshot object that is malformed is rejected whole, never
-  repaired, coerced or degraded. Missing or malformed OPTIONAL upstream
-  metadata is a SEPARATE, producer-side boundary: it already projects to
-  `null`/unknown as documented above, and that projection is unchanged.
-- **Hash verification stays load-bearing.** `snapshot_id` must still equal the
-  SHA-256 of the canonical body excluding the field. A well-shaped but wrong
-  64-hex value, and a malformed value, are both rejected; `snapshot_id` is
-  never treated as a merely well-shaped opaque string.
-- **Generic schema versus synthetic fixture policy.** The PUBLIC schema itself
-  permits a legitimately empty registry (`provider_order` empty with
-  `providers` empty), provider keys that are arbitrary nonempty strings (not
-  only `synthetic-*`), and registries in which every provider tracks at least
-  one id. `provider_order` stays unique and must match the provider map keys
-  exactly, and zero-ID providers are permitted and retained (never required).
-  The `synthetic-` namespace, a nonempty registry and at least one zero-ID
-  provider are TEST-FIXTURE POLICY, not public schema rules. Provider-map keys
-  and model-map keys are identifier namespaces, not serialized field names; a
-  literal identifier such as `auth` is allowed, but an extra private field is
-  not.
-- **Wiring.** `chat_completions_url` must be a nonempty absolute
-  `http`/`https` URL with a hostname, containing no userinfo, no fragment and
-  no ASCII whitespace or control character; the original string is preserved
-  verbatim. This is purely syntactic — no DNS/network probing, no public-IP
-  allowlist, no provider inference and no URL rewriting. Query strings are
-  not automatically forbidden. An empty fragment component (a trailing `#`
-  delimiter) is permitted; nonempty fragments are rejected.
-- **Warning order.** Snapshot warning codes are deduplicated in the frozen
-  vocabulary order; a `null` tick still requires `tick_epoch_unknown`.
-
-This structural contract does NOT settle raw-JSON numeric lexeme handling,
-duplicate-member handling or canonical-language/JS-parity questions: those
-belong to a separate raw-JSON/canonical-boundary unit. No runtime validator,
-package or JS implementation is claimed here.
-
-### Raw JSON validation of published payloads (frozen rules)
-
-Raw JSON validation runs **BEFORE** any structural schema check. A published
-catalogue document is first checked as raw JSON text and, only if it is
-lexically accepted, checked against the structural contract above. An intended
-raw failure uses one shared envelope: top-level fields are **exactly** `ok` and
-`error`, `ok` is strictly `false`, and `error` carries **exactly** `code` and
-`message` with the single literal `invalid_json` / `Invalid catalogue JSON.`
-No parameter, offset, exception text, reflected raw content, local path,
-source/cache datum or partial result is ever carried, and several simultaneous
-raw faults still produce that one literal — there is **no** public subtype
-precedence. The existing `invalid_snapshot` and `unsupported_schema_version`
-envelopes are unchanged.
-
-- **Lexical acceptance is not public-snapshot acceptance.** Valid JSON that is
-  a scalar, array or `null` is **not** a raw error: it is lexically accepted
-  and later classified `invalid_snapshot` by the structural layer. Root
-  primitives never claim a valid public catalogue.
-- **Strict JSON syntax.** Empty or whitespace-only text, malformed or
-  truncated documents, comments, trailing data or a trailing comma, unquoted
-  member names, a leading-zero integer, a plus-prefixed number, malformed
-  escapes and raw control characters inside strings, and a UTF-8 BOM at the
-  start of the text are all rejected. No BOM stripping, trimming or other
-  silent preprocessing or sanitizing is performed, and the native JSON decoder
-  remains the syntax authority.
-- **Non-finite and overflowing numbers.** The `NaN`, `Infinity` and
-  `-Infinity` constants are rejected, and a syntactically valid number that
-  overflows binary64 (`1e400`, `-1e400`) is rejected as non-finite.
-- **Notation-independent numeric safety (at EVERY depth).** Every integer
-  token is checked **exactly**, before any precision-losing conversion,
-  against `[-9007199254740991, 9007199254740991]`; floating and exponent
-  tokens convert with normal binary64 semantics, and a non-finite result or an
-  integer-valued result outside that same range is rejected. Unsafe integers
-  therefore reject in **every notation** — plain digits, a `.0` spelling and
-  an exponent spelling such as `1e16` — positive and negative alike, wherever
-  they appear (including pricing or unused extra fields), before any schema
-  check. A lexical-integer-only safety policy is expressly **not** the
-  contract, and numeric-looking **strings** are untouched and never inspected
-  as numbers.
-- **Python-compatible finite rounding and underflow.** Normal finite
-  fractions, signed zero, subnormal values, rounded finite decimals
-  (`1.0000000000000001` becomes `1.0`, `9007199254740991.1` becomes
-  `9007199254740991.0`) and underflow (`1e-400` becomes `0.0`) remain
-  accepted at the raw boundary, and an accepted float token keeps **float**
-  type even when its value is integral — it is never coerced into an int or a
-  string. No arbitrary decimal-precision reinterpretation is performed.
-- **Duplicate member names.** A repeated object member name is rejected at
-  **every** object nesting level, including decoded escape-equivalent keys
-  (`"a"` versus `"\u0061"`), even when the repeated values are equal. Names
-  are compared after decoding and **before** any dict conversion, so there is
-  no last-write-wins repair; different case is distinct, and repeating a name
-  in two separate objects is fine.
-- **Container depth.** `MAX_JSON_DEPTH` is `64`, inclusive: a root container
-  is depth `1`, each nested array or object adds `1`, and a root scalar is
-  depth `0`. Arrays and objects **both** count, including mixed nesting;
-  quoted brackets and braces and escaped quotes or backslashes never affect the
-  container depth. The bound is enforced before an unbounded recursive decode
-  could exceed runtime limits; the interpreter recursion limit is never raised
-  as a substitute.
-- **No raw-value repair.** Values are never rewritten: duplicates, unsafe
-  numbers, malformed lexemes and over-deep nesting are rejected outright,
-  never partially salvaged, clamped, re-spelled or silently preprocessed.
-
-`tests/fixtures/catalog/raw-json-cases.json` is the clearly-labelled raw-JSON
-rule **TABLE** (explicitly **not** a snapshot and **not** a query result)
-holding the adversarial literal lexemes as STRINGS plus their handwritten
-complete expected envelopes or decoded values; `tests/test_catalog.py`
-restates these rules as a test-local stdlib checker. No runtime parser or
-public success envelope is claimed here: the canonical encoding/hash vectors
-and the strict snapshot integer-token boundary are frozen separately in the
-typed-encoding subsection below, and JavaScript parity remains a separate
-concern with no JS implementation claimed anywhere.
-
-### Typed canonical encoding and strict snapshot integer tokens (frozen rules)
-
-The public `snapshot_id` remains the SHA-256 of the **canonical body** — the
-complete snapshot object with **only** the root `snapshot_id` excluded — and
-hash equality stays **load-bearing**: a well-shaped but wrong 64-hex value is
-never accepted as a merely opaque id. The canonical body is produced from the
-**decoded typed values**, never from the raw file bytes or their numeric
-spellings: UTF-8, object keys sorted by Unicode **code point**, compact `,`/`:`
-separators, finite JSON values and `ensure_ascii=True`; Python's `json.dumps`
-with those flags is the reference encoder. A lexical difference that parses to
-identical typed values — re-spelled floats such as `1e0` versus `1.0`,
-harmless whitespace, object-member order, or equivalent string escapes — yields
-an **identical** canonical body and `snapshot_id`, while an integer token `1`
-and a float token `1.0` are **different** typed values and hash differently.
-String values, including numeric-looking strings, are never coerced.
-
-Published snapshot integer-token fields (`schema_version`, `tick_epoch`,
-`cadence_s` and a model's `context_length`) stay **strict integer tokens**:
-booleans are excluded, and an integral **float** token such as `1.0` or `1e0`
-is **not** a valid strict snapshot integer. Such a document is
-`invalid_snapshot`, never `unsupported_schema_version`, which applies only to a
-well-typed strict integer version other than `1`. This is a **different**
-boundary from the `c1` tool argument table, which still accepts `1.0` for
-integer arguments; pricing keeps its frozen finite scalar numbers, numeric
-strings and `null`, and is never dropped, stringified or coerced to an int.
-Unknown capability metadata stays unknown.
-
-`tests/fixtures/catalog/canonical-cases.json` is the clearly-labelled canonical
-rule **TABLE** (explicitly **not** a snapshot and **not** a query result). Its
-`canonical_vectors` rows carry an explicit `scope`: a `general_value` row is a
-general raw-JSON **encoding specification** whose whole value is hashed (a
-nested `snapshot_id` key is ordinary retained content), never a valid public
-snapshot; a `snapshot` row is a complete re-sealed snapshot document hashed
-with only the root `snapshot_id` excluded. The `canonical_text` and `sha256`
-values are literal hand-authored FILE CONTENT, re-derived independently by the
-test-local stdlib checker; the `snapshot_cases` rows carry complete literal
-documents and either `accepted: true` or the complete literal error envelope.
-No runtime encoder, package implementation or JavaScript parity is claimed
-here.
-
-### Tool surface (frozen names)
-
-Five tools, names stable; `watchdog_status` reports **published catalogue
-health**, not private operator health. Schemas stay static with provider
-validation against each snapshot (no stale provider enums embedded in an
-installed package):
-
-- `list_free_models(provider=None)`
-- `get_model(model_id)`
-- `list_endpoints(provider=None)`
-- `watchdog_status()`
-- `search_models(query=None, provider=None, min_context_length=None, input_modalities=None, supported_parameters=None, limit=50, offset=0)`
-
-### Tool arguments and argument errors (frozen rules)
-
-Every known tool shares one semantic argument-error envelope: top-level
-fields are **exactly** `ok` and `error`, `ok` is strictly `false`, and
-`error` carries **exactly** `code`, `message` and `parameter`. Two codes
-exist: `invalid_arguments` with the literal message `Invalid tool
-arguments.`, and `unknown_provider` with the literal message `Unknown
-provider.` `parameter` is the offending **known signature parameter** name,
-or `null` for non-object arguments and unknown argument names; the response
-never reflects an arbitrary supplied key or hostile value. An argument error
-carries **no** `tool`, `state_root`, path, `source`, cache, snapshot
-provenance, staleness, partial-data or count field, and every success
-envelope is unchanged.
-
-Argument validation is deterministic. The arguments must be a JSON object;
-then **ANY** unknown argument key is rejected (`parameter` `null`); then the
-parameters are validated in signature order and the first error wins.
-`search_models` validates `query`, `provider`, `min_context_length`,
-`input_modalities`, `supported_parameters`, `limit`, `offset`, and
-`get_model` checks its required `model_id` in its signature position. A
-provider of the wrong non-null type is `invalid_arguments`; a string absent
-from the current snapshot's `provider_order` is `unknown_provider`. Empty,
-padded and wrong-case provider keys are never repaired. Only the five known
-tools are scoped here: unknown-tool protocol dispatch and invalid-snapshot or
-source precedence are separate concerns.
-
-- `list_free_models(provider=None)` and `list_endpoints(provider=None)`
-  accept an absent or `null` `provider`; otherwise it must be one exact
-  registered key.
-- `get_model(model_id)` requires a string containing at least one character
-  outside ASCII whitespace (U+0009..U+000D and U+0020); empty or
-  ASCII-blank-only strings are `invalid_arguments(model_id)`. The retained
-  identifier is never trimmed: `" vendor/model "` remains a literal nonblank
-  query, and non-ASCII code points stay literal. The ASCII blank set is never
-  widened with Python `str.strip` or JavaScript `trim`.
-- `watchdog_status()` has no public arguments; the fixed test clock is
-  case-level harness input, never a tool argument.
-- `search_models` accepts an absent or `null` `query` and **any** string,
-  including empty, whitespace-only, non-ASCII and regex-looking values; it is
-  literal and untrimmed. Any other query type is `invalid_arguments(query)`.
-  `min_context_length` accepts absent/`null` or a JSON safe integer `>= 0`.
-  `limit` accepts omission (default `50`) or a JSON safe integer in `1..200`,
-  never `null`; `offset` accepts omission (default `0`) or a JSON safe
-  integer in `0..2^53 - 1`, never `null`. `input_modalities` and
-  `supported_parameters` accept absent/`null` or arrays of nonempty strings;
-  an empty `[]` applies no constraint, and duplicates, casing and surrounding
-  whitespace inside nonempty entries are preserved, not trimmed. A bare
-  string, an object, a mixed or `null` member, or an empty string member
-  rejects the whole parameter; arrays are never partially salvaged.
-- **JSON integer input boundary:** a JSON Schema integer is a finite numeric
-  value with zero fractional part, so numeric `1` and `1.0` are the same
-  integer value and JavaScript `Number.isSafeInteger(1.0)` is `true`.
-  Integral numeric tool inputs such as Python `1.0` are therefore accepted;
-  `true`, `"1"`, `1.5`, unsafe integers and non-finite numbers are rejected.
-  This is **not** coercion of a string or boolean, and it does not change the
-  separately frozen strict-int metadata projection or payload-count rules.
-
-These argument errors are **separate from published snapshot degradation**:
-missing or malformed OPTIONAL upstream metadata still degrades to
-`null`/unknown inside a success payload. Neither is changed by this argument
-contract.
-
-### Shared tool definitions (frozen resource)
-
-`watchdog_catalog/tools.json` is the transport-independent, data-only
-shared definition of the five known tools: a bare JSON array of exactly
-five objects, each with exactly `name`, `description` and `inputSchema`.
-It is the reviewed cross-runtime contract and the single source for the
-shared tool descriptions and the browser tool definitions; it is **not**
-an `input_schema` argument to any SDK `add_tool` call, and no wrapper
-metadata, annotations, titles, output schemas, callbacks, sources or
-provider list appears anywhere in the resource. No per-tool private input
-(the clock, source, URL, path, cache or config) is ever exposed as a tool
-argument.
-
-Each `inputSchema` is a plain JSON Schema 2020-12 subset object — an
-object schema with an explicit `type` of `object`, a `properties` map, a
-`required` list and `additionalProperties` **false** — using only the
-portable keywords `type` (including nullable type arrays), `properties`,
-`required`, `additionalProperties`, `items`, `minLength`, `pattern`,
-`minimum`, `maximum`, `default` and `description`. There are no `$ref`
-or `$defs`, no custom executable validators, no provider enums and no
-`oneOf` boilerplate. Unknown schema keywords are never silently ignored
-by the schema checker.
-
-The schemas are **static** while provider membership stays **dynamic**:
-`provider` is a nullable, unconstrained string with `default` `null` and
-**no** `enum`, `minLength` or `pattern`, so empty, padded and unknown
-provider strings pass static typing and are rejected at runtime by the
-existing `unknown_provider` query check against each snapshot's
-`provider_order` — no stale provider enum is embedded in an installed
-package. `limit` defaults to `50` and `offset` to `0`, must be present
-integers (never `null`) and are never repaired. Omitted and `null` stay
-distinct: an omission may apply a default, but the default is never
-injected into, or coerced onto, the retained arguments.
-
-The **JSON Schema integer** input boundary is value based — a finite
-numeric value with zero fractional part, so `1.0` is the integer `1` —
-and is **separate** from the strict snapshot integer lexeme rule, where
-an integral float token such as `1.0` is not a valid strict snapshot
-integer. `true`, `"1"`, `1.5`, unsafe integers and non-finite numbers
-are rejected tool arguments.
-
-The local text budgets — **500** characters per tool description,
-**150** per parameter description and **30** per tool or parameter name
-— are inclusive local quality gates, **not** protocol hard limits: the
-official tool-definition API does not reject larger text, so these are
-revisited if that API later adds normative limits.
-
-The `list_free_models` and `list_endpoints` descriptions state that they
-are **bulk** exports and advise routine use of `search_models` with an
-explicit small `limit` **1-5** followed by `get_model` for details; they
-never imply a hard universal output cap or truncation, so bulk output may
-exceed that guidance. `watchdog_status` describes **published catalogue
-health** only — never live or private operator or cron health, and never a
-provider probe.
-
-This subsection scopes to the shared **data** resource itself, and that
-resource ships: it is packaged as the package's one MCP resource, embedded in
-the dashboard as the `tool-contract` island, and read by `web/webmcp.js` for
-all five browser descriptors (each a defensive copy — there is no second
-schema table in the page). The transport derives the live advertised schema
-from its Python signatures and their constrained aliases, proves the generated
-property-name set equals the reviewed one, and copies only the reviewed
-description text from here — so no type, bound, default, requiredness, pattern
-or unknown-argument rule of a live registration is read out of this file.
-Packaging, embedding, SDK schema comparison and native browser registration are
-therefore ordinary shipped behaviour documented elsewhere in this README, not
-later work.
-
-### Identity, lookup, and ordering (frozen rules)
-
-- `get_model.exact_matches` is **literal raw-ID membership** — case-sensitive,
-  unpadded, exact. `get_model("vendor/model:free")` matches only providers
-  tracking that raw id, never marker-stripped or renamed variants.
-- The separate marker-insensitive lookup strips **only** a delimiter-bounded
-  `free` at the start or end of an id (delimiters `[-:_]`, case-insensitive),
-  with an **empty-result guard**: a strip that would empty the id returns it
-  unchanged. `get_model("vendor/model")` lists every endpoint whose stripped
-  name equals the stripped query, raw ids unchanged.
-- A marker match is **not proof of cross-gateway model identity**; the absence
-  caveat is preserved on every `get_model` payload.
-- Identifiers are **never silently trimmed or repaired**: `" vendor/model "` is
-  not trimmed into a match.
-- Endpoint identity is **`(provider, raw model_id)`**: a raw id shared by two
-  providers is two endpoints, and metadata stays attached to its own pair.
-  Result arrays order by provider display order, then natural raw-ID order
-  (ASCII digit runs compared by digit length and lexical order).
-- **Total ordering rule (frozen):** provider precedence is the index in
-  `provider_order`, never alphabetic key order, provider-map insertion order or
-  global raw-ID order. Identical raw IDs on different providers remain two pairs
-  and order by provider precedence; within one provider, raw IDs compare by the
-  natural comparator below.
-- **Natural comparator:** tokenize only maximal ASCII `[0-9]+` runs, preserving
-  intervening text and string boundaries. Numeric runs compare by original digit
-  count, then lexical ASCII digits — no integer/float conversion of long digit
-  sequences and no stripping of leading zeroes, so `vendor/item1` <
-  `vendor/item2` < `vendor/item02` < `vendor/item10`. Text segments compare
-  case-sensitively by Unicode code point: no case folding, no locale collation,
-  no Unicode normalization and never UTF-16 code-unit comparison; on a strict
-  prefix the shorter sequence sorts first. Non-ASCII numeric-looking characters
-  are TEXT, never digit runs; Arabic-Indic digits (`١`) and superscript digits
-  (`²`) stay text (generic `isdigit`/`\d` classification is not this contract).
-  Digit-run tokens precede text tokens, empty boundary text tokens are preserved,
-  and literal raw IDs are never rewritten or replaced by normalized labels.
-- **Snapshot order versus query order:** snapshot `model_ids` stay sorted and
-  deduplicated by literal code-point string order (frozen), while query endpoint
-  result arrays use provider precedence plus NATURAL raw-ID order. The two orders
-  genuinely differ — `vendor/item02` precedes `vendor/item1` in a snapshot
-  `model_ids` list but follows `vendor/item2` in a query result. Input
-  `model_ids` are never reordered to hide a query sort defect, and snapshot
-  integrity is never relaxed to accept an adversarial unsorted `model_ids` list.
-
-### Success envelope — `get_model` (frozen field sets)
-
-The pure query payload is the **semantic** payload: SDK and browser
-wrappers may differ in protocol envelopes, but this object is identical
-across them. It exposes no local filesystem path and no source
-retrieval/cache metadata — a source layer adds a separate `source` object
-(URL/file/browser mode, retrieval/cache information, refresh warnings)
-OUTSIDE this pure payload, and the pure payload never invents freshness
-from HTTP download time.
-
-`get_model(model_id)` success payload — exact top-level fields:
-
-| Field | Type | Definition |
-|---|---|---|
-| `ok` | bool | Exactly `true` on success; a lookup that finds nothing is still a success. |
-| `query` | string | The exact raw query as passed, never trimmed or repaired. |
-| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`. |
-| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`; `null` means unknown, never fresh. |
-| `exact_matches` | map of bool | Literal raw-ID membership — one entry per snapshot provider in `provider_order`, **including zero-ID providers**. |
-| `exact_gateways` | list of string | Provider keys whose `exact_matches` is `true`, in provider display order. |
-| `provider_staleness` | map of bool | Staleness of **every** snapshot provider relevant to the response. Exact membership covers all snapshot providers, so this map carries one entry per `provider_order` provider even when no endpoint matches. Each value is that gateway's carried-forward stale flag — **provider staleness, never tick age** (tick freshness is derived from `tick_epoch` against the snapshot's `cadence_s`). |
-| `endpoints` | list of object | Matched endpoint pairs, ordered by provider display order then natural raw-ID order. |
-| `caveats` | list of string | Always carries the absence caveat. |
-| `counts` | object | Explicit cardinalities of the returned lookup result; exact set below. |
-
-Endpoint object — exact fields:
-
-| Field | Type | Definition |
-|---|---|---|
-| `provider` | string | Provider key of the `(provider, raw model_id)` pair. |
-| `model_id` | string | Raw tracked model ID, unchanged. A raw id shared by two providers yields two endpoints. |
-| `chat_completions_url` | string | The provider's chat-completions URL. |
-| `api_type` | string | The provider's API dialect. |
-| `stale` | bool | This provider's staleness — equals `provider_staleness[provider]`. |
-| `metadata` | object | The credential-free **projected public model object** of exactly this `(provider, raw model_id)` pair — the same exact field set as a snapshot projected model, and **never the legacy raw metadata** object. Not nullable: an endpoint exists only for a tracked raw id and the projection always carries the exact field set, with unknown optional fields `null`. |
-
-`counts` object — exact fields (each a non-negative int; booleans are invalid):
-
-| Field | Definition |
-|---|---|
-| `exact_matches` | **Matching gateways**: providers with literal raw-ID membership (`len(exact_gateways)`). |
-| `endpoints` | Endpoint pairs returned (`len(endpoints)`). |
-| `distinct_raw_ids` | Distinct raw `model_id` strings among the returned endpoints: a raw id shared by two providers is **two endpoints but one distinct raw id**. |
-| `marker_group_labels` | Distinct **marker group** labels among the returned endpoints (the delimiter-stripped query label they matched); `0` when `endpoints` is empty. A marker group is a labelling convenience, **never** a count of verified underlying models — marker grouping is not proof of cross-gateway identity. |
-
-Every `counts` value describes only the returned lookup result —
-never the global registry. A no-match lookup is an explicit success:
-`exact_gateways` and `endpoints` are `[]`, `provider_staleness` still lists
-every snapshot provider, and `counts` is **all zeros** — there is no
-no-match error.
-
-### Success envelope — `search_models` (frozen field sets)
-
-`search_models(query=None, provider=None, min_context_length=None,
-input_modalities=None, supported_parameters=None, limit=50, offset=0)`
-returns the same PURE semantic payload across SDK and browser wrappers; like
-`get_model` it exposes no local filesystem path and no source retrieval/cache
-data (a source layer adds a separate `source` object OUTSIDE this payload).
-Text search is **literal substring** matching over raw ID, name and
-description, folded **ASCII case-insensitive** only; there is
-**no regular expression** support, no fuzzy alias and no JSON-string/metadata
-search. Exact top-level fields:
-
-| Field | Type | Definition |
-|---|---|---|
-| `ok` | bool | Exactly `true` on success — a no-match or beyond-end page is still a success. |
-| `query` | string or null | The supplied raw query echoed unchanged, or `null` when omitted; it is **never trimmed**. |
-| `filters` | object | Echoed raw filter values (exact set below); each is the supplied value or `null` when omitted. |
-| `limit` | int | Effective page size: the supplied `limit` or the default `50`; integer in `1..200`. |
-| `offset` | int | Effective page offset: the supplied `offset` or the default `0`; integer `>= 0`. |
-| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`. |
-| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`; `null` means unknown, never fresh. |
-| `provider_staleness` | map of bool | Staleness scope: every snapshot provider in `provider_order` when no provider filter is given, else exactly the selected provider — **including a selected provider with zero tracked IDs**. Each value is that gateway's carried-forward stale flag (**provider staleness, never tick age**), retained even on an empty or beyond-end page. |
-| `endpoints` | list of object | The `returned page` of matched endpoint pairs, in frozen order (below). |
-| `total_matches` | int | Endpoint pairs satisfying **all** active predicates **before** pagination — the separate `unpaginated` cardinality. |
-| `returned_count` | int | `len(endpoints)` for this page. |
-| `next_offset` | int or null | `offset + returned_count` when that is **less than** `total_matches`; otherwise `null` (including an exhausted or beyond-end page). |
-| `counts` | object | PAGE-scoped cardinalities of the returned page; exact set below. |
-| `caveats` | list of string | Always carries the **absence caveat**. |
-
-`filters` object — exact fields:
-
-| Field | Definition |
-|---|---|
-| `provider` | The one exact provider key to restrict to, echoed raw, or `null` when omitted. An unknown key is an argument error (a later unit). |
-| `min_context_length` | The non-negative integer filter, echoed raw, or `null`; the comparison is inclusive over KNOWN safe non-negative integer contexts, and unknown contexts fail it. |
-| `input_modalities` | The requested modalities, echoed raw (casing/order/duplicates preserved), or `null`; an empty `[]` is echoed as `[]` yet applies no constraint. |
-| `supported_parameters` | The requested parameters, echoed raw, or `null`; an empty `[]` likewise applies no constraint. |
-
-Endpoint object — exact fields:
-
-| Field | Type | Definition |
-|---|---|---|
-| `provider` | string | Provider key of the `(provider, raw model_id)` pair. |
-| `model_id` | string | Raw tracked model ID, unchanged. |
-| `chat_completions_url` | string | The provider's chat-completions URL. |
-| `api_type` | string | The provider's API dialect. |
-| `stale` | bool | This provider's staleness — equals `provider_staleness[provider]`. |
-| `name` | string | The pair's public display name. |
-| `description` | string or null | The pair's public description; `null` when unknown. |
-| `context_length` | int or null | The normalized context value (unknown stays `null`). |
-| `input_modalities` | list of string or null | The normalized input modalities (ASCII-lowercased, first-occurrence deduplicated). |
-| `output_modalities` | list of string or null | The normalized output modalities. |
-| `supported_parameters` | list of string or null | The normalized supported parameters. |
-| `unknown_fields` | list of string | Exactly the four capability fields whose normalized value is `null`, in the frozen order `context_length`, `input_modalities`, `output_modalities`, `supported_parameters`. |
-| `metadata` | object | The complete **projected public model object** of exactly this `(provider, raw model_id)` pair, retaining valid original array casing/order/duplicates — **never the legacy raw metadata**, and never a cross-provider merge. |
-
-`counts` object — exact fields, describing the **returned page** only (never
-the global registry or the unpaginated match set; an empty page is all
-zeros, even when `total_matches` is positive):
-
-| Field | Definition |
-|---|---|
-| `gateways` | Distinct provider keys among the returned page rows. |
-| `endpoints` | Returned page rows (`returned_count`). |
-| `distinct_raw_ids` | Distinct raw `model_id` strings in the page. |
-| `marker_group_labels` | Distinct delimiter-stripped labels in the page — labels, **never** a count of verified underlying models. |
-
-Filtering and pagination semantics:
-
-- The **AND** of the active predicates selects endpoint pairs; each pair is
-  tested independently on its own `(provider, raw model_id)` metadata, so a
-  context from one gateway is never combined with a capability from another.
-- A `min_context_length` filter qualifies only a KNOWN finite, safe,
-  non-negative integer context, compared inclusively; a `null` (unknown)
-  context fails it. An empty or omitted text query applies no text constraint.
-- A modality or parameter filter uses **AND** across its requested entries:
-  **every** requested entry (normalized to ASCII-lowercase) must be present
-  in that endpoint's validated array. A `null`/unknown array fails a nonempty
-  filter; a known empty `[]` satisfies no nonempty request.
-- **Sort, then slice**: order results by provider display order, then natural
-  raw-ID order, and only then apply `offset`/`limit`; `total_matches` is the
-  cardinality **before** that slice.
-- `NaN`/`Infinity`, `bool`-as-integer and unsafe integers in PUBLIC JSON are rejected when parsing (Python and JS share these expectations); but an **unsafe UPSTREAM context** degrades to null (unknown) rather than failing the endpoint — upstream uncertainty never becomes a parsed unsafe integer.
-
-Worked examples (complete payloads live as literal goldens in
-`tests/fixtures/catalog/cases.json`, one `search_models` case per scenario):
-
-- Over `metadata-edge-cases.json`, `query="reasoning"` matches the
-  known-context, unknown-context and zero-context models (but not the
-  null-description one); adding `min_context_length=65536` keeps only the
-  known 65536-context model, while `min_context_length=0` keeps the known and
-  the known-zero models and still excludes the unknown (null) context.
-- Over `lookup.json`, the raw id `vendor/shared` is tracked by two gateways:
-  `query="shared" + min_context_length=65536` yields only synthetic-a's
-  endpoint; `query="shared" + input_modalities=["text","IMAGE"]` yields only
-  synthetic-b's; asking for both at once yields NEITHER (no cross-provider
-  merge).
-- Over `search-text.json`, `query="REASONING"` returns normalized capability
-  arrays while the public `metadata` object keeps its original casing;
-  `query="Image"` yields nothing (the token lives only in the metadata array,
-  which is never searched); and `query=" REASONING "` yields nothing because
-  identifiers and queries are never trimmed.
-
-### Success envelope — `watchdog_status` (frozen field sets)
-
-`watchdog_status()` reports **published catalogue health**, not private
-operator health. It is the **whole-catalogue** status of the consumed
-snapshot: like `get_model` and `search_models` the pure payload exposes no
-local filesystem path, no `state_root`/tool path, no source retrieval/cache
-timestamp and no operator diagnostics — those belong to a separate,
-explicitly labelled wrapper OUTSIDE this payload. `ok: true` means the
-valid snapshot was queried successfully — **not** that its observations are
-fresh or that every provider is healthy. The fixed test clock is a case-level
-`now` epoch injected into the core; it is **never** a tool argument and never a
-wall-clock lookup. Exact top-level fields:
-
-| Field | Type | Definition |
-|---|---|---|
-| `ok` | bool | Exactly `true` on success — the snapshot was queried successfully, not that its observations are fresh. |
-| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`. |
-| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`, echoed literally (a future epoch is **never** repaired); `null` means unknown, never fresh. |
-| `cadence_s` | int | The consumed snapshot's cadence, echoed: this is **snapshot data, never a hardcoded `3600`**. |
-| `last_tick_age_s` | int or null | `now - tick_epoch` as a strict non-negative int for a known non-future tick; `null` when the tick is `null` or in the future — **never clamped to a healthy zero**. |
-| `tick_fresh` | bool | The **inclusive one-cadence boundary**: `true` exactly when `last_tick_age_s` is a known age and `last_tick_age_s <= cadence_s` (age `0` and age `== cadence_s` are both fresh); `false` for a null or future tick. Always a strict bool. |
-| `provider_staleness` | map of bool | **Every** configured provider in `provider_order`, including zero-ID providers; each value is that gateway's carried-forward stale flag, **unchanged by the clock** — this is **provider staleness, never tick age**. Provider staleness may be `true` during a fresh tick and all providers may be `false` during an old tick. |
-| `provider_counts` | map of strict non-negative int | **Every** configured provider, each its tracked `(provider, raw ID)` pair count (`len(model_ids)`), **zero included**. |
-| `metadata_coverage` | object | Coverage of the stated metadata fields over the global tracked-pair denominator; exact set below. |
-| `counts` | object | **Whole-catalogue** cardinalities; exact set below. |
-| `pending_alerts` | null | Unobservable on the published/browser sources: **strictly `null`**. |
-| `site_published` | null | Unobservable on the published/browser sources: **strictly `null`**. |
-| `site_publish_age_s` | null | Unobservable on the published/browser sources: **strictly `null`**. |
-| `warnings` | list of string | Snapshot warnings plus derived status codes, deduplicated in the frozen status order below; stable strings, never paths or exceptions. |
-
-`counts` object — exact fields (each a strict non-negative int; booleans are
-invalid). Unlike `search_models`' PAGE-scoped counts, a status `counts` object
-describes the **whole catalogue** and never a filtered page:
-
-| Field | Definition |
-|---|---|
-| `gateways` | **All** configured snapshot providers in `provider_order`, **including zero-ID providers** (whole-catalogue, not a page). |
-| `endpoints` | **All** tracked `(provider, raw ID)` pairs. |
-| `distinct_raw_ids` | The **literal union** of raw IDs: a raw id shared by two gateways is one distinct raw id. |
-| `marker_group_labels` | Distinct delimiter-stripped labels — labels, **never** verified underlying model identities. |
-
-`metadata_coverage` object — exact fields (each a strict non-negative int at
-most the `endpoints` denominator):
-
-| Field | Definition |
-|---|---|
-| `endpoints` | The **global tracked-pair denominator** (equal to `counts.endpoints`). |
-| `context_length_known` | Tracked pairs with a non-null **valid** context; a known `0` counts, `null` (unknown) does not. |
-| `input_modalities_known` | Tracked pairs with a non-null valid input-modality array; a known empty `[]` counts, `null` does not. |
-| `output_modalities_known` | As above for output modalities. |
-| `supported_parameters_known` | As above for supported parameters. |
-| `description_known` | Tracked pairs with a non-null description string. |
-
-Coverage is of these stated metadata fields only — **never provider health or
-price availability** — and a present metadata object is never counted as
-complete metadata, because projection always supplies an object even when its
-fields are unknown.
-
-**Status warning order and the status/snapshot vocabulary split.** The
-snapshot warning vocabulary stays the frozen THREE codes (`tick_epoch_unknown`,
-`metadata_missing`, `metadata_invalid`) — the only codes a snapshot document
-may carry. A status payload adds two **status-only** codes after them, so the
-full status order is `tick_epoch_unknown`, `metadata_missing`,
-`metadata_invalid`, `tick_epoch_future`, `tick_stale`:
-
-- `tick_epoch_unknown` is added for a `null` epoch (normally already a snapshot
-  warning).
-- `tick_epoch_future` is added when `tick_epoch` is in the future; the raw
-  epoch is echoed unchanged.
-- `tick_stale` is added when the **known** age is strictly greater than
-  `cadence_s`.
-
-A fresh known epoch adds no status warning. A null or future epoch is **NOT a
-stale known observation** and never carries `tick_stale`.
-
-Compact complete example — `watchdog_status()` over a snapshot with
-`synthetic-a` tracking two models (one all-known, one all-unknown) and a stale
-zero-ID `synthetic-b`, at the fixed clock `now = 1759200000` (tick `1759200000`,
-cadence `3600`):
-
-```json
-{
-  "ok": true,
-  "snapshot_id": "deb67e26339f74463348688870b091058362fcf7b88455fbea1507e6e8571b41",
-  "tick_epoch": 1759200000,
-  "cadence_s": 3600,
-  "last_tick_age_s": 0,
-  "tick_fresh": true,
-  "provider_staleness": {"synthetic-a": false, "synthetic-b": true},
-  "provider_counts": {"synthetic-a": 2, "synthetic-b": 0},
-  "metadata_coverage": {"endpoints": 2, "context_length_known": 1,
-    "input_modalities_known": 1, "output_modalities_known": 1,
-    "supported_parameters_known": 1, "description_known": 1},
-  "counts": {"gateways": 2, "endpoints": 2, "distinct_raw_ids": 2,
-    "marker_group_labels": 2},
-  "pending_alerts": null,
-  "site_published": null,
-  "site_publish_age_s": null,
-  "warnings": ["metadata_missing"]
-}
-```
-
-Worked examples (complete payloads live as literal fixed-clock goldens in
-`tests/fixtures/catalog/cases.json`, one `watchdog_status` case per scenario,
-each with a case-level `now` and `args: {}`): at `now == tick_epoch` the age is
-`0` and the tick is fresh; age `== cadence_s` is still fresh, and one second
-more is `tick_stale`; a `null` epoch yields `last_tick_age_s: null`,
-`tick_fresh: false` and `tick_epoch_unknown`; a future epoch yields the same
-null age and `tick_epoch_future`, never `tick_stale`; and a snapshot whose
-cadence is `120` (not `3600`) proves the freshness boundary uses the snapshot's
-own cadence.
-
-### Success envelope — `list_free_models` (frozen field sets)
-
-`list_free_models(provider=None)` is the frozen **BULK export tool**: one call
-returns the whole registry, or one gateway's complete ID list. Routine agent
-lookups should not use it — direct those to `search_models` with a small
-explicit `limit` (e.g. 1–5), then `get_model` for one exact ID. Limits in this
-surface bound returned **rows, not characters**: there is no truncation and no
-browser-only semantics anywhere in it. Like the other pure payloads this
-object exposes no local filesystem path, no `tool`/`state_root` field and no
-source retrieval/cache data (a source layer adds a separate `source` object
-OUTSIDE it). It keeps the nested shape (`providers`, `models`, `counts`,
-`total_ids`, `n_gateways`) and carries no local-only fields.
-
-Two **different** exact top-level field sets, one per variant.
-
-`provider` omitted or `null` — all-provider export:
-
-| Field | Type | Definition |
-|---|---|---|
-| `ok` | bool | Exactly `true`. |
-| `providers` | map | Provider key -> that provider's **complete** raw ID array, each array in NATURAL raw-ID order (the frozen comparator above), **including zero-ID providers** (an empty array). Provider object key order is not semantic; result array order is. |
-| `models` | map | Provider key -> map of **all** tracked IDs to their complete **projected public model object** — an empty map for a zero-ID provider. Values stay attached to their own `(provider, raw model_id)` pair: a raw ID shared by two gateways keeps its two conflicting per-provider objects, never flattened or copied across. |
-| `counts` | map | Provider key -> that provider's tracked-ID count as a strict non-negative int, `0` included; the same exact provider set as `providers`/`models`/`provider_staleness`. |
-| `total_ids` | int | **Distinct LITERAL raw IDs** across the selected registry — never the endpoint-pair count and never marker-label count. |
-| `n_gateways` | int | `len(provider_order)`, zero-ID providers included. |
-| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`, echoed literally. |
-| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`, echoed literally — no invented freshness or download date. |
-| `provider_staleness` | map of bool | Each selected provider's strict carried-forward snapshot stale flag, **including zero-ID providers** — **provider staleness, never tick age**. |
-
-`provider` a valid exact key — one-provider export:
-
-| Field | Type | Definition |
-|---|---|---|
-| `ok` | bool | Exactly `true`. |
-| `provider` | string | The exact provider key, echoed; identifiers are never trimmed or repaired. |
-| `model_ids` | list of string | That provider's complete raw ID array in NATURAL raw-ID order. |
-| `models` | map | Its flat raw ID -> projected public model object map — **not** the all-provider nesting. |
-| `count` | int | Strict non-negative int, equal to `len(model_ids)`. |
-| `snapshot_id` | string | As above. |
-| `tick_epoch` | int or null | As above. |
-| `provider_staleness` | map of bool | Exactly `{selected_provider: its_stale_flag}`. |
-
-A registered **zero-ID** provider is a success: `model_ids` is `[]`, `models`
-is `{}`, `count` is `0` and `provider_staleness` still carries that provider —
-never a no-match or missing-provider error. No global field
-(`providers`/`counts`/`total_ids`/`n_gateways`) leaks into the one-provider
-shape, and published `models` values are projected public model objects,
-**never the legacy raw metadata** dictionaries.
-
-Complete worked examples live as literal goldens in
-`tests/fixtures/catalog/cases.json` — `list_free_lookup_all`,
-`list_free_lookup_provider_a`, `list_free_lookup_zero_provider_c` (an empty but
-successful zero-ID selection) and `list_free_ordering_all` (natural raw-ID
-array order, a shared raw ID whose per-provider objects conflict, and a stale
-flag preserved independently of the observation epoch).
-
-### Success envelope — `list_endpoints` (frozen field sets)
-
-`list_endpoints(provider=None)` publishes the wiring and the projected metadata
-of every selected `(provider, raw model ID)` pair. Routine lookups should not
-use it — direct those to `search_models` with a small explicit `limit` (e.g.
-1–5), then `get_model` for one exact ID. Limits in this surface bound returned
-**rows, not characters**: there is no truncation and no browser-only semantic
-difference anywhere in it. Like the other pure payloads this object exposes no
-local filesystem path, no `tool`/`state_root` field and no source
-retrieval/cache data (a source layer adds a separate `source` object OUTSIDE
-it). It keeps the nested shape while publishing only projected data.
-
-One **exact** top-level field set for BOTH the all-provider and the
-provider-filtered variant:
-
-| Field | Type | Definition |
-|---|---|---|
-| `ok` | bool | Exactly `true`. |
-| `gateways` | map | Provider key -> gateway object (below), one entry per **selected** provider, **including zero-ID ones**. Provider object key order is not semantic; result array order is. |
-| `counts` | map | The exact count object below. |
-| `provider` | string or null | The exact selected provider key echoed, or strictly `null` when `provider` is omitted or `null`. Identifiers are never trimmed or repaired. |
-| `snapshot_id` | string | Observation provenance: the consumed snapshot's `snapshot_id`, echoed literally. |
-| `tick_epoch` | int or null | Observation provenance: the consumed snapshot's `tick_epoch`, echoed literally — no invented freshness or download date. |
-| `provider_staleness` | map of bool | Exactly the **selected** providers' strict carried-forward snapshot stale flags — **provider staleness, never tick age**. |
-
-Each `gateways` value is the exact gateway entry field set:
-
-| Field | Type | Definition |
-|---|---|---|
-| `chat_completions_url` | string | Wiring, from the exact snapshot provider. |
-| `api_type` | string | Wiring, from the exact snapshot provider. |
-| `model_ids` | list of string | That provider's complete raw ID array in NATURAL raw-ID order (the frozen comparator above) — unchanged strings, never marker labels. |
-| `models` | map | Every tracked raw ID -> its complete **projected public model object**, never the legacy raw metadata; an empty map for a zero-ID provider. |
-
-The `counts` object carries the exact count field set:
-
-| Field | Type | Definition |
-|---|---|---|
-| `gateways` | int | Number of **selected** providers, zero-ID providers included. |
-| `endpoints` | int | Number of selected `(provider, raw model ID)` pairs. |
-| `distinct_raw_ids` | int | Number of selected literal raw IDs. |
-| `marker_group_labels` | int | Number of selected marker-group labels (delimiter-stripped, frozen empty-result guard). |
-| `models` | int | A **documented legacy alias** equal to `marker_group_labels`. |
-
-Counts describe the filtered response, not the entire registry: `gateways`
-counts the selected providers, zero-ID providers included, never the whole
-registry. `models` is the documented legacy alias equal to
-`marker_group_labels`, never a verified underlying model identity. A filtered
-`list_endpoints("synthetic-a")` reports only synthetic-a's `gateways`,
-`endpoints`, ids and labels, and no registry-wide total leaks in. A zero-ID
-single provider yields `gateways` 1 with all other counts zero.
-
-Provider selection is all `provider_order` keys if `provider` is omitted or
-`null`, else exactly the known selected provider. A registered **zero-ID**
-provider is a success: its `gateways` entry still exists with `model_ids` `[]`
-and `models` `{}` — never a no-match or missing-provider error.
-
-Complete worked examples live as literal goldens in
-`tests/fixtures/catalog/cases.json` — `endpoints_lookup_all`,
-`endpoints_lookup_provider_a`, `endpoints_lookup_zero_provider_c` (an empty but
-successful zero-ID selection), `endpoints_ordering_all` (natural raw-ID array
-order over the ordering snapshot) and `endpoints_extension_all` (a new synthetic
-gateway added by DATA alone: the `provider-extension.json` snapshot adds
-`synthetic-d` and the same generic checkers accept it with no provider enum or
-package-code edit).
-
-## State layout (state/, gitignored)
-
-- `roster.json`: providers + provider_models + tick_epoch + stale_providers + transients + unconfirmed + ratelimits. Never hand-edit — use --init.
-- `alive.json`: last_tick_epoch + last_output_epoch + dropped_alerts_total.
-- `pending_alerts.json`: bounded retry queue (MAX_ATTEMPTS 5 per alert).
-- `pending_removals.json`: held provider removals waiting to settle (shared by both settle paths).
-- `probe_state.json`: per-provider probe verdicts (`{provider: {model_id: {"verdict": "free"|"paid", "epoch": int}}}`). Written once per tick after the serial probe loop. Never hand-edit.
-- `state/monitor.lock`: PID lockfile; stale locks (>30 min old) are auto-broken on the next invocation (crash recovery).
-
-## Held removals (opt-in per providers)
-
-A provider config may set `removal_hold_seconds`. When present, a confirmed removal is held that long in `state/pending_removals.json` before an alert is emitted — letting a transient fetch failure or a quick re-add self-silence. Absent, removals alert instantly.
-
-Two settle paths drain the queue; both share `pending_removals.settle` (never forked):
-- **Resolver accelerates**: an in-pass resolver resolves holds as soon as their deadline elapses within the tick.
-- **Hourly tick is the durable fallback**: if the resolver missed the window (crash, long fetch), the next hourly pass resolves the remaining holds.
-
-Recovery is silent in both directions: a model that returns before the hold expires settles as RECOVERED with no announcement. News alerts are bounded at `hold + 15 min` — a removal past its deadline cannot wait longer.
-
-Expiry is at-least-once. The one edge case: expiry fired-but-unconsumed (crash between the two saves) + model returns before the next pass → the return settles as RECOVERED, silently. An announced removal whose return goes unannounced. Accepted: bounded by one process crash in a ~emit-sized window.
-
-## Removal resolver
-
-The hourly tick settles the hold queue itself, but a 15-min resolver (`--resolve`)
-accelerates it: holds whose deadline elapses between hourly passes drain on the
-next quarter-hour instead of waiting a full cadence. The resolver shares the
-same `pending_removals.settle` logic as the tick (never forked); it is a
-schedule accelerator, not a second source of truth.
-
-What `--resolve` does:
-- Drains `pending_removals.json`: expired removals alert via the webhook,
-  recovered models silently union back into the roster.
-- Takes `monitor.lock` so it never overlaps a tick (the tick is the durable
-  fallback — if the resolver crashes or misses a window, the next hourly pass
-  picks up the remainder).
-- Drops orphan providers (held entries for a provider no longer in `providers/`)
-  from the queue with a stderr note — never fetches them, never touches the
-  roster.
-
-What `--resolve` does NOT do:
-- Never touches `alive.json`, the 💚 alive ping, or the ⚠️ missed-tick warning
-  — the hourly tick owns those clocks; the 15-min job must not masquerade as
-  a tick.
-- Never rebaselines (mutually exclusive with `--init`).
-- Does not persist resolver-side `dropped_alerts_total` increments — drop
-  accounting is a tick-owned metric; resolver increments are lost at process
-  exit (at-least-once queueing in `pending_alerts.json` is unaffected).
-
-Orphan release notes go to stderr on both settle paths (resolver and hourly
-tick): a ghost provider's held entries are printed as dropped, then consumed.
-Un-flagged releases are silent on both paths — both end in the same consumed
-entry.
-
-The resolver is the same two-stage wrapper as the tick, with `--resolve` added
-to the monitor invocation — that flag is the only difference. Create
-`~/.hermes/scripts/inference-watchdog-resolve.sh`:
+| [Vercel AI Gateway](providers/vercel.json) | `input-output-models` |
+| [Felo](providers/felo.json) | `channel-catalog` |
+| [TokenRA](providers/tokenra.json) | `newapi-pricing` |
+| [Infron](providers/infron.json) | `provider-models` |
+| [AI/ML API](providers/aimlapi.json) | `typed-unit-models` |
+
+These five gateways use public JSON catalogues; monitoring needs no key or
+completion. Zero-priced inference may still require funding or carry account
+limits. Dated terms and known protocol/availability caveats are in each
+config's `limits_note`, also shown in dashboard tooltips. A listing is not
+proof of callability or unlimited use. AI/ML API's variable-priced campaigns
+are not detected by its fixed-zero rule. Enabled gateways with no qualifying
+models remain monitored but have no dashboard column.
+
+`ignored_slugs` drops exact ids after detection (auto-router endpoints such as
+`kilo-auto/free` that pass the rule but are not real models). `probe` moves a
+gateway's probe dialect into its JSON: `max_tokens` (default 3) and
+`paid_signals`, a list of `{status, all_of, any_of}` bodies meaning "no credit";
+a matching signal verdicts the model PAID, anything else DEFERs and self-heals.
+Probes run serially with 5s spacing, capped by `PROBE_PHASE_BUDGET_S` (260s)
+counted from the top of `fetch_all()`. Verdicts persist to
+`state/probe_state.json` before the recheck nap, so a truncated pass resumes
+next tick and a kill costs at most one roster write.
+
+`catalog_url` and `catalog_format` are validated per file when present. The URL
+is stored and fetched literally — bytes, case and any query preserved — and is
+used only for discovery: `chat_completions_url` is still derived from
+`base_url`. A credential-bearing config (`env_var` or `token_file`) whose
+`catalog_url` leaves the `base_url` origin is rejected before the credential is
+resolved, and the fetcher refuses a nonempty token crossing scheme, host or
+effective port even for a hand-built config. `ignored_slugs` still applies
+after detection. Only `openai-models`, `input-output-models`,
+`channel-catalog`, `newapi-pricing`, `provider-models` and `typed-unit-models`
+are implemented today;
+other gateway families are not registered, and naming one skips the config file
+rather than polling it with the wrong rule.
+
+Providers are file drops. Add one by adding a JSON file; untrack one with
+`"enabled": false` (it disappears from the dashboard, alerts and provider list
+on the next tick); remove one for good by deleting the file. A registry change
+that only adds or removes a provider needs no `--init` — the roster loader drops
+keys outside the registry and a new provider's models surface as additions.
+
+### State and recovery
+
+`state/` is gitignored. Files: `roster.json` (providers, `provider_models` raw
+per-model metadata, tick epoch, stale/transient/unconfirmed sets, ratelimits —
+never hand-edit),
+`alive.json` (tick and output epochs, dropped-alert counter),
+`pending_alerts.json` (bounded retry queue, 5 attempts per alert),
+`pending_removals.json` (held removals), `probe_state.json` (probe verdicts) and
+`monitor.lock` (PID lock).
+
+A provider config may set `removal_hold_seconds`: a confirmed removal then waits
+that long in `pending_removals.json` before alerting, so a transient failure or
+a quick re-add self-silences. The hourly tick drains the queue; a 15-minute
+`--resolve` pass accelerates it. Both paths share `pending_removals.settle` —
+never fork it — and the resolver never touches `alive.json`, never rebaselines
+and never fetches a provider. A model that returns before the hold expires
+settles as recovered with no announcement. An expired hold alerts at hold + 15
+minutes while the 15-minute resolve job is installed and scheduled; without
+that job, the next tick drains it at the tick cadence. Orphaned provider entries
+are dropped with a stderr note.
+
+Create `~/.hermes/scripts/inference-watchdog-resolve.sh` — the tick wrapper with
+`--resolve` added:
 
 ```bash
 #!/usr/bin/env bash
 # inference-watchdog-resolve.sh — drain the removal-hold queue every 15 minutes.
 set -u
 
-# EDIT ME: absolute path to your clone. Quoted, so a path with spaces works.
+# EDIT ME: absolute path to your clone. Quoted, so a path containing spaces works.
 WATCHDOG_HOME="$HOME/projects/free-inference-watchdog"
 # EDIT ME only if `python3` on the scheduler's PATH is not the one you want.
 PYTHON="python3"
@@ -1665,214 +737,233 @@ cd "$WATCHDOG_HOME" || { echo "inference-watchdog resolve FAILED (cannot cd to $
 "$PYTHON" inference_watchdog.py --resolve || { c=$?; [ "$c" -eq 1 ] || { echo "inference-watchdog resolve FAILED (exit $c)" >&2; exit "$c"; }; }
 ```
 
-Register it on the quarter-hour (`*/15 * * * *` matches the resolver's recheck
-rhythm):
-
 ```bash
 hermes cron create --name inference-watchdog-resolve --no-agent \
   --script inference-watchdog-resolve.sh --deliver local "*/15 * * * *"
 ```
 
-## Drop-a-provider / managing providers
+Recovery notes: a stale lock older than 30 minutes is broken automatically; to
+clear one by hand, confirm `pgrep -f inference_watchdog.py` is empty and remove
+`state/monitor.lock`. `--init` archives an existing `roster.json` to
+`roster.json.bak` before clean-rebaselining; each successful init overwrites a
+prior `.bak`, and the command always prints "initialized, no diff" and never
+alerts. A behaviour-changing roster edit needs a manual `--init` rebaseline,
+then verify the next tick is silent.
 
-Providers are plain JSON config files in `providers/`. The watchdog loads every
-`*.json` at startup.
+### Cadence and exit codes
 
-- **To add a provider**: drop a new JSON config file into `providers/`.
-- **To untrack a provider**: set `"enabled": false` in its JSON. The config
-  file stays put — no code change, no re-registration to reverse it. It
-  disappears from the dashboard, the alerts, and the MCP provider list on
-  the next tick, and is noted on stderr each run.
-- **To remove a provider for good**: delete its JSON file. A file the
-  loader cannot use is skipped with a `config: skipping ...` warning.
-
-A file the loader cannot use (invalid JSON, missing required fields, an auth
-method it does not implement) is skipped with a
-`config: skipping providers/<name>.json: <reason>` warning on stderr and costs
-exactly that provider — the rest of the roster still loads.
-
-## Architecture
-
-The watchdog is **config-driven**: none of the gateways are hard-coded in the
-monitor logic. Each provider is a `providers/*.json` file whose schema the
-loader validates at startup:
-
-| Field | Type | Required | Meaning |
-|---|---|---|---|
-| `name` | string | yes | Human-readable name |
-| `base_url` | string | yes | API base URL (no trailing `/`) |
-| `detection` | string | yes | Which free-model detection method to apply |
-| `auth` | object | yes | Authentication config |
-| `auth.method` | string | yes | `env_var`, `token_file`, or `none` |
-| `auth.env_key` | string | if `env_var` | Env var name |
-| `auth.path_env` | string | if `token_file` | Env var holding a path to a JSON token file (takes precedence over `auth.path`) |
-| `auth.path` | string | if `token_file` | Literal path to a JSON token file (legacy `token_file` alternative to `path_env`) |
-| `auth.key` | string | if `token_file` | Dot-separated JSON path to the token inside the file (e.g. `providers.nous.access_token`) |
-| `display` | int | yes | Column order (0 = first) |
-| `roster_key` | string | no | Explicit roster-key override; defaults to the config file's stem (see `config_loader._provider_key`) |
-| `ignored_slugs` | list of strings | no | Exact model ids to exclude from tracking (see below) |
-| `probe` | object | no | Zero-credit-probe dialect: `max_tokens` + `paid_signals` (see below) |
-| `removal_hold_seconds` | int | no | When present, confirmed removals are held this many seconds before alerting. Absent = instant. Opt-in per provider. |
-| `enabled` | bool | no | `false` untracks the provider while keeping its config file on disk. Absent = enabled. Must be a real JSON boolean — a quoted `"false"` is a string and is rejected. |
-
-### Ignored slugs (`ignored_slugs`)
-
-Optional per-provider list of **exact-match** model ids dropped after detection
-so they never enter the roster — e.g. auto-router endpoints like
-`kilo-auto/free` or `openrouter/free`, which pass the free-id rule but are not
-real models. Excluded ids drop silently. A value that is not a list of
-non-empty, unpadded strings breaks validation: the whole config file is skipped
-with the standard `config: skipping ...` stderr warning.
-
-### Probe dialect (`probe`)
-
-Optional block for `zero-credit-probe` gateways: it moves the prober's
-gateway-specific assumptions out of code and into the provider's JSON, so a
-second zero-credit gateway needs no code edit. Two keys, both optional:
-
-- `max_tokens` — positive integer, the completion size the probe fires.
-  Defaults to 3 because b.ai rejects values of 2 or less.
-- `paid_signals` — non-empty list of error bodies that mean "this key has no
-  credit". Each entry is `{"status": <int>, "all_of": [<substrs>],
-  "any_of": [<substrs>]}`: it matches when the HTTP status equals `status`,
-  every `all_of` substring appears in the lower-cased body, and either there is
-  no `any_of` key or at least one `any_of` substring appears. A matching signal
-  verdicts the model PAID; anything else DEFERs and self-heals next tick.
-  Supplying `paid_signals` REPLACES the built-in defaults rather than adding.
-
-`providers/bai.json` carries b.ai's dialect explicitly — the built-in defaults
-are only the fallback for a config that omits the block. A block of the wrong
-shape costs exactly its own file with the standard `config: skipping ...` warning.
-
-Detection methods (dispatched by string key, so a provider can pick any):
-
-- `api-pricing` — model is free when `pricing.prompt == "0"` AND `pricing.completion == "0"`.
-- `api-flag` — model is free when `isFree == true`.
-- `id-suffix` — model id ends with `:free` / `-free`, or contains `free`.
-- `all-free` — every model in the catalog is treated as free.
-- `zero-credit-probe` — fire a minimal 3-token completion per model and classify by the
-  response. Probes run **serially with 5s spacing** (12 RPM) to stay
-  under b.ai's undocumented rate limits (operator pacing choice
-  2026-09-13); verdicts are persisted to
-  `probe_state.json` and the roster is verdict-filtered (ONLY FREE-verdict
-  models). A DEFER never overwrites a prior verdict (sticky roster survives
-  burst 429s). The probe phase is capped at 260s
-  (`PROBE_PHASE_BUDGET_S`). The budget clock starts at the top of
-  `fetch_all()`, so catalog fetches run INSIDE the 260s; worst case to the
-  `save_probe_state` persist point is ~295s (the last probe can start at
-  259.9s and overshoot by sleep(5) + 30s timeout). The cron runner SIGKILLs
-  the wrapper at 3600s (live `script_timeout_seconds`; historically 300s,
-  briefly raised to 1800s on 2026-09-13, then restored to 300s the same
-  day). One tick carries ~45 of 47 models at 5s operator pacing (46×5s
-  sleeps + 47×~1s probes ≈ 280s exceeds the 260s budget); the short tail
-  self-heals next tick via `probe_state.json` persistence (the deferred
-  models re-queue as tier-1 arrivals). Even the pathological overshoot
-  (~295s) lands the spiral-critical persist under the 3600s kill. The
-  full tick (persist + the unconditional 180s recheck nap) can exceed
-  300s — the invariant is that the persist precedes any kill: a kill
-  during the recheck costs that tick's roster write (roster lags one
-  tick), never probe progress. A truncated pass (the normal every-tick
-  tail at 5s pacing, or deeper if probes burn their 30s timeouts)
-  persists its probed subset and the next tick resumes (self-healing).
-
-### Modules
-
-- **`config_loader.py`** — loads and validates every `providers/*.json`,
-  resolves auth (`env_var` / `token_file` / `none`) into an in-memory token,
-  and sorts configs by `display` order. Exposes the `PROVIDERS` dict used by the
-  rest of the watchdog, plus `build_gateway_wiring()`.
-- **`detection.py`** — string-keyed `detect_free(model, method)` dispatch used
-  at fetch time to decide which ids count as free.
-- **`probe_zero_credit.py`** — the `zero-credit-probe` backend: fires a
-  minimal 3-token completion per model and classifies it as `free` / `paid` / `defer`
-  based on the HTTP response (a `403` mentioning "deposit" ⇒ paid).
-- **`probe_state.py`** — persisted zero-credit probe verdicts. Atomic write
-  pattern: `load_probe_state`, `record_verdict`, `get_verdict`,
-  `drop_missing`, `save_probe_state`. DEFER never recorded as a verdict.
-- **`probe_select.py`** — pure probe-queue selection: `select_queue(catalog_ids,
-  provider_state, now, stale_hours=24)` returns ordered list [new arrivals →
-  free (every tick) → stale paid (>=24h, oldest first)].
-
-To add a provider, drop in a JSON config (see the schema table above); to change
-a detection strategy, edit the JSON — no Python changes required.
-
-### Zero-credit probe (B.AI)
-
-Black-box gateways with no free-tier metadata get probed, not parsed. The
-`zero-credit-probe` bullet above and the `probe_*.py` docstrings carry the
-rationale; this is the operator cheat-sheet.
-
-- **State file** — `state/probe_state.json`; schema as in the State layout
-  above (verdict + epoch per model, optional `defer_epoch`); corrupt/missing
-  reads as `{}`, written atomically (temp file + `os.replace`).
-- **Verdicts** — HTTP 200 ⇒ `free`. `403` whose body mentions "deposit", or
-  `400` carrying an insufficient-balance/quota marker ⇒ `paid`. Everything
-  else — `429`, 404, 5xx, an unmarked `400`, network errors — ⇒ `DEFER`: no
-  verdict is recorded, any prior verdict stands (sticky), and a model left
-  without one re-queues next tick. Rate-limit pain shows up only as
-  transient 429 defers, never as a verdict flip.
-- **Queue (`probe_select.select_queue`)** — each tick probes, in order:
-  tier 1 new arrivals (no usable verdict yet), tier 2 every `free` model
-  (a quiet flip to paid must be caught fast), tier 3 `paid` models last
-  probed ≥ 24h ago (`stale_hours`, oldest first — a daily pass catches a
-  promo going free). Paid models inside the 24h window are skipped.
-- **Pacing/budget** — `PROBE_INTERVAL_S = 5` serial spacing (12 RPM),
-  `PROBE_PHASE_BUDGET_S = 260` counted from the top of `fetch_all()`. At 5s
-  one tick carries ~45 of 47 models; the tail resumes next tick as tier 1.
-- **Where it runs** — the probe phase inside `fetch_all()`, before the
-  verdict-filtered roster is returned. `save_probe_state` persists verdicts
-  and catalog prunes once per tick, before the unconditional 180s recheck
-  nap — the invariant is "persist precedes the 300s cron kill", so a crash
-  costs at most one roster write, never probe progress. Note: `--dry-run`
-  skips this persist too (probe verdicts from a dry run are not saved).
-
-## Cadence change
-
-The tick cadence defaults to 1 hour. To change it:
-
-1. Update the cron schedule to match (`hermes cron edit <job_id> --schedule "..."`).
-2. Pass `--cadence-hours N` (default 1) on the invocation — it drives the
-   ⚠️ missed-tick warning, which fires when the last tick is older than
-   cadence + 2h slack. Keep the flag in step with the cron schedule or the
-   warning will cry wolf.
-
-The 💚 alive ping fires on output-age ≥ 20h regardless of cadence. Both
-derive from `alive.json` — no restart needed.
-
-## Manual lockfile recovery
-
-If the monitor crashes without releasing its PID lock:
-
-```bash
-# Verify no monitor is actually running:
-pgrep -f inference_watchdog.py
-
-# If nothing holds it:
-rm state/monitor.lock
-```
-
-Stale locks (>30 min old) are automatically broken on the next invocation.
-
-## --init re-baseline
-
-Running `--init` archives any existing `roster.json` to `roster.json.bak`
-before clean-rebaselining. It always prints "initialized, no diff" and never
-alerts. A prior `roster.json.bak` is overwritten by each successful init.
-Safe to re-run at any time.
-
-## Exit codes
+The tick cadence defaults to 1 hour. Pass `--cadence-hours N` (default 1) and
+keep the cron schedule in step: the flag drives the missed-tick warning, which
+fires when the last tick is older than cadence + 2h slack. The alive ping fires
+on output-age ≥ 20h regardless of cadence; both derive from `alive.json` and
+need no restart.
 
 | Code | Meaning |
 |---|---|
-| 0 | Normal (incl. alerts sent, no diffs, alive ping) |
-| 1 | Partial provider failures — any mode, incl. `--init` / first-run (still completes) — or bootstrap refused |
+| 0 | Normal (alerts sent, no diffs, alive ping) |
+| 1 | Partial provider failures — any mode, including `--init` — or bootstrap refused |
 | 2 | Fatal/unhandled exception — check stderr |
 
-## Testing
+### Testing
+
+The default run is the fast, hermetic suite; genuine wheel/CLI/browser-process/
+publication cases carry the single `integration` marker and are excluded:
 
 ```bash
-python3 -m pytest tests/ -v
+python3 -m pytest tests/ -q                    # fast suite (default)
+python3 -m pytest tests/ -q -m integration     # integration cases only
+python3 -m pytest -o addopts='' tests/ -q      # explicit full run
 ```
 
-Tests across envfile, providers, state, diffing, notify, confirm,
-and full integration (stubbed providers through the complete tick loop).
+The fast suite needs pytest plus the SDK pins (`mcp`, `pydantic`, `anyio`)
+because collection imports them. The integration cases additionally need the
+explicit interpreter overrides, `FREE_INFERENCE_WATCHDOG_UV`, a prepared
+dependency wheelhouse named by `FREE_INFERENCE_WATCHDOG_WHEELHOUSE`, and
+`CONTRACT_NODE`; a missing prerequisite fails with its preparation command, and
+the two operator read-backs skip unless `--operator-tick-wrapper=PATH` is
+passed. Nothing discovers a provider, a credential or the network.
+
+`tests/consumer_smoke.py` exercises an actually installed wheel and takes the
+exact CPython minor it must prove (`3.11` for the floor lane, or the current
+stable minor):
+
+```bash
+python -I tests/consumer_smoke.py \
+  --fixtures tests/fixtures/catalog \
+  --console <venv>/bin/free-inference-watchdog-mcp \
+  --work <fresh-empty-owned-dir> \
+  --python-version 3.11
+```
+
+---
+
+## Published catalogue snapshot (v2)
+
+Version 2 removes projected `pricing` and is incompatible with v1 consumers
+and caches. See [Version caution](#choose-the-catalogue-source) when upgrading.
+
+### Snapshot fields
+
+| Field | Type | Definition |
+|---|---|---|
+| `schema_version` | int | Exactly `2`. |
+| `snapshot_id` | string | SHA-256 of the canonical snapshot body excluding this field. |
+| `tick_epoch` | int or null | Observation time; `null` (with `tick_epoch_unknown`) when unknown. Never inferred from download time. |
+| `cadence_s` | int | Positive observation cadence (initially 3600), exposed rather than duplicated in clients. |
+| `provider_order` | list of string | Active provider keys in display order, including zero-ID providers. |
+| `providers` | map | One entry per active provider, keyed by provider key. |
+| `warnings` | list of string | Frozen warning codes; never paths or exception dumps. |
+
+Provider entry: `display_name`, `chat_completions_url`, `api_type`,
+`model_ids` (raw tracked ids, sorted and deduplicated by code-point string
+order), `models` (projected objects keyed by raw id) and `stale` (from the
+roster's stale-provider list).
+
+Projected model fields: `id` (the raw id, equal to the map key), `name`,
+`description` (string or null), `context_length` (safe non-negative integer or
+null; `0` is a known zero), `architecture` (exactly `input_modalities` +
+`output_modalities`, each a list of nonempty strings or null) and
+`supported_parameters` (list of nonempty strings or null).
+
+Unknown is never empty: missing, null or malformed optional upstream metadata
+projects to `null`; a valid empty upstream array projects to `[]` and stays
+known-empty. Context must be a safe non-negative integer (at most 2^53-1,
+booleans excluded); missing, numeric-string, boolean, negative and unsafe
+values all project to `null`, never coerced. A malformed array is rejected whole,
+never partially salvaged. Retained public metadata keeps original casing, order
+and duplicates; normalized query values attach separately (ASCII-only lowercase,
+first-occurrence deduplication, no whitespace trimming). A missing or null model
+metadata container is `metadata_missing`; a non-object container is
+`metadata_invalid`. New public metadata fields need a deliberate
+schema/projection test — arbitrary upstream objects are never exposed.
+
+| Warning | Meaning |
+|---|---|
+| `tick_epoch_unknown` | Observation epoch missing or invalid — tick age unknown, never a healthy tick. |
+| `metadata_missing` | Optional metadata field absent upstream. |
+| `metadata_invalid` | Optional metadata present but malformed or unusable. |
+
+### Validation and errors
+
+A published snapshot is validated strictly and independently of the producer,
+after a raw-JSON pass. Structural failures use one envelope: exactly `ok` and
+`error`, `ok` strictly `false`, and `error` with exactly `code` and `message`.
+Two literals exist: `invalid_snapshot` / `Invalid catalogue snapshot.` and
+`unsupported_schema_version` / `Unsupported catalogue schema version.`. Raw-JSON
+failures use `invalid_json` / `Invalid catalogue JSON.`. No parameter, raw value,
+path, source datum or partial payload is ever carried.
+
+- Order: raw JSON, then object/required-field/version-type, then the version
+  value (`unsupported_schema_version` only for a well-typed integer other than
+  `2`), then v2 body checks.
+- `snapshot_id` must equal the SHA-256 of the canonical body; a well-shaped but
+  wrong value is rejected.
+- Raw JSON rejects empty or malformed text, comments, trailing data or commas,
+  unquoted names, leading-zero and plus-prefixed numbers, malformed escapes, raw
+  control characters, a UTF-8 BOM, `NaN`/`Infinity`, and overflowing numbers.
+- Every integer token is range-checked exactly at every depth against
+  ±9007199254740991 before any precision-losing conversion; numeric-looking
+  strings are untouched.
+- Duplicate member names are rejected at every object level, including
+  escape-equivalent keys. `MAX_JSON_DEPTH` is 64 inclusive; a root scalar is
+  depth 0.
+- `chat_completions_url` must be a nonempty absolute `http`/`https` URL with a
+  hostname, no userinfo, no non-empty fragment and no whitespace. This is
+  syntactic only: no DNS lookup, no IP allowlist, no rewriting.
+- `unsupported_schema_version` is the validator's code. A consumer acquisition
+  with no compatible last-good snapshot collapses it into generic
+  `source_unavailable` — indistinguishable from a network failure — while
+  compatible cached data is served with `refresh_failed`/`cache_fallback`.
+- Structural errors fail export and retain the last published artifact;
+  optional metadata degradation never loses an endpoint.
+
+### Tool surface and payloads
+
+Three tools, names stable. Schemas are static; provider membership is validated
+against each snapshot, so no stale provider enum is embedded in a package.
+
+These tables list the **core** payload. Every served result also carries a
+sibling `source` object — mode, retrieval and observation ages, cache and
+refresh warnings — attached outside the pure payload and omitted from these
+field lists. Over stdio every result produced after a successful acquisition
+carries `source`, including `unknown_provider` and `not_found`; only a failed
+acquisition/source-error envelope lacks it. Browser results add
+`source: {"mode": "browser"}` to successes and argument errors alike.
+
+| Tool | Success top-level fields |
+|---|---|
+| `get_model(provider, model_id)` | `ok`, `snapshot_id`, `tick_epoch`, `provider_staleness`, `endpoint` |
+| `search_models(...)` | `ok`, `snapshot_id`, `tick_epoch`, `provider_staleness`, `total_matches`, `next_offset`, `endpoints` |
+| `watchdog_status()` | `ok`, `snapshot_id`, `tick_epoch`, `cadence_s`, `last_tick_age_s`, `tick_fresh`, `provider_staleness`, `provider_counts`, `metadata_coverage`, `counts`, `pending_alerts`, `site_published`, `site_publish_age_s`, `warnings` |
+
+A `get_model` endpoint carries `provider`, `model_id`, `name`, `description`,
+`context_length`, `input_modalities`, `output_modalities`,
+`supported_parameters`, `chat_completions_url` and `api_type`; a `search_models`
+row omits `description`, `chat_completions_url` and `api_type`.
+`watchdog_status` reports `counts` (`gateways`,
+`endpoints`, `distinct_raw_ids`, `marker_group_labels`) and
+`metadata_coverage` (the `endpoints` denominator plus
+`context_length_known`, `input_modalities_known`, `output_modalities_known`,
+`supported_parameters_known`, `description_known`). Coverage counts stated
+metadata fields only, never provider health or price.
+
+`last_tick_age_s` is `now - tick_epoch` for a known non-future tick and `null`
+otherwise, never clamped to zero. `tick_fresh` is true exactly when the age is
+known and `<= cadence_s`. Status adds `tick_epoch_future` and `tick_stale` after
+the snapshot's three codes in that fixed order; a null or future epoch is never
+`tick_stale`. `pending_alerts`, `site_published` and `site_publish_age_s` are
+strictly `null` on the published and browser sources.
+
+Argument errors share one envelope: exactly `ok` and `error`, with `error`
+carrying exactly `code`, `message` and `parameter`. Codes are `invalid_arguments`
+(`Invalid tool arguments.`) and `unknown_provider` (`Unknown provider.`);
+`parameter` is the offending known parameter name, or `null` for non-object
+arguments and unknown keys. Any unknown key is rejected first, then parameters
+are validated in signature order and the first error wins. The PURE CORE's
+argument envelope carries no `tool`, path, `source`, cache, staleness or count
+field; a served result attaches its `source` sibling outside that envelope.
+`not_found` is
+`{"ok": false, "error": {"code": "not_found", "message": "Model not found."}}`
+with no `parameter` and no echoed value.
+
+Integer tool arguments are value-based JSON Schema integers: `1` and `1.0` are
+the same integer, while `true`, `"1"`, `1.5`, unsafe integers and non-finite
+numbers are rejected. That boundary is separate from snapshot integer tokens,
+where a float spelling such as `1.0` is invalid.
+
+### Identity and ordering
+
+Endpoint identity is `(provider, raw model_id)`: case-sensitive, unpadded,
+never marker-stripped or renamed. Result arrays order by provider precedence in
+`provider_order`, then by natural raw-ID order within a provider. The natural
+comparator tokenizes only maximal ASCII `[0-9]+` runs: numeric runs compare by
+original digit count, then lexically, so `vendor/item1` < `vendor/item2` <
+`vendor/item02` < `vendor/item10`; text compares case-sensitively by code point
+with the shorter prefix first, and non-ASCII digits stay text. Snapshot
+`model_ids` lists use plain code-point order, which genuinely differs from query
+order; neither is relaxed to hide a defect.
+
+### Shared tool definitions (frozen resource)
+
+`watchdog_catalog/tools.json` is the transport-independent, data-only contract:
+a bare JSON array of exactly three objects, each with exactly `name`,
+`description` and `inputSchema`. It is the reviewed cross-runtime source for the
+shared descriptions and the browser descriptors, packaged as the one MCP
+resource and embedded in the page as the `tool-contract` island. Each
+`inputSchema` is a plain JSON Schema 2020-12 subset object with `type`,
+`properties`, `required` and `additionalProperties: false`, using only portable
+keywords — no `$ref`, no `$defs`, no provider enums, no executable validators.
+`search_models.provider` is nullable and unconstrained; `get_model.provider` is
+a required unconstrained string, so empty, padded and unknown keys pass static
+typing and are rejected at runtime against the snapshot. `limit` defaults to 5
+and `offset` to 0.
+
+`watchdog_catalog/server.py` derives the advertised schema from its Python
+signatures and constrained aliases, proves the generated property-name set
+equals the reviewed one, and copies only the reviewed description text — no
+type, bound, default, requiredness or pattern is read from this file, and it is
+never installed as a replacement `inputSchema`. `web/webmcp.js` builds each
+browser descriptor from a defensive copy, with no second schema table in the
+page. Packaging, embedding and browser registration are shipped behaviour, not
+later work. Local text budgets (500 characters per tool description, 150 per
+parameter, 30 per name) are quality gates, not protocol limits.

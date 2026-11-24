@@ -2,7 +2,11 @@
 import json
 import os
 import sys
+import urllib.parse
 from pathlib import Path
+
+import catalog_adapters
+
 
 def _lookup_env(key):
     """Resolve an env var for auth: os.environ first, then the project-local
@@ -197,7 +201,82 @@ def _validate_and_read(path):
                     raise ValueError(
                         "probe.paid_signals entries need all_of or any_of, "
                         f"got {sig!r}")
+    _validate_catalog_members(config, auth)
     return config
+
+
+def _validate_catalog_members(config, auth):
+    """Validate the optional discovery-URL/format members per file.
+
+    Present means VALID (same boundary doctrine as display/ignored_slugs):
+    junk here would silently change which URL is fetched or which price rule
+    runs, so it costs exactly this file. The URL is checked, never rewritten —
+    its literal bytes (including any query) are what the fetcher uses.
+
+    A credential-bearing config may not point discovery at another origin: the
+    rejection happens HERE, before ``_resolve_auth_token`` runs, so a
+    cross-origin override cannot resolve or send a real credential.
+    """
+    catalog_format = config.get("catalog_format",
+                               catalog_adapters.LEGACY_FORMAT)
+    if "catalog_format" in config:
+        if (not isinstance(catalog_format, str) or not catalog_format
+                or catalog_format != catalog_format.strip()):
+            raise ValueError(
+                "catalog_format must be a non-empty, unpadded string, "
+                f"got {catalog_format!r}")
+        if not catalog_adapters.is_registered_format(catalog_format):
+            # Later slices extend the registry; an unimplemented name here is
+            # a broken config, not a provider to poll with the legacy rule.
+            raise ValueError(f"unknown catalog_format: {catalog_format!r}")
+
+    if "catalog_url" in config:
+        catalog_url = config["catalog_url"]
+        if (not isinstance(catalog_url, str) or not catalog_url
+                or catalog_url != catalog_url.strip()):
+            raise ValueError(
+                "catalog_url must be a non-empty, unpadded string, "
+                f"got {catalog_url!r}")
+        if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F
+               for ch in catalog_url):
+            raise ValueError(
+                "catalog_url must not contain whitespace or control characters")
+        try:
+            parts = urllib.parse.urlsplit(catalog_url)
+            parts.port  # noqa: B018 - a malformed explicit port raises here
+        except ValueError as exc:
+            raise ValueError(f"catalog_url is not a valid absolute URL: {exc}")
+        if parts.scheme != "https":
+            raise ValueError(
+                f"catalog_url must use https, got {parts.scheme!r}")
+        if not parts.netloc or not parts.hostname:
+            raise ValueError("catalog_url must be an absolute URL with a host")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("catalog_url must not carry userinfo")
+        # `urlsplit` reports a literal trailing `#` as an EMPTY fragment, so the
+        # parsed value alone would let `.../models#` through. A literal `#` is
+        # always a fragment delimiter (it cannot appear unencoded in a path or
+        # query), while `%23` stays valid literal URL data and is preserved.
+        if "#" in catalog_url or parts.fragment:
+            raise ValueError("catalog_url must not carry a fragment")
+        if auth.get("method") in ("env_var", "token_file"):
+            if (catalog_adapters.url_origin(catalog_url)
+                    != catalog_adapters.url_origin(config["base_url"])):
+                raise ValueError(
+                    "catalog_url must stay on the base_url origin when auth "
+                    "carries credentials")
+
+    detection = config["detection"]
+    if detection == "catalog-pricing":
+        if (not catalog_adapters.is_registered_format(catalog_format)
+                or catalog_adapters.is_legacy_format(catalog_format)):
+            raise ValueError(
+                "detection 'catalog-pricing' requires an implemented "
+                "nonlegacy catalog_format")
+    elif not catalog_adapters.is_legacy_format(catalog_format):
+        raise ValueError(
+            f"catalog_format {catalog_format!r} requires detection "
+            "'catalog-pricing'")
 
 
 def _resolve_auth_token(config, fname):
@@ -252,9 +331,9 @@ def load_configs():
     providers dir likewise degrades to [] with a stderr warning — as does an
     existing dir that yields no readable *.json (Path.glob swallows
     PermissionError internally, so a chmod-000 dir looks empty). This
-    function must never raise for file/dir problems: PROVIDERS is built at
-    import time, and inference_watchdog/build_site both crash before doing
-    anything if the import raises, silently every hour.
+    function must never raise for file/dir problems: the CLI calls it once
+    per invocation after argument parsing, and a raising loader would take
+    the whole tick down before it did anything, silently every hour.
     """
     configs = []
     providers_dir = REPO / "providers"
@@ -323,12 +402,20 @@ def _provider_key(config):
             or config["name"].lower().replace(" ", "_"))
 
 
-def build_providers():
-    """Build PROVIDERS dict mapping provider key -> config dict.
+def build_providers(configs):
+    """Project already-loaded configs to the provider-key -> config mapping.
+
+    ``configs`` is the list :func:`load_configs` returned for THIS invocation
+    (display order, disabled files already gated out, auth already resolved).
+    This function reads no file, resolves no credential and keeps no cache:
+    it is a pure projection, so every entry point loads configuration exactly
+    once and hands the SAME resolved mapping to everything that needs it.
+
     A duplicate key (two files resolving to one key, e.g. an explicit
-    "roster_key" matching another stem) is a config bug: warn, later wins."""
+    "roster_key" matching another stem) is a config bug: warn, later wins.
+    """
     providers = {}
-    for cfg in load_configs():
+    for cfg in configs:
         key = _provider_key(cfg)
         if key in providers:
             print(f"config: duplicate provider key {key!r} "
@@ -340,17 +427,17 @@ def build_providers():
     return providers
 
 
-def build_gateway_wiring():
-    """Build GATEWAY_WIRING dict mapping provider key -> wiring info."""
+def build_gateway_wiring(providers):
+    """Project an already-resolved registry to its gateway wiring map.
+
+    ``providers`` is the mapping :func:`build_providers` returned for THIS
+    invocation: membership of that dict IS the registry, so a disabled or
+    failed config leaves no dangling wiring entry and nothing is re-read.
+    """
     wiring = {}
-    for cfg in load_configs():
-        key = _provider_key(cfg)
+    for key, cfg in providers.items():
         wiring[key] = {
             "chat_completions_url": f"{cfg['base_url'].rstrip('/')}/chat/completions",
             "api_type": "openai_compatible",
         }
     return wiring
-
-
-PROVIDERS = build_providers()
-GATEWAY_WIRING = build_gateway_wiring()

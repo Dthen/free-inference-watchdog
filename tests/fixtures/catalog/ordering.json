@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "snapshot_id": "2ce5d5e119b442d14e1bf95f7eede5229ea912a7a1fc801db8746b0df3f84d14",
+  "schema_version": 2,
+  "snapshot_id": "2177044250e992257a5142b9293d9825821517082e4ccea967e5cb7ff3a85aee",
   "tick_epoch": 1759200000,
   "cadence_s": 3600,
   "provider_order": [
@@ -32,11 +32,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         }
       },
       "stale": false
@@ -72,11 +68,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/item2": {
           "id": "vendor/item2",
@@ -93,11 +85,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/item02": {
           "id": "vendor/item02",
@@ -114,11 +102,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/item10": {
           "id": "vendor/item10",
@@ -135,11 +119,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/item١": {
           "id": "vendor/item١",
@@ -156,11 +136,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/long9999999999999999999999999999999999999999999999999999999999999991": {
           "id": "vendor/long9999999999999999999999999999999999999999999999999999999999999991",
@@ -177,11 +153,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/long9999999999999999999999999999999999999999999999999999999999999992": {
           "id": "vendor/long9999999999999999999999999999999999999999999999999999999999999992",
@@ -198,11 +170,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/Ａ": {
           "id": "vendor/Ａ",
@@ -219,11 +187,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/😀": {
           "id": "vendor/😀",
@@ -240,11 +204,7 @@
           },
           "supported_parameters": [
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         }
       },
       "stale": true

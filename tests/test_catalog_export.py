@@ -42,7 +42,7 @@ row:
   existing valid fixture, one trailing LF, ASCII/ensure_ascii evidence,
   object-insertion-order independence with preserved array order, a resealed
   non-default ``provider_order``, capture -> build -> serialize sentinel
-  exclusion with hostile retained text, typed pricing distinctions and the
+  exclusion with hostile retained text and the
   delegated rejection codes. File publication, HTML escaping and the CLI stay
   OUT of this group's boundary.
 * G7 -- the reusable pure artifact-pair validator (unit 4e): external
@@ -57,7 +57,7 @@ row:
 
 Every expected value below is an independent literal restatement of the frozen
 contract or of an existing fixture; no expected snapshot is generated from the
-adapter and no reference engine is imported from ``tests/test_catalog.py``.
+adapter and no reference engine is imported from another test module.
 """
 
 from __future__ import annotations
@@ -96,9 +96,8 @@ PUBLIC_PROVIDER_FIELDS = frozenset({
     "model_ids", "models", "stale"})
 PUBLIC_MODEL_FIELDS = frozenset({
     "id", "name", "description", "context_length", "architecture",
-    "supported_parameters", "pricing"})
+    "supported_parameters"})
 PUBLIC_ARCHITECTURE_FIELDS = frozenset({"input_modalities", "output_modalities"})
-PUBLIC_PRICING_FIELDS = frozenset({"prompt", "completion"})
 
 WARNING_ORDER = ("tick_epoch_unknown", "metadata_missing", "metadata_invalid")
 
@@ -242,7 +241,7 @@ def test_reverse_capture_reproduces_fixtures_and_canonicalises_ids():
     out = build_snapshot(registry, roster, cadence_s=1)
 
     assert set(out) == PUBLIC_TOP_FIELDS
-    assert out["schema_version"] == 1
+    assert out["schema_version"] == 2
     assert out["cadence_s"] == 1
     assert out["tick_epoch"] == 1759200000
     # The ten IDs with no captured metadata are metadata_missing; the shared ID
@@ -445,8 +444,7 @@ def test_metadata_hierarchy_epoch_and_staleness_matrix():
     known_model = {"name": "N", "description": "d", "context_length": 4096,
                    "architecture": {"input_modalities": ["text"],
                                     "output_modalities": ["text"]},
-                   "supported_parameters": ["temperature"],
-                   "pricing": {"prompt": "0", "completion": "0"}}
+                   "supported_parameters": ["temperature"]}
     good_meta = {"providers": {"p": ["m"]},
                  "provider_models": {"p": {"m": dict(known_model)}}}
     for known in (0, 1, 1759200000, catalog.MAX_SAFE_INT):
@@ -665,7 +663,6 @@ def test_closed_projection_freshness_and_producer_import_purity(tmp_path):
                          "architecture": {"input_modalities": ["TEXT"],
                                           "output_modalities": ["text"]},
                          "supported_parameters": ["Temperature"],
-                         "pricing": {"prompt": "0", "completion": 0},
                          "unknown_field": "SENTINEL-ROSTER",
                          "nested": {"deep": object()},
                          "auth": {"token": token}},
@@ -698,7 +695,6 @@ def test_closed_projection_freshness_and_producer_import_purity(tmp_path):
     model = entry["models"]["keep"]
     assert set(model) == PUBLIC_MODEL_FIELDS
     assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
-    assert set(model["pricing"]) == PUBLIC_PRICING_FIELDS
     assert model["name"] == hostile_name
     assert model["description"] == "  spaced  "
     assert model["architecture"]["input_modalities"] == ["TEXT"]
@@ -716,7 +712,7 @@ def test_closed_projection_freshness_and_producer_import_purity(tmp_path):
     m2 = second["providers"]["p"]["models"]["keep"]
     source = roster["provider_models"]["p"]["keep"]
     assert m1 is not m2
-    for field in ("architecture", "supported_parameters", "pricing"):
+    for field in ("architecture", "supported_parameters"):
         assert m1[field] is not m2[field] and m1[field] is not source[field]
     assert m1["architecture"]["input_modalities"] is not \
         source["architecture"]["input_modalities"]
@@ -731,7 +727,6 @@ def test_closed_projection_freshness_and_producer_import_purity(tmp_path):
     first["warnings"].append("mutated")
     m1["architecture"]["input_modalities"].append("mutated")
     m1["supported_parameters"].append("mutated")
-    m1["pricing"]["prompt"] = "mutated"
     assert _same_inputs(registry, registry_before)
     assert _same_inputs(roster, roster_before)
     assert second == build_snapshot(registry, roster, cadence_s=3600)
@@ -944,7 +939,6 @@ def test_active_registry_public_capture_and_secret_sentinels():
                        "architecture": {"input_modalities": ["TEXT"],
                                         "output_modalities": ["text"]},
                        "supported_parameters": ["Temperature"],
-                       "pricing": {"prompt": "0", "completion": 0},
                        "unknown_field": unknown},
                 "m2": {"name": "M2"},
             },
@@ -986,8 +980,6 @@ def test_active_registry_public_capture_and_secret_sentinels():
     assert model["context_length"] == 4096
     assert model["architecture"]["input_modalities"] == ["TEXT"]
     assert model["supported_parameters"] == ["Temperature"]
-    assert model["pricing"] == {"prompt": "0", "completion": 0}
-    assert set(model["pricing"]) == PUBLIC_PRICING_FIELDS
     assert snapshot["providers"][" pad "]["display_name"] == " pad "
     assert snapshot["providers"]["zero-id"]["model_ids"] == []
     assert snapshot["providers"]["off-extra"]["display_name"] == "Off"
@@ -1092,7 +1084,7 @@ def test_serialize_snapshot_validated_deterministic_export():
         assert snapshot["snapshot_id"] == before["snapshot_id"], name
 
     # (b) Determinism: repeated calls are byte-identical, and reversing OBJECT
-    # insertion order at root, provider, model and nested architecture/pricing
+    # insertion order at root, provider, model and nested architecture
     # maps cannot change the exported bytes or the id. Arrays keep their order.
     for name in ("lookup.json", "metadata-edge-cases.json", "search-text.json"):
         snapshot = _load_fixture(name)
@@ -1195,48 +1187,7 @@ def test_serialize_snapshot_validated_deterministic_export():
                                        "output_modalities": None}
     assert unknown["supported_parameters"] is None
 
-    # (d) Typed pricing controls: integer 1 vs float 1.0 vs a numeric string
-    # are distinct ids AND distinct export text, each independently valid.
-    def pricing_snapshot(prompt, completion):
-        registry = [_record("p")]
-        entry = {"tick_epoch": 0, "providers": {"p": ["m"]},
-                 "provider_models": {"p": {"m": {
-                     "name": "M", "context_length": 8,
-                     "architecture": {"input_modalities": ["text"],
-                                      "output_modalities": ["text"]},
-                     "supported_parameters": ["temperature"],
-                     "pricing": {"prompt": prompt,
-                                 "completion": completion}}}}}
-        return build_snapshot(registry, entry, cadence_s=1)
-
-    int_snapshot = pricing_snapshot(1, 0)
-    float_snapshot = pricing_snapshot(1.0, 0.5)
-    string_snapshot = pricing_snapshot("1.0", "0")
-    for snapshot in (int_snapshot, float_snapshot, string_snapshot):
-        assert snapshot["snapshot_id"] == _independent_snapshot_id(snapshot)
-        assert catalog.validate_snapshot(snapshot) is snapshot
-        assert serialize_snapshot(snapshot) == \
-            _reference_export_text(snapshot)
-    ids = {int_snapshot["snapshot_id"], float_snapshot["snapshot_id"],
-           string_snapshot["snapshot_id"]}
-    assert len(ids) == 3
-    int_text = serialize_snapshot(int_snapshot)
-    float_text = serialize_snapshot(float_snapshot)
-    string_text = serialize_snapshot(string_snapshot)
-    assert '"prompt":1},"supported_parameters"' in int_text
-    assert '"prompt":1.0},"supported_parameters"' in float_text
-    assert '"prompt":"1.0"},"supported_parameters"' in string_text
-    int_prompt = catalog.load_snapshot(int_text)[
-        "providers"]["p"]["models"]["m"]["pricing"]["prompt"]
-    float_prompt = catalog.load_snapshot(float_text)[
-        "providers"]["p"]["models"]["m"]["pricing"]["prompt"]
-    string_prompt = catalog.load_snapshot(string_text)[
-        "providers"]["p"]["models"]["m"]["pricing"]["prompt"]
-    assert type(int_prompt) is int and int_prompt == 1
-    assert type(float_prompt) is float and float_prompt == 1.0
-    assert type(string_prompt) is str and string_prompt == "1.0"
-
-    # (e) Rejection controls delegate to the accepted validator: exact frozen
+    # (d) Rejection controls delegate to the accepted validator: exact frozen
     # code/message, no input mutation, no repaired output. The shaped native
     # case would raise an incidental ``TypeError`` from the encoder if
     # validation were skipped, so validator-before-encoder is observable.
@@ -1248,9 +1199,9 @@ def test_serialize_snapshot_validated_deterministic_export():
     extra = copy.deepcopy(good)
     extra["unexpected"] = "x"
     version_type = copy.deepcopy(good)
-    version_type["schema_version"] = "1"
+    version_type["schema_version"] = "2"
     unsupported = copy.deepcopy(good)
-    unsupported["schema_version"] = 2
+    unsupported["schema_version"] = 3
     bad_type = copy.deepcopy(good)
     bad_type["providers"][first_key]["stale"] = "yes"
     bad_hash_format = copy.deepcopy(good)
@@ -1313,25 +1264,6 @@ def _rendered_pair(snapshot):
     return serialize_snapshot(snapshot), html
 
 
-def _pricing_snapshot(prompt):
-    """A real valid snapshot whose ONLY varying value is one pricing scalar."""
-    from catalog_export import build_snapshot
-
-    roster = {
-        "tick_epoch": 0,
-        "providers": {"p": ["m"]},
-        "provider_models": {"p": {"m": {
-            "name": "M",
-            "context_length": 8,
-            "architecture": {"input_modalities": ["text"],
-                             "output_modalities": ["text"]},
-            "supported_parameters": ["temperature"],
-            "pricing": {"prompt": prompt, "completion": 0},
-        }}},
-    }
-    return build_snapshot([_record("p")], roster, cadence_s=1)
-
-
 def test_validate_artifact_pair_rejects_a_mismatched_or_malformed_pair(
         monkeypatch):
     """One public data contract across the external JSON and the HTML island.
@@ -1378,18 +1310,6 @@ def test_validate_artifact_pair_rejects_a_mismatched_or_malformed_pair(
         with pytest.raises(ValueError) as excinfo:
             validate_artifact_pair(catalog_text, html_text)
         assert type(excinfo.value) is ValueError, "a pair mismatch is not a CatalogError"
-        assert str(excinfo.value) == PAIR_MISMATCH_MESSAGE
-
-    # int 1 and float 1.0 are DIFFERENT published values: both snapshots are
-    # independently valid, so only a complete TYPED comparison rejects them.
-    int_text, int_html = _rendered_pair(_pricing_snapshot(1))
-    float_text, float_html = _rendered_pair(_pricing_snapshot(1.0))
-    assert int_text != float_text
-    assert validate_artifact_pair(int_text, int_html)["snapshot_id"]
-    assert validate_artifact_pair(float_text, float_html)["snapshot_id"]
-    for catalog_text, html_text in ((int_text, float_html), (float_text, int_html)):
-        with pytest.raises(ValueError) as excinfo:
-            validate_artifact_pair(catalog_text, html_text)
         assert str(excinfo.value) == PAIR_MISMATCH_MESSAGE
 
     # ---- (c) every candidate-element defect is rejected --------------------
@@ -1443,7 +1363,7 @@ def test_validate_artifact_pair_rejects_a_mismatched_or_malformed_pair(
     # ---- (d) malformed/unaccepted external or embedded JSON ----------------
     for catalog_text, expected in (
             (base_text[:60], "invalid_json"),
-            ('{"schema_version":1,"schema_version":1}', "invalid_json"),
+            ('{"schema_version":2,"schema_version":2}', "invalid_json"),
             ("{}", "invalid_snapshot"),
             ("null", "invalid_snapshot")):
         assert code_of(validate_artifact_pair, catalog_text, base_html).code == expected
@@ -1473,3 +1393,593 @@ def test_validate_artifact_pair_rejects_a_mismatched_or_malformed_pair(
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "[]", proc.stdout
+
+
+# ---------- Synthetic gateway rows for projection ----------
+
+VERCEL_ID = "example/unsuffixed-chat"
+VERCEL_ROW = {
+    "id": VERCEL_ID, "name": "Example Chat", "description": "Synthetic chat",
+    "context_window": 96000,
+    "modalities": {"input": ["text"], "output": ["text"]},
+    "supported_parameters": ["temperature", "tools"],
+    "pricing": {"input": "0", "output": "0"},
+    "owned_by": "example", "zdr": True, "no_training": True,
+    "supported_specifications": ["example"], "reasoning_options": {},
+}
+
+
+def _vercel_inputs():
+    """A synthetic raw row in an already-tracked roster."""
+    registry = [_record("vercel", name="Vercel AI Gateway",
+                        url="https://ai-gateway.vercel.sh/v1/chat/completions")]
+    roster = {
+        "tick_epoch": 1700000000,
+        "providers": {"vercel": [VERCEL_ID]},
+        "provider_models": {"vercel": {VERCEL_ID: copy.deepcopy(VERCEL_ROW)}},
+        "stale_providers": [],
+    }
+    return registry, roster
+
+
+def test_catalog_format_map_projects_vercel_metadata_into_one_snapshot():
+    build_snapshot, catalog = _export()
+    registry, roster = _vercel_inputs()
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"vercel": "input-output-models"})
+
+    assert set(snapshot) == PUBLIC_TOP_FIELDS
+    assert snapshot["schema_version"] == 2
+    assert snapshot["snapshot_id"] == _independent_snapshot_id(snapshot)
+    assert catalog.validate_snapshot(snapshot) is snapshot
+    assert snapshot["provider_order"] == ["vercel"]
+    entry = snapshot["providers"]["vercel"]
+    assert set(entry) == PUBLIC_PROVIDER_FIELDS
+    assert entry["model_ids"] == [VERCEL_ID]
+    assert entry["display_name"] == "Vercel AI Gateway"
+
+    model = entry["models"][VERCEL_ID]
+    assert set(model) == PUBLIC_MODEL_FIELDS
+    assert model["id"] == VERCEL_ID
+    assert model["name"] == "Example Chat"
+    assert model["description"] == "Synthetic chat"
+    assert model["context_length"] == 96000
+    assert model["architecture"] == {"input_modalities": ["text"],
+                                     "output_modalities": ["text"]}
+    assert model["supported_parameters"] == ["temperature", "tools"]
+    # The public payload never carries raw or private upstream fields.
+    text = json.dumps(snapshot)
+    for leaked in ("pricing", "owned_by", "zdr", "no_training",
+                   "supported_specifications", "reasoning_options"):
+        assert f'"{leaked}"' not in text, leaked
+    assert snapshot["warnings"] == []
+
+
+def test_absent_or_legacy_format_map_keeps_the_legacy_projection():
+    build_snapshot, _catalog = _export()
+    registry, roster = _vercel_inputs()
+    legacy = build_snapshot(registry, roster, cadence_s=3600)
+    explicit = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"vercel": "openai-models"})
+    assert legacy == explicit
+    model = legacy["providers"]["vercel"]["models"][VERCEL_ID]
+    # Legacy projection reads context_length/modalities from the raw row, which
+    # spells them differently, so they stay unknown -- never coerced.
+    assert model["context_length"] is None
+    assert model["architecture"] == {"input_modalities": None,
+                                     "output_modalities": None}
+    assert model["name"] == "Example Chat", "name is a shared raw member"
+    assert legacy["warnings"] == ["metadata_missing"]
+
+
+def test_capture_catalog_formats_projects_the_already_resolved_registry():
+    from catalog_export import capture_catalog_formats
+
+    providers = {
+        "vercel": {"name": "Vercel AI Gateway",
+                   "catalog_format": "input-output-models",
+                   "_token": "SENTINEL-FORMAT-TOKEN",
+                   "auth": {"method": "none", "key": "SENTINEL-AUTH"}},
+        "nous": {"name": "Nous Portal", "_token": "SENTINEL-NOUS"},
+    }
+    before = copy.deepcopy(providers)
+    formats = capture_catalog_formats(providers)
+    assert formats == {"vercel": "input-output-models",
+                       "nous": "openai-models"}
+    assert "SENTINEL" not in json.dumps(formats)
+    assert providers == before, "the pure capture never mutates the registry"
+    with pytest.raises(TypeError):
+        capture_catalog_formats([("vercel", "input-output-models")])
+
+
+@pytest.mark.parametrize("formats", [
+    {"vercel": "not-a-catalog-format"},
+    {"vercel": ""},
+    {"vercel": None},
+    {"": "input-output-models"},
+    {1: "input-output-models"},
+])
+def test_malformed_catalog_format_maps_are_structural_faults(formats):
+    build_snapshot, catalog = _export()
+    registry, roster = _vercel_inputs()
+    with pytest.raises(catalog.CatalogError):
+        build_snapshot(registry, roster, cadence_s=3600, catalog_formats=formats)
+
+
+def test_catalog_format_map_root_type_error():
+    build_snapshot, _catalog = _export()
+    registry, roster = _vercel_inputs()
+    with pytest.raises(TypeError):
+        build_snapshot(registry, roster, cadence_s=3600,
+                       catalog_formats=[("vercel", "input-output-models")])
+
+
+def test_format_map_projection_does_not_mutate_or_alias_the_roster():
+    build_snapshot, _catalog = _export()
+    registry, roster = _vercel_inputs()
+    before = copy.deepcopy(roster)
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"vercel": "input-output-models"})
+    assert _same_inputs(roster, before)
+    model = snapshot["providers"]["vercel"]["models"][VERCEL_ID]
+    raw = roster["provider_models"]["vercel"][VERCEL_ID]
+    assert model is not raw
+    assert model["architecture"] is not raw["modalities"]
+    model["architecture"]["input_modalities"].append("image")
+    model["supported_parameters"].append("stop")
+    assert _same_inputs(roster, before)
+
+
+def test_new_raw_row_replaces_the_previous_metadata_view():
+    build_snapshot, _catalog = _export()
+    registry, roster = _vercel_inputs()
+    formats = {"vercel": "input-output-models"}
+    first = build_snapshot(registry, roster, cadence_s=3600,
+                           catalog_formats=formats)
+    roster["provider_models"]["vercel"][VERCEL_ID] = dict(
+        VERCEL_ROW, context_window=131072)
+    second = build_snapshot(registry, roster, cadence_s=3600,
+                            catalog_formats=formats)
+    assert first["providers"]["vercel"]["models"][VERCEL_ID]["context_length"] == 96000
+    assert second["providers"]["vercel"]["models"][VERCEL_ID]["context_length"] == 131072
+    assert first["snapshot_id"] != second["snapshot_id"]
+
+
+@pytest.mark.parametrize("raw,warnings", [
+    ({"id": "vendor/bare", "type": "language"}, ["metadata_missing"]),
+    ({"id": "vendor/bare", "type": "language", "context_window": "128k",
+      "modalities": {"input": "text"}},
+     ["metadata_missing", "metadata_invalid"]),
+])
+def test_format_map_degrades_optional_capabilities_without_dropping_ids(
+        raw, warnings):
+    """Optional metadata faults never remove a confirmed free endpoint."""
+    build_snapshot, _catalog = _export()
+    registry, roster = _vercel_inputs()
+    roster["providers"]["vercel"] = ["vendor/bare"]
+    roster["provider_models"]["vercel"] = {"vendor/bare": raw}
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"vercel": "input-output-models"})
+    entry = snapshot["providers"]["vercel"]
+    assert entry["model_ids"] == ["vendor/bare"]
+    model = entry["models"]["vendor/bare"]
+    assert model["id"] == "vendor/bare" and model["name"] == "vendor/bare"
+    assert model["context_length"] is None
+    assert model["architecture"] == {"input_modalities": None,
+                                     "output_modalities": None}
+    assert model["supported_parameters"] is None
+    assert snapshot["warnings"] == warnings
+
+
+# ---------- Felo channel-catalog metadata through the same projector (P2) ----------
+
+FELO_ID = "example-vision:free"
+FELO_ROW = {
+    "id": FELO_ID, "name": "Example Vision", "description": "Synthetic vision",
+    "context_length": 64000, "input_modalities": ["text", "image", "video"],
+    "output_modalities": ["text"], "supported_parameters": ["stop"],
+    "channels": [{"standard_pricing": {"prompt": 0}}],
+    "capabilities": ["vision"], "parameter_definitions": {},
+    "recommended_protocol": "messages", "trial_status": "example",
+}
+
+
+def _felo_inputs():
+    registry = [_record("felo", name="Felo",
+                        url="https://openapi.felo.ai/api/v1/chat/completions")]
+    roster = {
+        "tick_epoch": 1700000000,
+        "providers": {"felo": [FELO_ID]},
+        "provider_models": {"felo": {FELO_ID: copy.deepcopy(FELO_ROW)}},
+        "stale_providers": [],
+    }
+    return registry, roster
+
+
+def test_felo_format_map_projects_metadata_into_one_snapshot():
+    build_snapshot, catalog = _export()
+    registry, roster = _felo_inputs()
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"felo": "channel-catalog"})
+    assert catalog.validate_snapshot(snapshot) is snapshot
+    entry = snapshot["providers"]["felo"]
+    assert entry["model_ids"] == [FELO_ID]
+    assert entry["chat_completions_url"] == (
+        "https://openapi.felo.ai/api/v1/chat/completions")
+
+    raw = FELO_ROW
+    model = entry["models"][FELO_ID]
+    assert set(model) == PUBLIC_MODEL_FIELDS
+    assert model["name"] == raw["name"]
+    assert model["description"] == raw["description"]
+    assert model["context_length"] == 64000
+    assert model["architecture"] == {
+        "input_modalities": ["text", "image", "video"],
+        "output_modalities": ["text"],
+    }
+    assert model["supported_parameters"] == raw["supported_parameters"]
+    assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
+
+    text = json.dumps(snapshot)
+    for leaked in ("channels", "standard_pricing", "capabilities",
+                   "parameter_definitions", "recommended_protocol",
+                   "trial_status"):
+        assert f'"{leaked}"' not in text, leaked
+
+
+@pytest.mark.parametrize("raw,warnings", [
+    ({"id": "vendor/bare"}, ["metadata_missing"]),
+    ({"id": "vendor/bare", "context_length": "128k",
+      "input_modalities": "text"}, ["metadata_missing", "metadata_invalid"]),
+])
+def test_felo_missing_or_malformed_optional_metadata_never_drops_an_endpoint(
+        raw, warnings):
+    build_snapshot, _catalog = _export()
+    registry, roster = _felo_inputs()
+    roster["providers"]["felo"] = ["vendor/bare"]
+    roster["provider_models"]["felo"] = {"vendor/bare": raw}
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"felo": "channel-catalog"})
+    entry = snapshot["providers"]["felo"]
+    assert entry["model_ids"] == ["vendor/bare"]
+    model = entry["models"]["vendor/bare"]
+    assert model["id"] == "vendor/bare" and model["name"] == "vendor/bare"
+    assert model["context_length"] is None
+    assert model["architecture"] == {"input_modalities": None,
+                                     "output_modalities": None}
+    assert model["supported_parameters"] is None
+    assert snapshot["warnings"] == warnings
+
+
+# ---------- TokenRA newapi-pricing metadata through the same projector (P3) ----------
+
+TOKENRA_ID = "example-chat"
+TOKENRA_ROW = {
+    "model_name": TOKENRA_ID, "quota_type": 0, "model_ratio": 0,
+    "model_price": 0, "enable_groups": ["default"],
+    "supported_endpoint_types": ["openai"], "video_resolution_prices": {},
+    "tags": ["text"],
+}
+
+
+def _tokenra_inputs():
+    registry = [_record("tokenra", name="TokenRA",
+                        url="https://tokenra.io/v1/chat/completions")]
+    roster = {
+        "tick_epoch": 1700000000,
+        "providers": {"tokenra": [TOKENRA_ID]},
+        "provider_models": {"tokenra": {TOKENRA_ID: copy.deepcopy(TOKENRA_ROW)}},
+        "stale_providers": [],
+    }
+    return registry, roster
+
+
+def test_tokenra_format_map_projects_honest_unknown_capabilities():
+    """A pricing-only source yields null capabilities, not invented ones."""
+    build_snapshot, catalog = _export()
+    registry, roster = _tokenra_inputs()
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"tokenra": "newapi-pricing"})
+    assert catalog.validate_snapshot(snapshot) is snapshot
+    entry = snapshot["providers"]["tokenra"]
+    assert entry["model_ids"] == [TOKENRA_ID]
+    assert entry["chat_completions_url"] == (
+        "https://tokenra.io/v1/chat/completions")
+
+    model = entry["models"][TOKENRA_ID]
+    assert set(model) == PUBLIC_MODEL_FIELDS
+    assert model["id"] == TOKENRA_ID
+    assert model["name"] == TOKENRA_ID, "name falls back to model_name"
+    assert model["description"] is None
+    assert model["context_length"] is None, "no marketing 1M context"
+    assert model["architecture"] == {"input_modalities": None,
+                                     "output_modalities": None}
+    assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
+    assert model["supported_parameters"] is None
+    # Non-vacuous: the adapter view really ran and the accepted projector
+    # reported the absent capability container rather than nothing at all.
+    assert snapshot["warnings"] == ["metadata_missing"]
+
+    text = json.dumps(snapshot)
+    for leaked in ("quota_type", "model_ratio", "model_price",
+                   "enable_groups", "supported_endpoint_types",
+                   "video_resolution_prices", "tags"):
+        assert f'"{leaked}"' not in text, leaked
+
+
+def test_tokenra_genuine_description_passes_verbatim():
+    build_snapshot, _catalog = _export()
+    registry, roster = _tokenra_inputs()
+    roster["provider_models"]["tokenra"][TOKENRA_ID]["description"] = "Example prose"
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"tokenra": "newapi-pricing"})
+    model = snapshot["providers"]["tokenra"]["models"][TOKENRA_ID]
+    assert model["description"] == "Example prose"
+    assert model["name"] == TOKENRA_ID
+
+
+def test_tokenra_malformed_optional_metadata_never_drops_a_free_identity():
+    build_snapshot, _catalog = _export()
+    registry, roster = _tokenra_inputs()
+    roster["provider_models"]["tokenra"][TOKENRA_ID]["description"] = {"en": "not a string"}
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"tokenra": "newapi-pricing"})
+    entry = snapshot["providers"]["tokenra"]
+    assert entry["model_ids"] == [TOKENRA_ID]
+    model = entry["models"][TOKENRA_ID]
+    assert model["description"] is None
+    assert model["name"] == TOKENRA_ID
+    assert snapshot["warnings"] == ["metadata_missing"]
+
+
+# ---------- Infron provider-models metadata through the same projector (P4) ----------
+
+INFRON_VISION_ID = "example/vision:free"
+INFRON_TEXT_ID = "example/text:free"
+INFRON_ROWS = {
+    INFRON_VISION_ID: {
+        "id": INFRON_VISION_ID, "display_name": "Example Vision",
+        "description": "Synthetic multimodal model", "context_length": 64000,
+        "input_modalities": ["text", "image", "video"], "output_modalities": ["text"],
+        "min_prompt_price": 0, "min_completion_price": 0,
+        "providers": [{"endpoint_name": "test-route", "context_length": 8000}],
+        "is_zdr": True, "category_type": "LLM", "model_family": "example",
+        "supported_endpoint_types": ["openai"],
+    },
+    INFRON_TEXT_ID: {
+        "id": INFRON_TEXT_ID, "supports_vision": True,
+        "input_modalities": ["text"], "output_modalities": ["text"],
+    },
+}
+
+
+def _infron_inputs():
+    registry = [_record("infron", name="Infron",
+                        url="https://llm.onerouter.pro/v1/chat/completions")]
+    roster = {
+        "tick_epoch": 1700000000,
+        "providers": {"infron": list(INFRON_ROWS)},
+        "provider_models": {"infron": copy.deepcopy(INFRON_ROWS)},
+        "stale_providers": [],
+    }
+    return registry, roster
+
+
+def test_infron_format_map_projects_the_published_metadata():
+    """Known name/context/modalities; request parameters stay unknown."""
+    build_snapshot, catalog = _export()
+    registry, roster = _infron_inputs()
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"infron": "provider-models"})
+    assert catalog.validate_snapshot(snapshot) is snapshot
+    entry = snapshot["providers"]["infron"]
+    assert entry["model_ids"] == sorted(INFRON_ROWS)
+    assert entry["chat_completions_url"] == (
+        "https://llm.onerouter.pro/v1/chat/completions")
+
+    model = entry["models"][INFRON_VISION_ID]
+    assert set(model) == PUBLIC_MODEL_FIELDS, "the six public fields only"
+    assert model["name"] == "Example Vision"
+    assert model["context_length"] == 64000, "the model context, not the provider's"
+    assert model["architecture"] == {"input_modalities": ["text", "image", "video"],
+                                     "output_modalities": ["text"]}
+    assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
+    assert model["supported_parameters"] is None, "no parameter vocabulary exists"
+
+    text_only = entry["models"][INFRON_TEXT_ID]
+    assert text_only["architecture"]["input_modalities"] == ["text"], (
+        "the modality array wins over supports_vision: true")
+    assert text_only["supported_parameters"] is None
+    # `supported_parameters` is genuinely unknown on every admitted row, so the
+    # accepted projector reports it rather than the export staying silent.
+    assert snapshot["warnings"] == ["metadata_missing"]
+
+    # The public MODEL objects carry the six projected fields only: no raw
+    # upstream member survives (`display_name`/`providers` legitimately exist as
+    # provider-level and snapshot-level members, so this scope is the models).
+    for model in entry["models"].values():
+        text = json.dumps(model)
+        for leaked in ("display_name", "providers", "min_prompt_price",
+                       "min_completion_price", "supports_vision", "is_zdr",
+                       "category_type", "supported_endpoint_types",
+                       "model_family", "endpoint_name"):
+            assert f'"{leaked}"' not in text, leaked
+
+
+def test_infron_copy_and_view_do_not_mutate_the_raw_rows():
+    build_snapshot, _catalog = _export()
+    registry, roster = _infron_inputs()
+    before = copy.deepcopy(roster)
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"infron": "provider-models"})
+    assert _same_inputs(roster, before), "the stored raw rows are untouched"
+    model = snapshot["providers"]["infron"]["models"][INFRON_VISION_ID]
+    raw = roster["provider_models"]["infron"][INFRON_VISION_ID]
+    assert model is not raw
+    assert model["architecture"] is not raw["input_modalities"]
+    model["architecture"]["input_modalities"].append("audio")
+    model["name"] = "changed"
+    assert _same_inputs(roster, before), "mutating the output never reaches the input"
+
+
+def test_infron_malformed_optional_metadata_keeps_the_admitted_identity():
+    """Junk optional metadata degrades visibly instead of dropping the free id."""
+    build_snapshot, _catalog = _export()
+    registry, roster = _infron_inputs()
+    raw = copy.deepcopy(INFRON_ROWS[INFRON_VISION_ID])
+    raw["input_modalities"] = "text is not a list"
+    raw["description"] = {"en": "prose is not a string"}
+    roster["providers"]["infron"] = [INFRON_VISION_ID]
+    roster["provider_models"]["infron"] = {INFRON_VISION_ID: raw}
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"infron": "provider-models"})
+    entry = snapshot["providers"]["infron"]
+    assert entry["model_ids"] == [INFRON_VISION_ID]
+    model = entry["models"][INFRON_VISION_ID]
+    assert model["name"] == "Example Vision"
+    assert model["description"] is None
+    assert model["architecture"]["input_modalities"] is None
+    assert model["architecture"]["output_modalities"] == ["text"]
+    assert snapshot["warnings"] == ["metadata_missing", "metadata_invalid"]
+
+
+def test_infron_missing_metadata_row_is_a_warning_not_a_dropped_id():
+    build_snapshot, _catalog = _export()
+    registry, roster = _infron_inputs()
+    roster["providers"]["infron"] = [INFRON_VISION_ID]
+    roster["provider_models"]["infron"] = {INFRON_VISION_ID: None}
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"infron": "provider-models"})
+    model = snapshot["providers"]["infron"]["models"][INFRON_VISION_ID]
+    assert model["name"] == INFRON_VISION_ID, "name falls back to the id"
+    assert model["context_length"] is None
+    assert snapshot["warnings"] == ["metadata_missing"]
+
+
+# ---------- AI/ML API typed-unit metadata through the same projector (P5) ----------
+
+AIMLAPI_ID = "example/typed-chat"
+AIMLAPI_UNKNOWN_ID = "example/unspecified-context"
+AIMLAPI_ROWS = {
+    AIMLAPI_ID: {
+        "id": AIMLAPI_ID, "type": "openai/chat-completions",
+        "info": {"name": "Example Typed Chat", "contextLength": 64000},
+        "modalities": {"input": ["image", "text", "video"], "output": ["text"]},
+        "capabilities": ["tools"], "aliases": ["example-alias"],
+        "pricing": {"units": [{"price": 0}]},
+    },
+    AIMLAPI_UNKNOWN_ID: {
+        "id": AIMLAPI_UNKNOWN_ID, "type": "openai/chat-completions",
+        "info": {"name": "Example Without Context"},
+        "modalities": {"input": ["image", "text"], "output": ["text"]},
+    },
+}
+
+
+def _aimlapi_inputs(model_ids=(AIMLAPI_ID,)):
+    """A synthetic roster for projection, not a free-admission test."""
+    registry = [_record("aimlapi", name="AI/ML API",
+                        url="https://api.aimlapi.com/v1/chat/completions")]
+    roster = {
+        "tick_epoch": 1700000000,
+        "providers": {"aimlapi": list(model_ids)},
+        "provider_models": {"aimlapi": {
+            raw_id: copy.deepcopy(AIMLAPI_ROWS[raw_id]) for raw_id in model_ids}},
+        "stale_providers": [],
+    }
+    return registry, roster
+
+
+def test_aimlapi_format_map_projects_typed_chat_metadata():
+    """Map known name/context/modalities without inventing parameters."""
+    build_snapshot, catalog = _export()
+    registry, roster = _aimlapi_inputs()
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"aimlapi": "typed-unit-models"})
+    assert catalog.validate_snapshot(snapshot) is snapshot
+    entry = snapshot["providers"]["aimlapi"]
+    assert entry["model_ids"] == [AIMLAPI_ID]
+    assert entry["chat_completions_url"] == (
+        "https://api.aimlapi.com/v1/chat/completions")
+
+    model = entry["models"][AIMLAPI_ID]
+    assert set(model) == PUBLIC_MODEL_FIELDS, "the six public fields only"
+    assert model["name"] == "Example Typed Chat"
+    assert model["context_length"] == 64000
+    assert model["architecture"] == {
+        "input_modalities": ["image", "text", "video"],
+        "output_modalities": ["text"]}
+    assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
+    assert model["supported_parameters"] is None, (
+        "capabilities is not a request-parameter vocabulary")
+    assert snapshot["warnings"] == ["metadata_missing"]
+
+    text = json.dumps(model)
+    for leaked in ('"pricing"', '"units"', '"capabilities"', '"modalities"',
+                   '"info"', '"aliases"', '"contextLength"', '"price"'):
+        assert leaked not in text, leaked
+
+
+def test_aimlapi_unknown_optional_context_stays_genuinely_unknown():
+    """Modalities can be present without info.contextLength."""
+    build_snapshot, _catalog = _export()
+    registry, roster = _aimlapi_inputs(model_ids=(AIMLAPI_ID, AIMLAPI_UNKNOWN_ID))
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"aimlapi": "typed-unit-models"})
+    models = snapshot["providers"]["aimlapi"]["models"]
+    assert models[AIMLAPI_ID]["context_length"] == 64000
+    model = models[AIMLAPI_UNKNOWN_ID]
+    assert model["context_length"] is None
+    assert model["architecture"] == {"input_modalities": ["image", "text"],
+                                     "output_modalities": ["text"]}
+    assert model["supported_parameters"] is None
+    assert snapshot["warnings"] == ["metadata_missing"]
+
+
+def test_aimlapi_pricing_only_metadata_cannot_claim_known_modalities():
+    """Without modalities, keep known context and report unknown modalities."""
+    build_snapshot, _catalog = _export()
+    registry, roster = _aimlapi_inputs()
+    del roster["provider_models"]["aimlapi"][AIMLAPI_ID]["modalities"]
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"aimlapi": "typed-unit-models"})
+    model = snapshot["providers"]["aimlapi"]["models"][AIMLAPI_ID]
+    assert model["name"] == "Example Typed Chat"
+    assert model["context_length"] == 64000
+    assert model["architecture"] == {"input_modalities": None,
+                                     "output_modalities": None}
+    assert snapshot["warnings"] == ["metadata_missing"]
+
+
+def test_aimlapi_optional_junk_warns_without_dropping_the_identity():
+    build_snapshot, _catalog = _export()
+    registry, roster = _aimlapi_inputs()
+    raw = roster["provider_models"]["aimlapi"][AIMLAPI_ID]
+    raw["info"]["contextLength"] = "one million"
+    raw["modalities"] = "text"
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"aimlapi": "typed-unit-models"})
+    entry = snapshot["providers"]["aimlapi"]
+    assert entry["model_ids"] == [AIMLAPI_ID]
+    model = entry["models"][AIMLAPI_ID]
+    assert model["name"] == "Example Typed Chat"
+    assert model["context_length"] is None
+    assert model["architecture"] == {"input_modalities": None,
+                                     "output_modalities": None}
+    assert snapshot["warnings"] == ["metadata_missing", "metadata_invalid"]
+
+
+def test_aimlapi_copy_and_view_do_not_mutate_the_raw_rows():
+    build_snapshot, _catalog = _export()
+    registry, roster = _aimlapi_inputs()
+    before = copy.deepcopy(roster)
+    snapshot = build_snapshot(registry, roster, cadence_s=3600,
+                              catalog_formats={"aimlapi": "typed-unit-models"})
+    assert _same_inputs(roster, before), "the stored raw rows are untouched"
+    model = snapshot["providers"]["aimlapi"]["models"][AIMLAPI_ID]
+    raw = roster["provider_models"]["aimlapi"][AIMLAPI_ID]
+    assert model is not raw
+    assert model["architecture"]["input_modalities"] is not raw["modalities"]["input"]
+    model["architecture"]["input_modalities"].append("audio")
+    model["name"] = "changed"
+    assert _same_inputs(roster, before), "mutating the output never reaches the input"

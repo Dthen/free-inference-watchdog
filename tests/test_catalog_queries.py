@@ -1,47 +1,25 @@
-"""Runtime tests for the pure raw-JSON boundary, typed canonical bytes (unit
-2a1) and the strict public snapshot validator / hash provenance (unit 2a2).
+"""Native runtime tests for the pure catalogue core.
 
-These tests exercise ONLY the public runtime API of the side-effect-free
-package root and its pure raw + structural + query modules:
+The shared fixture corpora -- raw JSON acceptance, typed canonical bytes,
+structural validation, metadata projection, marker stripping, natural ordering,
+the argument table and the shared query goldens -- are owned by
+``tests/test_contract_parity.py``, which executes every row against independent
+literal expectations in BOTH implementations (the Python reference and the
+dependency-free Node module). This module no longer re-reads or re-asserts those
+tables.
 
-    watchdog_catalog.catalog.MAX_SAFE_INT
-    watchdog_catalog.catalog.MAX_JSON_DEPTH
-    watchdog_catalog.catalog.CatalogError
-    watchdog_catalog.catalog.load_json
-    watchdog_catalog.catalog.canonical_bytes
-    watchdog_catalog.catalog.INVALID_SNAPSHOT
-    watchdog_catalog.catalog.UNSUPPORTED_SCHEMA_VERSION
-    watchdog_catalog.catalog.validate_snapshot
-    watchdog_catalog.catalog.load_snapshot
-    watchdog_catalog.catalog.snapshot_hash
-    watchdog_catalog.query.strip_free_marker
-
-They read the frozen, independently-authored RULE TABLES by path
-(``tests/fixtures/catalog/raw-json-cases.json``, ``canonical-cases.json`` and
-``structural-cases.json``) plus the committed snapshot fixtures, and compare
-each literal row against the runtime functions. They never import
-``tests/test_catalog.py`` or any of its private checkers, and no production
-module imports them.
-
-The structural layer is exercised through a SMALL TEST-LOCAL path setter and
-reseal helper built on independent ``json.dumps``/``hashlib`` calls: expected
-envelopes come from the literal table rows, never from runtime-derived hashes,
-and every fixture file stays byte-identical. Grouped loops keep the added test
-count proportional to the coherent boundaries rather than to the individual
-table rows.
-
-The real package is imported normally at module level. The frozen
-contract-only suite proves its own isolation in a fresh interpreter (with the
-implementation package blocked) rather than by inspecting this process's
-``sys.modules``, so this module needs no lazy import and must not use one to
-keep the process-global module table clean.
+What remains here is what the parity lane cannot express: Python host-object
+behaviour (non-JSON containers, ``object()`` sentinels, ``TypeError``
+programming errors, ``sys`` limit side effects), the exact Python
+exception/envelope surface, this module's own import-isolation audit, and
+literal characterizations of Python-regex/ordering semantics that are not
+table-driven.
 """
 
 import collections
 import copy
 import hashlib
 import json
-import math
 import os
 import subprocess
 import sys
@@ -53,9 +31,6 @@ from watchdog_catalog import catalog as _catalog
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO / "tests" / "fixtures" / "catalog"
-RAW_TABLE_DOC = FIXTURE_DIR / "raw-json-cases.json"
-CANONICAL_TABLE_DOC = FIXTURE_DIR / "canonical-cases.json"
-STRUCTURAL_TABLE_DOC = FIXTURE_DIR / "structural-cases.json"
 
 INVALID_JSON = "invalid_json"
 INVALID_JSON_MESSAGE = "Invalid catalogue JSON."
@@ -65,77 +40,6 @@ STRUCTURAL_MESSAGES = {
     INVALID_SNAPSHOT: "Invalid catalogue snapshot.",
     UNSUPPORTED_SCHEMA_VERSION: "Unsupported catalogue schema version.",
 }
-
-# The nine committed public snapshot fixtures: every one of them is a valid
-# publication and must be accepted, unchanged, by the structural layer.
-SNAPSHOT_FIXTURES = (
-    "basic.json",
-    "capability-unknown.json",
-    "lookup.json",
-    "metadata-edge-cases.json",
-    "ordering.json",
-    "provider-extension.json",
-    "search-text.json",
-    "status-short-cadence.json",
-    "status-unknown-time.json",
-)
-
-# The five strict-float snapshot-case rows and the literal path of the offending
-# float token; this unit's ``load_snapshot`` classifies their
-# ``invalid_snapshot`` envelope.
-STRICT_FLOAT_PATH = {
-    "snap_case_schema_version_float": ("schema_version",),
-    "snap_case_tick_epoch_float": ("tick_epoch",),
-    "snap_case_cadence_float": ("cadence_s",),
-    "snap_case_context_length_float": (
-        "providers", "synthetic-a", "models", "alpha-1:free", "context_length"),
-    "snap_case_schema_version_exponent": ("schema_version",),
-}
-STRICT_INT_PATHS = (
-    ("schema_version",),
-    ("tick_epoch",),
-    ("cadence_s",),
-    ("providers", "synthetic-a", "models", "alpha-1:free", "context_length"),
-)
-
-
-def _load_table(path):
-    path = Path(path)
-    assert path.is_file(), f"rule table fixture is missing: {path.name}"
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-@pytest.fixture(scope="module")
-def raw_table():
-    return _load_table(RAW_TABLE_DOC)
-
-
-@pytest.fixture(scope="module")
-def canonical_table():
-    return _load_table(CANONICAL_TABLE_DOC)
-
-
-def _row(rows, case_id):
-    return next(r for r in rows if r["id"] == case_id)
-
-
-def _doc_at(doc, path):
-    node = doc
-    for component in path:
-        node = node[component]
-    return node
-
-
-def _decoded_depth(value):
-    """The container depth of a freshly decoded value: a root container is
-    depth 1, each nested array/object adds 1, a scalar is depth 0."""
-    if isinstance(value, dict):
-        inner = [_decoded_depth(v) for v in value.values()] or [0]
-        return 1 + max(inner)
-    if isinstance(value, list):
-        inner = [_decoded_depth(v) for v in value] or [0]
-        return 1 + max(inner)
-    return 0
 
 
 # -- literal depth builders (grouped rows; not one helper per row) --
@@ -170,52 +74,7 @@ def _assert_invalid(text, cid=None):
     return err
 
 
-# ---------- raw boundary: frozen rule-table rows ----------
-
-def test_raw_invalid_rows_reject_with_the_single_literal_envelope(raw_table):
-    assert raw_table["invalid_cases"], "the raw rule table must carry rows"
-    assert len(raw_table["invalid_cases"]) == 35
-    for row in raw_table["invalid_cases"]:
-        cid = row["id"]
-        err = _assert_invalid(row["json_text"], cid)
-        # str() is the fixed public message, never decoder text or raw content.
-        assert str(err) == INVALID_JSON_MESSAGE, cid
-        assert err.to_payload() == row["expect"], cid
-        # Exactly ok+error and exactly code+message; a fresh object each call.
-        payload = err.to_payload()
-        assert set(payload) == {"ok", "error"}, cid
-        assert payload["ok"] is False, cid
-        assert set(payload["error"]) == {"code", "message"}, cid
-        assert err.to_payload() is not err.to_payload(), cid
-
-
-def test_raw_valid_rows_decode_to_expected_typed_values(raw_table):
-    assert raw_table["valid_controls"], "the raw rule table must carry rows"
-    assert len(raw_table["valid_controls"]) == 27
-    catalog = _catalog
-    load_json = catalog.load_json
-    for row in raw_table["valid_controls"]:
-        cid = row["id"]
-        decoded = load_json(row["json_text"])
-        if "expect" in row:
-            expected = row["expect"]
-            assert decoded == expected, cid
-            # Strict per-token type: an integral float token stays float.
-            assert type(decoded) is type(expected), cid
-        else:
-            assert row["expect_depth"] == catalog.MAX_JSON_DEPTH, cid
-            assert _decoded_depth(decoded) == catalog.MAX_JSON_DEPTH, cid
-            if row["expect_kind"] == "object":
-                assert isinstance(decoded, dict), cid
-            else:
-                assert isinstance(decoded, list), cid
-    # Grouped strict-type pins: integral float tokens keep FLOAT type and a
-    # signed float zero retains its sign.
-    assert type(load_json("1.0")) is float
-    assert type(load_json("1e0")) is float
-    zero = load_json("-0.0")
-    assert type(zero) is float
-    assert zero == 0.0 and math.copysign(1.0, zero) == -1.0
+# ---------- raw boundary: native precedence and numeric policy ----------
 
 
 def test_raw_numeric_safety_and_duplicate_policy_are_notation_independent():
@@ -283,98 +142,7 @@ def test_raw_huge_integer_lexeme_rejects_without_changing_int_limits():
     assert load_json("-12345") == -12345
 
 
-# ---------- typed canonical bytes: frozen rule-table rows ----------
-
-def test_canonical_vectors_match_the_literal_text_and_sha(canonical_table):
-    catalog = _catalog
-    load_json = catalog.load_json
-    canonical_bytes = catalog.canonical_bytes
-    assert canonical_table["canonical_vectors"], "the table must carry rows"
-    assert len(canonical_table["canonical_vectors"]) == 14
-    for row in canonical_table["canonical_vectors"]:
-        cid = row["id"]
-        decoded = load_json(row["json_text"])
-        if row["scope"] == "snapshot":
-            # The caller excludes ONLY the root snapshot_id.
-            body = {k: v for k, v in decoded.items() if k != "snapshot_id"}
-        else:
-            body = decoded
-        raw = canonical_bytes(body)
-        assert raw == row["canonical_text"].encode("utf-8"), cid
-        assert hashlib.sha256(raw).hexdigest() == row["sha256"], cid
-
-
-def test_canonical_lexeme_types_and_float_priced_snapshot_twins(canonical_table):
-    catalog = _catalog
-    load_json = catalog.load_json
-    canonical_bytes = catalog.canonical_bytes
-    vec = {r["id"]: r for r in canonical_table["canonical_vectors"]}
-    i1 = load_json(vec["vec_int_lexeme_one"]["json_text"])["n"]
-    f1 = load_json(vec["vec_float_lexeme_one"]["json_text"])["n"]
-    fe = load_json(vec["vec_float_lexeme_one_exponent"]["json_text"])["n"]
-    assert type(i1) is int and type(f1) is float and type(fe) is float
-    # Integer `1` and float `1.0` are DIFFERENT typed values.
-    assert canonical_bytes({"n": i1}) != canonical_bytes({"n": f1})
-    # Float `1.0` and float `1e0` share ONE typed value.
-    assert canonical_bytes({"n": f1}) == canonical_bytes({"n": fe})
-    # Escaped and literal escapes collapse to one canonical body.
-    esc = load_json(vec["vec_equivalent_escapes_escaped"]["json_text"])
-    lit = load_json(vec["vec_equivalent_escapes_literal"]["json_text"])
-    assert canonical_bytes(esc) == canonical_bytes(lit)
-    # A nested snapshot_id in a general_value vector is RETAINED content.
-    nested = load_json(vec["vec_nested_snapshot_id"]["json_text"])
-    assert b'"snapshot_id"' in canonical_bytes(nested)
-    # Float-priced snapshot twins: raw-accepted, identical body and hash, and
-    # float pricing kept as floats (never dropped or stringified).
-    prod = load_json(vec["vec_snapshot_float_priced_producer"]["json_text"])
-    alt = load_json(vec["vec_snapshot_float_priced_alternate"]["json_text"])
-    prod_body = canonical_bytes(
-        {k: v for k, v in prod.items() if k != "snapshot_id"})
-    alt_body = canonical_bytes(
-        {k: v for k, v in alt.items() if k != "snapshot_id"})
-    assert prod_body == alt_body
-    assert prod["snapshot_id"] == alt["snapshot_id"] == \
-        hashlib.sha256(prod_body).hexdigest()
-    price = prod["providers"]["synthetic-a"]["models"]["alpha-1:free"]["pricing"]
-    assert type(price["prompt"]) is float
-    assert type(price["completion"]) is float
-
-
-def test_canonical_snapshot_cases_are_raw_accepted_with_hash_preconditions(
-        canonical_table):
-    catalog = _catalog
-    load_json = catalog.load_json
-    canonical_bytes = catalog.canonical_bytes
-    assert canonical_table["snapshot_cases"], "the table must carry rows"
-    assert len(canonical_table["snapshot_cases"]) == 7
-    for row in canonical_table["snapshot_cases"]:
-        cid = row["id"]
-        decoded = load_json(row["json_text"])  # raw guard accepts the numbers
-        assert isinstance(decoded, dict), cid
-        recomputed = hashlib.sha256(canonical_bytes(
-            {k: v for k, v in decoded.items() if k != "snapshot_id"})).hexdigest()
-        if cid == "snap_case_hash_tamper":
-            assert decoded["snapshot_id"] != recomputed, cid
-        else:
-            assert decoded["snapshot_id"] == recomputed, cid
-        if "expect" in row:
-            # Structural classification stays a SEPARATE layer: the raw layer
-            # accepts these and produces NO envelope itself, and this unit's
-            # load_snapshot is what composes raw acceptance with the structural
-            # envelope asserted in the structural group below.
-            assert row["expect"]["error"]["code"] == "invalid_snapshot", cid
-    # The strict-token inputs load with FLOAT tokens intact (never coerced to
-    # int) -- the precondition the structural layer classifies invalid_snapshot.
-    for cid, path in STRICT_FLOAT_PATH.items():
-        row = _row(canonical_table["snapshot_cases"], cid)
-        value = _doc_at(load_json(row["json_text"]), path)
-        assert type(value) is float, cid
-        assert value == int(value), cid
-    # The accepted base case carries strict INT tokens.
-    base = _row(canonical_table["snapshot_cases"], "snap_case_integer_token_base")
-    doc = load_json(base["json_text"])
-    for path in STRICT_INT_PATHS:
-        assert type(_doc_at(doc, path)) is int, path
+# ---------- typed canonical bytes: native encoder properties ----------
 
 
 def test_canonical_bytes_encoder_flags_and_no_key_exclusion():
@@ -398,8 +166,8 @@ def test_canonical_bytes_encoder_flags_and_no_key_exclusion():
 # ---------- structural validation: literal table rows and fixtures ----------
 
 # Small TEST-LOCAL change applier + reseal helper. Independent stdlib only
-# (json/hashlib); no ``tests/test_catalog.py`` private helper is imported and no
-# production module is used to build the expected value.
+# (json/hashlib); no test-local reference helper is shared and no production
+# module is used to build the expected value.
 
 
 def _decode_doc(path):
@@ -417,30 +185,6 @@ def _reseal(snap):
     body = {k: v for k, v in snap.items() if k != "snapshot_id"}
     snap["snapshot_id"] = hashlib.sha256(_canonical_text(body)).hexdigest()
     return snap
-
-
-def _apply_changes(snap, changes):
-    for change in changes:
-        op = change["op"]
-        if op == "replace_root":
-            snap = change["value"]
-            continue
-        path = change["path"]
-        parent = snap
-        for component in path[:-1]:
-            parent = parent[component]
-        if op == "delete":
-            del parent[path[-1]]
-        else:
-            assert op == "set", op
-            parent[path[-1]] = change["value"]
-    return snap
-
-
-def _structural_snapshot(row):
-    snap = _apply_changes(_decode_doc(FIXTURE_DIR / row["base_fixture"]),
-                          row["changes"])
-    return _reseal(snap) if row["reseal"] else snap
 
 
 def _mutate(base, path, value):
@@ -472,15 +216,11 @@ def _assert_rejected(snapshot, code, cid):
     return err
 
 
-@pytest.fixture(scope="module")
-def structural_table():
-    return _decode_doc(STRUCTURAL_TABLE_DOC)
-
-
 def test_structural_error_literals_and_envelopes_are_frozen():
     catalog = _catalog
     assert catalog.INVALID_SNAPSHOT == INVALID_SNAPSHOT
     assert catalog.UNSUPPORTED_SCHEMA_VERSION == UNSUPPORTED_SCHEMA_VERSION
+    assert catalog.SCHEMA_VERSION == 2
     for code, message in STRUCTURAL_MESSAGES.items():
         err = catalog.CatalogError(code)
         assert err.code == code
@@ -498,95 +238,37 @@ def test_structural_error_literals_and_envelopes_are_frozen():
     assert catalog.CatalogError().code == INVALID_JSON
 
 
-def test_structural_invalid_rows_reject_with_the_frozen_envelope(
-        structural_table):
-    rows = structural_table["invalid_cases"]
-    assert len(rows) == 57
-    for row in rows:
-        snap = _structural_snapshot(row)
-        if row["reseal"]:
-            body = {k: v for k, v in snap.items() if k != "snapshot_id"}
-            assert snap["snapshot_id"] == \
-                hashlib.sha256(_canonical_text(body)).hexdigest(), row["id"]
-        err = _assert_rejected(snap, row["expect"]["error"]["code"], row["id"])
-        # The literal, independently-authored envelope is reproduced exactly.
-        assert err.to_payload() == row["expect"], row["id"]
-
-
-def test_structural_valid_controls_are_accepted_identically_and_unmutated(
-        structural_table):
-    rows = structural_table["valid_controls"]
-    assert len(rows) == 10
+def test_raw_faults_precede_structural_validation():
+    """The composition order, pinned on ONE literal document: a raw lexical
+    fault is reported as invalid_json before the structural layer runs. The raw
+    and structural tables themselves are exercised row by row in
+    ``tests/test_contract_parity.py``."""
     catalog = _catalog
-    for row in rows:
-        snap = _structural_snapshot(row)
-        before = json.loads(json.dumps(snap))
-        assert catalog.validate_snapshot(snap) is snap, row["id"]
-        assert snap == before, row["id"]
-        assert catalog.load_snapshot(json.dumps(snap)) == snap, row["id"]
-
-
-def test_committed_snapshot_fixtures_validate_identically():
-    catalog = _catalog
-    for name in SNAPSHOT_FIXTURES:
-        text = (FIXTURE_DIR / name).read_text(encoding="utf-8")
-        doc = catalog.load_json(text)
-        before = json.loads(json.dumps(doc))
-        assert catalog.validate_snapshot(doc) is doc, name
-        assert doc == before, name
-        assert catalog.load_snapshot(text) == doc, name
-
-
-def test_canonical_snapshot_cases_classify_via_load_snapshot(canonical_table):
-    rows = canonical_table["snapshot_cases"]
-    assert len(rows) == 7
-    catalog = _catalog
-    base = _row(rows, "snap_case_integer_token_base")
-    accepted = catalog.load_snapshot(base["json_text"])
-    assert isinstance(accepted, dict) and base.get("expect") is None
-    strict_float = 0
-    for row in rows:
-        if row["id"] == "snap_case_integer_token_base":
-            continue
-        if row["id"] in STRICT_FLOAT_PATH:
-            strict_float += 1
-        with pytest.raises(catalog.CatalogError) as excinfo:
-            catalog.load_snapshot(row["json_text"])
-        err = excinfo.value
-        assert err.code == INVALID_SNAPSHOT, row["id"]
-        assert err.to_payload() == row["expect"], row["id"]
-    assert strict_float == 5
-    # The tampered row is a genuine body/hash mismatch, not a shape accident.
-    tamper = _row(rows, "snap_case_hash_tamper")
-    doc = catalog.load_json(tamper["json_text"])
-    body = {k: v for k, v in doc.items() if k != "snapshot_id"}
-    assert doc["snapshot_id"] != catalog.snapshot_hash(body)
-
-
-def test_raw_faults_precede_structural_validation(raw_table):
-    catalog = _catalog
-    for row in raw_table["invalid_cases"]:
-        with pytest.raises(catalog.CatalogError) as excinfo:
-            catalog.load_snapshot(row["json_text"])
-        err = excinfo.value
-        assert err.code == INVALID_JSON, row["id"]
-        assert err.to_payload() == row["expect"], row["id"]
-
-
-def test_raw_valid_documents_reach_the_structural_layer(raw_table):
-    catalog = _catalog
-    non_objects = 0
-    for row in raw_table["valid_controls"]:
-        decoded = catalog.load_json(row["json_text"])  # lexically accepted
-        if not isinstance(decoded, dict):
-            non_objects += 1
-        with pytest.raises(catalog.CatalogError) as excinfo:
-            catalog.load_snapshot(row["json_text"])
-        assert excinfo.value.code == INVALID_SNAPSHOT, row["id"]
-    assert non_objects, "the raw table must carry non-object roots"
-    for text in ("null", "[]", "true", "42", "1.5", '"x"',
-                 "-9007199254740991", "{}", '{"A":1,"a":2}'):
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        catalog.load_snapshot('{"schema_version": 2,')
+    assert excinfo.value.code == INVALID_JSON
+    # A lexically valid non-object root reaches (and fails) the structural
+    # layer, so no raw fault can mask it.
+    for text in ("null", "[]", "true", "42", "1.5", '"x"', "{}"):
         _assert_rejected(catalog.load_json(text), INVALID_SNAPSHOT, text)
+
+
+def test_canonical_snapshot_rows_carry_their_declared_body_seal():
+    """Seal precondition for the canonical table's snapshot rows: every row
+    except the intentional tamper is otherwise VALID, so a rejection there is
+    attributable to the strict-token rule and not to a stale fixture seal. The
+    rejection envelopes themselves stay parity's two-engine payload oracle."""
+    rows = _decode_doc(FIXTURE_DIR / "canonical-cases.json")["snapshot_cases"]
+    assert rows
+    for row in rows:
+        cid = row["id"]
+        decoded = json.loads(row["json_text"])
+        body = {k: v for k, v in decoded.items() if k != "snapshot_id"}
+        seal = hashlib.sha256(_canonical_text(body)).hexdigest()
+        if cid == "snap_case_hash_tamper":
+            assert decoded["snapshot_id"] != seal, cid
+        else:
+            assert decoded["snapshot_id"] == seal, cid
 
 
 def test_structural_precedence_matrix_on_native_values():
@@ -611,16 +293,16 @@ def test_structural_precedence_matrix_on_native_values():
         _assert_rejected(_mutate(base, ("schema_version",), value),
                          INVALID_SNAPSHOT, f"version type {value!r}")
 
-    # (d) A well-typed integer version != 1 is unsupported_schema_version EVEN
+    # (d) A well-typed integer version != 2 is unsupported_schema_version EVEN
     #     with a malformed body and a wrong hash: the value check precedes
-    #     every v1 body check and the hash.
-    for value in (2, 0, -1, catalog.MAX_SAFE_INT):
+    #     every v2 body check and the hash.
+    for value in (3, 1, 0, -1, catalog.MAX_SAFE_INT):
         snap = _mutate(base, ("schema_version",), value)
         snap["providers"] = []
         snap["snapshot_id"] = "0" * 64
         _assert_rejected(snap, UNSUPPORTED_SCHEMA_VERSION, f"version {value}")
 
-    # (e) Version 1: a malformed body, a wrong 64-hex hash and a malformed hash
+    # (e) Version 2: a malformed body, a wrong 64-hex hash and a malformed hash
     #     are each invalid_snapshot.
     _assert_rejected(_mutate(base, ("providers",), []),
                      INVALID_SNAPSHOT, "malformed body")
@@ -644,7 +326,6 @@ def test_structural_native_body_guards_reject_without_incidental_errors():
         (("providers", "synthetic-a"), "oops"),
         ((model[0], model[1], "models"), []),
         (model + ("architecture",), []),
-        (model + ("pricing",), []),
         (("warnings",), {}),
         (("providers",), {1: {}}),
         (("providers", "synthetic-a", "models"), {7: {}}),
@@ -659,9 +340,6 @@ def test_structural_native_body_guards_reject_without_incidental_errors():
         (model + ("context_length",), float("nan")),
         (model + ("context_length",), catalog.MAX_SAFE_INT + 1),
         (model + ("context_length",), True),
-        (model + ("pricing", "prompt"), float("nan")),
-        (model + ("pricing", "prompt"), float("inf")),
-        (model + ("pricing", "prompt"), catalog.MAX_SAFE_INT + 1),
     )
     for path, value in cases:
         snap = _mutate(base, path, value)
@@ -748,83 +426,22 @@ def test_structural_wiring_is_syntactic_and_preserved_verbatim():
         _assert_rejected(snap, INVALID_SNAPSHOT, f"wiring {url!r}")
 
 
-def test_structural_pricing_literals_are_validated_but_never_normalized():
+def test_snapshot_hash_excludes_only_the_root_id_and_rejects_non_mappings():
+    """`snapshot_hash` excludes exactly the ROOT ``snapshot_id``: a nested one
+    is ordinary content and stays bound into the digest. The digest vectors
+    themselves are executed by ``tests/test_contract_parity.py``."""
     catalog = _catalog
-    base = _decode_doc(FIXTURE_DIR / "lookup.json")
-    path = ("providers", "synthetic-a", "models", "vendor/shared", "pricing")
-    accepted = (
-        None,
-        {"prompt": 0.5, "completion": None},
-        {"prompt": "0.001", "completion": "1e-5"},
-        {"prompt": " 1.5 ", "completion": "1_000"},
-        {"prompt": "-0", "completion": "+1.5"},
-        {"prompt": "١٢٣", "completion": "１２３"},
-        {"prompt": 9007199254740991, "completion": "9007199254740992"},
-        {"prompt": 1.0, "completion": -0.0},
-    )
-    for pricing in accepted:
-        snap = _mutate(base, path, pricing)
-        _reseal(snap)
-        assert catalog.validate_snapshot(snap) is snap, pricing
-        stored = snap["providers"]["synthetic-a"]["models"]["vendor/shared"][
-            "pricing"]
-        assert stored == pricing, pricing
-        if pricing is not None:
-            for key in ("prompt", "completion"):
-                assert type(stored[key]) is type(pricing[key]), pricing
-                assert repr(stored[key]) == repr(pricing[key]), pricing
-    rejected = (
-        {"prompt": True, "completion": "0"},
-        {"prompt": "abc", "completion": "0"},
-        {"prompt": "nan", "completion": "0"},
-        {"prompt": "inf", "completion": "0"},
-        {"prompt": "1e400", "completion": "0"},
-        {"prompt": float("nan"), "completion": "0"},
-        {"prompt": float("inf"), "completion": "0"},
-        {"prompt": [], "completion": "0"},
-        {"prompt": {"a": 1}, "completion": "0"},
-        {"prompt": "0"},
-        {"prompt": "0", "completion": "0", "extra": "x"},
-        "free",
-        0,
-    )
-    for pricing in rejected:
-        snap = _mutate(base, path, pricing)
-        _reseal(snap)
-        _assert_rejected(snap, INVALID_SNAPSHOT, f"pricing {pricing!r}")
-
-
-def test_snapshot_hash_matches_literal_vectors_and_retains_nested_ids(
-        canonical_table):
-    catalog = _catalog
-    vectors = {row["id"]: row for row in canonical_table["canonical_vectors"]}
-    snapshot_scoped = [row for row in canonical_table["canonical_vectors"]
-                       if row["scope"] == "snapshot"]
-    assert len(snapshot_scoped) == 2
-    for row in snapshot_scoped:
-        doc = catalog.load_json(row["json_text"])
-        body = {k: v for k, v in doc.items() if k != "snapshot_id"}
-        assert '"snapshot_id"' not in row["canonical_text"], row["id"]
-        assert catalog.snapshot_hash(doc) == row["sha256"], row["id"]
-        assert catalog.snapshot_hash(body) == row["sha256"], row["id"]
-        assert catalog.snapshot_hash(doc) == hashlib.sha256(
-            row["canonical_text"].encode("utf-8")).hexdigest(), row["id"]
-        # Sealing then setting the root id is not circular.
-        sealed = dict(body)
-        sealed["snapshot_id"] = catalog.snapshot_hash(body)
-        assert catalog.snapshot_hash(sealed) == catalog.snapshot_hash(body)
-
-    # ONLY the root snapshot_id is excluded: a NESTED one is content and stays
-    # bound into the digest.
-    nested = catalog.load_json(vectors["vec_nested_snapshot_id"]["json_text"])
-    body = {k: v for k, v in nested.items() if k != "snapshot_id"}
-    assert body == {"inner": {"snapshot_id": "cafe"}}
+    nested = catalog.load_json(
+        '{"snapshot_id": "a", "inner": {"snapshot_id": "cafe"}}')
     assert catalog.snapshot_hash(nested) == hashlib.sha256(
         b'{"inner":{"snapshot_id":"cafe"}}').hexdigest()
-    without_nested = {"inner": {}}
     assert catalog.snapshot_hash(nested) != catalog.snapshot_hash(
-        without_nested)
-
+        {"inner": {}})
+    # Sealing then setting the root id is not circular.
+    body: dict = {"inner": {"snapshot_id": "cafe"}}
+    sealed = dict(body)
+    sealed["snapshot_id"] = catalog.snapshot_hash(body)
+    assert catalog.snapshot_hash(sealed) == catalog.snapshot_hash(body)
     # A non-dict argument is a programming error, never a public code.
     for bad in ([], "x", None, 1, b"{}"):
         with pytest.raises(TypeError):
@@ -835,69 +452,19 @@ def test_snapshot_hash_matches_literal_vectors_and_retains_nested_ids(
 #
 # `project_capabilities` (raw upstream fragment -> public capability shape +
 # warnings) and `normalize_capabilities` (valid public capability projection ->
-# query shape) are exercised against the SAME independently hand-authored
-# `metadata-normalization.json` rule table that the contract suite's fixture
-# checker pins. The literal row data is the authoritative expected value; the
-# table is loaded with a plain ``json.loads`` (NOT the strict raw loader)
-# because it deliberately carries an unsafe ``2**53`` context token, which the
-# projection must classify unknown without ever coercing it.
+# query shape) are exercised row by row against ``metadata-normalization.json``
+# in ``tests/test_contract_parity.py``. This module keeps only the native
+# semantics and the literal edges either lane can express.
 
-NORMALIZATION_TABLE_DOC = FIXTURE_DIR / "metadata-normalization.json"
-
-# The four normalized capability fields and their frozen order (unknown_fields
-# names exactly these, in exactly this order).
-CAPABILITY_FIELD_ORDER = (
-    "context_length", "input_modalities", "output_modalities",
-    "supported_parameters",
-)
-# The capability-only warning order (tick_epoch_unknown is snapshot-level and
-# never arises here).
-CAPABILITY_WARNING_ORDER = ("metadata_missing", "metadata_invalid")
 PROJECTED_CAPABILITY_FIELDS = frozenset(
     {"context_length", "architecture", "supported_parameters"})
 PROJECTED_ARCHITECTURE_FIELDS = frozenset(
     {"input_modalities", "output_modalities"})
-NORMALIZED_CAPABILITY_FIELDS = frozenset(CAPABILITY_FIELD_ORDER) | {
-    "unknown_fields"}
 
 
-@pytest.fixture(scope="module")
-def normalization_rows():
-    doc = _load_table(NORMALIZATION_TABLE_DOC)
-    return {row["id"]: row for row in doc["rows"]}
-
-
-def test_project_capabilities_matches_every_literal_table_row(
-        normalization_rows):
+def test_normalize_capabilities_accepts_a_full_model_projection():
     catalog = _catalog
-    assert len(normalization_rows) == 22, "the rule table must carry 22 rows"
-    for cid, row in normalization_rows.items():
-        raw = copy.deepcopy(row["raw"])
-        before = copy.deepcopy(raw)
-        projected, warnings = catalog.project_capabilities(raw)
-        assert set(projected) == PROJECTED_CAPABILITY_FIELDS, cid
-        assert set(projected["architecture"]) == \
-            PROJECTED_ARCHITECTURE_FIELDS, cid
-        assert projected == row["projected"], cid
-        assert warnings == row["warnings"], cid
-        assert raw == before, cid  # the raw fragment is never mutated
-
-
-def test_normalize_capabilities_matches_every_literal_table_row(
-        normalization_rows):
-    catalog = _catalog
-    assert len(normalization_rows) == 22, "the rule table must carry 22 rows"
-    for cid, row in normalization_rows.items():
-        projected = copy.deepcopy(row["projected"])
-        before = copy.deepcopy(projected)
-        normalized = catalog.normalize_capabilities(projected)
-        assert set(normalized) == NORMALIZED_CAPABILITY_FIELDS, cid
-        assert normalized == row["normalized"], cid
-        assert normalized["unknown_fields"] == [
-            field for field in CAPABILITY_FIELD_ORDER
-            if normalized[field] is None], cid
-        assert projected == before, cid  # never normalized in place
-    # A valid full public MODEL (extra identity/display/pricing members) is a
+    # A valid full public MODEL (extra identity/display members) is a
     # valid projection input and those extra members are ignored.
     model = {
         "id": "vendor/example",
@@ -907,7 +474,6 @@ def test_normalize_capabilities_matches_every_literal_table_row(
         "architecture": {"input_modalities": ["TEXT"],
                          "output_modalities": None},
         "supported_parameters": ["Temperature"],
-        "pricing": {"prompt": "0", "completion": "0"},
     }
     before = copy.deepcopy(model)
     assert catalog.normalize_capabilities(model) == {
@@ -915,7 +481,6 @@ def test_normalize_capabilities_matches_every_literal_table_row(
         "input_modalities": ["text"],
         "output_modalities": None,
         "supported_parameters": ["temperature"],
-        "unknown_fields": ["output_modalities"],
     }
     assert model == before
 
@@ -950,8 +515,8 @@ def test_capability_projection_edges_distinguish_unknown_from_malformed():
     assert projected["architecture"]["output_modalities"] == ["text"]
     assert projected["supported_parameters"] == []
     assert warnings == ["metadata_invalid"]
-    # Unknown (null) and known-empty ([]) stay distinct: only the null field is
-    # flagged unknown, and a known zero context is KNOWN.
+    # Unknown (null) and known-empty ([]) stay distinct: a null stays
+    # unknown/null, and a known zero context is KNOWN.
     normalized = catalog.normalize_capabilities(
         {"context_length": 0,
          "architecture": {"input_modalities": [],
@@ -959,7 +524,10 @@ def test_capability_projection_edges_distinguish_unknown_from_malformed():
          "supported_parameters": []})
     assert normalized["context_length"] == 0
     assert normalized["input_modalities"] == []
-    assert normalized["unknown_fields"] == ["output_modalities"]
+    assert normalized["output_modalities"] is None
+    assert set(normalized) == {
+        "context_length", "input_modalities", "output_modalities",
+        "supported_parameters"}
     # A malformed array is rejected WHOLE, never partially salvaged.
     projected, _ = project(
         {"context_length": 4096,
@@ -1031,13 +599,12 @@ def test_capability_functions_never_alias_or_mutate_their_inputs():
     projected2, warnings2 = catalog.project_capabilities(raw)
     assert projected2["architecture"]["input_modalities"] == ["temperature"]
     assert warnings2 == []
-    # Normalization returns new lists and a fresh unknown_fields each call.
+    # Normalization returns new lists; no unknown-field list is reported.
     normalized = catalog.normalize_capabilities(projected2)
     normalized["input_modalities"].append("audio")
-    normalized["unknown_fields"].append("context_length")
     again = catalog.normalize_capabilities(projected2)
     assert again["input_modalities"] == ["temperature"]
-    assert again["unknown_fields"] == []
+    assert "unknown_fields" not in again
     assert projected2["architecture"]["input_modalities"] == ["temperature"]
     assert projected2["supported_parameters"] == ["temperature"]
 
@@ -1235,18 +802,17 @@ def test_package_import_audit_is_import_order_independent(tmp_path):
 
 # ---------- full public model projection ----------
 #
-# `project_model` composes the accepted capability projection with the three
-# identity/display/pricing members into ONE complete public model object. Every
+# `project_model` composes the accepted capability projection with the two
+# identity/display members into ONE complete public model object. Every
 # expected value below is an INDEPENDENT literal restatement of the frozen
 # contract (the README projected-model field table), never derived from a
 # runtime helper.
 
 PUBLIC_MODEL_FIELDS = frozenset(
     {"id", "name", "description", "context_length", "architecture",
-     "supported_parameters", "pricing"})
+     "supported_parameters"})
 PUBLIC_ARCHITECTURE_FIELDS = frozenset(
     {"input_modalities", "output_modalities"})
-PUBLIC_PRICING_FIELDS = frozenset({"prompt", "completion"})
 
 # A complete, all-known upstream fragment used as the positive control.
 _KNOWN_FRAGMENT = {
@@ -1256,7 +822,6 @@ _KNOWN_FRAGMENT = {
     "architecture": {"input_modalities": ["text"],
                      "output_modalities": ["text"]},
     "supported_parameters": ["temperature"],
-    "pricing": {"prompt": "0", "completion": 0},
 }
 
 
@@ -1291,11 +856,10 @@ def test_project_model_identity_name_description_and_raw_degradation():
     assert model["id"] == "vendor/key"
     assert warnings == []
 
-    # (b) Always exactly the seven public fields.
+    # (b) Always exactly the six public fields.
     model, _ = project("vendor/key", _known_fragment())
     assert set(model) == PUBLIC_MODEL_FIELDS
     assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
-    assert set(model["pricing"]) == PUBLIC_PRICING_FIELDS
 
     # (c) `name`: the upstream value iff a NONEMPTY string (verbatim, including
     #     whitespace and non-ASCII); otherwise the tracked key.
@@ -1335,7 +899,6 @@ def test_project_model_identity_name_description_and_raw_degradation():
         "context_length": None,
         "architecture": {"input_modalities": None, "output_modalities": None},
         "supported_parameters": None,
-        "pricing": None,
     }
     for raw in (None, {}):
         model, warnings = project("vendor/absent", raw)
@@ -1357,107 +920,15 @@ def test_project_model_identity_name_description_and_raw_degradation():
             "architecture": {"input_modalities": None,
                              "output_modalities": None},
             "supported_parameters": None,
-            "pricing": None,
         }, raw
         assert warnings == ["metadata_invalid"], raw
 
 
-def test_project_model_pricing_projection_and_scalar_type_preservation():
-    catalog = _catalog
-    project = catalog.project_model
+def test_project_model_isolates_warnings_from_display_members():
+    project = _catalog.project_model
 
-    def pricing_of(value):
-        return project("k", _fragment(pricing=value))[0]["pricing"]
-
-    # (a) Whole-object null when pricing is unknown overall: absent, explicit
-    #     null or any non-object value.
-    assert pricing_of(None) is None
-    assert project("k", _fragment_without("pricing"))[0]["pricing"] is None
-    for wrong in ("free", 0, 0.0, True, False, [], ["0"], ("x",)):
-        assert pricing_of(wrong) is None, wrong
-
-    # (b) A present pricing OBJECT always yields EXACTLY prompt+completion, even
-    #     empty or both-null; extra upstream keys are dropped, never leaked.
-    for value, expect in (
-            ({}, {"prompt": None, "completion": None}),
-            ({"prompt": None, "completion": None},
-             {"prompt": None, "completion": None}),
-            ({"prompt": "0", "completion": "0"},
-             {"prompt": "0", "completion": "0"}),
-            ({"prompt": "0", "completion": True},
-             {"prompt": "0", "completion": None}),
-            ({"prompt": "0.5", "completion": "abc"},
-             {"prompt": "0.5", "completion": None}),
-            ({"prompt": "0", "completion": "0", "image": "0", "request": 1},
-             {"prompt": "0", "completion": "0"})):
-        got = pricing_of(value)
-        assert got == expect, value
-        assert set(got) == PUBLIC_PRICING_FIELDS, value
-
-    # (c) An invalid individual scalar degrades to null; a valid SIBLING
-    #     survives unchanged.
-    invalid = (True, False, float("nan"), float("inf"), float("-inf"),
-               9007199254740992, -9007199254740992, 9007199254740992.0,
-               "abc", "nan", "inf", "1e400", [], {}, ["0"])
-    for bad in invalid:
-        got = pricing_of({"prompt": bad, "completion": "0.5"})
-        assert got["prompt"] is None, bad
-        assert got["completion"] == "0.5", bad
-        assert type(got["completion"]) is str, bad
-
-    # (d) Valid scalars keep their ORIGINAL TYPE and spelling: int 1, float 1.0
-    #     and string "1" are three DISTINCT retained values (equality alone
-    #     cannot pin this -- assert type identity). No coercion, no zero default.
-    got = pricing_of({"prompt": 1, "completion": 1.0})
-    assert got["prompt"] == 1 and type(got["prompt"]) is int
-    assert got["completion"] == 1.0 and type(got["completion"]) is float
-    got = pricing_of({"prompt": "1", "completion": "0"})
-    assert got["prompt"] == "1" and type(got["prompt"]) is str
-    assert type(got["completion"]) is str
-    # None vs 0 vs 0.0 vs "0" stay four DISTINCT values.
-    got = pricing_of({"prompt": None, "completion": 0})
-    assert got["prompt"] is None
-    assert got["completion"] == 0 and type(got["completion"]) is int
-    got = pricing_of({"prompt": 0.0, "completion": "0"})
-    assert got["prompt"] == 0.0 and type(got["prompt"]) is float
-    assert got["completion"] == "0" and type(got["completion"]) is str
-    # Finite numeric-string spellings are kept VERBATIM (no trim, no rewrite):
-    # the permissive float-probe edge is preserved, never tightened.
-    for spelling in (" 1.5 ", "1_000", "\u0661\u0662\u0663", "-0", "+1.5",
-                     "1e-5", "0.001"):
-        got = pricing_of({"prompt": spelling, "completion": spelling})
-        assert got["prompt"] == spelling, spelling
-        assert type(got["prompt"]) is str, spelling
-    # Negative finite prices are accepted (the existing predicate, unchanged).
-    got = pricing_of({"prompt": -1.5, "completion": "-0.5"})
-    assert got["prompt"] == -1.5 and type(got["prompt"]) is float
-    assert got["completion"] == "-0.5"
-    # No free-price inference: two unknown scalars stay null, never 0.
-    assert pricing_of({"prompt": "abc", "completion": "abc"}) == {
-        "prompt": None, "completion": None}
-
-
-def test_project_model_composes_capabilities_and_isolates_warnings(
-        normalization_rows):
-    catalog = _catalog
-    project = catalog.project_model
-    assert len(normalization_rows) == 22
-
-    # (a) Every literal capability row, projected through project_model with an
-    #     explicit synthetic tracked id, reproduces its capability fragment, its
-    #     warnings and its normalized fields EXACTLY. Each row's `raw` carries
-    #     only capability members, so its warnings are the model's warnings.
-    for cid, row in normalization_rows.items():
-        model, warnings = project("synthetic/tracked-id", row["raw"])
-        assert model["context_length"] == row["projected"]["context_length"], cid
-        assert model["architecture"] == row["projected"]["architecture"], cid
-        assert model["supported_parameters"] == \
-            row["projected"]["supported_parameters"], cid
-        assert warnings == row["warnings"], cid
-        assert catalog.normalize_capabilities(model) == row["normalized"], cid
-
-    # (b) Warning isolation: with all FOUR capabilities known, a missing,
-    #     malformed or null name/description/pricing NEVER contributes a code.
+    # Warning isolation: with all FOUR capabilities known, a missing,
+    # malformed or null name/description NEVER contributes a code.
     complete = {
         "context_length": 4096,
         "architecture": {"input_modalities": ["text"],
@@ -1465,14 +936,13 @@ def test_project_model_composes_capabilities_and_isolates_warnings(
         "supported_parameters": ["temperature"],
     }
     for extra in ({}, {"name": None}, {"name": 5}, {"description": 5},
-                  {"description": None}, {"pricing": "free"},
-                  {"pricing": None}, {"pricing": {"prompt": True}},
-                  {"name": [], "description": {}, "pricing": []}):
+                  {"description": None},
+                  {"name": [], "description": {}}):
         model, warnings = project("k", dict(complete, **extra))
         assert warnings == [], extra
         assert set(model) == PUBLIC_MODEL_FIELDS, extra
 
-    # (c) Mixed missing/invalid capability data warns in the frozen order, each
+    # (b) Mixed missing/invalid capability data warns in the frozen order, each
     #     code exactly once.
     _, warnings = project("k", {
         "context_length": None,
@@ -1490,7 +960,6 @@ def test_project_model_is_pure_unaliased_and_validates_in_a_strict_snapshot():
     # (a) No aliasing: every retained container/list is a NEW object, and
     #     mutating a returned collection never touches the input or a later call.
     shared = ["temperature"]
-    pricing = {"prompt": "0", "completion": "0"}
     raw = {
         "name": "N",
         "description": "D",
@@ -1498,7 +967,6 @@ def test_project_model_is_pure_unaliased_and_validates_in_a_strict_snapshot():
         "architecture": {"input_modalities": shared,
                          "output_modalities": shared},
         "supported_parameters": shared,
-        "pricing": pricing,
         "api_key": "secret",          # ignored extras must never be serialized
         "note": "ignored",
     }
@@ -1509,29 +977,23 @@ def test_project_model_is_pure_unaliased_and_validates_in_a_strict_snapshot():
     assert model["supported_parameters"] is not shared
     assert model["architecture"]["input_modalities"] is not \
         model["architecture"]["output_modalities"]
-    assert model["pricing"] is not pricing
     # Ignored extras (including nested extras) never leak into the projection.
     assert set(model) == PUBLIC_MODEL_FIELDS
     assert set(model["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
-    assert set(model["pricing"]) == PUBLIC_PRICING_FIELDS
     # Mutate the returned collections: input and a fresh call are unaffected.
     model["architecture"]["input_modalities"].append("vision")
     model["supported_parameters"].append("seed")
-    model["pricing"]["prompt"] = "999"
     warnings.append("metadata_invalid")
     assert raw == before
     again, again_warnings = project("vendor/shared", raw)
     assert again["architecture"]["input_modalities"] == ["temperature"]
     assert again["supported_parameters"] == ["temperature"]
-    assert again["pricing"] == {"prompt": "0", "completion": "0"}
     assert again_warnings == []
-    # Nested extras on architecture/pricing are dropped, never interpreted.
+    # Nested extras on architecture are dropped, never interpreted.
     nested = project("k", _fragment(
         architecture={"input_modalities": ["text"],
-                      "output_modalities": ["text"], "extra": 1},
-        pricing={"prompt": "0", "completion": "0", "image": "0"}))[0]
+                      "output_modalities": ["text"], "extra": 1}))[0]
     assert set(nested["architecture"]) == PUBLIC_ARCHITECTURE_FIELDS
-    assert set(nested["pricing"]) == PUBLIC_PRICING_FIELDS
 
     # (b) Every projected model independently satisfies the unchanged public
     #     validator, with the exact literal field set asserted separately.
@@ -1559,15 +1021,12 @@ def test_project_model_is_pure_unaliased_and_validates_in_a_strict_snapshot():
     assert catalog.load_snapshot(json.dumps(snap)) == snap
 
 
-# ---------- pure free-marker helper: literal corpus + compatibility edges ----------
+# ---------- pure free-marker helper: compatibility edges ----------
 #
 # `watchdog_catalog.query.strip_free_marker` is the pure, stdlib-only marker
-# helper extracted from build_site. The 17 expected values below are the
-# INDEPENDENTLY authored rows of cases.json's `marker_strip_rule` table (never a
-# runtime helper or another test module); the fallback controls and compatibility
-# edges are literal characterizations of the frozen README contract.
-
-MARKER_CASES_DOC = FIXTURE_DIR / "cases.json"
+# helper extracted from build_site. The 17 `marker_strip_rule` rows are executed
+# by `tests/test_contract_parity.py`; what remains here are the literal
+# delimiter-only fallbacks and the Python-regex compatibility edges.
 
 # Delimiter-only ids (a "free" segment with its delimiter but nothing else) plus
 # the bare non-marker control. Each expected value is a literal restatement of
@@ -1600,20 +1059,12 @@ MARKER_COMPAT_EDGES = {
 }
 
 
-def test_strip_free_marker_matches_literal_corpus_and_compat_edges():
-    """The pure helper reproduces all 17 frozen marker rows unchanged and holds
-    the delimiter-only empty-result guard plus the characterized regex edges."""
+def test_strip_free_marker_holds_the_literal_fallback_and_compat_edges():
+    """The delimiter-only empty-result guard and the characterized regex edges.
+
+    The frozen marker corpus itself is executed by the parity lane."""
     from watchdog_catalog.query import strip_free_marker
 
-    rows = _load_table(MARKER_CASES_DOC)["marker_strip_rule"]
-    # Count and uniqueness are asserted so a silently dropped or duplicated row
-    # cannot shrink the loop and still pass.
-    assert len(rows) == 17, len(rows)
-    assert len({row["raw_id"] for row in rows}) == 17
-    for row in rows:
-        raw_id, stripped = row["raw_id"], row["stripped"]
-        assert strip_free_marker(raw_id) == stripped, (
-            f"marker rule mismatch for {raw_id!r}: want {stripped!r}")
     for raw_id, want in MARKER_FALLBACK_CONTROLS.items():
         assert strip_free_marker(raw_id) == want, (
             f"fallback control mismatch for {raw_id!r}: want {want!r}")
@@ -1622,31 +1073,17 @@ def test_strip_free_marker_matches_literal_corpus_and_compat_edges():
             f"compat edge mismatch for {raw_id!r}: want {want!r}")
 
 
-# ---------- pure ordering primitives: natural raw-ID + provider precedence ----------
+# ---------- pure ordering primitive: natural raw-ID order ----------
 #
-# `natural_key` / `endpoint_key` are the two pure ordering primitives of the
-# frozen README rule (README.md, "Total ordering rule" and "Natural comparator"):
-# provider precedence is the index in `provider_order`, and within one provider
-# raw IDs compare by maximal ASCII digit runs (ORIGINAL digit count, then lexical
-# ASCII digits), case-sensitive Unicode code-point text, digit runs before text,
-# empty boundary text tokens preserved and a strict prefix first.
+# `natural_key` is the pure ordering primitive of the frozen README rule
+# (README.md, "Total ordering rule" and "Natural comparator"): within one
+# provider, raw IDs compare by maximal ASCII digit runs (ORIGINAL digit count,
+# then lexical ASCII digits), case-sensitive Unicode code-point text, digit runs
+# before text, empty boundary text tokens preserved and a strict prefix first.
 #
-# Every expected order below is INDEPENDENT LITERAL data: the seven rows of
-# `ordering-cases.json` (hand-authored before any implementation) plus the literal
-# `provider_order`/golden arrays of `cases.json`. No expectation is generated by a
-# reference implementation, and `tests/test_catalog.py`'s private
-# `_natural_key_contract` is never imported.
-
-ORDERING_VECTOR_DOC = FIXTURE_DIR / "ordering-cases.json"
-
-# Literal provider precedence: the fixture's `provider_order` array. It is
-# asserted equal to the fixture field BEFORE any golden map is consulted, and the
-# golden provider arrays are then flattened in THIS order -- never by iterating
-# the golden object's own (meaningless) key order.
-PROVIDER_PRECEDENCE = ("synthetic-b", "synthetic-a", "synthetic-c")
-# The fixture's PHYSICAL provider-map insertion order: deliberately NOT the query
-# order, and used as the input order the helper has to sort.
-PROVIDER_MAP_INSERTION = ("synthetic-a", "synthetic-b", "synthetic-c")
+# The seven `ordering-cases.json` vectors are executed by
+# `tests/test_contract_parity.py`; the literal controls below pin the comparator
+# edges that table does not reach, against this runtime primitive only.
 
 # Compact literal controls for the frozen comparator edges the seven vectors do
 # not reach: the empty id, a strict prefix, several digit runs in one id, the
@@ -1660,44 +1097,32 @@ NATURAL_KEY_CONTROLS = (
 )
 
 
-def test_natural_key_matches_every_literal_ordering_vector_and_control():
-    """The natural comparator reproduces all seven frozen vector rows from their
-    literal input/expected arrays -- forward and reverse-supplied -- plus the
-    literal empty/strict-prefix/multi-run/no-trim controls, without mutating the
-    inputs and without ever raising a heterogeneous comparison TypeError."""
+def test_natural_key_matches_every_literal_ordering_control():
+    """The natural comparator holds the literal empty/strict-prefix/multi-run/
+    no-trim controls, without mutating the inputs and without ever raising a
+    heterogeneous comparison TypeError."""
     from watchdog_catalog.query import natural_key
 
-    rows = _load_table(ORDERING_VECTOR_DOC)["cases"]
-    assert len(rows) == 7, len(rows)
-    assert len({row["id"] for row in rows}) == 7
     corpus = set()
-    for row in rows:
-        cid = row["id"]
-        supplied, expected = row["input"], row["expected"]
-        assert len(supplied) == len(expected), cid
-        # Guard: every vector is a genuine SORT, never an identity order.
-        assert supplied != expected, cid
+    for supplied, expected in NATURAL_KEY_CONTROLS:
         before = copy.deepcopy(supplied)
-        assert sorted(supplied, key=natural_key) == expected, cid
-        assert supplied == before, cid  # the input list is never reordered
+        assert sorted(supplied, key=natural_key) == expected, supplied
+        assert supplied == before, supplied  # the input list is never reordered
         # Reverse-supplied control: the same literal expectation still holds.
-        assert sorted(list(reversed(supplied)), key=natural_key) == expected, cid
+        assert sorted(list(reversed(supplied)), key=natural_key) == expected, \
+            supplied
         corpus.update(supplied)
         corpus.update(expected)
-
-    for supplied, expected in NATURAL_KEY_CONTROLS:
-        assert sorted(supplied, key=natural_key) == expected, supplied
-        corpus.update(supplied)
 
     # The frozen snapshot order is the OPPOSITE literal code-point order for the
     # divergence row: item02 precedes item1 there and follows it naturally.
     assert sorted(["vendor/item02", "vendor/item1"]) == \
         ["vendor/item02", "vendor/item1"]
 
-    # Cross-vector comparability sweep: every key in the corpus compares with
+    # Cross-control comparability sweep: every key in the corpus compares with
     # every other (no heterogeneous TypeError), equal strings give equal keys and
     # the key order is one consistent total order over the whole corpus.
-    assert len(corpus) >= 20, len(corpus)
+    assert len(corpus) >= 10, len(corpus)
     ordered = sorted(corpus, key=natural_key)
     assert [natural_key(raw_id) for raw_id in ordered] == \
         sorted(natural_key(raw_id) for raw_id in corpus)
@@ -1706,261 +1131,6 @@ def test_natural_key_matches_every_literal_ordering_vector_and_control():
     assert natural_key("") == natural_key("")
     assert natural_key("vendor/item1") == natural_key("vendor/item1")
 
-
-def test_endpoint_key_orders_by_provider_precedence_then_natural_raw_id():
-    """`endpoint_key` ranks by the caller's `provider_order` index and then by the
-    natural raw-ID order: all ten pairs of the ordering fixture reproduce the
-    literal golden arrays from physical (wrong-order) input, forward and
-    reversed; a shared raw ID stays two pairs; the zero-id provider is tolerated;
-    and the snapshot data is never reordered."""
-    from watchdog_catalog.query import endpoint_key
-
-    ordering = _decode_doc(FIXTURE_DIR / "ordering.json")
-    cases = {row["id"]: row for row in _load_table(MARKER_CASES_DOC)["cases"]}
-
-    def pair_key(pair):
-        return endpoint_key(ordering["provider_order"], pair[0], pair[1])
-
-    # (a) Declared precedence is the literal array, the physical provider-map
-    #     insertion order is a DIFFERENT order, and precedence is the supplied
-    #     index -- reversing that list reverses provider precedence.
-    assert ordering["provider_order"] == list(PROVIDER_PRECEDENCE)
-    assert list(ordering["providers"]) == list(PROVIDER_MAP_INSERTION)
-    assert list(ordering["providers"]) != list(PROVIDER_PRECEDENCE)
-    flipped = ["synthetic-c", "synthetic-a", "synthetic-b"]
-    assert endpoint_key(flipped, "synthetic-a", "vendor/item2") < \
-        endpoint_key(flipped, "synthetic-b", "vendor/item2")
-
-    golden = cases["list_free_ordering_all"]["expect"]["providers"]
-    assert set(golden) == set(PROVIDER_PRECEDENCE)
-    expected_pairs = [(provider, raw_id)
-                      for provider in PROVIDER_PRECEDENCE
-                      for raw_id in golden[provider]]
-    assert len(expected_pairs) == 10, len(expected_pairs)
-    assert len(set(expected_pairs)) == 10
-
-    # (b) Snapshot model_ids stay in literal code-point order while the query
-    #     order genuinely differs.
-    for provider in PROVIDER_PRECEDENCE:
-        ids = ordering["providers"][provider]["model_ids"]
-        assert ids == sorted(ids), provider
-    snapshot_b = ordering["providers"]["synthetic-b"]["model_ids"]
-    natural_b = golden["synthetic-b"]
-    assert snapshot_b.index("vendor/item02") < snapshot_b.index("vendor/item1")
-    assert natural_b.index("vendor/item02") > natural_b.index("vendor/item1")
-
-    # (c) Input pairs come from the ACTUAL physical snapshot order (provider-map
-    #     insertion order, stored lexical model_ids), which is NOT the expected
-    #     order; sorting with the helper -- forward and reversed -- reproduces the
-    #     literal golden arrays, and nothing in the snapshot is touched.
-    physical_pairs = [(provider, raw_id)
-                      for provider in ordering["providers"]
-                      for raw_id in ordering["providers"][provider]["model_ids"]]
-    assert len(physical_pairs) == 10
-    assert physical_pairs == [(provider, raw_id)
-                              for provider in PROVIDER_MAP_INSERTION
-                              for raw_id in ordering["providers"][provider]["model_ids"]]
-    assert physical_pairs != expected_pairs  # guard: the input is unsorted
-    providers_before = copy.deepcopy(ordering["providers"])
-    order_before = copy.deepcopy(ordering["provider_order"])
-    assert sorted(physical_pairs, key=pair_key) == expected_pairs
-    assert sorted(list(reversed(physical_pairs)), key=pair_key) == expected_pairs
-    assert ordering["providers"] == providers_before
-    assert ordering["provider_order"] == order_before
-    # Provider precedence is NOT alphabetic key order: the sorted provider
-    # sequence is b...b, a, where the alphabetical one would be a, b, c.
-    assert [pair[0] for pair in sorted(physical_pairs, key=pair_key)] != \
-        sorted(pair[0] for pair in physical_pairs)
-    # Within-provider natural order for the whole nine-id provider.
-    assert sorted([("synthetic-b", raw_id) for raw_id in snapshot_b],
-                  key=pair_key) == [("synthetic-b", raw_id)
-                                    for raw_id in natural_b]
-
-    # (d) A raw id shared by two providers stays TWO sortable pairs (never
-    #     deduped) and orders by provider precedence; the get_model golden's
-    #     literal endpoint order is the control.
-    shared = cases[
-        "get_model_ordering_identical_raw_id_provider_precedence"]["expect"]
-    assert shared["exact_gateways"] == ["synthetic-b", "synthetic-a"]
-    assert [endpoint["provider"] for endpoint in shared["endpoints"]] == \
-        ["synthetic-b", "synthetic-a"]
-    sorted_shared = sorted(
-        [("synthetic-a", "vendor/item2"), ("synthetic-b", "vendor/item2")],
-        key=pair_key)
-    assert sorted_shared == [("synthetic-b", "vendor/item2"),
-                             ("synthetic-a", "vendor/item2")]
-    assert [pair[0] for pair in sorted_shared] == \
-        [endpoint["provider"] for endpoint in shared["endpoints"]]
-    assert len(sorted_shared) == 2 and len(set(sorted_shared)) == 2
-    assert pair_key(sorted_shared[0]) != pair_key(sorted_shared[1])
-
-    # (e) The existing search page is the provider's natural order seen through a
-    #     TEST-ONLY offset/limit slice: query filtering and pagination runtime is
-    #     deferred, so no query algorithm is implemented here.
-    page = cases["search_ordering_provider_b_natural_page"]["expect"]
-    assert (page["offset"], page["limit"]) == (1, 2)
-    assert [(endpoint["provider"], endpoint["model_id"])
-            for endpoint in page["endpoints"]] == \
-        [("synthetic-b", "vendor/item2"), ("synthetic-b", "vendor/item02")]
-    b_pairs = sorted([("synthetic-b", raw_id) for raw_id in snapshot_b],
-                     key=pair_key)
-    assert b_pairs[page["offset"]:page["offset"] + page["limit"]] == \
-        [(endpoint["provider"], endpoint["model_id"])
-         for endpoint in page["endpoints"]]
-
-    # (f) The zero-id provider contributes no pair, its rank is still tolerated
-    #     and sorts last; identical pairs give equal keys and a stable sort keeps
-    #     the original references.
-    assert golden["synthetic-c"] == []
-    assert ordering["providers"]["synthetic-c"]["model_ids"] == []
-    assert pair_key(("synthetic-b", "vendor/item1")) < \
-        pair_key(("synthetic-c", "vendor/absent"))
-    assert pair_key(("synthetic-a", "vendor/item2")) < \
-        pair_key(("synthetic-c", "vendor/absent"))
-    duplicates = [{"provider": "synthetic-b", "model_id": "vendor/item1"},
-                  {"provider": "synthetic-b", "model_id": "vendor/item1"}]
-
-    def record_key(record):
-        return endpoint_key(ordering["provider_order"], record["provider"],
-                            record["model_id"])
-
-    assert record_key(duplicates[0]) == record_key(duplicates[1])
-    stable = sorted(duplicates, key=record_key)
-    assert stable[0] is duplicates[0] and stable[1] is duplicates[1]
-
-
-# ---------- pure list_free_models: bulk/single success goldens ----------
-#
-# `watchdog_catalog.query.list_free_models(snapshot, arguments)` is the pure
-# core of the frozen BULK `list_free_models` tool. It takes an already-VALIDATED
-# public snapshot (the load_snapshot / source boundary owns validation -- this
-# core performs no re-hash, no I/O and no clock) plus the whole DECODED argument
-# object, and returns either the frozen success payload or the shared
-# argument-error envelope. It never raises into the semantic caller for a
-# malformed argument and never mutates its inputs.
-#
-# Every expected payload below is the INDEPENDENTLY authored `cases.json` golden
-# for the `list_free_models` tool (hand-written from the contract, never from an
-# implementation), and the two exact top-level field sets are the frozen README
-# tables (README.md, "Success envelope -- list_free_models").
-
-LIST_FREE_CASES_DOC = FIXTURE_DIR / "cases.json"
-
-# The two DIFFERENT exact top-level field sets, one per variant.
-LIST_FREE_ALL_FIELDS = frozenset({
-    "ok", "providers", "models", "counts", "total_ids", "n_gateways",
-    "snapshot_id", "tick_epoch", "provider_staleness"})
-LIST_FREE_ONE_FIELDS = frozenset({
-    "ok", "provider", "model_ids", "models", "count", "snapshot_id",
-    "tick_epoch", "provider_staleness"})
-
-
-def _list_free_cases(doc):
-    return [case for case in doc["cases"] if case["tool"] == "list_free_models"]
-
-
-def _validated_snapshot(name):
-    """The load_snapshot-validated precondition snapshot for a fixture name."""
-    text = (FIXTURE_DIR / name).read_text(encoding="utf-8")
-    return _catalog.load_snapshot(text)
-
-
-def test_list_free_models_success_goldens_match_every_literal_case():
-    """All five frozen `list_free_models` goldens reproduce EXACTLY -- deep
-    semantic equality plus the exact top-level field set per variant -- with
-    strict scalar types, omission/null equivalence on one shared fixture, the
-    registered zero-ID success and a compact empty-registry control."""
-    from watchdog_catalog.query import list_free_models
-
-    doc = _decode_doc(LIST_FREE_CASES_DOC)
-    cases = _list_free_cases(doc)
-    # Count and id uniqueness are asserted so a dropped or duplicated golden
-    # cannot shrink the loop and still pass.
-    assert len(cases) == 5, len(cases)
-    assert len({case["id"] for case in cases}) == 5
-    all_provider = 0
-    one_provider = 0
-    for case in cases:
-        cid = case["id"]
-        # Per-case fixture override; NEVER a wrong-fixture fallback.
-        fixture = case.get("fixture", doc["fixture"])
-        snapshot = _validated_snapshot(fixture)
-        before = copy.deepcopy(snapshot)
-        result = list_free_models(snapshot, case["args"])
-        expect = case["expect"]
-        # Deep semantic equality AND the exact top-level field set.
-        assert result == expect, cid
-        assert set(result) == set(expect), cid
-        if "providers" in expect:
-            all_provider += 1
-            assert set(result) == LIST_FREE_ALL_FIELDS, cid
-            assert "provider" not in result and "model_ids" not in result, cid
-        else:
-            one_provider += 1
-            assert set(result) == LIST_FREE_ONE_FIELDS, cid
-            for leaked in ("providers", "counts", "total_ids", "n_gateways"):
-                assert leaked not in result, (cid, leaked)
-        # Strict scalar types: ok is exactly True; every count is a strict
-        # non-negative int (a bool is never a count); every stale flag a bool.
-        assert result["ok"] is True, cid
-        assert type(result["snapshot_id"]) is str, cid
-        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
-        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
-        for flag in result["provider_staleness"].values():
-            assert type(flag) is bool, cid
-        if "count" in result:
-            assert type(result["count"]) is int, cid
-            assert result["count"] >= 0, cid
-        for value in result.get("counts", {}).values():
-            assert type(value) is int, cid
-            assert value >= 0, cid
-        for key in ("total_ids", "n_gateways"):
-            if key in result:
-                assert type(result[key]) is int, cid
-        assert snapshot == before, cid  # never mutated
-    # Two all-provider goldens and three one-provider goldens, every one seen.
-    assert (all_provider, one_provider) == (2, 3), (all_provider, one_provider)
-
-    # Omission (`{}`) and explicit `{"provider": None}` are the SAME all-provider
-    # export, asserted on ONE shared fixture (the two goldens above use
-    # different fixtures, so this equivalence needs its own control).
-    lookup = _validated_snapshot("lookup.json")
-    omitted = list_free_models(lookup, {})
-    null = list_free_models(lookup, {"provider": None})
-    assert omitted == null
-    assert set(omitted) == LIST_FREE_ALL_FIELDS
-
-    # A registered zero-ID provider is a success with empty containers.
-    zero = list_free_models(lookup, {"provider": "synthetic-c"})
-    assert zero["model_ids"] == [] and zero["models"] == {} and zero["count"] == 0
-    assert zero["provider_staleness"] == {"synthetic-c": False}
-
-    # A legitimately EMPTY registry is a valid all-provider control, built from
-    # an existing valid fixture and resealed with the test-local json/hashlib
-    # oracle, then re-validated before the query.
-    empty = _decode_doc(FIXTURE_DIR / "lookup.json")
-    empty["provider_order"] = []
-    empty["providers"] = {}
-    _reseal(empty)
-    assert _catalog.validate_snapshot(empty) is empty
-    whole = list_free_models(empty, {})
-    assert set(whole) == LIST_FREE_ALL_FIELDS
-    assert whole["providers"] == {} and whole["models"] == {}
-    assert whole["counts"] == {} and whole["provider_staleness"] == {}
-    assert whole["total_ids"] == 0 and whole["n_gateways"] == 0
-    assert whole["ok"] is True
-
-
-# ---------- pure list_free_models: the provider argument boundary ----------
-#
-# The four `list_free_models` invalid rows of `argument-cases.json` carry the
-# COMPLETE literal semantic envelope; the three valid controls record
-# acceptance only. The programmatic rows below are compact literal restatements
-# of the frozen README rules (object -> unknown-key -> provider type ->
-# provider membership), including the unknown-key precedence that makes
-# `parameter` null even when the provider itself would also be wrong.
-
-LIST_FREE_ARG_DOC = FIXTURE_DIR / "argument-cases.json"
 
 INVALID_ARGUMENTS = "invalid_arguments"
 INVALID_ARGUMENTS_MESSAGE = "Invalid tool arguments."
@@ -1989,925 +1159,210 @@ def _assert_argument_envelope(result, code, parameter, cid):
     return result
 
 
-def test_list_free_models_argument_boundary_matches_literal_rows_and_rules():
-    """The four frozen invalid rows and three valid controls reproduce their
-    literal classification, and the compact programmatic rows pin the frozen
-    object -> unknown-key -> provider type -> membership precedence, the
-    no-coercion provider rules and the fresh non-reflecting envelope."""
-    from watchdog_catalog.query import list_free_models
+def _validated_snapshot(name):
+    """The load_snapshot-validated precondition snapshot for a fixture name."""
+    text = (FIXTURE_DIR / name).read_text(encoding="utf-8")
+    return _catalog.load_snapshot(text)
 
-    doc = _decode_doc(LIST_FREE_ARG_DOC)
-    invalid = [row for row in doc["invalid_cases"]
-               if row["tool"] == "list_free_models"]
-    valid = [row for row in doc["valid_controls"]
-             if row["tool"] == "list_free_models"]
-    assert len(invalid) == 4, [row["id"] for row in invalid]
-    assert {row["id"] for row in invalid} == {
-        "unknown_arg_list_free_models", "unknown_provider_list_free_models",
-        "provider_wrong_type", "provider_wrong_case"}
-    assert len(valid) == 3, [row["id"] for row in valid]
 
-    for row in invalid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        args = copy.deepcopy(row["args"])
-        before = copy.deepcopy(args)
-        result = list_free_models(snapshot, args)
-        # The literal, independently-authored envelope is reproduced exactly.
-        assert result == row["expect"], cid
-        assert args == before, cid  # the argument object is never mutated
-        error = result["error"]
-        assert result["ok"] is False, cid
-        assert set(result) == {"ok", "error"}, cid
-        assert set(error) == {"code", "message", "parameter"}, cid
-        # No hostile key/value reflection and no extra provenance field.
-        for hostile in ("tool", "state_root", "source", "path", "cache",
-                        "snapshot_id", "count", "partial", "staleness"):
-            assert hostile not in result and hostile not in error, (cid, hostile)
-        assert error["code"] in ARGUMENT_MESSAGES, cid
+# ---------- pure get_model: exact provider + literal raw id ----------
+#
+# `watchdog_catalog.query.get_model(snapshot, arguments)` is the pure core of
+# the `get_model` tool. It takes an already-VALIDATED public snapshot plus the
+# whole DECODED argument object and returns either the flat success payload or
+# a frozen error envelope. The `cases.json` / `argument-cases.json` rows are
+# executed by `tests/test_contract_parity.py`; the owners here pin the exact
+# pair identity, the details projection, the not_found envelope, the argument
+# boundary and output freshness.
 
-    # The three valid controls are ACCEPTED (ok True); the complete success
-    # oracles are the five independent goldens above, so this pins acceptance.
-    for row in valid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        result = list_free_models(snapshot, copy.deepcopy(row["args"]))
-        assert result["ok"] is True, cid
+# The exact top-level field set of the `get_model` success payload and of its
+# single details endpoint.
+GET_MODEL_FIELDS = frozenset({
+    "ok", "snapshot_id", "tick_epoch", "provider_staleness", "endpoint"})
+GET_MODEL_ENDPOINT_FIELDS = frozenset({
+    "provider", "model_id", "name", "description", "context_length",
+    "input_modalities", "output_modalities", "supported_parameters",
+    "chat_completions_url", "api_type"})
+NOT_FOUND = {"ok": False,
+             "error": {"code": "not_found", "message": "Model not found."}}
 
-    # A whole argument object that is not a JSON object is invalid_arguments/
-    # null -- None, a list, a number, a string, a bool, a tuple and bytes.
+
+def test_get_model_exact_pair_projects_flat_details():
+    """One exact (provider, raw id) pair returns that pair's flat details, and
+    staleness is scoped to the requested provider only."""
+    from watchdog_catalog.query import get_model
+
     lookup = _validated_snapshot("lookup.json")
+    before = copy.deepcopy(lookup)
+    result = get_model(lookup, {"provider": "synthetic-a",
+                                "model_id": "vendor/model:free"})
+    assert set(result) == GET_MODEL_FIELDS
+    assert result["ok"] is True
+    assert result["snapshot_id"] == lookup["snapshot_id"]
+    assert result["tick_epoch"] == lookup["tick_epoch"]
+    assert result["provider_staleness"] == {"synthetic-a": False}
+    endpoint = result["endpoint"]
+    assert set(endpoint) == GET_MODEL_ENDPOINT_FIELDS
+    assert endpoint == {
+        "provider": "synthetic-a",
+        "model_id": "vendor/model:free",
+        "name": "Vendor Model",
+        "description": (
+            "Oracle case 1 alpha endpoint: sufficient context, image input."),
+        "context_length": 131072,
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"],
+        "supported_parameters": ["temperature", "max_tokens"],
+        "chat_completions_url": (
+            "https://synthetic-alpha.example/v1/chat/completions"),
+        "api_type": "openai",
+    }
+    assert lookup == before
+
+    # A raw id tracked by two providers is TWO endpoint identities: each call
+    # selects exactly one provider and returns that pair's OWN metadata.
+    alpha = get_model(lookup, {"provider": "synthetic-a",
+                               "model_id": "vendor/shared"})
+    beta = get_model(lookup, {"provider": "synthetic-b",
+                              "model_id": "vendor/shared"})
+    assert alpha["endpoint"]["context_length"] == 131072
+    assert alpha["endpoint"]["input_modalities"] == ["text"]
+    assert alpha["endpoint"]["supported_parameters"] == [
+        "temperature", "max_tokens"]
+    assert beta["endpoint"]["context_length"] == 32768
+    assert beta["endpoint"]["input_modalities"] == ["text", "image"]
+    assert beta["endpoint"]["supported_parameters"] == [
+        "temperature", "top_p"]
+    assert alpha["provider_staleness"] == {"synthetic-a": False}
+    assert beta["provider_staleness"] == {"synthetic-b": False}
+    assert alpha["endpoint"]["model_id"] == beta["endpoint"]["model_id"]
+
+
+def test_get_model_literal_id_and_not_found_envelope():
+    """The id is literal and single-provider: no trimming, ASCII folding,
+    marker stripping or cross-provider lookup. An absent exact id in a known
+    provider is the fixed, non-reflecting not_found envelope."""
+    from watchdog_catalog.query import get_model
+
+    lookup = _validated_snapshot("lookup.json")
+    # `vendor/model` is NOT the marker-stripped form of `vendor/model:free`;
+    # the :free id exists only on synthetic-a, so a padded/cased/sibling id
+    # stays a literal miss.
+    for model_id in ("vendor/model", "vendor/model-free", "VENDOR/SHARED",
+                     " vendor/shared", "vendor/shared ",
+                     "vendor/does-not-exist", "\u00a0", "\u2003"):
+        result = get_model(lookup, {"provider": "synthetic-a",
+                                    "model_id": model_id})
+        assert result == NOT_FOUND, repr(model_id)
+        assert set(result["error"]) == {"code", "message"}, repr(model_id)
+
+    # A registered zero-ID provider is a KNOWN provider: every id is absent.
+    assert get_model(lookup, {"provider": "synthetic-c",
+                              "model_id": "vendor/shared"}) == NOT_FOUND
+
+
+def test_get_model_argument_boundary_rules():
+    """Frozen order: object, unknown key, provider presence/type, provider
+    membership, then model_id presence/type/ASCII blankness."""
+    from watchdog_catalog.query import get_model
+
+    lookup = _validated_snapshot("lookup.json")
+
     for args in (None, [], 5, "x", False, 1.0, (), b"{}"):
-        _assert_argument_envelope(list_free_models(lookup, args),
+        _assert_argument_envelope(get_model(lookup, args),
                                   INVALID_ARGUMENTS, None, repr(args))
 
-    # A non-null provider of the wrong type (bool/int/float/list/dict) is
-    # invalid_arguments(provider); empty/padded/wrong-case/absent strings are
-    # unknown_provider(provider) -- never coerced, trimmed or case-repaired.
-    for bad in (True, False, 5, 1.5, [], ["synthetic-a"], {}, {"a": 1}):
-        _assert_argument_envelope(list_free_models(lookup, {"provider": bad}),
-                                  INVALID_ARGUMENTS, "provider", repr(bad))
+    # ANY unknown key rejects with parameter null before every other check.
+    for args in ({"bogus": 1},
+                 {"provider": "synthetic-a", "bogus": 1},
+                 {"provider": "synthetic-a", "model_id": "vendor/shared",
+                  "limit": 5},
+                 {"provider": "synthetic-z", "bogus": 1}):
+        _assert_argument_envelope(get_model(lookup, dict(args)),
+                                  INVALID_ARGUMENTS, None, repr(args))
+
+    # provider: missing or wrong-typed is invalid_arguments(provider); an
+    # absent string -- empty, padded, cased or unknown -- is unknown_provider.
+    _assert_argument_envelope(get_model(lookup, {"model_id": "vendor/shared"}),
+                              INVALID_ARGUMENTS, "provider", "missing")
+    for bad in (None, True, False, 5, 1.5, [], ["synthetic-a"], {}, b"synthetic-a"):
+        _assert_argument_envelope(
+            get_model(lookup, {"provider": bad,
+                               "model_id": "vendor/shared"}),
+            INVALID_ARGUMENTS, "provider", repr(bad))
     for bad in ("", " synthetic-a ", "synthetic-a ", " synthetic-a",
                 "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"):
-        _assert_argument_envelope(list_free_models(lookup, {"provider": bad}),
-                                  UNKNOWN_PROVIDER, "provider", bad)
+        _assert_argument_envelope(
+            get_model(lookup, {"provider": bad, "model_id": "vendor/shared"}),
+            UNKNOWN_PROVIDER, "provider", repr(bad))
 
-    # Unknown-key precedence: ANY unknown key rejects with parameter null BEFORE
-    # the provider type or membership check, so an unknown key combined with a
-    # wrong-typed provider AND with an unknown provider both yield null.
+    # provider membership precedes the model_id check: an unknown provider
+    # rejects even when model_id is missing or blank.
+    _assert_argument_envelope(get_model(lookup, {"provider": "synthetic-z"}),
+                              UNKNOWN_PROVIDER, "provider", "unknown first")
     _assert_argument_envelope(
-        list_free_models(lookup, {"provider": 5, "bogus": 1}),
-        INVALID_ARGUMENTS, None, "unknown-key before provider type")
+        get_model(lookup, {"provider": "synthetic-z", "model_id": ""}),
+        UNKNOWN_PROVIDER, "provider", "unknown before blank")
+
+    # model_id: missing/wrong-typed is invalid_arguments(model_id).
     _assert_argument_envelope(
-        list_free_models(lookup, {"provider": "synthetic-z", "bogus": 1}),
-        INVALID_ARGUMENTS, None, "unknown-key before provider membership")
-    _assert_argument_envelope(
-        list_free_models(lookup, {"bogus": 1}),
-        INVALID_ARGUMENTS, None, "unknown-key alone")
-    _assert_argument_envelope(
-        list_free_models(lookup, {"provider": "synthetic-a", "bogus": 1}),
-        INVALID_ARGUMENTS, None, "unknown-key with a valid provider")
-
-    # `{}` and `{"provider": None}` are accepted, and the error envelope is a
-    # FRESH object on every call (never a shared module-level constant).
-    assert list_free_models(lookup, {})["ok"] is True
-    assert list_free_models(lookup, {"provider": None})["ok"] is True
-    first = list_free_models(lookup, {"provider": "synthetic-z"})
-    first["error"]["code"] = "mutated"
-    first["ok"] = True
-    second = list_free_models(lookup, {"provider": "synthetic-z"})
-    assert second == _argument_envelope(UNKNOWN_PROVIDER, "provider")
-    assert second is not first
-
-
-# ---------- pure list_free_models: freshness + deep output isolation ----------
-#
-# A public output is never a window onto the cached snapshot: every container,
-# array and selected projected model object (with its nested architecture /
-# parameter / pricing containers) is freshly allocated, so a caller mutating a
-# returned payload can never corrupt the snapshot or another call.
-
-def test_list_free_models_outputs_are_fresh_and_deeply_isolated():
-    from watchdog_catalog.query import list_free_models
-
-    lookup = _validated_snapshot("lookup.json")
-    before = copy.deepcopy(lookup)
-
-    # (a) All-provider form: fresh containers/arrays, and each selected model
-    #     object and its nested containers unaliased to the snapshot and to a
-    #     second call.
-    whole = list_free_models(lookup, {})
-    again = list_free_models(lookup, {})
-    assert lookup == before
-    assert whole == again
-    assert whole["providers"] is not lookup["providers"]
-    assert whole["models"] is not lookup["providers"]
-    assert whole["counts"] is not lookup["providers"]
-    assert whole["provider_staleness"] is not lookup["providers"]
-    for provider, ids in whole["providers"].items():
-        source = lookup["providers"][provider]
-        assert ids is not source["model_ids"], provider
-        assert whole["models"][provider] is not source["models"], provider
-        assert whole["counts"][provider] == len(source["model_ids"]), provider
-        for raw_id in source["model_ids"]:
-            got = whole["models"][provider][raw_id]
-            src = source["models"][raw_id]
-            assert got is not src, (provider, raw_id)
-            assert got["architecture"] is not src["architecture"], raw_id
-            assert got["supported_parameters"] is not src["supported_parameters"]
-            assert got["pricing"] is not src["pricing"]
-            assert again["models"][provider][raw_id] is not got, raw_id
-
-    # Mutating the returned payload leaves the snapshot, the earlier result and
-    # a brand-new call all unchanged.
-    shared = whole["models"]["synthetic-a"]["vendor/shared"]
-    shared["architecture"]["input_modalities"].append("vision")
-    shared["supported_parameters"].append("seed")
-    shared["pricing"]["prompt"] = "999"
-    whole["providers"]["synthetic-a"].append("injected")
-    whole["counts"]["synthetic-a"] = 99
-    whole["provider_staleness"]["synthetic-a"] = True
-    assert lookup == before
-    assert again["models"]["synthetic-a"]["vendor/shared"][
-        "architecture"]["input_modalities"] == ["text"]
-    assert again["models"]["synthetic-a"]["vendor/shared"][
-        "supported_parameters"] == ["temperature", "max_tokens"]
-    assert again["models"]["synthetic-a"]["vendor/shared"][
-        "pricing"] == {"prompt": "0", "completion": "0"}
-    assert again["providers"]["synthetic-a"] == [
-        "vendor/model-renamed", "vendor/model:free", "vendor/shared"]
-    third = list_free_models(lookup, {})
-    assert third == again
-
-    # (b) One-provider form and the registered zero-ID containers are fresh too,
-    #     and the known metadata casing/order/type is preserved verbatim (no
-    #     reprojection).
-    single = list_free_models(lookup, {"provider": "synthetic-a"})
-    source_a = lookup["providers"]["synthetic-a"]
-    assert single["models"] is not source_a["models"]
-    assert single["model_ids"] is not source_a["model_ids"]
-    assert single["provider_staleness"] is not lookup["providers"]
-    assert single["models"]["vendor/model:free"]["architecture"][
-        "input_modalities"] == ["text", "image"]
-    assert type(single["models"]["vendor/model:free"]["context_length"]) is int
-    single["model_ids"].append("injected")
-    single["models"]["vendor/model:free"]["architecture"][
-        "input_modalities"].append("audio")
-    single["provider_staleness"]["synthetic-a"] = True
-    assert lookup == before
-    assert single["model_ids"] is not list_free_models(
-        lookup, {"provider": "synthetic-a"})["model_ids"]
-
-    zero = list_free_models(lookup, {"provider": "synthetic-c"})
-    source_c = lookup["providers"]["synthetic-c"]
-    assert zero["model_ids"] is not source_c["model_ids"]
-    assert zero["models"] is not source_c["models"]
-    assert zero["provider_staleness"] is not lookup["providers"]
-    zero["model_ids"].append("injected")
-    zero["provider_staleness"]["synthetic-c"] = True
-    assert lookup == before
-    assert zero["model_ids"] is not list_free_models(
-        lookup, {"provider": "synthetic-c"})["model_ids"]
-
-
-# ---------- pure get_model: literal membership + separate marker endpoints ----------
-#
-# `watchdog_catalog.query.get_model(snapshot, arguments)` is the pure core of the
-# frozen `get_model` tool. It takes an already-VALIDATED public snapshot (the
-# load_snapshot / source boundary owns validation -- this core performs no
-# re-hash, no I/O and no clock) plus the whole DECODED argument object, and
-# returns either the frozen success payload or the shared argument-error
-# envelope. It never raises into the semantic caller for a malformed argument
-# and never mutates its inputs.
-#
-# Every expected payload below is the INDEPENDENTLY authored `cases.json` golden
-# for the `get_model` tool (hand-written from the contract, never from an
-# implementation), and the three exact field sets are the frozen README tables
-# (README.md, "Success envelope -- get_model").
-
-GET_MODEL_CASES_DOC = FIXTURE_DIR / "cases.json"
-GET_MODEL_ARG_DOC = FIXTURE_DIR / "argument-cases.json"
-
-GET_MODEL_FIELDS = frozenset({
-    "ok", "query", "snapshot_id", "tick_epoch", "exact_matches",
-    "exact_gateways", "provider_staleness", "endpoints", "caveats", "counts"})
-GET_MODEL_ENDPOINT_FIELDS = frozenset({
-    "provider", "model_id", "chat_completions_url", "api_type", "stale",
-    "metadata"})
-GET_MODEL_COUNT_FIELDS = frozenset({
-    "exact_matches", "endpoints", "distinct_raw_ids", "marker_group_labels"})
-GET_MODEL_CAVEAT = (
-    "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a "
-    "missing exact id does NOT prove the model is unavailable there.")
-
-
-def _get_model_cases(doc):
-    return [case for case in doc["cases"] if case["tool"] == "get_model"]
-
-
-def test_get_model_success_goldens_match_every_literal_case():
-    """All thirteen frozen `get_model` goldens reproduce EXACTLY -- deep
-    semantic equality plus the exact top-level/endpoint/count field sets -- with
-    strict scalar types, literal provenance, untouched inputs, and a compact
-    empty-registry control."""
-    from watchdog_catalog.query import get_model
-
-    doc = _decode_doc(GET_MODEL_CASES_DOC)
-    cases = _get_model_cases(doc)
-    # Count and id uniqueness are asserted so a dropped or duplicated golden
-    # cannot shrink the loop and still pass.
-    assert len(cases) == 13, len(cases)
-    assert len({case["id"] for case in cases}) == 13
-    for case in cases:
-        cid = case["id"]
-        # Per-case fixture override; NEVER a wrong-fixture fallback.
-        fixture = case.get("fixture", doc["fixture"])
-        snapshot = _validated_snapshot(fixture)
-        before = copy.deepcopy(snapshot)
-        args = copy.deepcopy(case["args"])
-        args_before = copy.deepcopy(args)
-        result = get_model(snapshot, args)
-        expect = case["expect"]
-        # Deep semantic equality AND the exact top-level field set.
-        assert result == expect, cid
-        assert set(result) == set(expect), cid
-        assert set(result) == GET_MODEL_FIELDS, cid
-        # Strict scalar types and literal provenance: ok is exactly True, the
-        # query is the raw argument verbatim, and the provenance slots echo the
-        # consumed snapshot.
-        assert result["ok"] is True, cid
-        assert type(result["query"]) is str, cid
-        assert result["query"] == args["model_id"], cid
-        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
-        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
-        # exact_matches / provider_staleness carry ONE entry per provider_order
-        # provider -- including the registered zero-ID provider.
-        assert set(result["exact_matches"]) == \
-            set(snapshot["provider_order"]), cid
-        assert set(result["provider_staleness"]) == \
-            set(snapshot["provider_order"]), cid
-        for flag in result["exact_matches"].values():
-            assert type(flag) is bool, cid
-        for flag in result["provider_staleness"].values():
-            assert type(flag) is bool, cid
-        assert result["exact_gateways"] == \
-            [p for p in snapshot["provider_order"]
-             if result["exact_matches"][p]], cid
-        for endpoint in result["endpoints"]:
-            assert set(endpoint) == GET_MODEL_ENDPOINT_FIELDS, cid
-            assert type(endpoint["stale"]) is bool, cid
-            assert endpoint["stale"] == \
-                result["provider_staleness"][endpoint["provider"]], cid
-            source = snapshot["providers"][endpoint["provider"]]
-            assert endpoint["chat_completions_url"] == \
-                source["chat_completions_url"], cid
-            assert endpoint["api_type"] == source["api_type"], cid
-            assert endpoint["metadata"] == \
-                source["models"][endpoint["model_id"]], cid
-        assert set(result["counts"]) == GET_MODEL_COUNT_FIELDS, cid
-        for value in result["counts"].values():
-            assert type(value) is int, cid  # a bool is never a count
-            assert value >= 0, cid
-        assert result["counts"]["exact_matches"] == \
-            len(result["exact_gateways"]), cid
-        assert result["counts"]["endpoints"] == len(result["endpoints"]), cid
-        assert result["counts"]["distinct_raw_ids"] == \
-            len({e["model_id"] for e in result["endpoints"]}), cid
-        assert result["caveats"] == [GET_MODEL_CAVEAT], cid
-        assert snapshot == before, cid  # never mutated
-        assert args == args_before, cid
-
-    # A legitimately EMPTY registry is a valid control, built from an existing
-    # valid fixture and resealed with the test-local json/hashlib oracle, then
-    # re-validated before the query.
-    empty = _decode_doc(FIXTURE_DIR / "lookup.json")
-    empty["provider_order"] = []
-    empty["providers"] = {}
-    _reseal(empty)
-    assert _catalog.validate_snapshot(empty) is empty
-    whole = get_model(empty, {"model_id": "vendor/shared"})
-    assert set(whole) == GET_MODEL_FIELDS
-    assert whole["ok"] is True
-    assert whole["exact_matches"] == {} and whole["exact_gateways"] == []
-    assert whole["provider_staleness"] == {} and whole["endpoints"] == []
-    assert whole["counts"] == {"exact_matches": 0, "endpoints": 0,
-                               "distinct_raw_ids": 0,
-                               "marker_group_labels": 0}
-    assert whole["caveats"] == [GET_MODEL_CAVEAT]
-
-
-# ---------- pure get_model: the required model_id argument boundary ----------
-#
-# The eight `get_model` invalid rows of `argument-cases.json` carry the COMPLETE
-# literal semantic envelope; the two valid controls record acceptance only. The
-# programmatic rows below are compact literal restatements of the frozen README
-# rules (object -> unknown-key -> required model_id type/blankness), including
-# the unknown-key precedence that makes `parameter` null even when the required
-# id itself would also be wrong.
-
-def test_get_model_argument_boundary_matches_literal_rows_and_rules():
-    """The eight frozen invalid rows and two valid controls reproduce their
-    literal classification, and the compact programmatic rows pin the frozen
-    object -> unknown-key -> required-string -> blank precedence, the explicit
-    ASCII blank set, the never-trimmed/case-folded identifier and the fresh
-    non-reflecting envelope."""
-    from watchdog_catalog.query import get_model
-
-    doc = _decode_doc(GET_MODEL_ARG_DOC)
-    invalid = [row for row in doc["invalid_cases"]
-               if row["tool"] == "get_model"]
-    valid = [row for row in doc["valid_controls"] if row["tool"] == "get_model"]
-    assert len(invalid) == 8, [row["id"] for row in invalid]
-    assert {row["id"] for row in invalid} == {
-        "args_number_not_object", "unknown_arg_get_model", "model_id_missing",
-        "model_id_null", "model_id_number", "model_id_empty",
-        "model_id_ascii_blank", "precedence_unknown_key_before_required"}
-    assert len(valid) == 2, [row["id"] for row in valid]
-
-    for row in invalid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        args = copy.deepcopy(row["args"])
-        before = copy.deepcopy(args)
-        result = get_model(snapshot, args)
-        # The literal, independently-authored envelope is reproduced exactly.
-        assert result == row["expect"], cid
-        assert args == before, cid  # the argument object is never mutated
-        error = result["error"]
-        assert result["ok"] is False, cid
-        assert set(result) == {"ok", "error"}, cid
-        assert set(error) == {"code", "message", "parameter"}, cid
-        # No hostile key/value reflection and no extra provenance field.
-        for hostile in ("tool", "state_root", "source", "path", "cache",
-                        "snapshot_id", "count", "partial", "staleness",
-                        "query", "endpoints"):
-            assert hostile not in result and hostile not in error, (cid, hostile)
-        assert error["code"] in ARGUMENT_MESSAGES, cid
-
-    # The two valid controls are ACCEPTED (ok True); the complete success
-    # oracles are the thirteen independent goldens above, so this pins
-    # acceptance and the literal retained query.
-    for row in valid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        result = get_model(snapshot, copy.deepcopy(row["args"]))
-        assert result["ok"] is True, cid
-        assert result["query"] == row["args"]["model_id"], cid
-
-    lookup = _validated_snapshot("lookup.json")
-
-    # A whole argument object that is not a JSON object is invalid_arguments/
-    # null -- None, a list, a number, a string, a bool, a tuple and bytes.
-    for args in (None, [], 5, "x", False, 1.0, (), b"{}"):
-        _assert_argument_envelope(get_model(lookup, args),
-                                  INVALID_ARGUMENTS, None, repr(args))
-
-    # A missing or wrong-typed required model_id (null/bool/int/float/list/dict)
-    # is invalid_arguments(model_id) -- never coerced.
-    _assert_argument_envelope(get_model(lookup, {}),
-                              INVALID_ARGUMENTS, "model_id", "missing")
-    for bad in (None, True, False, 5, 1.5, [], ["vendor/shared"], {}, {"a": 1}):
-        _assert_argument_envelope(get_model(lookup, {"model_id": bad}),
-                                  INVALID_ARGUMENTS, "model_id", repr(bad))
-
-    # Empty and ASCII-blank-only strings are invalid_arguments(model_id): every
-    # class of the explicit U+0009..U+000D + U+0020 set, alone and combined.
+        get_model(lookup, {"provider": "synthetic-a"}),
+        INVALID_ARGUMENTS, "model_id", "missing")
+    for bad in (None, True, False, 5, 1.5, [], ["vendor/shared"], {},
+                {"a": 1}, b"vendor/shared"):
+        _assert_argument_envelope(
+            get_model(lookup, {"provider": "synthetic-a", "model_id": bad}),
+            INVALID_ARGUMENTS, "model_id", repr(bad))
     for blank in ("", " ", "\t", "\n", "\r", "\v", "\f", " \t\n\r\v\f",
                   "\t \n", "  "):
-        _assert_argument_envelope(get_model(lookup, {"model_id": blank}),
-                                  INVALID_ARGUMENTS, "model_id", repr(blank))
-
-    # Unknown-key precedence: ANY unknown key rejects with parameter null BEFORE
-    # the required model_id check -- even `provider`, which is NOT a get_model
-    # key and is therefore never a filter.
-    for args in ({"bogus": 1}, {"model_id": 5, "bogus": 1},
-                 {"model_id": "", "bogus": 1}, {"provider": "synthetic-a"},
-                 {"model_id": "vendor/shared", "provider": "synthetic-a"},
-                 {"model_id": "vendor/shared", "bogus": 1},
-                 {"bogus": 1, "provider": "synthetic-z"}):
-        _assert_argument_envelope(get_model(lookup, args),
-                                  INVALID_ARGUMENTS, None, repr(args))
-
-    # The retained identifier is never trimmed, case-folded or repaired: a
-    # padded nonblank query stays literal, wrong case is not folded, and
-    # non-ASCII code points (NBSP U+00A0, EM SPACE U+2003, FILE SEPARATOR
-    # U+001C) are literal NONBLANK queries -- ACCEPTED, a success with no match,
-    # zero counts and the caveat. The ASCII blank set is never widened.
-    for query in (" vendor/shared ", "VENDOR/SHARED", "Vendor/Shared",
-                  "\u00a0", "\u2003", "\u001c", "\u00a0\u2003"):
-        result = get_model(lookup, {"model_id": query})
-        assert result["ok"] is True, repr(query)
-        assert result["query"] == query, repr(query)
-        assert result["counts"] == {"exact_matches": 0, "endpoints": 0,
-                                    "distinct_raw_ids": 0,
-                                    "marker_group_labels": 0}, repr(query)
-        assert result["exact_gateways"] == [] and result["endpoints"] == [], \
-            repr(query)
-        assert result["caveats"] == [GET_MODEL_CAVEAT], repr(query)
+        _assert_argument_envelope(
+            get_model(lookup, {"provider": "synthetic-a", "model_id": blank}),
+            INVALID_ARGUMENTS, "model_id", repr(blank))
 
 
-# ---------- pure get_model: freshness + deep output isolation ----------
-#
-# A public output is never a window onto the cached snapshot: every container,
-# array and matched endpoint metadata object (with its nested architecture /
-# parameter / pricing containers) is freshly allocated, so a caller mutating a
-# returned payload can never corrupt the snapshot or another call.
-
-def test_get_model_outputs_are_fresh_and_deeply_isolated():
+def test_get_model_outputs_are_fresh_and_inputs_untouched():
+    """Fresh containers on every call, no aliasing of the snapshot and fresh
+    non-reflecting errors; an empty registry has no known provider."""
     from watchdog_catalog.query import get_model
 
     lookup = _validated_snapshot("lookup.json")
     before = copy.deepcopy(lookup)
+    args = {"provider": "synthetic-a", "model_id": "vendor/shared"}
+    args_before = copy.deepcopy(args)
 
-    # (a) Two independent calls on the same shared raw ID: fresh containers and
-    #     each endpoint metadata object (and its nested containers) unaliased to
-    #     the snapshot and to the other call.
-    first = get_model(lookup, {"model_id": "vendor/shared"})
-    second = get_model(lookup, {"model_id": "vendor/shared"})
-    assert lookup == before
+    first = get_model(lookup, args)
+    second = get_model(lookup, args)
     assert first == second
-    assert first["exact_matches"] is not second["exact_matches"]
-    assert first["exact_gateways"] is not second["exact_gateways"]
+    assert first["endpoint"] is not second["endpoint"]
+    assert first["endpoint"]["input_modalities"] is not \
+        second["endpoint"]["input_modalities"]
     assert first["provider_staleness"] is not second["provider_staleness"]
-    assert first["endpoints"] is not second["endpoints"]
-    assert first["counts"] is not second["counts"]
-    assert first["caveats"] is not second["caveats"]
-    for index, endpoint in enumerate(first["endpoints"]):
-        provider = endpoint["provider"]
-        raw_id = endpoint["model_id"]
-        source = lookup["providers"][provider]["models"][raw_id]
-        other = second["endpoints"][index]["metadata"]
-        assert endpoint["metadata"] is not source, (provider, raw_id)
-        assert endpoint["metadata"] is not other, (provider, raw_id)
-        assert endpoint["metadata"]["architecture"] is not source["architecture"]
-        assert endpoint["metadata"]["supported_parameters"] is not \
-            source["supported_parameters"]
-        assert endpoint["metadata"]["pricing"] is not source["pricing"]
-        assert endpoint["metadata"]["architecture"] is not \
-            other["architecture"]
 
-    # Mutating the returned payload deeply leaves the snapshot, the earlier
-    # independent result and a brand-new call all unchanged.
-    shared_a = first["endpoints"][0]["metadata"]
-    shared_a["architecture"]["input_modalities"].append("vision")
-    shared_a["supported_parameters"].append("seed")
-    shared_a["pricing"]["prompt"] = "999"
-    first["exact_matches"]["synthetic-a"] = False
-    first["exact_gateways"].append("injected")
+    first["endpoint"]["input_modalities"].append("vision")
+    first["endpoint"]["supported_parameters"].append("seed")
     first["provider_staleness"]["synthetic-a"] = True
-    first["endpoints"].append("injected")
-    first["counts"]["endpoints"] = 99
-    first["caveats"].append("injected")
     assert lookup == before
-    meta_a = second["endpoints"][0]["metadata"]
-    assert meta_a["architecture"]["input_modalities"] == ["text"]
-    assert meta_a["supported_parameters"] == ["temperature", "max_tokens"]
-    assert meta_a["pricing"] == {"prompt": "0", "completion": "0"}
-    assert second["exact_matches"] == {"synthetic-a": True, "synthetic-b": True,
-                                       "synthetic-c": False}
-    assert second["counts"]["endpoints"] == 2
-    assert second["caveats"] == [GET_MODEL_CAVEAT]
-    third = get_model(lookup, {"model_id": "vendor/shared"})
-    assert third == second
+    assert args == args_before
+    assert second["endpoint"]["input_modalities"] == ["text"]
+    assert second["endpoint"]["supported_parameters"] == [
+        "temperature", "max_tokens"]
+    assert second["provider_staleness"] == {"synthetic-a": False}
+    assert get_model(lookup, args) == second
 
-    # (b) The marker-insensitive lookup isolates each matched endpoint's
-    #     metadata independently, and the two providers of a shared raw id never
-    #     share a metadata object.
-    base = get_model(lookup, {"model_id": "vendor/model"})
-    assert [e["model_id"] for e in base["endpoints"]] == \
-        ["vendor/model:free", "vendor/model-free"]
-    a_meta = base["endpoints"][0]["metadata"]
-    b_meta = base["endpoints"][1]["metadata"]
-    assert a_meta is not b_meta
-    assert a_meta is not \
-        lookup["providers"]["synthetic-a"]["models"]["vendor/model:free"]
-    assert b_meta is not \
-        lookup["providers"]["synthetic-b"]["models"]["vendor/model-free"]
-    a_meta["architecture"]["input_modalities"].append("audio")
-    assert b_meta["architecture"]["input_modalities"] == ["text"]
-    assert lookup == before
-    assert get_model(lookup, {"model_id": "vendor/model"})["endpoints"][0][
-        "metadata"]["architecture"]["input_modalities"] == ["text", "image"]
-
-    # (c) A no-match success has fresh mutable containers and the caveat, and a
-    #     fresh error envelope is returned on every call (mutate then recall).
-    empty = get_model(lookup, {"model_id": "vendor/does-not-exist"})
-    empty["exact_matches"]["synthetic-a"] = True
-    empty["exact_gateways"].append("injected")
-    empty["provider_staleness"]["synthetic-a"] = True
-    empty["endpoints"].append("injected")
-    empty["counts"]["endpoints"] = 7
-    empty["caveats"].append("injected")
-    assert lookup == before
-    fresh = get_model(lookup, {"model_id": "vendor/does-not-exist"})
-    assert fresh["exact_matches"] == {"synthetic-a": False,
-                                      "synthetic-b": False,
-                                      "synthetic-c": False}
-    assert fresh["exact_gateways"] == [] and fresh["endpoints"] == []
-    assert fresh["counts"] == {"exact_matches": 0, "endpoints": 0,
-                               "distinct_raw_ids": 0, "marker_group_labels": 0}
-    assert fresh["caveats"] == [GET_MODEL_CAVEAT]
-
-    first_error = get_model(lookup, {"model_id": ""})
+    first_error = get_model(lookup, {"provider": "synthetic-a",
+                                     "model_id": ""})
     first_error["error"]["code"] = "mutated"
     first_error["ok"] = True
-    second_error = get_model(lookup, {"model_id": ""})
+    second_error = get_model(lookup, {"provider": "synthetic-a",
+                                      "model_id": ""})
     assert second_error == _argument_envelope(INVALID_ARGUMENTS, "model_id")
     assert second_error is not first_error
 
-
-# ---------- pure list_endpoints: selected-scope endpoints + counts alias ----------
-#
-# `watchdog_catalog.query.list_endpoints(snapshot, arguments)` is the pure core
-# of the frozen `list_endpoints` tool. It takes an already-VALIDATED public
-# snapshot (the load_snapshot / source boundary owns validation -- this core
-# performs no re-hash, no I/O and no clock) plus the whole DECODED argument
-# object, and returns either the frozen success payload or the shared
-# argument-error envelope. It never raises into the semantic caller for a
-# malformed argument and never mutates its inputs.
-#
-# Every expected payload below is the INDEPENDENTLY authored `cases.json` golden
-# for the `list_endpoints` tool (hand-written from the contract, never from an
-# implementation), and the three exact field sets are the frozen README tables
-# (README.md, "Success envelope -- list_endpoints").
-
-LIST_ENDPOINTS_CASES_DOC = FIXTURE_DIR / "cases.json"
-LIST_ENDPOINTS_ARG_DOC = FIXTURE_DIR / "argument-cases.json"
-
-# The ONE exact top-level field set for BOTH the all-provider and the
-# provider-filtered variant, the exact gateway-entry field set and the exact
-# count field set.
-ENDPOINT_FIELDS = frozenset({
-    "ok", "gateways", "counts", "provider", "snapshot_id", "tick_epoch",
-    "provider_staleness"})
-ENDPOINT_GATEWAY_FIELDS = frozenset({
-    "chat_completions_url", "api_type", "model_ids", "models"})
-ENDPOINT_COUNT_FIELDS = frozenset({
-    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
-    "models"})
-
-
-def _endpoint_cases(doc):
-    return [case for case in doc["cases"] if case["tool"] == "list_endpoints"]
-
-
-def test_list_endpoints_success_goldens_match_every_literal_case():
-    """All five frozen `list_endpoints` goldens reproduce EXACTLY -- deep
-    semantic equality plus the exact top-level/gateway/count field sets -- with
-    strict scalar types, literal provenance, untouched inputs, omission/null
-    equivalence on one shared fixture, a programmatic arbitrary-data-key
-    selection and a compact empty-registry control."""
-    from watchdog_catalog.query import list_endpoints
-
-    doc = _decode_doc(LIST_ENDPOINTS_CASES_DOC)
-    cases = _endpoint_cases(doc)
-    # Count and id uniqueness are asserted so a dropped or duplicated golden
-    # cannot shrink the loop and still pass.
-    assert len(cases) == 5, len(cases)
-    assert len({case["id"] for case in cases}) == 5
-    assert {case["id"] for case in cases} == {
-        "endpoints_lookup_all", "endpoints_lookup_provider_a",
-        "endpoints_lookup_zero_provider_c", "endpoints_ordering_all",
-        "endpoints_extension_all"}
-    for case in cases:
-        cid = case["id"]
-        # Per-case fixture override; NEVER a wrong-fixture fallback.
-        fixture = case.get("fixture", doc["fixture"])
-        snapshot = _validated_snapshot(fixture)
-        before = copy.deepcopy(snapshot)
-        result = list_endpoints(snapshot, case["args"])
-        expect = case["expect"]
-        # Deep semantic equality AND the exact field sets.
-        assert result == expect, cid
-        assert set(result) == set(expect), cid
-        assert set(result) == ENDPOINT_FIELDS, cid
-        # Strict scalar types and literal provenance: ok is exactly True and the
-        # provenance slots echo the consumed snapshot verbatim.
-        assert result["ok"] is True, cid
-        assert type(result["snapshot_id"]) is str, cid
-        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
-        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
-        # `provider` echoes the exact selected key, else strictly null.
-        args_provider = case["args"].get("provider")
-        assert result["provider"] == args_provider, cid
-        assert result["provider"] is None or type(result["provider"]) is str
-        # Selected scope: gateways and provider_staleness carry exactly the
-        # selected provider keys, zero-ID providers INCLUDED.
-        selected = [args_provider] if args_provider is not None \
-            else list(snapshot["provider_order"])
-        assert set(result["gateways"]) == set(selected), cid
-        assert set(result["provider_staleness"]) == set(selected), cid
-        for flag in result["provider_staleness"].values():
-            assert type(flag) is bool, cid
-        # Each gateway entry has the exact field set, the same raw-ID
-        # membership as its source (order pinned by the golden above), its own
-        # projected metadata map and never a cross-provider merge.
-        for p in selected:
-            entry = result["gateways"][p]
-            assert set(entry) == ENDPOINT_GATEWAY_FIELDS, (cid, p)
-            source = snapshot["providers"][p]
-            assert entry["chat_completions_url"] == \
-                source["chat_completions_url"], (cid, p)
-            assert entry["api_type"] == source["api_type"], (cid, p)
-            assert sorted(entry["model_ids"]) == sorted(source["model_ids"]), \
-                (cid, p)
-            assert set(entry["models"]) == set(source["model_ids"]), (cid, p)
-            for raw_id in source["model_ids"]:
-                assert entry["models"][raw_id] == source["models"][raw_id], \
-                    (cid, p, raw_id)
-        # The counts object has the exact field set; every value is a strict
-        # non-negative int (a bool is never a count). Counts describe the
-        # SELECTED scope only, and `models` is the documented legacy alias
-        # equal to `marker_group_labels`.
-        assert set(result["counts"]) == ENDPOINT_COUNT_FIELDS, cid
-        pairs = [raw_id for p in selected
-                 for raw_id in snapshot["providers"][p]["model_ids"]]
-        for value in result["counts"].values():
-            assert type(value) is int, cid
-            assert value >= 0, cid
-        assert result["counts"]["gateways"] == len(selected), cid
-        assert result["counts"]["endpoints"] == len(pairs), cid
-        assert result["counts"]["distinct_raw_ids"] == len(set(pairs)), cid
-        assert result["counts"]["models"] == \
-            result["counts"]["marker_group_labels"], cid
-        assert snapshot == before, cid  # inputs never mutated
-
-    # Omission (`{}`) and explicit `{"provider": None}` are the SAME
-    # all-provider export, asserted on ONE shared fixture (the goldens above use
-    # different fixtures, so this equivalence needs its own control).
-    lookup = _validated_snapshot("lookup.json")
-    omitted = list_endpoints(lookup, {})
-    null = list_endpoints(lookup, {"provider": None})
-    assert omitted == null
-    assert set(omitted) == ENDPOINT_FIELDS
-    assert omitted["provider"] is None
-
-    # A programmatic selection by an ARBITRARY data key proves membership is
-    # driven by `snapshot.provider_order` alone -- no provider enum or package
-    # code knows "synthetic-d". Selecting it yields ONLY synthetic-d, its own
-    # metadata and 1/1/1/1/1 counts.
-    ext = _validated_snapshot("provider-extension.json")
-    assert "synthetic-d" in ext["provider_order"]
-    only_d = list_endpoints(ext, {"provider": "synthetic-d"})
-    assert set(only_d["gateways"]) == {"synthetic-d"}
-    assert set(only_d["provider_staleness"]) == {"synthetic-d"}
-    assert only_d["provider"] == "synthetic-d"
-    assert only_d["counts"] == {"gateways": 1, "endpoints": 1,
-                                "distinct_raw_ids": 1,
-                                "marker_group_labels": 1, "models": 1}
-    assert only_d["gateways"]["synthetic-d"]["model_ids"] == ["vendor/shared"]
-    assert only_d["gateways"]["synthetic-d"]["models"]["vendor/shared"] == \
-        ext["providers"]["synthetic-d"]["models"]["vendor/shared"]
-
-    # A registered zero-ID provider is a success with empty containers and a
-    # zeroed counts object (the gateway entry still exists).
-    zero = list_endpoints(lookup, {"provider": "synthetic-c"})
-    assert set(zero["gateways"]) == {"synthetic-c"}
-    assert zero["gateways"]["synthetic-c"]["model_ids"] == []
-    assert zero["gateways"]["synthetic-c"]["models"] == {}
-    assert zero["counts"] == {"gateways": 1, "endpoints": 0,
-                              "distinct_raw_ids": 0, "marker_group_labels": 0,
-                              "models": 0}
-    assert zero["provider_staleness"] == {"synthetic-c": False}
-
-    # A legitimately EMPTY registry is a valid all-provider control, built from
-    # an existing valid fixture and resealed with the test-local json/hashlib
-    # oracle, then re-validated before the query.
-    empty = _decode_doc(FIXTURE_DIR / "lookup.json")
-    empty["provider_order"] = []
-    empty["providers"] = {}
-    _reseal(empty)
-    assert _catalog.validate_snapshot(empty) is empty
-    whole = list_endpoints(empty, {})
-    assert set(whole) == ENDPOINT_FIELDS
-    assert whole["ok"] is True
-    assert whole["gateways"] == {} and whole["provider_staleness"] == {}
-    assert whole["provider"] is None
-    assert whole["counts"] == {"gateways": 0, "endpoints": 0,
-                               "distinct_raw_ids": 0, "marker_group_labels": 0,
-                               "models": 0}
-
-
-# ---------- pure list_endpoints: the provider argument boundary ----------
-#
-# The three `list_endpoints` invalid rows of `argument-cases.json` carry the
-# COMPLETE literal semantic envelope; the two valid controls record acceptance
-# only. The programmatic rows below are compact literal restatements of the
-# frozen README rules (object -> unknown-key -> provider type -> provider
-# membership), including the unknown-key precedence that makes `parameter` null
-# even when the provider itself would also be wrong.
-
-def test_list_endpoints_argument_boundary_matches_literal_rows_and_rules():
-    """The three frozen invalid rows and two valid controls reproduce their
-    literal classification, and the compact programmatic rows pin the frozen
-    object -> unknown-key -> provider type -> membership precedence, the
-    no-coercion provider rules and the fresh non-reflecting envelope."""
-    from watchdog_catalog.query import list_endpoints
-
-    doc = _decode_doc(LIST_ENDPOINTS_ARG_DOC)
-    invalid = [row for row in doc["invalid_cases"]
-               if row["tool"] == "list_endpoints"]
-    valid = [row for row in doc["valid_controls"]
-             if row["tool"] == "list_endpoints"]
-    assert len(invalid) == 3, [row["id"] for row in invalid]
-    assert {row["id"] for row in invalid} == {
-        "unknown_arg_list_endpoints", "unknown_provider_list_endpoints",
-        "provider_empty"}
-    assert len(valid) == 2, [row["id"] for row in valid]
-
-    for row in invalid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        args = copy.deepcopy(row["args"])
-        before = copy.deepcopy(args)
-        result = list_endpoints(snapshot, args)
-        # The literal, independently-authored envelope is reproduced exactly.
-        assert result == row["expect"], cid
-        assert args == before, cid  # the argument object is never mutated
-        error = result["error"]
-        assert result["ok"] is False, cid
-        assert set(result) == {"ok", "error"}, cid
-        assert set(error) == {"code", "message", "parameter"}, cid
-        # No hostile key/value reflection and no extra provenance/count field.
-        for hostile in ("tool", "state_root", "source", "path", "cache",
-                        "snapshot_id", "count", "gateways", "partial",
-                        "staleness", "provider_staleness"):
-            assert hostile not in result and hostile not in error, (cid, hostile)
-        assert error["code"] in ARGUMENT_MESSAGES, cid
-
-    # The two valid controls are ACCEPTED (ok True); the complete success
-    # oracles are the five independent goldens above, so this pins acceptance.
-    for row in valid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        result = list_endpoints(snapshot, copy.deepcopy(row["args"]))
-        assert result["ok"] is True, cid
-
-    lookup = _validated_snapshot("lookup.json")
-
-    # A whole argument object that is not a JSON object is invalid_arguments/
-    # null -- None, a list, a number, a string, a bool, a tuple and bytes.
-    for args in (None, [], 5, "x", False, 1.0, (), b"{}"):
-        _assert_argument_envelope(list_endpoints(lookup, args),
-                                  INVALID_ARGUMENTS, None, repr(args))
-
-    # A non-null provider of the wrong type (bool/int/float/list/dict) is
-    # invalid_arguments(provider) -- never coerced.
-    for bad in (True, False, 5, 1.5, [], ["synthetic-a"], {}, {"a": 1}):
-        _assert_argument_envelope(list_endpoints(lookup, {"provider": bad}),
-                                  INVALID_ARGUMENTS, "provider", repr(bad))
-
-    # Empty/padded/wrong-case/absent strings are unknown_provider(provider) --
-    # never trimmed, padded-repaired or case-folded.
-    for bad in ("", " synthetic-a ", "synthetic-a ", " synthetic-a",
-                "Synthetic-A", "SYNTHETIC-A", "synthetic-z", "unknown"):
-        _assert_argument_envelope(list_endpoints(lookup, {"provider": bad}),
-                                  UNKNOWN_PROVIDER, "provider", bad)
-
-    # Unknown-key precedence: ANY unknown key rejects with parameter null BEFORE
-    # the provider type or membership check, so an unknown key combined with a
-    # wrong-typed provider AND with an unknown provider both yield null.
+    empty_registry = _search_snapshot([], {})
     _assert_argument_envelope(
-        list_endpoints(lookup, {"provider": 5, "limit": 5}),
-        INVALID_ARGUMENTS, None, "unknown-key before provider type")
-    _assert_argument_envelope(
-        list_endpoints(lookup, {"provider": "synthetic-z", "bogus": 1}),
-        INVALID_ARGUMENTS, None, "unknown-key before provider membership")
-    _assert_argument_envelope(
-        list_endpoints(lookup, {"provider": None, "limit": 5}),
-        INVALID_ARGUMENTS, None, "unknown-key with a null provider")
-    _assert_argument_envelope(
-        list_endpoints(lookup, {"provider": "synthetic-a", "limit": 5}),
-        INVALID_ARGUMENTS, None, "unknown-key with a valid provider")
-
-    # `{}` and `{"provider": None}` are accepted, and the error envelope is a
-    # FRESH object on every call (never a shared module-level constant).
-    assert list_endpoints(lookup, {})["ok"] is True
-    assert list_endpoints(lookup, {"provider": None})["ok"] is True
-    first = list_endpoints(lookup, {"provider": "synthetic-z"})
-    first["error"]["code"] = "mutated"
-    first["ok"] = True
-    second = list_endpoints(lookup, {"provider": "synthetic-z"})
-    assert second == _argument_envelope(UNKNOWN_PROVIDER, "provider")
-    assert second is not first
-
-
-# ---------- pure list_endpoints: freshness + deep output isolation ----------
-#
-# A public output is never a window onto the cached snapshot: every container,
-# gateway entry, raw-ID array and projected model object (with its nested
-# architecture / parameter / pricing containers) is freshly allocated, so a
-# caller mutating a returned payload can never corrupt the snapshot or another
-# call.
-
-def test_list_endpoints_outputs_are_fresh_and_deeply_isolated():
-    from watchdog_catalog.query import list_endpoints
-
-    lookup = _validated_snapshot("lookup.json")
-    before = copy.deepcopy(lookup)
-
-    # (a) All-provider form: fresh containers, and each gateway's model_ids /
-    #     models (and nested model containers) unaliased to the snapshot and to
-    #     a second call.
-    whole = list_endpoints(lookup, {})
-    again = list_endpoints(lookup, {})
-    assert lookup == before
-    assert whole == again
-    assert whole["gateways"] is not again["gateways"]
-    assert whole["counts"] is not again["counts"]
-    assert whole["provider_staleness"] is not again["provider_staleness"]
-    for provider in lookup["provider_order"]:
-        source = lookup["providers"][provider]
-        entry = whole["gateways"][provider]
-        assert entry is not source, provider
-        assert entry["model_ids"] is not source["model_ids"], provider
-        assert entry["models"] is not source["models"], provider
-        assert again["gateways"][provider] is not entry, provider
-        for raw_id in source["model_ids"]:
-            got = entry["models"][raw_id]
-            src = source["models"][raw_id]
-            assert got is not src, (provider, raw_id)
-            assert got["architecture"] is not src["architecture"], raw_id
-            assert got["supported_parameters"] is not src["supported_parameters"]
-            assert got["pricing"] is not src["pricing"]
-            assert again["gateways"][provider]["models"][raw_id] is not got
-
-    # Mutating the returned payload deeply leaves the snapshot, the earlier
-    # independent result and a brand-new call all unchanged.
-    shared = whole["gateways"]["synthetic-a"]["models"]["vendor/shared"]
-    shared["architecture"]["input_modalities"].append("vision")
-    shared["supported_parameters"].append("seed")
-    shared["pricing"]["prompt"] = "999"
-    whole["gateways"]["synthetic-a"]["model_ids"].append("injected")
-    whole["counts"]["endpoints"] = 99
-    whole["provider_staleness"]["synthetic-a"] = True
-    assert lookup == before
-    again_shared = again["gateways"]["synthetic-a"]["models"]["vendor/shared"]
-    assert again_shared["architecture"]["input_modalities"] == ["text"]
-    assert again_shared["supported_parameters"] == ["temperature", "max_tokens"]
-    assert again_shared["pricing"] == {"prompt": "0", "completion": "0"}
-    assert again["gateways"]["synthetic-a"]["model_ids"] == [
-        "vendor/model-renamed", "vendor/model:free", "vendor/shared"]
-    third = list_endpoints(lookup, {})
-    assert third == again
-
-    # (b) Single-provider and registered zero-ID containers are fresh too, and
-    #     the known metadata casing/order/type is preserved verbatim (no
-    #     reprojection).
-    single = list_endpoints(lookup, {"provider": "synthetic-a"})
-    source_a = lookup["providers"]["synthetic-a"]
-    single_a = single["gateways"]["synthetic-a"]
-    assert single_a["model_ids"] is not source_a["model_ids"]
-    assert single_a["models"] is not source_a["models"]
-    assert single["provider_staleness"] is not lookup["providers"]
-    assert single_a["models"]["vendor/model:free"]["architecture"][
-        "input_modalities"] == ["text", "image"]
-    assert type(single_a["models"]["vendor/model:free"]["context_length"]) is int
-    single_a["model_ids"].append("injected")
-    single_a["models"]["vendor/model:free"]["architecture"][
-        "input_modalities"].append("audio")
-    single["provider_staleness"]["synthetic-a"] = True
-    assert lookup == before
-    assert single_a["model_ids"] is not list_endpoints(
-        lookup, {"provider": "synthetic-a"})["gateways"]["synthetic-a"][
-            "model_ids"]
-
-    zero = list_endpoints(lookup, {"provider": "synthetic-c"})
-    source_c = lookup["providers"]["synthetic-c"]
-    zero_c = zero["gateways"]["synthetic-c"]
-    assert zero_c["model_ids"] is not source_c["model_ids"]
-    assert zero_c["models"] is not source_c["models"]
-    assert zero["provider_staleness"] is not lookup["providers"]
-    zero_c["model_ids"].append("injected")
-    zero["provider_staleness"]["synthetic-c"] = True
-    assert lookup == before
-    assert zero_c["model_ids"] is not list_endpoints(
-        lookup, {"provider": "synthetic-c"})["gateways"]["synthetic-c"][
-            "model_ids"]
-
-    # (c) A provider added by DATA alone (synthetic-d) isolates its own metadata
-    #     exactly like the registry providers.
-    ext = _validated_snapshot("provider-extension.json")
-    ext_before = copy.deepcopy(ext)
-    only_d = list_endpoints(ext, {"provider": "synthetic-d"})
-    d_source = ext["providers"]["synthetic-d"]
-    d_entry = only_d["gateways"]["synthetic-d"]
-    assert d_entry["models"] is not d_source["models"]
-    assert d_entry["models"]["vendor/shared"] is not \
-        d_source["models"]["vendor/shared"]
-    assert d_entry["models"]["vendor/shared"]["architecture"] is not \
-        d_source["models"]["vendor/shared"]["architecture"]
-    d_entry["models"]["vendor/shared"]["architecture"][
-        "input_modalities"].append("audio")
-    assert ext == ext_before
-
-    # (d) A fresh error envelope is returned on every call (mutate then recall).
-    first_error = list_endpoints(lookup, {"provider": ""})
-    first_error["error"]["code"] = "mutated"
-    first_error["ok"] = True
-    second_error = list_endpoints(lookup, {"provider": ""})
-    assert second_error == _argument_envelope(UNKNOWN_PROVIDER, "provider")
-    assert second_error is not first_error
+        get_model(empty_registry,
+                  {"provider": "synthetic-a", "model_id": "vendor/shared"}),
+        UNKNOWN_PROVIDER, "provider", "empty registry")
 
 
 # ---------- pure watchdog_status: fixed-clock status + coverage ----------
@@ -2916,170 +1371,23 @@ def test_list_endpoints_outputs_are_fresh_and_deeply_isolated():
 # published-catalogue health, never private operator health, so it carries no
 # local path/state_root/source/cache timestamp. The fixed test clock is a
 # case-level `now` injected as a REQUIRED keyword-only argument into the core --
-# it is never a tool argument (`args` is `{}` on every golden) and never a
-# wall-clock lookup. Every expected payload below is the INDEPENDENTLY authored
-# `cases.json` golden (hand-written from the contract, never from an
-# implementation); the exact field sets are the frozen README tables
-# (README.md, "Success envelope -- watchdog_status").
+# it is never a tool argument and never a wall-clock lookup. The nine
+# `cases.json` goldens and the status argument rows are executed by
+# `tests/test_contract_parity.py`.
 
-STATUS_CASES_DOC = FIXTURE_DIR / "cases.json"
-STATUS_ARG_DOC = FIXTURE_DIR / "argument-cases.json"
-
-# The exact top-level field set, the exact whole-catalogue count field set and
-# the exact metadata-coverage field set.
+# The exact top-level field set of a status payload.
 STATUS_FIELDS = frozenset({
     "ok", "snapshot_id", "tick_epoch", "cadence_s", "last_tick_age_s",
     "tick_fresh", "provider_staleness", "provider_counts", "metadata_coverage",
     "counts", "pending_alerts", "site_published", "site_publish_age_s",
     "warnings"})
-STATUS_COUNT_FIELDS = frozenset({
-    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels"})
-STATUS_COVERAGE_FIELDS = frozenset({
-    "endpoints", "context_length_known", "input_modalities_known",
-    "output_modalities_known", "supported_parameters_known",
-    "description_known"})
-# The frozen status warning order: the snapshot THREE codes followed by the two
-# derived status-only codes (five is unreachable in one payload because the
-# derived codes are mutually exclusive).
-STATUS_WARNING_ORDER = (
-    "tick_epoch_unknown", "metadata_missing", "metadata_invalid",
-    "tick_epoch_future", "tick_stale")
 
 
-def test_watchdog_status_success_goldens_match_every_literal_case():
-    """All nine frozen `watchdog_status` goldens reproduce EXACTLY -- deep
-    semantic equality plus the exact top-level/count/coverage field sets -- with
-    strict scalar types, literal provenance, independent counts/coverage
-    recomputation, the inclusive one-cadence freshness boundary, every-provider
-    (zero-ID included) staleness/count maps, strictly-null unobservables, the
-    frozen warning order and untouched inputs, plus four valid in-memory
-    controls."""
-    from watchdog_catalog.query import watchdog_status, strip_free_marker
-
-    doc = _decode_doc(STATUS_CASES_DOC)
-    cases = [case for case in doc["cases"]
-             if case["tool"] == "watchdog_status"]
-    # Count and id uniqueness are asserted so a dropped or duplicated golden
-    # cannot shrink the loop and still pass.
-    assert len(cases) == 9, len(cases)
-    assert len({case["id"] for case in cases}) == 9
-    assert {case["id"] for case in cases} == {
-        "status_capability_unknown_epoch_now_fresh",
-        "status_metadata_age_below_cadence_fresh",
-        "status_metadata_age_at_cadence_fresh",
-        "status_metadata_age_just_over_cadence_stale",
-        "status_lookup_old_tick_stale_healthy_providers",
-        "status_lookup_future_epoch_not_stale",
-        "status_unknown_time_missing_epoch",
-        "status_short_cadence_age_at_cadence_fresh",
-        "status_short_cadence_age_just_over_stale"}
-    for case in cases:
-        cid = case["id"]
-        # Every status case is argument-free with its own literal case-level
-        # clock.
-        assert case["args"] == {}, cid
-        assert type(case["now"]) is int and case["now"] >= 0, cid
-        # Per-case fixture override; NEVER a wrong-fixture fallback.
-        fixture = case.get("fixture", doc["fixture"])
-        snapshot = _validated_snapshot(fixture)
-        before = copy.deepcopy(snapshot)
-        args = copy.deepcopy(case["args"])
-        result = watchdog_status(snapshot, args, now=case["now"])
-        expect = case["expect"]
-        # Deep semantic equality AND the exact frozen field sets.
-        assert result == expect, cid
-        assert set(result) == set(expect), cid
-        assert set(result) == STATUS_FIELDS, cid
-        assert set(result["counts"]) == STATUS_COUNT_FIELDS, cid
-        assert set(result["metadata_coverage"]) == STATUS_COVERAGE_FIELDS, cid
-        # Strict scalar types: ok is exactly True, tick_fresh a strict bool,
-        # the age null or a strict int.
-        assert result["ok"] is True, cid
-        assert type(result["tick_fresh"]) is bool, cid
-        assert result["last_tick_age_s"] is None or \
-            type(result["last_tick_age_s"]) is int, cid
-        # Provenance echoes the consumed snapshot verbatim (a future epoch is
-        # never repaired); cadence is snapshot data, never a hardcoded 3600.
-        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
-        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
-        assert result["cadence_s"] == snapshot["cadence_s"], cid
-        # Inclusive freshness: age 0 and age == cadence are fresh; a null or
-        # future tick is null age and not fresh, never clamped to a healthy 0.
-        tick = snapshot["tick_epoch"]
-        cadence = snapshot["cadence_s"]
-        now = case["now"]
-        if tick is None or tick > now:
-            assert result["last_tick_age_s"] is None, cid
-            assert result["tick_fresh"] is False, cid
-        else:
-            assert result["last_tick_age_s"] == now - tick, cid
-            assert result["tick_fresh"] is (now - tick <= cadence), cid
-        # Provider maps cover EVERY provider_order key, zero-ID providers
-        # included, in display order.
-        assert list(result["provider_staleness"]) == \
-            list(snapshot["provider_order"]), cid
-        assert list(result["provider_counts"]) == \
-            list(snapshot["provider_order"]), cid
-        for provider in snapshot["provider_order"]:
-            entry = snapshot["providers"][provider]
-            assert result["provider_staleness"][provider] == entry["stale"], \
-                (cid, provider)
-            assert type(result["provider_staleness"][provider]) is bool, \
-                (cid, provider)
-            assert result["provider_counts"][provider] == \
-                len(entry["model_ids"]), (cid, provider)
-            assert type(result["provider_counts"][provider]) is int, \
-                (cid, provider)
-            assert result["provider_counts"][provider] >= 0, (cid, provider)
-        # Whole-catalogue counts recomputed independently from the snapshot.
-        pairs = [raw_id for provider in snapshot["provider_order"]
-                 for raw_id in snapshot["providers"][provider]["model_ids"]]
-        assert result["counts"] == {
-            "gateways": len(snapshot["provider_order"]),
-            "endpoints": len(pairs),
-            "distinct_raw_ids": len(set(pairs)),
-            "marker_group_labels": len({strip_free_marker(raw_id)
-                                        for raw_id in pairs})}, cid
-        # Metadata coverage recomputed independently over the global tracked-pair
-        # denominator: a known 0 / [] / "" counts, a null does not.
-        coverage = {"endpoints": len(pairs), "context_length_known": 0,
-                    "input_modalities_known": 0, "output_modalities_known": 0,
-                    "supported_parameters_known": 0, "description_known": 0}
-        for provider in snapshot["provider_order"]:
-            entry = snapshot["providers"][provider]
-            for raw_id in entry["model_ids"]:
-                model = entry["models"][raw_id]
-                architecture = model["architecture"]
-                if model["context_length"] is not None:
-                    coverage["context_length_known"] += 1
-                if architecture["input_modalities"] is not None:
-                    coverage["input_modalities_known"] += 1
-                if architecture["output_modalities"] is not None:
-                    coverage["output_modalities_known"] += 1
-                if model["supported_parameters"] is not None:
-                    coverage["supported_parameters_known"] += 1
-                if model["description"] is not None:
-                    coverage["description_known"] += 1
-        assert result["metadata_coverage"] == coverage, cid
-        for value in result["metadata_coverage"].values():
-            assert type(value) is int and value >= 0, cid
-        assert result["metadata_coverage"]["endpoints"] == \
-            result["counts"]["endpoints"], cid
-        assert result["metadata_coverage"]["endpoints"] >= \
-            max(result["metadata_coverage"].values()), cid
-        # The three unobservables are STRICTLY null -- never 0 or False.
-        assert result["pending_alerts"] is None, cid
-        assert result["site_published"] is None, cid
-        assert result["site_publish_age_s"] is None, cid
-        # Warnings are the deduplicated snapshot-plus-derived union in the frozen
-        # status order, stable strings only.
-        assert result["warnings"] == [code for code in STATUS_WARNING_ORDER
-                                      if code in set(result["warnings"])], cid
-        assert len(result["warnings"]) == len(set(result["warnings"])), cid
-        assert all(isinstance(code, str) for code in result["warnings"]), cid
-        # Inputs are never mutated.
-        assert snapshot == before, cid
-        assert args == case["args"], cid
+def test_watchdog_status_valid_in_memory_controls():
+    """Valid in-memory controls the parity lane cannot build: they reseal a
+    synthetic body with the test-local hash oracle. The nine literal
+    `watchdog_status` goldens are executed by `tests/test_contract_parity.py`."""
+    from watchdog_catalog.query import watchdog_status
 
     # Valid controls, built in-memory from existing valid fixtures and resealed
     # with the test-local json/hashlib oracle, then re-validated BEFORE the
@@ -3141,57 +1449,16 @@ def test_watchdog_status_success_goldens_match_every_literal_case():
 # ---------- pure watchdog_status: the empty public argument boundary ----------
 #
 # `watchdog_status` has NO public arguments: only `{}` is accepted, and ANY key
-# (including `now`, `provider` and `limit`) is an unknown argument. The one
-# invalid row of `argument-cases.json` carries the COMPLETE literal envelope;
-# the one valid control records acceptance only. The programmatic rows are
-# compact literal restatements of the frozen README rules.
+# (including `now`, `provider` and `limit`) is an unknown argument. The frozen
+# `argument-cases.json` rows are executed by `tests/test_contract_parity.py`;
+# the programmatic rows are compact literal restatements of the README rules.
 
-def test_watchdog_status_argument_boundary_matches_literal_rows_and_rules():
-    """The one frozen invalid row and one valid control reproduce their literal
-    classification, and the compact programmatic rows pin the frozen object ->
-    any-unknown-key precedence, the never-reflecting fresh envelope and the fact
-    that the fixed clock is a keyword-only harness input, never an argument."""
+def test_watchdog_status_argument_boundary_rules():
+    """The compact programmatic rows pin the frozen object -> any-unknown-key
+    precedence, the never-reflecting fresh envelope and the fact that the fixed
+    clock is a keyword-only harness input, never an argument. The frozen
+    argument table is executed by `tests/test_contract_parity.py`."""
     from watchdog_catalog.query import watchdog_status
-
-    doc = _decode_doc(STATUS_ARG_DOC)
-    invalid = [row for row in doc["invalid_cases"]
-               if row["tool"] == "watchdog_status"]
-    valid = [row for row in doc["valid_controls"]
-             if row["tool"] == "watchdog_status"]
-    assert len(invalid) == 1, [row["id"] for row in invalid]
-    assert invalid[0]["id"] == "unknown_arg_watchdog_status"
-    assert invalid[0]["args"] == {"now": 1759200000}
-    assert len(valid) == 1, [row["id"] for row in valid]
-    assert valid[0]["id"] == "valid_omitted_watchdog_status"
-    assert valid[0]["args"] == {}
-
-    for row in invalid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        args = copy.deepcopy(row["args"])
-        before = copy.deepcopy(args)
-        result = watchdog_status(snapshot, args, now=1759200000)
-        # The literal, independently-authored envelope is reproduced exactly.
-        assert result == row["expect"], cid
-        assert args == before, cid  # the argument object is never mutated
-        error = result["error"]
-        assert result["ok"] is False, cid
-        assert set(result) == {"ok", "error"}, cid
-        assert set(error) == {"code", "message", "parameter"}, cid
-        # No hostile key/value reflection and no provenance/count field.
-        for hostile in ("tool", "state_root", "source", "path", "cache",
-                        "snapshot_id", "count", "counts", "partial",
-                        "staleness", "provider_staleness", "warnings"):
-            assert hostile not in result and hostile not in error, (cid, hostile)
-        assert error["code"] == INVALID_ARGUMENTS, cid
-        assert error["parameter"] is None, cid
-
-    for row in valid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        result = watchdog_status(snapshot, copy.deepcopy(row["args"]),
-                                 now=1759200000)
-        assert result["ok"] is True, cid
 
     lookup = _validated_snapshot("lookup.json")
 
@@ -3300,82 +1567,9 @@ def test_watchdog_status_outputs_are_fresh_and_isolated_and_clock_invariant():
 # validation -- including `unknown_provider` -- belongs to a later unit, so this
 # stage deliberately has no temporary argument envelope and no public tool.
 #
-# Expected pairs below are taken from the INDEPENDENTLY authored `cases.json`
-# goldens (never from another implementation, serializer or runtime query) and
-# from literal, hand-derived synthetic sequences.
-
-SEARCH_SELECTION_CASES_DOC = FIXTURE_DIR / "cases.json"
-
-# The exact frozen goldens whose arguments are confined to query/provider and
-# whose complete match set fits the default page. A paginated or
-# capability-filtered case must never become a selection oracle here.
-SEARCH_SELECTION_CASE_IDS = frozenset({
-    "search_metadata_reasoning_text_only",
-    "search_capability_defaults_both_models",
-    "search_provider_b_shared_stale_scope",
-    "search_provider_c_empty_stale_scope",
-    "search_text_unicode_upper_echo_first",
-    "search_text_unicode_lower_echo_second",
-    "search_text_literal_brackets_not_regex",
-    "search_text_metadata_array_not_searched",
-    "search_text_raw_id_unknown_flags",
-    "search_text_padded_query_not_trimmed",
-})
-
-
-def _selection_eligible(case):
-    """A search golden usable as a candidate-selection oracle: only
-    query/provider arguments and a whole match set inside the default page."""
-    expect = case["expect"]
-    return (set(case["args"]) <= {"query", "provider"}
-            and expect["limit"] == 50
-            and expect["offset"] == 0
-            and expect["next_offset"] is None
-            and expect["total_matches"] == len(expect["endpoints"]))
-
-
-def test_search_text_provider_pairs_match_eligible_goldens():
-    """The ten eligible frozen `search_models` goldens reproduce EXACTLY as
-    ordered endpoint identities, with the case set itself pinned so a future
-    paginated golden cannot silently widen this oracle."""
-    from watchdog_catalog.query import _search_text_provider_pairs
-
-    doc = _decode_doc(SEARCH_SELECTION_CASES_DOC)
-    search_cases = [case for case in doc["cases"]
-                    if case["tool"] == "search_models"]
-    eligible = [case for case in search_cases if _selection_eligible(case)]
-    assert len(search_cases) == 29, len(search_cases)
-    assert len(eligible) == 10, len(eligible)
-    assert {case["id"] for case in eligible} == SEARCH_SELECTION_CASE_IDS
-
-    for case in eligible:
-        cid = case["id"]
-        fixture = case.get("fixture", doc["fixture"])
-        snapshot = _validated_snapshot(fixture)
-        before = copy.deepcopy(snapshot)
-        query = case["args"].get("query")
-        provider = case["args"].get("provider")
-        expected = [(row["provider"], row["model_id"])
-                    for row in case["expect"]["endpoints"]]
-        result = _search_text_provider_pairs(
-            snapshot, query=query, provider=provider)
-        assert result == expected, cid
-        assert type(result) is list, cid
-        assert all(type(pair) is tuple and len(pair) == 2 for pair in result), cid
-        # Every selected identity is a REAL tracked pair of the source
-        # snapshot, and the selection never borrows another provider's row.
-        for provider_key, raw_id in result:
-            assert provider_key in snapshot["provider_order"], cid
-            assert raw_id in snapshot["providers"][provider_key]["model_ids"], \
-                (cid, provider_key, raw_id)
-        assert snapshot == before, cid
-        # A NEW list on every call: mutating one result can never corrupt the
-        # snapshot, an earlier result or a later call.
-        result.clear()
-        assert snapshot == before, cid
-        assert _search_text_provider_pairs(
-            snapshot, query=query, provider=provider) == expected, cid
-        assert snapshot == before, cid
+# The `cases.json` search goldens are executed through the public `search_models`
+# by `tests/test_contract_parity.py`; every expectation below is a literal,
+# hand-derived synthetic boundary control.
 
 
 # -- synthetic boundary controls (structurally valid, independently pinned) ---
@@ -3455,16 +1649,14 @@ SEARCH_BOUNDARY_ROWS = (
     # spelling ("None") nor the JSON spelling ("null") may match a null.
     ("none", None, []),
     ("null", None, []),
-    # Capability arrays, pricing, URL, provider key and object key names are
+    # Capability arrays, URL, provider key and object key names are
     # never searched.
     ("ImageToken", None, []),
     ("ParamToken", None, []),
     ("urltoken", None, []),
     ("apitoken", None, []),
-    ("0.123", None, []),
     ("https", None, []),
     ("zeta", None, []),
-    ("pricing", None, []),
     ("context_length", None, []),
     ("architecture", None, []),
     ("supported_parameters", None, []),
@@ -3481,7 +1673,7 @@ SEARCH_BOUNDARY_ROWS = (
 
 def _search_model(raw_id, name, description=None, *, context_length=None,
                   input_modalities=None, output_modalities=None,
-                  supported_parameters=None, pricing=None):
+                  supported_parameters=None):
     """One complete projected public model object (the accepted model shape)."""
     return {
         "id": raw_id,
@@ -3491,7 +1683,6 @@ def _search_model(raw_id, name, description=None, *, context_length=None,
         "architecture": {"input_modalities": input_modalities,
                          "output_modalities": output_modalities},
         "supported_parameters": supported_parameters,
-        "pricing": pricing,
     }
 
 
@@ -3512,7 +1703,7 @@ def _search_provider(models, display_name, url, *, api_type="openai",
 def _search_snapshot(provider_order, providers):
     """A resealed synthetic snapshot that the REAL validator accepts."""
     snapshot = {
-        "schema_version": 1,
+        "schema_version": 2,
         "snapshot_id": "0" * 64,
         "tick_epoch": 1759200000,
         "cadence_s": 3600,
@@ -3539,8 +1730,7 @@ def _boundary_snapshot():
             "caps-only", "Caps Only", "plain synthetic prose",
             context_length=7, input_modalities=["ImageToken"],
             output_modalities=["OutToken"],
-            supported_parameters=["ParamToken"],
-            pricing={"prompt": "0.123", "completion": 0}),
+            supported_parameters=["ParamToken"]),
         "fusion-left": _search_model(
             "fusion-left", "Alpha", "Beta prose body."),
         "idtoken-model": _search_model(
@@ -3609,7 +1799,7 @@ def test_search_text_provider_pairs_boundary_controls():
                    for pair in result), (query, provider)
     assert snapshot == before
 
-    # More than the public default page (50) is returned WHOLE: the internal
+    # More than the public default page (5) is returned WHOLE: the internal
     # stage neither slices nor truncates.
     bulk = _search_text_provider_pairs(snapshot, query="bulk")
     assert len(bulk) == 55
@@ -3645,72 +1835,14 @@ def test_search_text_provider_pairs_boundary_controls():
 # -- inclusive per-pair minimum-context stage: unknown is never zero --
 
 def test_search_min_context_pairs_boundary_controls():
-    """The internal inclusive minimum-context stage composes with the accepted
-    text/provider selection: the four frozen active-min-context `search_models`
-    goldens reproduce exactly as literal endpoint identities, and a synthetic
-    fully-validated registry pins None-threshold freedom, zero-vs-unknown
-    distinction, the inclusive boundary, per-pair isolation (no raw-id borrowing
-    across providers, no selection expansion), unpaginated completeness and
-    mutation isolation."""
+    """A synthetic fully-validated registry pins None-threshold freedom,
+    zero-vs-unknown distinction, the inclusive boundary, per-pair isolation (no
+    raw-id borrowing across providers, no selection expansion), unpaginated
+    completeness and mutation isolation. The active-min-context goldens
+    themselves are executed through `search_models` by
+    `tests/test_contract_parity.py`."""
     from watchdog_catalog.query import _search_min_context_pairs
     from watchdog_catalog.query import _search_text_provider_pairs
-
-    # -- the four frozen active-min-context goldens: compose the accepted
-    # text/provider stage then this context stage over the REAL validated
-    # fixtures and compare to the literal golden identity arrays.
-    min_context_goldens = (
-        ("search_metadata_reasoning_min_context_inclusive",
-         "metadata-edge-cases.json",
-         {"query": "reasoning", "min_context_length": 65536}),
-        ("search_metadata_reasoning_min_context_zero",
-         "metadata-edge-cases.json",
-         {"query": "reasoning", "min_context_length": 0}),
-        ("search_capability_min_context_zero_known_only",
-         "capability-unknown.json",
-         {"min_context_length": 0}),
-        ("search_shared_min_context_a_only",
-         "lookup.json",
-         {"query": "shared", "min_context_length": 65536}),
-    )
-    assert len(min_context_goldens) == 4, len(min_context_goldens)
-    assert len({cid for cid, _, _ in min_context_goldens}) == 4
-    doc = _decode_doc(SEARCH_SELECTION_CASES_DOC)
-    search_cases = {case["id"]: case for case in doc["cases"]
-                    if case["tool"] == "search_models"}
-    for cid, fixture, args in min_context_goldens:
-        case = search_cases[cid]
-        assert case["args"] == args, cid
-        assert case.get("fixture", doc["fixture"]) == fixture, cid
-        expect = case["expect"]
-        # No other active filter and no page slicing: the whole match set fits
-        # the default page, so the eligible set is exactly the golden rows.
-        assert expect["limit"] == 50, cid
-        assert expect["offset"] == 0, cid
-        assert expect["next_offset"] is None, cid
-        assert expect["total_matches"] == len(expect["endpoints"]), cid
-        assert expect["filters"] == {
-            "provider": None,
-            "min_context_length": args["min_context_length"],
-            "input_modalities": None,
-            "supported_parameters": None,
-        }, cid
-        snapshot = _validated_snapshot(fixture)
-        before = copy.deepcopy(snapshot)
-        query = args.get("query")
-        provider = args.get("provider")
-        text_pairs = _search_text_provider_pairs(
-            snapshot, query=query, provider=provider)
-        composed = _search_min_context_pairs(
-            snapshot, text_pairs, min_context_length=args["min_context_length"])
-        expected = [(row["provider"], row["model_id"])
-                    for row in expect["endpoints"]]
-        assert composed == expected, cid
-        assert type(composed) is list, cid
-        # A pure filter: it can only narrow the accepted text/provider
-        # selection, never widen it or borrow a sibling pair's context.
-        assert set(composed) <= set(text_pairs), cid
-        assert len(composed) <= len(text_pairs), cid
-        assert snapshot == before, cid
 
     # -- synthetic controls over a resealed, structurally valid registry.
     def model(raw_id, context_length):
@@ -3807,7 +1939,7 @@ def test_search_min_context_pairs_boundary_controls():
     assert _search_min_context_pairs(solo, []) == []
     assert _search_min_context_pairs(solo, [], min_context_length=0) == []
 
-    # More than the public default page (50) of eligible pairs stays complete.
+    # More than the public default page (5) of eligible pairs stays complete.
     bulk_pairs = _search_text_provider_pairs(snapshot, provider="bulk")
     assert len(bulk_pairs) == 60
     assert _search_min_context_pairs(
@@ -3858,8 +1990,7 @@ def test_search_min_context_pairs_boundary_controls():
         # A degraded or missing context never drops the endpoint: the model
         # keeps its complete projected shape, and the warning list is fresh.
         assert set(projected) == {"id", "name", "description", "context_length",
-                                  "architecture", "supported_parameters",
-                                  "pricing"}, raw_id
+                                  "architecture", "supported_parameters"}, raw_id
         assert type(warnings) is list, raw_id
         projected_models[raw_id] = projected
     raw_snapshot = _search_snapshot(
@@ -3882,137 +2013,71 @@ def test_search_min_context_pairs_boundary_controls():
     assert snapshot == before
 
 
-# ---------- internal metadata search: input-modality AND stage (3c) ----------
+# ---------- internal metadata search: shared capability AND stage ----------
 #
-# `watchdog_catalog.query._search_input_modality_pairs(snapshot, pairs, *,
-# input_modalities=None)` is the INTERNAL, UNPAGINATED input-modality stage
-# that later `search_models` units compose AFTER the accepted text/provider and
-# minimum-context stages. Preconditions are an already-VALIDATED snapshot, an
+# `watchdog_catalog.query._search_capability_pairs(snapshot, pairs, *,
+# field, requested)` is the INTERNAL, UNPAGINATED capability filter that
+# `search_models` composes twice -- once for `input_modalities`, once for
+# `supported_parameters`. Preconditions are an already-VALIDATED snapshot, an
 # ordered sequence of immutable tracked `(provider_key, raw_model_id)` tuples
 # and an already-validated `None`/list-of-nonempty-strings request: public
-# argument validation belongs to a later unit, so this stage deliberately has no
+# argument validation belongs to the transport unit, so this stage has no
 # temporary argument envelope and no public tool.
 #
-# The three eligible frozen goldens are the INDEPENDENTLY authored `cases.json`
-# rows whose arguments are confined to query/provider/min_context_length/
-# input_modalities; the synthetic rows below are literal, hand-derived controls.
+# Expectations below are literal, hand-derived controls over a resealed,
+# structurally valid registry. The public `search_models` whole-payload goldens
+# are executed by `tests/test_contract_parity.py`; they remain the owners of
+# stage wiring, success and error semantics and are not replayed here as a
+# private intermediate pipeline.
 
 
-MODALITY_GOLDEN_IDS = (
-    "search_capability_positive_modality_yields_none",
-    "search_shared_modalities_and_b_only",
-    "search_shared_context_and_image_neither",
+CAPABILITY_FIELDS = (
+    ("input_modalities", "text", "image"),
+    ("supported_parameters", "temperature", "max_tokens"),
 )
 
 
-def test_search_input_modality_pairs_and_and_isolation_controls():
-    """The internal input-modality AND stage composes with the accepted
-    text/provider and minimum-context stages: the three frozen eligible
-    `search_models` goldens reproduce exactly as literal endpoint identities,
-    and a synthetic fully-validated registry pins None/[] freedom, the AND over
-    every requested token, ASCII-only folding on both sides, whitespace and
-    non-ASCII case-pair preservation, input-vs-output separation, no inference
-    from name/description/raw id/provider key/pricing/supported_parameters, no
-    cross-provider borrowing, no scope expansion, unpaginated completeness and
-    mutation isolation."""
-    from watchdog_catalog.query import _search_input_modality_pairs
-    from watchdog_catalog.query import _search_min_context_pairs
-    from watchdog_catalog.query import _search_text_provider_pairs
+@pytest.mark.parametrize("field,first,second", CAPABILITY_FIELDS,
+                         ids=[field for field, _, _ in CAPABILITY_FIELDS])
+def test_search_capability_pairs_filter_controls(field, first, second):
+    """One shared field-parametrised capability filter: None/[] freedom, the
+    ALL-tokens-on-one-pair AND, ASCII-only folding with literal whitespace and
+    non-ASCII casing, exact membership (no substring), isolation from every
+    other field, no cross-provider borrowing, subset/order preservation,
+    unpaginated completeness and mutation isolation."""
+    from watchdog_catalog.query import _search_capability_pairs
 
-    doc = _decode_doc(SEARCH_SELECTION_CASES_DOC)
-    search_cases = {case["id"]: case for case in doc["cases"]
-                    if case["tool"] == "search_models"}
+    def model(raw_id, values):
+        return _search_model(raw_id, "Capability " + raw_id, **{field: values})
 
-    # (a) The three frozen eligible goldens: compose text/provider -> context ->
-    #     modality over the REAL validated fixtures and compare the literal
-    #     golden identity arrays, pinning args/filter scope and the default page.
-    modality_goldens = (
-        (MODALITY_GOLDEN_IDS[0], "capability-unknown.json",
-         {"input_modalities": ["text"]}, []),
-        (MODALITY_GOLDEN_IDS[1], "lookup.json",
-         {"query": "shared", "input_modalities": ["text", "IMAGE"]},
-         [("synthetic-b", "vendor/shared")]),
-        (MODALITY_GOLDEN_IDS[2], "lookup.json",
-         {"query": "shared", "min_context_length": 65536,
-          "input_modalities": ["image"]}, []),
-    )
-    assert len({cid for cid, _, _, _ in modality_goldens}) == 3
-    for cid, fixture, args, expected in modality_goldens:
-        case = search_cases[cid]
-        assert case["args"] == args, cid
-        assert set(args) <= {"query", "provider", "min_context_length",
-                             "input_modalities"}, cid
-        assert case.get("fixture", doc["fixture"]) == fixture, cid
-        expect = case["expect"]
-        assert set(expect["filters"]) == {
-            "provider", "min_context_length", "input_modalities",
-            "supported_parameters"}, cid
-        assert expect["filters"]["input_modalities"] == \
-            args["input_modalities"], cid
-        assert expect["filters"]["min_context_length"] == \
-            args.get("min_context_length"), cid
-        assert expect["filters"]["supported_parameters"] is None, cid
-        assert expect["limit"] == 50, cid
-        assert expect["offset"] == 0, cid
-        assert expect["next_offset"] is None, cid
-        assert expect["total_matches"] == len(expect["endpoints"]), cid
-        snapshot = _validated_snapshot(fixture)
-        before = copy.deepcopy(snapshot)
-        text_pairs = _search_text_provider_pairs(
-            snapshot, query=args.get("query"), provider=args.get("provider"))
-        context_pairs = _search_min_context_pairs(
-            snapshot, text_pairs,
-            min_context_length=args.get("min_context_length"))
-        composed = _search_input_modality_pairs(
-            snapshot, context_pairs, input_modalities=args["input_modalities"])
-        assert composed == expected, cid
-        assert type(composed) is list, cid
-        # A pure filter: it can only narrow the accepted composition, never
-        # widen it or borrow a sibling pair's capability.
-        assert set(composed) <= set(context_pairs), cid
-        assert len(composed) <= len(context_pairs), cid
-        assert snapshot == before, cid
-
-    # (b) Synthetic controls over a resealed, structurally valid registry.
+    if field == "input_modalities":
+        decoy = _search_model(
+            "decoy-" + first, first, first, input_modalities=None,
+            output_modalities=[first], supported_parameters=[first])
+    else:
+        decoy = _search_model(
+            "decoy-" + first, first, first, input_modalities=[first],
+            output_modalities=[first], supported_parameters=None)
     synth_models = {
-        "both": _search_model("both", "Both Modalities",
-                              input_modalities=["text", "image"]),
-        "text-only": _search_model("text-only", "Text Only",
-                                   input_modalities=["text"]),
-        "empty-known": _search_model("empty-known", "Empty Known",
-                                     input_modalities=[]),
-        "unknown-array": _search_model("unknown-array", "Unknown Array",
-                                       input_modalities=None),
-        "cased-dupes": _search_model(
-            "cased-dupes", "Cased Dupes",
-            input_modalities=["TEXT", "Image", "text", "image"]),
-        "padded": _search_model("padded", "Padded", input_modalities=[" text "]),
-        "unicode-upper": _search_model("unicode-upper", "Unicode Upper",
-                                       input_modalities=["\u00c9"]),
-        "output-image": _search_model(
-            "output-image", "Output Image", input_modalities=["text"],
-            output_modalities=["image"]),
-        "name-image": _search_model(
-            "name-image", "Image Name", "image prose",
-            input_modalities=["text"]),
-        "param-image": _search_model(
-            "param-image", "Param Image", input_modalities=["text"],
-            supported_parameters=["image_size"]),
-        "price-image": _search_model(
-            "price-image", "Price Image", input_modalities=["text"],
-            pricing={"prompt": "0", "completion": "0"}),
-        "shared-id": _search_model("shared-id", "Shared A",
-                                   input_modalities=["text", "image"]),
+        "both": model("both", [first, second]),
+        "single": model("single", [first]),
+        "empty-known": model("empty-known", []),
+        "unknown": model("unknown", None),
+        "cased-dupes": model(
+            "cased-dupes", [first.upper(), first.title(), first]),
+        "padded": model("padded", [" " + first + " "]),
+        "unicode-upper": model("unicode-upper", ["\u00c9"]),
+        "substring": model("substring", [first + "_" + second]),
+        # Every NON-selected slot carries `first` while the selected field is
+        # unknown: name, description, raw id and both other capability fields
+        # must never become a substitute.
+        "decoy-" + first: decoy,
+        "shared-id": model("shared-id", [first, second]),
     }
-    other_models = {
-        "shared-id": _search_model("shared-id", "Shared B",
-                                   input_modalities=["text"]),
-    }
-    bulk_models = {"bulk-%02d" % index: _search_model(
-                       "bulk-%02d" % index, "Bulk %02d" % index,
-                       input_modalities=["text"])
+    other_models = {"shared-id": model("shared-id", [first])}
+    bulk_models = {"bulk-%02d" % index: model("bulk-%02d" % index, [first])
                    for index in range(60)}
-    synth_snapshot = _search_snapshot(
+    snapshot = _search_snapshot(
         ["gate", "other", "bulk", "zero-provd"],
         {"gate": _search_provider(
              synth_models, "Gate", "https://gate.example/v1/chat/completions"),
@@ -4023,799 +2088,113 @@ def test_search_input_modality_pairs_and_and_isolation_controls():
              bulk_models, "Bulk", "https://bulk.example/v1/chat/completions"),
          "zero-provd": _search_provider(
              {}, "Zero", "https://zero.example/v1/chat/completions")})
-    before = copy.deepcopy(synth_snapshot)
+    before = copy.deepcopy(snapshot)
 
-    modality_rows = (
-        # None and [] apply NO constraint: every supplied pair is retained,
-        # including unknown (null) and known-empty ([]) input arrays.
-        ([("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")],
-         None,
-         [("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")]),
-        ([("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")],
-         [],
-         [("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")]),
-        # A nonempty request rejects BOTH an unknown array and a known-empty one.
-        ([("gate", "both"), ("gate", "unknown-array"), ("gate", "empty-known")],
-         ["text"],
-         [("gate", "both")]),
-        # Single and multi-token AND: every requested token on the SAME pair.
-        ([("gate", "both"), ("gate", "text-only")], ["text"],
-         [("gate", "both"), ("gate", "text-only")]),
-        ([("gate", "both"), ("gate", "text-only")], ["text", "image"],
-         [("gate", "both")]),
-        ([("gate", "both"), ("gate", "text-only")], ["image", "text"],
-         [("gate", "both")]),
-        # Duplicates are idempotent, never a multiplicity constraint.
-        ([("gate", "both")], ["text", "text", "TEXT"],
-         [("gate", "both")]),
-        # ASCII-insensitive on BOTH sides; first-occurrence duplicates harmless.
-        ([("gate", "cased-dupes")], ["image", "TEXT"],
-         [("gate", "cased-dupes")]),
-        # Whitespace preserved: a padded token matches only an identically
-        # padded reported token.
-        ([("gate", "padded")], ["text"], []),
-        ([("gate", "padded")], [" text "], [("gate", "padded")]),
-        ([("gate", "padded")], [" text"], []),
-        ([("gate", "padded")], ["text "], []),
-        # A non-ASCII case pair stays distinct (never Unicode-folded).
-        ([("gate", "unicode-upper")], ["\u00e9"], []),
-        ([("gate", "unicode-upper")], ["\u00c9"], [("gate", "unicode-upper")]),
-        # Output modalities are not substitutes for input modalities.
-        ([("gate", "output-image")], ["image"], []),
-        ([("gate", "output-image")], ["text"], [("gate", "output-image")]),
-        # No capability is inferred from name, description, raw id, provider
-        # key, pricing or supported_parameters.
-        ([("gate", "name-image")], ["image"], []),
-        ([("gate", "param-image")], ["image"], []),
-        ([("gate", "price-image")], ["image"], []),
-        ([("gate", "text-only")], ["text"], [("gate", "text-only")]),
-        # A supplied strict subset is never expanded, even when excluded
-        # snapshot models satisfy the filter; empty input stays empty.
-        ([("gate", "both")], ["text"], [("gate", "both")]),
-        ([], ["text"], []),
-        # Exact incoming order is preserved: never sorted, never deduplicated.
-        ([("gate", "text-only"), ("gate", "both"), ("gate", "cased-dupes")],
-         ["text"],
-         [("gate", "text-only"), ("gate", "both"), ("gate", "cased-dupes")]),
-        # A shared raw id with disjoint per-provider capabilities: no union,
-        # no borrowing, and the incoming order is still preserved.
-        ([("gate", "shared-id"), ("other", "shared-id")], ["image"],
-         [("gate", "shared-id")]),
-        ([("gate", "shared-id"), ("other", "shared-id")], ["text"],
-         [("gate", "shared-id"), ("other", "shared-id")]),
-        ([("other", "shared-id"), ("gate", "shared-id")], ["image"],
-         [("gate", "shared-id")]),
-    )
-    for pairs, request, expected in modality_rows:
-        result = _search_input_modality_pairs(
-            synth_snapshot, pairs, input_modalities=request)
-        assert result == expected, (pairs, request)
-        assert type(result) is list, (pairs, request)
-        assert all(type(pair) is tuple and len(pair) == 2
-                   for pair in result), (pairs, request)
+    def run(pairs, requested):
+        return _search_capability_pairs(
+            snapshot, pairs, field=field, requested=requested)
 
-    # (c) Composition with context: high-context text-only A and low-context
-    #     image-capable B yield NEITHER for context+image, even though each
-    #     predicate alone matches somewhere.
-    ctx_models = {
-        "high-text": _search_model("high-text", "High Text",
-                                   context_length=65536,
-                                   input_modalities=["text"]),
-        "low-image": _search_model("low-image", "Low Image",
-                                   context_length=32768,
-                                   input_modalities=["text", "image"]),
-    }
-    ctx_snapshot = _search_snapshot(
-        ["ctx"], {"ctx": _search_provider(
-            ctx_models, "Ctx", "https://ctx.example/v1/chat/completions")})
-    assert _search_input_modality_pairs(
-        ctx_snapshot,
-        _search_min_context_pairs(
-            ctx_snapshot, _search_text_provider_pairs(ctx_snapshot),
-            min_context_length=65536),
-        input_modalities=["image"]) == []
-    assert _search_input_modality_pairs(
-        ctx_snapshot, _search_text_provider_pairs(ctx_snapshot),
-        input_modalities=["image"]) == [("ctx", "low-image")]
-    assert _search_min_context_pairs(
-        ctx_snapshot, _search_text_provider_pairs(ctx_snapshot),
-        min_context_length=65536) == [("ctx", "high-text")]
+    # None and [] are NO constraint: unknown (null) and known-empty ([]) pairs
+    # stay, while a nonempty request retains neither.
+    free = [("gate", "both"), ("gate", "unknown"), ("gate", "empty-known")]
+    for requested in (None, []):
+        result = run(free, requested)
+        assert result == free
+        assert result is not free
+    assert run(free, [first]) == [("gate", "both")]
 
-    # (d) A fresh, non-aliasing result on BOTH branches: mutating it (or a
-    #     returned pair) can never corrupt the snapshot, the input sequence, the
-    #     request list or a later call.
-    supplied = [("gate", "both"), ("gate", "text-only")]
-    for request, expected in (
-            (None, supplied), ([], supplied),
-            (["text"], [("gate", "both"), ("gate", "text-only")]),
-            (["image"], [("gate", "both")])):
-        result = _search_input_modality_pairs(
-            synth_snapshot, supplied, input_modalities=request)
-        assert result is not supplied, request
-        assert result == expected, request
-        result.clear()
-        result.append(("gate", "injected"))
-        assert _search_input_modality_pairs(
-            synth_snapshot, supplied, input_modalities=request) == expected, \
-            request
-        assert supplied == [("gate", "both"), ("gate", "text-only")], request
-    request = ["TEXT", "IMAGE"]
-    request_before = list(request)
-    assert _search_input_modality_pairs(
-        synth_snapshot, [("gate", "both")], input_modalities=request) == \
+    # ALL requested tokens on the SAME pair, request order independent, and a
+    # duplicated request is idempotent.
+    two = [("gate", "both"), ("gate", "single")]
+    assert run(two, [first]) == two
+    assert run(two, [first, second]) == [("gate", "both")]
+    assert run(two, [second, first]) == [("gate", "both")]
+    assert run([("gate", "both")], [first, first, first.upper()]) == \
         [("gate", "both")]
-    assert request == request_before
 
-    # (e) A zero-ID provider selects nothing and an empty registry stays empty.
-    assert _search_input_modality_pairs(
-        synth_snapshot, [], input_modalities=["text"]) == []
-    assert _search_input_modality_pairs(
-        synth_snapshot, [], input_modalities=None) == []
+    # ASCII-only folding on both sides; reported duplicates are harmless.
+    assert run([("gate", "cased-dupes")], [first.upper()]) == \
+        [("gate", "cased-dupes")]
+
+    # Whitespace stays literal: a padded token matches only an identically
+    # padded reported token.
+    assert run([("gate", "padded")], [first]) == []
+    assert run([("gate", "padded")], [" " + first + " "]) == \
+        [("gate", "padded")]
+
+    # Non-ASCII case pairs never collapse.
+    assert run([("gate", "unicode-upper")], ["\u00e9"]) == []
+    assert run([("gate", "unicode-upper")], ["\u00c9"]) == \
+        [("gate", "unicode-upper")]
+
+    # Exact membership only: a longer capability name is not a substring match.
+    assert run([("gate", "substring")], [first]) == []
+    assert run([("gate", "substring")], [first + "_" + second]) == \
+        [("gate", "substring")]
+
+    # No other field is a substitute: selected field unknown while every other
+    # slot (name, description, raw id and both other capability fields)
+    # carries the requested token.
+    assert run([("gate", "decoy-" + first)], [first]) == []
+
+    # A shared raw id stays TWO pairs with disjoint per-provider capability:
+    # no union, no borrowing, incoming order preserved.
+    shared = [("gate", "shared-id"), ("other", "shared-id")]
+    assert run(shared, [second]) == [("gate", "shared-id")]
+    assert run(shared, [first]) == shared
+    assert run([("other", "shared-id"), ("gate", "shared-id")], [second]) == \
+        [("gate", "shared-id")]
+
+    # A supplied strict subset is never expanded; empty input and an empty
+    # registry stay empty.
+    assert run([("gate", "both")], [first]) == [("gate", "both")]
+    assert run([], [first]) == []
+    assert run([], None) == []
     empty_snapshot = _search_snapshot([], {})
-    assert _search_input_modality_pairs(empty_snapshot, []) == []
-    assert _search_input_modality_pairs(
-        empty_snapshot, [], input_modalities=[]) == []
-    assert _search_input_modality_pairs(
-        empty_snapshot, [], input_modalities=["text"]) == []
+    assert _search_capability_pairs(
+        empty_snapshot, [], field=field, requested=[first]) == []
 
-    # More than the public default page (50) of eligible pairs stays complete.
-    bulk_pairs = _search_text_provider_pairs(synth_snapshot, provider="bulk")
-    assert len(bulk_pairs) == 60
-    assert _search_input_modality_pairs(
-        synth_snapshot, bulk_pairs, input_modalities=["text"]) == bulk_pairs
+    # Incoming pair order and duplicates are preserved exactly.
+    ordered = [("gate", "single"), ("gate", "both"), ("gate", "cased-dupes"),
+               ("gate", "single")]
+    assert run(ordered, [first]) == ordered
 
-    # (f) Malformed upstream input arrays project to null WHOLE through the real
-    #     accepted projector; the query stage then rejects them, never salvaging
-    #     a valid member. Valid []/casing/duplicates/padded tokens survive in the
-    #     projected metadata, which the filter matches literally.
-    raw_rows = (
-        ("absent", {"name": "Absent"}, None),
-        ("null", {"name": "Null",
-                  "architecture": {"input_modalities": None}}, None),
-        ("bare-string", {"name": "Bare",
-                         "architecture": {"input_modalities": "text"}}, None),
-        ("object", {"name": "Object",
-                    "architecture": {"input_modalities": {"a": 1}}}, None),
-        ("mixed", {"name": "Mixed",
-                   "architecture": {"input_modalities": ["text", 5]}}, None),
-        ("null-member", {"name": "NullMember",
-                         "architecture": {"input_modalities": [None]}}, None),
-        ("empty-string-member",
-         {"name": "EmptyMember",
-          "architecture": {"input_modalities": [""]}}, None),
-        ("valid-empty", {"name": "ValidEmpty",
-                         "architecture": {"input_modalities": []}}, []),
-        ("valid-cased",
-         {"name": "ValidCased",
-          "architecture": {"input_modalities": ["TEXT", "Image", "text"]}},
-         ["TEXT", "Image", "text"]),
-        ("valid-padded",
-         {"name": "ValidPadded",
-          "architecture": {"input_modalities": [" text "]}}, [" text "]),
-    )
-    projected_models = {}
-    for raw_id, raw, expected_input in raw_rows:
-        projected, warnings = _catalog.project_model(raw_id, raw)
-        assert projected["architecture"]["input_modalities"] == \
-            expected_input, raw_id
-        assert set(projected) == {"id", "name", "description", "context_length",
-                                  "architecture", "supported_parameters",
-                                  "pricing"}, raw_id
-        assert type(warnings) is list, raw_id
-        projected_models[raw_id] = projected
-    raw_snapshot = _search_snapshot(
-        ["raw"], {"raw": _search_provider(
-            projected_models, "Raw",
-            "https://raw.example/v1/chat/completions")})
-    raw_pairs = _search_text_provider_pairs(raw_snapshot)
-    assert len(raw_pairs) == len(raw_rows)
-    # Unknown arrays are not a wildcard: a nonempty request rejects them, and
-    # a valid known-empty array satisfies no nonempty request.
-    assert _search_input_modality_pairs(
-        raw_snapshot, raw_pairs, input_modalities=["text"]) == \
-        [("raw", "valid-cased")]
-    assert _search_input_modality_pairs(
-        raw_snapshot, raw_pairs, input_modalities=["image"]) == \
-        [("raw", "valid-cased")]
-    assert _search_input_modality_pairs(
-        raw_snapshot, [("raw", "valid-empty")],
-        input_modalities=["text"]) == []
-    # Omission/[] retains every pair, including the unknown ones.
-    assert _search_input_modality_pairs(raw_snapshot, raw_pairs) == raw_pairs
-    assert _search_input_modality_pairs(
-        raw_snapshot, raw_pairs, input_modalities=[]) == raw_pairs
-    # Padded and cased projected metadata matches literally.
-    assert _search_input_modality_pairs(
-        raw_snapshot, [("raw", "valid-padded")],
-        input_modalities=[" text "]) == [("raw", "valid-padded")]
-    assert _search_input_modality_pairs(
-        raw_snapshot, [("raw", "valid-padded")],
-        input_modalities=["text"]) == []
-    assert _search_input_modality_pairs(
-        raw_snapshot, [("raw", "valid-cased")],
-        input_modalities=["IMAGE"]) == [("raw", "valid-cased")]
-    assert synth_snapshot == before
+    # More than the default page (5) of matches stays complete.
+    bulk_pairs = [("bulk", "bulk-%02d" % index) for index in range(60)]
+    assert len(run(bulk_pairs, [first])) == 60
 
-
-# ------ internal metadata search: supported-parameter AND stage (3d) ------
-#
-# `watchdog_catalog.query._search_supported_parameter_pairs(snapshot, pairs, *,
-# supported_parameters=None)` is the INTERNAL, UNPAGINATED FINAL capability stage
-# that `search_models` composes AFTER the accepted text/provider, minimum-context
-# and input-modality stages. Preconditions are an already-VALIDATED snapshot, an
-# ordered sequence of immutable tracked `(provider_key, raw_model_id)` tuples and
-# an already-validated `None`/list-of-nonempty-strings request: public argument
-# validation belongs to unit 3e, so this stage deliberately has no temporary
-# argument envelope and no public tool.
-#
-# The five eligible frozen goldens are the INDEPENDENTLY authored `cases.json`
-# rows whose arguments are confined to query/provider/min_context_length/
-# input_modalities/supported_parameters and whose whole match set fits the
-# default page; the synthetic rows below are literal, hand-derived controls.
-
-PARAMETER_GOLDEN_IDS = (
-    "search_capability_empty_filters_no_constraint",
-    "search_capability_positive_parameter_yields_none",
-    "search_shared_params_and_a_only",
-    "search_shared_context_and_top_p_neither",
-    "search_text_case_extended_filters_normalize",
-)
-
-
-def test_search_supported_parameter_pairs_and_cross_provider_controls():
-    """The internal supported-parameter AND stage composes as the final filter
-    over the accepted text/provider, minimum-context and input-modality stages:
-    the five frozen eligible `search_models` goldens reproduce exactly as
-    literal endpoint identities, and synthetic fully-validated registries pin
-    None/[] freedom, the ALL-on-one-pair request semantics, ASCII-only folding
-    on both sides, casing/order/duplicate/whitespace preservation, isolation
-    from modality/name/description/raw-id/pricing metadata, no substring
-    inference, no selection expansion, no cross-provider borrowing or raw-ID
-    union, unpaginated completeness and mutation isolation."""
-    from watchdog_catalog.query import _search_input_modality_pairs
-    from watchdog_catalog.query import _search_min_context_pairs
-    from watchdog_catalog.query import _search_supported_parameter_pairs
-    from watchdog_catalog.query import _search_text_provider_pairs
-
-    doc = _decode_doc(SEARCH_SELECTION_CASES_DOC)
-    search_cases = {case["id"]: case for case in doc["cases"]
-                    if case["tool"] == "search_models"}
-
-    # (a) The five frozen eligible goldens: compose all four accepted stages
-    #     over the REAL validated fixtures and compare the literal golden
-    #     identity arrays, pinning args/filter scope and the default page.
-    parameter_goldens = (
-        (PARAMETER_GOLDEN_IDS[0], "capability-unknown.json",
-         {"query": "", "input_modalities": [], "supported_parameters": []},
-         [("synthetic-a", "vendor/known-empty-capabilities"),
-          ("synthetic-a", "vendor/unknown-capabilities")]),
-        (PARAMETER_GOLDEN_IDS[1], "capability-unknown.json",
-         {"supported_parameters": ["temperature"]},
-         []),
-        (PARAMETER_GOLDEN_IDS[2], "lookup.json",
-         {"query": "shared",
-          "supported_parameters": ["temperature", "MAX_TOKENS"]},
-         [("synthetic-a", "vendor/shared")]),
-        (PARAMETER_GOLDEN_IDS[3], "lookup.json",
-         {"query": "shared", "min_context_length": 65536,
-          "supported_parameters": ["top_p"]},
-         []),
-        (PARAMETER_GOLDEN_IDS[4], "search-text.json",
-         {"query": "REASONING", "min_context_length": 65536,
-          "input_modalities": ["IMAGE", "text", "IMAGE"],
-          "supported_parameters": ["TEMPERATURE"]},
-         [("synthetic-a", "vendor/literal[ab].*")]),
-    )
-    assert len(parameter_goldens) == 5
-    assert len({cid for cid, _, _, _ in parameter_goldens}) == 5
-    assert {cid for cid, _, _, _ in parameter_goldens} == \
-        set(PARAMETER_GOLDEN_IDS)
-    for cid, fixture, args, expected in parameter_goldens:
-        case = search_cases[cid]
-        assert case["args"] == args, cid
-        assert set(args) <= {"query", "provider", "min_context_length",
-                             "input_modalities", "supported_parameters"}, cid
-        # A capability-filtered row is never a candidate-selection oracle.
-        assert not _selection_eligible(case), cid
-        assert case.get("fixture", doc["fixture"]) == fixture, cid
-        expect = case["expect"]
-        assert set(expect["filters"]) == {
-            "provider", "min_context_length", "input_modalities",
-            "supported_parameters"}, cid
-        assert expect["filters"]["supported_parameters"] == \
-            args["supported_parameters"], cid
-        assert expect["filters"]["input_modalities"] == \
-            args.get("input_modalities"), cid
-        assert expect["filters"]["min_context_length"] == \
-            args.get("min_context_length"), cid
-        assert expect["filters"]["provider"] is None, cid
-        assert expect["limit"] == 50, cid
-        assert expect["offset"] == 0, cid
-        assert expect["next_offset"] is None, cid
-        assert expect["total_matches"] == len(expect["endpoints"]), cid
-        snapshot = _validated_snapshot(fixture)
-        before = copy.deepcopy(snapshot)
-        text_pairs = _search_text_provider_pairs(
-            snapshot, query=args.get("query"), provider=args.get("provider"))
-        context_pairs = _search_min_context_pairs(
-            snapshot, text_pairs,
-            min_context_length=args.get("min_context_length"))
-        modality_pairs = _search_input_modality_pairs(
-            snapshot, context_pairs,
-            input_modalities=args.get("input_modalities"))
-        composed = _search_supported_parameter_pairs(
-            snapshot, modality_pairs,
-            supported_parameters=args["supported_parameters"])
-        assert composed == expected, cid
-        assert type(composed) is list, cid
-        # A pure final filter: it can only narrow the accepted composition,
-        # never widen it, re-expand the selection or borrow a capability.
-        assert set(composed) <= set(modality_pairs), cid
-        assert len(composed) <= len(modality_pairs), cid
-        assert snapshot == before, cid
-
-    # (b) Synthetic controls over a resealed, structurally valid registry.
-    synth_models = {
-        "params-both": _search_model(
-            "params-both", "Both Params",
-            supported_parameters=["temperature", "max_tokens"]),
-        "params-single": _search_model(
-            "params-single", "Single Param",
-            supported_parameters=["temperature"]),
-        "params-cased-dupes": _search_model(
-            "params-cased-dupes", "Cased Dupes",
-            supported_parameters=["TEMPERATURE", "Temperature", "temperature"]),
-        "params-unknown": _search_model("params-unknown", "Unknown Params"),
-        "params-empty": _search_model("params-empty", "Empty Params",
-                                      supported_parameters=[]),
-        "params-padded": _search_model("params-padded", "Padded Param",
-                                       supported_parameters=[" top_p "]),
-        "params-unicode-upper": _search_model(
-            "params-unicode-upper", "Unicode Param",
-            supported_parameters=["\u00c9"]),
-        "params-substring": _search_model(
-            "params-substring", "Substring Param",
-            supported_parameters=["temperature_top_p"]),
-        # A token in another metadata slot is NEVER a supported parameter.
-        "input-token": _search_model(
-            "input-token", "Input Token",
-            input_modalities=["temperature"]),
-        "output-token": _search_model(
-            "output-token", "Output Token", input_modalities=["text"],
-            output_modalities=["image_size"]),
-        "id-token-temperature": _search_model(
-            "id-token-temperature", "Temperature Display", "top_p prose",
-            pricing={"prompt": "0", "completion": "0"}),
-        "shared-id": _search_model(
-            "shared-id", "Shared Params A", context_length=65536,
-            input_modalities=["text", "image"],
-            supported_parameters=["temperature"]),
-    }
-    other_models = {
-        "shared-id": _search_model(
-            "shared-id", "Shared Params B", context_length=32768,
-            input_modalities=["text"], supported_parameters=["top_p"]),
-    }
-    bulk_models = {"bulk-%02d" % index: _search_model(
-                       "bulk-%02d" % index, "Bulk %02d" % index,
-                       supported_parameters=["Temperature"])
-                   for index in range(60)}
-    synth_snapshot = _search_snapshot(
-        ["gate", "other", "bulk", "zero-provd"],
-        {"gate": _search_provider(
-             synth_models, "Gate", "https://gate.example/v1/chat/completions"),
-         "other": _search_provider(
-             other_models, "Other",
-             "https://other.example/v1/chat/completions"),
-         "bulk": _search_provider(
-             bulk_models, "Bulk",
-             "https://bulk.example/v1/chat/completions"),
-         "zero-provd": _search_provider(
-             {}, "Zero", "https://zero.example/v1/chat/completions")})
-    before = copy.deepcopy(synth_snapshot)
-
-    parameter_rows = (
-        # None and [] apply NO constraint: every supplied pair is retained,
-        # including unknown (null) and known-empty ([]) parameter arrays.
-        ([("gate", "params-both"), ("gate", "params-unknown"),
-          ("gate", "params-empty")], None,
-         [("gate", "params-both"), ("gate", "params-unknown"),
-          ("gate", "params-empty")]),
-        ([("gate", "params-both"), ("gate", "params-unknown"),
-          ("gate", "params-empty")], [],
-         [("gate", "params-both"), ("gate", "params-unknown"),
-          ("gate", "params-empty")]),
-        # A nonempty request rejects BOTH an unknown array and a known-empty
-        # one: neither is a wildcard, and neither satisfies a token.
-        ([("gate", "params-both"), ("gate", "params-unknown"),
-          ("gate", "params-empty")], ["temperature"],
-         [("gate", "params-both")]),
-        # Single and multi-token AND: every requested token on the SAME pair,
-        # independent of request order.
-        ([("gate", "params-both"), ("gate", "params-single")], ["temperature"],
-         [("gate", "params-both"), ("gate", "params-single")]),
-        ([("gate", "params-both"), ("gate", "params-single")],
-         ["temperature", "max_tokens"], [("gate", "params-both")]),
-        ([("gate", "params-both"), ("gate", "params-single")],
-         ["max_tokens", "temperature"], [("gate", "params-both")]),
-        # Duplicates are idempotent, never a multiplicity constraint.
-        ([("gate", "params-both")],
-         ["temperature", "temperature", "TEMPERATURE"],
-         [("gate", "params-both")]),
-        # ASCII-insensitive on BOTH sides, first-occurrence duplicates
-        # harmless, and the projected array keeps its literal raw casing.
-        ([("gate", "params-cased-dupes")], ["temperature"],
-         [("gate", "params-cased-dupes")]),
-        ([("gate", "params-cased-dupes")], ["TEMPERATURE"],
-         [("gate", "params-cased-dupes")]),
-        # Whitespace preserved: a padded token matches only an identically
-        # padded reported token.
-        ([("gate", "params-padded")], ["top_p"], []),
-        ([("gate", "params-padded")], [" top_p "], [("gate", "params-padded")]),
-        ([("gate", "params-padded")], [" top_p"], []),
-        ([("gate", "params-padded")], ["top_p "], []),
-        # A non-ASCII case pair stays distinct (never Unicode-folded).
-        ([("gate", "params-unicode-upper")], ["\u00e9"], []),
-        ([("gate", "params-unicode-upper")], ["\u00c9"],
-         [("gate", "params-unicode-upper")]),
-        # No substring matching inside a capability name.
-        ([("gate", "params-substring")], ["temperature"], []),
-        ([("gate", "params-substring")], ["top_p"], []),
-        ([("gate", "params-substring")], ["temperature_top_p"],
-         [("gate", "params-substring")]),
-        # Input/output modalities, names, descriptions, raw ids and pricing
-        # are never substitutes for supported parameters.
-        ([("gate", "input-token")], ["temperature"], []),
-        ([("gate", "output-token")], ["image_size"], []),
-        ([("gate", "id-token-temperature")], ["temperature"], []),
-        ([("gate", "id-token-temperature")], ["top_p"], []),
-        ([("gate", "id-token-temperature")], ["image_size"], []),
-        # A supplied strict subset is never expanded, even when excluded
-        # snapshot models satisfy the filter; empty input stays empty.
-        ([("gate", "params-unknown")], ["temperature"], []),
-        ([], ["temperature"], []),
-        # Exact incoming order is preserved: never sorted, never deduplicated.
-        ([("gate", "params-single"), ("gate", "params-both"),
-          ("gate", "params-cased-dupes")], ["temperature"],
-         [("gate", "params-single"), ("gate", "params-both"),
-          ("gate", "params-cased-dupes")]),
-        # A shared raw id with disjoint per-provider parameter arrays: no
-        # union, no borrowing, and the incoming order is still preserved.
-        ([("gate", "shared-id"), ("other", "shared-id")], ["temperature"],
-         [("gate", "shared-id")]),
-        ([("gate", "shared-id"), ("other", "shared-id")], ["top_p"],
-         [("other", "shared-id")]),
-        ([("gate", "shared-id"), ("other", "shared-id")],
-         ["temperature", "top_p"], []),
-        ([("other", "shared-id"), ("gate", "shared-id")], ["temperature"],
-         [("gate", "shared-id")]),
-    )
-    for pairs, request, expected in parameter_rows:
-        result = _search_supported_parameter_pairs(
-            synth_snapshot, pairs, supported_parameters=request)
-        assert result == expected, (pairs, request)
-        assert type(result) is list, (pairs, request)
-        assert all(type(pair) is tuple and len(pair) == 2
-                   for pair in result), (pairs, request)
-
-    # More than the public default page (50) of eligible pairs stays complete.
-    bulk_pairs = _search_text_provider_pairs(synth_snapshot, provider="bulk")
-    assert len(bulk_pairs) == 60
-    assert _search_supported_parameter_pairs(
-        synth_snapshot, bulk_pairs, supported_parameters=["temperature"]) == \
-        bulk_pairs
-
-    # A zero-ID provider, a true zero-provider registry and empty input all
-    # stay empty on both the inactive and the active branch.
-    assert _search_supported_parameter_pairs(
-        synth_snapshot,
-        _search_text_provider_pairs(synth_snapshot, provider="zero-provd"),
-        supported_parameters=["temperature"]) == []
-    empty_snapshot = _search_snapshot([], {})
-    for request in (None, [], ["temperature"]):
-        assert _search_supported_parameter_pairs(
-            empty_snapshot, [], supported_parameters=request) == []
-
-    # A fresh, non-aliasing result list on the inactive None/[] AND the active
-    # branches: mutating it cannot corrupt the snapshot, the input sequence,
-    # the request list or a later call.
-    supplied = [("gate", "params-both"), ("gate", "params-single"),
-                ("gate", "params-unknown")]
-    supplied_before = list(supplied)
-    for request, expected in (
-            (None, supplied),
-            ([], supplied),
-            (["temperature"], [("gate", "params-both"),
-                               ("gate", "params-single")]),
-            (["max_tokens"], [("gate", "params-both")]),
-            (["temperature", "max_tokens"], [("gate", "params-both")])):
-        result = _search_supported_parameter_pairs(
-            synth_snapshot, supplied, supported_parameters=request)
-        assert result is not supplied, request
-        assert result == expected, request
+    # Fresh, non-aliasing list on both branches: mutating it cannot corrupt the
+    # snapshot, the supplied sequence or a later call.
+    supplied = [("gate", "both"), ("gate", "single")]
+    for requested, expected in (
+            (None, supplied), ([], supplied),
+            ([first], supplied), ([second], [("gate", "both")])):
+        result = run(supplied, requested)
+        assert result is not supplied
+        assert result == expected
         result.clear()
-        result.append(("gate", "injected"))
-        assert _search_supported_parameter_pairs(
-            synth_snapshot, supplied, supported_parameters=request) == \
-            expected, request
-        assert supplied == supplied_before, request
-    request = ["TEMPERATURE", "temperature"]
-    request_before = list(request)
-    assert _search_supported_parameter_pairs(
-        synth_snapshot, [("gate", "params-both")],
-        supported_parameters=request) == [("gate", "params-both")]
-    assert request == request_before
-    # Projected metadata keeps its literal raw casing, order, duplicates and
-    # padding; a known [] and an unknown null stay distinct from each other.
-    assert synth_snapshot["providers"]["gate"]["models"][
-        "params-cased-dupes"]["supported_parameters"] == \
-        ["TEMPERATURE", "Temperature", "temperature"]
-    assert synth_snapshot["providers"]["gate"]["models"][
-        "params-empty"]["supported_parameters"] == []
-    assert synth_snapshot["providers"]["gate"]["models"][
-        "params-unknown"]["supported_parameters"] is None
-    assert synth_snapshot == before
-
-    # (c) Malformed upstream parameter arrays project to null WHOLE through
-    #     the real accepted projector; the query stage then rejects them and
-    #     never salvages a valid member. Valid []/casing/duplicates/padded
-    #     tokens survive in the projected metadata and match literally.
-    raw_rows = (
-        ("absent", {"name": "Absent"}, None),
-        ("null", {"name": "Null", "supported_parameters": None}, None),
-        ("bare-string", {"name": "Bare",
-                         "supported_parameters": "temperature"}, None),
-        ("object", {"name": "Object",
-                    "supported_parameters": {"temperature": True}}, None),
-        ("mixed", {"name": "Mixed",
-                   "supported_parameters": ["temperature", 5]}, None),
-        ("number-member", {"name": "Number",
-                           "supported_parameters": ["temperature", 1.0]},
-         None),
-        ("null-member", {"name": "NullMember",
-                         "supported_parameters": ["temperature", None]}, None),
-        ("bool-member", {"name": "Bool",
-                         "supported_parameters": ["temperature", True]}, None),
-        ("empty-string-member",
-         {"name": "EmptyMember",
-          "supported_parameters": ["temperature", ""]}, None),
-        ("valid-empty", {"name": "ValidEmpty", "supported_parameters": []}, []),
-        ("valid-cased",
-         {"name": "ValidCased",
-          "supported_parameters": ["TEMPERATURE", "Temperature",
-                                   "temperature"]},
-         ["TEMPERATURE", "Temperature", "temperature"]),
-        ("valid-dupes",
-         {"name": "ValidDupes", "supported_parameters": ["top_p", "top_p"]},
-         ["top_p", "top_p"]),
-        ("valid-padded",
-         {"name": "ValidPadded", "supported_parameters": [" top_p "]},
-         [" top_p "]),
-    )
-    projected_models = {}
-    for raw_id, raw, expected_params in raw_rows:
-        projected, warnings = _catalog.project_model(raw_id, raw)
-        assert projected["supported_parameters"] == expected_params, raw_id
-        assert set(projected) == {"id", "name", "description", "context_length",
-                                  "architecture", "supported_parameters",
-                                  "pricing"}, raw_id
-        assert type(warnings) is list, raw_id
-        projected_models[raw_id] = projected
-    raw_snapshot = _search_snapshot(
-        ["raw"], {"raw": _search_provider(
-            projected_models, "Raw",
-            "https://raw.example/v1/chat/completions")})
-    assert _catalog.validate_snapshot(raw_snapshot) is raw_snapshot
-    raw_pairs = _search_text_provider_pairs(raw_snapshot)
-    assert len(raw_pairs) == len(raw_rows)
-    assert _search_supported_parameter_pairs(
-        raw_snapshot, raw_pairs, supported_parameters=["temperature"]) == \
-        [("raw", "valid-cased")]
-    assert _search_supported_parameter_pairs(
-        raw_snapshot, raw_pairs, supported_parameters=["top_p"]) == \
-        [("raw", "valid-dupes")]
-    assert _search_supported_parameter_pairs(
-        raw_snapshot, raw_pairs, supported_parameters=[" top_p "]) == \
-        [("raw", "valid-padded")]
-    # A null-projected (malformed or unknown) array is never a wildcard, and a
-    # known-empty array satisfies no nonempty request.
-    assert _search_supported_parameter_pairs(
-        raw_snapshot, [("raw", "absent")],
-        supported_parameters=["temperature"]) == []
-    assert _search_supported_parameter_pairs(
-        raw_snapshot, [("raw", "valid-empty")],
-        supported_parameters=["temperature"]) == []
-    # Omission/[] retains every pair, including the null-projected ones.
-    assert _search_supported_parameter_pairs(raw_snapshot, raw_pairs) == \
-        raw_pairs
-    assert _search_supported_parameter_pairs(
-        raw_snapshot, raw_pairs, supported_parameters=[]) == raw_pairs
-
-    # (d) Cross-provider false-positive regression: obviously synthetic
-    #     providers sharing ONE literal raw id carry intentionally conflicting
-    #     context, input modalities and parameters. Each predicate matches
-    #     somewhere on its own; the composed pipeline requires ALL on the SAME
-    #     (provider, raw_id), never a union by raw id.
-    def compose(snapshot, *, query=None, provider=None,
-                min_context_length=None, input_modalities=None,
-                supported_parameters=None):
-        pairs = _search_text_provider_pairs(
-            snapshot, query=query, provider=provider)
-        pairs = _search_min_context_pairs(
-            snapshot, pairs, min_context_length=min_context_length)
-        pairs = _search_input_modality_pairs(
-            snapshot, pairs, input_modalities=input_modalities)
-        return _search_supported_parameter_pairs(
-            snapshot, pairs, supported_parameters=supported_parameters)
-
-    # d1: gateway A has enough context but text-only input; gateway B accepts
-    # image input but has too little context. Both support the parameter.
-    cap_id = "vendor/conflict-cap"
-    cap_snapshot = _search_snapshot(
-        ["gw-a", "gw-b"],
-        {"gw-a": _search_provider(
-             {cap_id: _search_model(
-                 cap_id, "Conflict A", context_length=65536,
-                 input_modalities=["text"],
-                 supported_parameters=["temperature"])},
-             "Gate A", "https://gw-a.example/v1/chat/completions"),
-         "gw-b": _search_provider(
-             {cap_id: _search_model(
-                 cap_id, "Conflict B", context_length=8192,
-                 input_modalities=["text", "image"],
-                 supported_parameters=["temperature"])},
-             "Gate B", "https://gw-b.example/v1/chat/completions")})
-    cap_before = copy.deepcopy(cap_snapshot)
-    cap_pairs = _search_text_provider_pairs(cap_snapshot)
-    assert cap_pairs == [("gw-a", cap_id), ("gw-b", cap_id)]
-    # Each predicate alone matches somewhere.
-    assert _search_min_context_pairs(
-        cap_snapshot, cap_pairs, min_context_length=65536) == \
-        [("gw-a", cap_id)]
-    assert _search_input_modality_pairs(
-        cap_snapshot, cap_pairs, input_modalities=["image"]) == \
-        [("gw-b", cap_id)]
-    assert _search_supported_parameter_pairs(
-        cap_snapshot, cap_pairs, supported_parameters=["temperature"]) == \
-        cap_pairs
-    # Context AND image AND parameter: neither gateway has all three.
-    assert compose(cap_snapshot, min_context_length=65536,
-                   input_modalities=["image"],
-                   supported_parameters=["temperature"]) == []
-    assert compose(cap_snapshot, min_context_length=65536,
-                   input_modalities=["image"]) == []
-    # Positive same-pair controls prove the composed pipeline is not
-    # always-empty: A wins on context+text, B wins on image+small context.
-    assert compose(cap_snapshot, min_context_length=65536,
-                   input_modalities=["text"],
-                   supported_parameters=["temperature"]) == [("gw-a", cap_id)]
-    assert compose(cap_snapshot, min_context_length=8192,
-                   input_modalities=["image"],
-                   supported_parameters=["temperature"]) == [("gw-b", cap_id)]
-    assert cap_snapshot == cap_before
-
-    # d2: gateway A supports one requested parameter and gateway B another on
-    # the same raw id; requiring both yields neither (never a raw-ID union).
-    split_id = "vendor/split-param"
-    split_snapshot = _search_snapshot(
-        ["gw-a", "gw-b"],
-        {"gw-a": _search_provider(
-             {split_id: _search_model(
-                 split_id, "Split A", context_length=65536,
-                 input_modalities=["text"],
-                 supported_parameters=["temperature"])},
-             "Gate A", "https://gw-a.example/v1/chat/completions"),
-         "gw-b": _search_provider(
-             {split_id: _search_model(
-                 split_id, "Split B", context_length=65536,
-                 input_modalities=["text"],
-                 supported_parameters=["max_tokens"])},
-             "Gate B", "https://gw-b.example/v1/chat/completions")})
-    split_before = copy.deepcopy(split_snapshot)
-    split_pairs = _search_text_provider_pairs(split_snapshot)
-    assert split_pairs == [("gw-a", split_id), ("gw-b", split_id)]
-    assert _search_supported_parameter_pairs(
-        split_snapshot, split_pairs, supported_parameters=["temperature"]) == \
-        [("gw-a", split_id)]
-    assert _search_supported_parameter_pairs(
-        split_snapshot, split_pairs, supported_parameters=["max_tokens"]) == \
-        [("gw-b", split_id)]
-    assert _search_supported_parameter_pairs(
-        split_snapshot, split_pairs,
-        supported_parameters=["temperature", "max_tokens"]) == []
-    assert compose(split_snapshot, min_context_length=0,
-                   input_modalities=["text"],
-                   supported_parameters=["temperature", "max_tokens"]) == []
-    assert split_snapshot == split_before
-
-    # d3: prior text/context/modality/provider stages exclude the pair that
-    # alone holds the requested parameter; the final stage must neither
-    # re-expand the selection nor borrow that parameter for a surviving pair.
-    borrow_id = "vendor/borrow-param"
-    borrow_snapshot = _search_snapshot(
-        ["keep", "drop"],
-        {"keep": _search_provider(
-             {borrow_id: _search_model(
-                 borrow_id, "Keep Params", "borrow marker", context_length=65536,
-                 input_modalities=["text", "image"],
-                 supported_parameters=["temperature"])},
-             "Keep", "https://keep.example/v1/chat/completions"),
-         "drop": _search_provider(
-             {borrow_id: _search_model(
-                 borrow_id, "Drop Params", "borrow marker", context_length=8192,
-                 input_modalities=["text"],
-                 supported_parameters=["max_tokens"])},
-             "Drop", "https://drop.example/v1/chat/completions")})
-    borrow_before = copy.deepcopy(borrow_snapshot)
-    borrow_text = _search_text_provider_pairs(borrow_snapshot, query="borrow")
-    assert borrow_text == [("keep", borrow_id), ("drop", borrow_id)]
-    # Each prior predicate alone excludes exactly one of the two pairs.
-    context_kept = _search_min_context_pairs(
-        borrow_snapshot, borrow_text, min_context_length=65536)
-    assert context_kept == [("keep", borrow_id)]
-    assert _search_input_modality_pairs(
-        borrow_snapshot, borrow_text, input_modalities=["image"]) == \
-        [("keep", borrow_id)]
-    # The parameter alone matches only the DROP pair.
-    assert _search_supported_parameter_pairs(
-        borrow_snapshot, borrow_text, supported_parameters=["max_tokens"]) == \
-        [("drop", borrow_id)]
-    # Applied to the surviving subset it must not re-introduce DROP, and it
-    # must not borrow DROP's max_tokens for KEEP.
-    assert _search_supported_parameter_pairs(
-        borrow_snapshot, context_kept, supported_parameters=["max_tokens"]) == []
-    assert compose(borrow_snapshot, query="borrow", min_context_length=65536,
-                   supported_parameters=["max_tokens"]) == []
-    assert compose(borrow_snapshot, query="borrow", min_context_length=65536,
-                   input_modalities=["image"],
-                   supported_parameters=["max_tokens"]) == []
-    # Provider scope excludes the only pair holding max_tokens.
-    assert compose(borrow_snapshot, query="borrow", provider="keep",
-                   supported_parameters=["max_tokens"]) == []
-    assert compose(borrow_snapshot, query="borrow", provider="drop",
-                   supported_parameters=["max_tokens"]) == [("drop", borrow_id)]
-    # Positive same-pair control: KEEP's own parameter still matches KEEP.
-    assert compose(borrow_snapshot, query="borrow", min_context_length=65536,
-                   input_modalities=["image"],
-                   supported_parameters=["temperature"]) == [("keep", borrow_id)]
-    assert borrow_snapshot == borrow_before
+        assert run(supplied, requested) == expected
+        assert supplied == [("gate", "both"), ("gate", "single")]
+    assert snapshot == before
 
 
-# ---------- public metadata search: pipeline, pagination, counts (3e) ----------
+# ---------- public metadata search: pipeline, pagination, projection (3e) ----
 #
 # `watchdog_catalog.query.search_models(snapshot, arguments)` is the PUBLIC pure
 # assembled search: it validates the WHOLE decoded argument object against the
 # frozen tool contract, composes the four accepted internal stages in order,
-# then counts, slices and projects the page. The literal success corpus is the
-# INDEPENDENTLY authored `cases.json` `search_models` rows; the argument corpus
-# is the frozen `argument-cases.json` table plus compact programmatic rows. No
-# expectation below is derived from this implementation.
-
-SEARCH_GOLDEN_DOC = FIXTURE_DIR / "cases.json"
-SEARCH_ARGUMENT_DOC = FIXTURE_DIR / "argument-cases.json"
+# then slices and projects the page. The `cases.json` search goldens and the
+# `argument-cases.json` table are executed by
+# `tests/test_contract_parity.py`; the compact rows below add native edges.
 
 SEARCH_PAYLOAD_FIELDS = frozenset({
-    "ok", "query", "filters", "limit", "offset", "snapshot_id", "tick_epoch",
-    "provider_staleness", "endpoints", "total_matches", "returned_count",
-    "next_offset", "counts", "caveats",
-})
-SEARCH_FILTER_ECHO_FIELDS = frozenset({
-    "provider", "min_context_length", "input_modalities",
-    "supported_parameters",
+    "ok", "snapshot_id", "tick_epoch", "provider_staleness", "total_matches",
+    "next_offset", "endpoints",
 })
 SEARCH_ROW_FIELDS = frozenset({
-    "provider", "model_id", "chat_completions_url", "api_type", "stale",
-    "name", "description", "context_length", "input_modalities",
-    "output_modalities", "supported_parameters", "unknown_fields", "metadata",
+    "provider", "model_id", "name", "context_length", "input_modalities",
+    "output_modalities", "supported_parameters",
 })
-SEARCH_PAGE_COUNT_FIELDS = frozenset({
-    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
-})
-# The frozen absence caveat literal, pinned independently of the module.
-SEARCH_ABSENCE_CAVEAT = (
-    "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a "
-    "missing exact id does NOT prove the model is unavailable there."
-)
 
 
 def _assert_search_strict_types(result, cid):
@@ -4824,170 +2203,47 @@ def _assert_search_strict_types(result, cid):
     assert type(result) is dict, cid
     assert set(result) == SEARCH_PAYLOAD_FIELDS, cid
     assert type(result["ok"]) is bool and result["ok"] is True, cid
-    assert type(result["filters"]) is dict, cid
-    assert set(result["filters"]) == SEARCH_FILTER_ECHO_FIELDS, cid
     assert type(result["provider_staleness"]) is dict, cid
     assert type(result["endpoints"]) is list, cid
-    assert type(result["caveats"]) is list, cid
-    assert type(result["counts"]) is dict, cid
-    assert set(result["counts"]) == SEARCH_PAGE_COUNT_FIELDS, cid
-    for name in ("limit", "offset", "total_matches", "returned_count"):
-        assert type(result[name]) is int, (cid, name, type(result[name]))
-        assert result[name] >= 0, (cid, name)
+    assert type(result["total_matches"]) is int, cid
+    assert result["total_matches"] >= 0, cid
     if result["next_offset"] is not None:
         assert type(result["next_offset"]) is int, cid
         assert result["next_offset"] >= 0, cid
-    for name, value in result["counts"].items():
-        assert type(value) is int, (cid, name, type(value))
-        assert value >= 0, (cid, name)
     for name, value in result["provider_staleness"].items():
         assert type(name) is str and type(value) is bool, (cid, name)
     for row in result["endpoints"]:
         assert type(row) is dict and set(row) == SEARCH_ROW_FIELDS, cid
-        assert type(row["stale"]) is bool, cid
         assert type(row["provider"]) is str, cid
         assert type(row["model_id"]) is str, cid
         assert row["context_length"] is None or \
             type(row["context_length"]) is int, cid
-        assert type(row["metadata"]) is dict, cid
-        assert row["metadata"]["context_length"] is None or \
-            type(row["metadata"]["context_length"]) is int, cid
-        assert type(row["unknown_fields"]) is list, cid
         for name in ("input_modalities", "output_modalities",
-                     "supported_parameters", "unknown_fields"):
-            assert row[name] is None or type(row[name]) is list, (cid, name)
-    assert all(type(caveat) is str for caveat in result["caveats"]), cid
-
-
-def test_search_models_success_goldens_match_every_literal_case():
-    """All 29 frozen `search_models` goldens reproduce EXACTLY -- the whole
-    runtime payload compared to the stored independent `expect` (never a
-    runtime-derived or truncated projection), with exact field sets, strict
-    scalar types, raw filter echoes, fixture overrides honored through the real
-    `catalog.load_snapshot`, and unchanged inputs."""
-    from watchdog_catalog.query import search_models
-
-    doc = _decode_doc(SEARCH_GOLDEN_DOC)
-    cases = [case for case in doc["cases"] if case["tool"] == "search_models"]
-    assert len(cases) == 29, len(cases)
-    assert len({case["id"] for case in cases}) == 29
-
-    for case in cases:
-        cid = case["id"]
-        fixture = case.get("fixture", doc["fixture"])
-        snapshot = _validated_snapshot(fixture)
-        snapshot_before = copy.deepcopy(snapshot)
-        args = copy.deepcopy(case["args"])
-        args_before = copy.deepcopy(args)
-        expect = case["expect"]
-
-        result = search_models(snapshot, args)
-
-        # The ENTIRE payload equals the independent stored fixture payload.
-        assert result == expect, cid
-        _assert_search_strict_types(result, cid)
-        _assert_search_strict_types(expect, cid)
-
-        # Raw query echo, never trimmed or normalized, omission -> null.
-        assert result["query"] == args.get("query"), cid
-        # Raw filter echoes: casing/order/duplicates/[] versus null preserved,
-        # and a supplied array is COPIED rather than aliased.
-        for name in ("provider", "min_context_length", "input_modalities",
                      "supported_parameters"):
-            assert result["filters"][name] == args.get(name), (cid, name)
-            if isinstance(args.get(name), list):
-                assert result["filters"][name] is not args[name], (cid, name)
-        # The caveat literal is the accepted frozen tuple, freshly listed.
-        assert result["caveats"] == [SEARCH_ABSENCE_CAVEAT], cid
-        # Pagination echo is the effective strict int, never the raw float.
-        assert result["limit"] == args.get("limit", 50), cid
-        assert result["offset"] == args.get("offset", 0), cid
-        # Provenance mirrors the consumed snapshot.
-        assert result["snapshot_id"] == snapshot["snapshot_id"], cid
-        assert result["tick_epoch"] == snapshot["tick_epoch"], cid
-        # Each row's metadata is THAT pair's complete projected model, a deep
-        # copy distinct from the snapshot object, with raw casing preserved.
-        for row in result["endpoints"]:
-            pair_model = snapshot["providers"][row["provider"]]["models"][
-                row["model_id"]]
-            assert row["metadata"] == pair_model, cid
-            assert row["metadata"] is not pair_model, cid
-            assert row["metadata"]["architecture"] is not \
-                pair_model["architecture"], cid
+            assert row[name] is None or type(row[name]) is list, (cid, name)
 
-        # Fresh, non-aliasing payload and untouched inputs.
-        assert result is not expect, cid
-        assert args == args_before, cid
-        assert snapshot == snapshot_before, cid
-        assert result["provider_staleness"] is not \
-            expect["provider_staleness"], cid
-        again = search_models(snapshot, copy.deepcopy(args))
-        assert again == expect, cid
-        again["caveats"].clear()
-        assert search_models(snapshot, copy.deepcopy(args)) == expect, cid
 
 
 # ---------- public metadata search: the whole argument boundary (3e) ----------
 #
-# The frozen `argument-cases.json` table is the independent acceptance
-# specification for `search_models`: 31 invalid rows carry the COMPLETE literal
-# envelope and 13 valid controls record acceptance only. The compact rows below
-# add every parameter's wrong-type, numeric-safety, array-shape and precedence
-# edge without re-authoring the table.
+# The frozen `argument-cases.json` rows (31 invalid envelopes and 13 valid
+# controls) are executed by `tests/test_contract_parity.py`. The compact rows
+# below add every parameter's wrong-type, numeric-safety, array-shape and
+# precedence edge native to this runtime.
 
 SEARCH_MIN_CONTEXT_FIELD = "min_context_length"
 
 
-def test_search_models_argument_boundary_matches_literal_rows_and_rules(
-        monkeypatch):
-    """The 31 frozen invalid rows and 13 valid controls reproduce literally,
-    and compact rows pin non-object rejection, every parameter's wrong types
+def test_search_models_argument_boundary_rules(monkeypatch):
+    """Compact rows pin non-object rejection, every parameter's wrong types
     (both bools, numeric strings, fractions, huge native ints, NaN/Inf, unsafe
-    boundaries), integral-float acceptance with strict-int pagination echo,
+    boundaries), integral-float acceptance (raw inputs are never echoed),
     array member validation versus []/padded/cased/duplicate/unmatched tokens,
     exact provider case/padding/zero-ID/empty-registry rules, all six adjacent
     signature links and unknown-key precedence in BOTH insertion orders,
-    fail-before-selection and fresh non-reflecting errors."""
+    fail-before-selection and fresh non-reflecting errors. The frozen argument
+    table is executed by `tests/test_contract_parity.py`."""
     from watchdog_catalog.query import search_models
-
-    doc = _decode_doc(SEARCH_ARGUMENT_DOC)
-    invalid = [row for row in doc["invalid_cases"]
-               if row["tool"] == "search_models"]
-    valid = [row for row in doc["valid_controls"]
-             if row["tool"] == "search_models"]
-    assert len(invalid) == 31, len(invalid)
-    assert len(valid) == 13, len(valid)
-    assert len({row["id"] for row in invalid + valid}) == 44
-
-    # -- frozen literal corpus: complete envelope, unchanged args, no leakage.
-    for row in invalid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        snapshot_before = copy.deepcopy(snapshot)
-        args = copy.deepcopy(row["args"])
-        before = copy.deepcopy(args)
-        result = search_models(snapshot, args)
-        assert result == row["expect"], cid
-        assert set(result) == {"ok", "error"}, cid
-        assert result["ok"] is False, cid
-        assert set(result["error"]) == {"code", "message", "parameter"}, cid
-        assert args == before, cid
-        assert snapshot == snapshot_before, cid
-        for hostile in ("tool", "state_root", "source", "path", "cache",
-                        "snapshot_id", "tick_epoch", "provider_staleness",
-                        "counts", "partial", "warnings"):
-            assert hostile not in result and hostile not in result["error"], \
-                (cid, hostile)
-
-    for row in valid:
-        cid = row["id"]
-        snapshot = _validated_snapshot(row["fixture"])
-        args = copy.deepcopy(row["args"])
-        before = copy.deepcopy(args)
-        result = search_models(snapshot, args)
-        assert result["ok"] is True, cid
-        _assert_search_strict_types(result, cid)
-        assert args == before, cid
 
     lookup = _validated_snapshot("lookup.json")
     lookup_before = copy.deepcopy(lookup)
@@ -5073,19 +2329,14 @@ def test_search_models_argument_boundary_matches_literal_rows_and_rules(
         assert result["ok"] is True, args
         _assert_search_strict_types(result, repr(args))
 
-    # Integral floats are the same JSON integer value but the page echo is a
-    # strict int; the raw min-context filter echo stays the supplied float.
+    # Integral floats are the same JSON integer value; the page is identical to
+    # the strict-int call and nothing echoes the raw input.
     float_result = search_models(
         lookup, {SEARCH_MIN_CONTEXT_FIELD: 1.0, "limit": 1.0, "offset": 1.0})
     int_result = search_models(
         lookup, {SEARCH_MIN_CONTEXT_FIELD: 1, "limit": 1, "offset": 1})
-    assert type(float_result["limit"]) is int and float_result["limit"] == 1
-    assert type(float_result["offset"]) is int and float_result["offset"] == 1
-    assert type(float_result["filters"][SEARCH_MIN_CONTEXT_FIELD]) is float
-    assert float_result["filters"][SEARCH_MIN_CONTEXT_FIELD] == 1.0
-    assert float_result["endpoints"] == int_result["endpoints"]
-    assert float_result["total_matches"] == int_result["total_matches"]
-    assert float_result["next_offset"] == int_result["next_offset"]
+    assert float_result == int_result
+    assert "filters" not in float_result
     assert type(float_result["total_matches"]) is int
 
     # -- provider membership: never trimmed, case-folded or repaired.
@@ -5154,8 +2405,7 @@ def test_search_models_argument_boundary_matches_literal_rows_and_rules(
         raise AssertionError("selection stage ran before validation")
 
     for name in ("_search_text_provider_pairs", "_search_min_context_pairs",
-                 "_search_input_modality_pairs",
-                 "_search_supported_parameter_pairs"):
+                 "_search_capability_pairs"):
         monkeypatch.setattr(query_module, name, _boom)
     for args, code, parameter in (
             ({"limit": 0}, INVALID_ARGUMENTS, "limit"),
@@ -5179,12 +2429,11 @@ def test_search_models_argument_boundary_matches_literal_rows_and_rules(
 
 # ---------- public metadata search: composition, pagination, isolation (3e) ---
 #
-# The public function's own page/count/projection behavior over synthetic,
-# resealed, fully-validated registries: default and maximum pages, a population
-# larger than any page, filter-before-slice, provider-crossing and exact-end
-# pages, page-scoped counts with shared ids and marker variants, zero-ID and
-# empty-registry success, staleness scope, cross-provider conflict rejection
-# with same-pair positive controls, normalization versus raw metadata, and deep
+# The public function's own page/projection behavior over synthetic, resealed,
+# fully-validated registries: default and maximum pages, a population larger
+# than any page, filter-before-slice, provider-crossing and exact-end pages,
+# zero-ID and empty-registry success, staleness scope, cross-provider conflict
+# rejection with same-pair positive controls, compact-row normalization and deep
 # mutation isolation.
 
 
@@ -5219,14 +2468,13 @@ def _bulk_search_snapshot():
     return _search_snapshot(["omega", "alpha", "zero"], providers)
 
 
-def test_search_models_pagination_counts_and_projection_controls():
-    """Pages and counts describe the sorted-then-sliced match set: default 50,
-    maximum 200, a 215-pair population with no hidden cap, provider-crossing
-    and exact/beyond-end offsets, the inclusive MAX_SAFE offset, a filter that
-    genuinely moves the window, page-only counts with shared ids and marker
-    variants, zero-ID and empty-registry success, staleness scope, cross-
-    provider conflicts with same-pair positives, normalization versus raw
-    metadata and deep mutation isolation."""
+def test_search_models_pages_filters_and_projection_controls():
+    """Pages describe the sorted-then-sliced match set: default 5, maximum
+    200, a 215-pair population with no hidden cap, provider-crossing and
+    exact/beyond-end offsets, a filter that genuinely moves the window,
+    zero-ID and empty-registry success, cross-provider conflicts with
+    same-pair positive controls, compact-row normalization and deep mutation
+    isolation."""
     from watchdog_catalog.query import search_models
 
     snapshot = _bulk_search_snapshot()
@@ -5236,27 +2484,27 @@ def test_search_models_pagination_counts_and_projection_controls():
     omega_ids = ["om-%03d" % index for index in range(120)]
     alpha_ids = ["al-%03d" % index for index in range(95)]
 
-    # Default page: 50 rows, provider order then natural raw-ID order.
+    # Default page: 5 rows, provider order then natural raw-ID order.
     default = search_models(snapshot, {})
-    assert default["limit"] == 50 and default["offset"] == 0
+    _assert_search_strict_types(default, "default")
     assert default["total_matches"] == 215
-    assert default["returned_count"] == 50 and default["next_offset"] == 50
+    assert len(default["endpoints"]) == 5 and default["next_offset"] == 5
     assert [(row["provider"], row["model_id"])
             for row in default["endpoints"]] == \
-        [("omega", raw_id) for raw_id in omega_ids[:50]]
+        [("omega", raw_id) for raw_id in omega_ids[:5]]
     assert default["provider_staleness"] == {
         "omega": False, "alpha": False, "zero": False}
 
     # Maximum page and an over-200 population: no hidden stage cap or
     # truncation, and the page crosses the provider boundary exactly.
     max_page = search_models(snapshot, {"limit": 200})
-    assert max_page["returned_count"] == 200
+    assert len(max_page["endpoints"]) == 200
     assert max_page["next_offset"] == 200
     assert max_page["endpoints"][119]["model_id"] == "om-119"
     assert max_page["endpoints"][120]["provider"] == "alpha"
     assert max_page["endpoints"][120]["model_id"] == "al-000"
     tail = search_models(snapshot, {"limit": 200, "offset": 200})
-    assert tail["returned_count"] == 15 and tail["next_offset"] is None
+    assert len(tail["endpoints"]) == 15 and tail["next_offset"] is None
     assert [row["model_id"] for row in tail["endpoints"]] == alpha_ids[80:]
     assert tail["total_matches"] == 215
 
@@ -5266,31 +2514,21 @@ def test_search_models_pagination_counts_and_projection_controls():
             for row in cross["endpoints"]] == \
         [("omega", "om-119"), ("alpha", "al-000")]
     assert cross["next_offset"] == 121
-    assert cross["counts"] == {"gateways": 2, "endpoints": 2,
-                               "distinct_raw_ids": 2,
-                               "marker_group_labels": 2}
 
     # Exact end, one-past end, far beyond end and the MAX_SAFE offset.
     exact_end = search_models(snapshot, {"limit": 2, "offset": 213})
-    assert exact_end["returned_count"] == 2
+    assert len(exact_end["endpoints"]) == 2
     assert exact_end["next_offset"] is None
     continuing = search_models(snapshot, {"limit": 2, "offset": 211})
-    assert continuing["returned_count"] == 2
+    assert len(continuing["endpoints"]) == 2
     assert continuing["next_offset"] == 213
-    at_end = search_models(snapshot, {"limit": 2, "offset": 215})
-    assert at_end["returned_count"] == 0 and at_end["next_offset"] is None
-    assert at_end["total_matches"] == 215
-    far = search_models(snapshot, {"limit": 2, "offset": 999999})
-    assert far["returned_count"] == 0 and far["next_offset"] is None
-    assert far["counts"] == {"gateways": 0, "endpoints": 0,
-                             "distinct_raw_ids": 0, "marker_group_labels": 0}
-    assert far["provider_staleness"] == {
-        "omega": False, "alpha": False, "zero": False}
-    huge_offset = search_models(
-        snapshot, {"limit": 2, "offset": _catalog.MAX_SAFE_INT})
-    assert huge_offset["offset"] == _catalog.MAX_SAFE_INT
-    assert huge_offset["returned_count"] == 0
-    assert huge_offset["next_offset"] is None
+    for offset in (215, 999999, _catalog.MAX_SAFE_INT):
+        page = search_models(snapshot, {"limit": 2, "offset": offset})
+        assert page["endpoints"] == [], offset
+        assert page["next_offset"] is None, offset
+        assert page["total_matches"] == 215, offset
+        assert page["provider_staleness"] == {
+            "omega": False, "alpha": False, "zero": False}, offset
 
     # Filter BEFORE slice: the unfiltered first page holds no qualifying row,
     # and the filtered page starts at the LATER matching window.
@@ -5302,73 +2540,31 @@ def test_search_models_pagination_counts_and_projection_controls():
         ["om-115", "om-116", "om-117"]
     assert filtered["total_matches"] == 5
     assert filtered["next_offset"] == 3
-    assert filtered["counts"] == {"gateways": 1, "endpoints": 3,
-                                  "distinct_raw_ids": 3,
-                                  "marker_group_labels": 3}
-
-    # Page-only counts with shared literal raw IDs across providers and marker
-    # variants: endpoint, distinct-raw-ID and marker-label cardinalities differ.
-    def marker_model(raw_id):
-        return _search_model(raw_id, "Marker " + raw_id,
-                             input_modalities=["text"],
-                             supported_parameters=["temperature"])
-
-    marker_id = "acme/chat:free"
-    marker_snapshot = _search_snapshot(
-        ["p1", "p2", "p3"],
-        {"p1": _search_provider(
-             {marker_id: marker_model(marker_id),
-              "acme/other": marker_model("acme/other")},
-             "P1", "https://p1.example/v1/chat/completions", stale=True),
-         "p2": _search_provider(
-             {"acme/chat_free": marker_model("acme/chat_free")},
-             "P2", "https://p2.example/v1/chat/completions"),
-         "p3": _search_provider(
-             {marker_id: marker_model(marker_id)},
-             "P3", "https://p3.example/v1/chat/completions", stale=True)})
-    marker_before = copy.deepcopy(marker_snapshot)
-    marker_page = search_models(marker_snapshot, {"query": "acme"})
-    assert [(row["provider"], row["model_id"])
-            for row in marker_page["endpoints"]] == \
-        [("p1", marker_id), ("p1", "acme/other"),
-         ("p2", "acme/chat_free"), ("p3", marker_id)]
-    assert marker_page["total_matches"] == 4
-    assert marker_page["counts"] == {"gateways": 3, "endpoints": 4,
-                                     "distinct_raw_ids": 3,
-                                     "marker_group_labels": 2}
-    assert marker_page["provider_staleness"] == {
-        "p1": True, "p2": False, "p3": True}
-    # A single-provider page keeps its own pair metadata and stale flag.
-    p3_page = search_models(marker_snapshot, {"provider": "p3"})
-    assert [(row["provider"], row["model_id"])
-            for row in p3_page["endpoints"]] == [("p3", marker_id)]
-    assert p3_page["endpoints"][0]["stale"] is True
-    assert p3_page["endpoints"][0]["chat_completions_url"] == \
-        "https://p3.example/v1/chat/completions"
-    assert p3_page["counts"] == {"gateways": 1, "endpoints": 1,
-                                 "distinct_raw_ids": 1,
-                                 "marker_group_labels": 1}
-    assert marker_snapshot == marker_before
 
     # Zero-ID provider success keeps its own staleness scope; a true
-    # zero-provider registry succeeds with empty scope and zero counts.
+    # zero-provider registry succeeds with empty scope, not an error.
     zero_stale = _search_snapshot(
         ["zero"], {"zero": _search_provider(
             {}, "Zero", "https://zero.example/v1/chat/completions",
             stale=True)})
     zero_page = search_models(zero_stale, {})
+    assert zero_page["ok"] is True
     assert zero_page["endpoints"] == [] and zero_page["total_matches"] == 0
+    assert zero_page["next_offset"] is None
     assert zero_page["provider_staleness"] == {"zero": True}
     empty_registry = _search_snapshot([], {})
     empty_page = search_models(empty_registry, {})
-    assert empty_page["ok"] is True
-    assert empty_page["provider_staleness"] == {}
-    assert empty_page["counts"] == {"gateways": 0, "endpoints": 0,
-                                    "distinct_raw_ids": 0,
-                                    "marker_group_labels": 0}
+    assert empty_page == {
+        "ok": True,
+        "snapshot_id": empty_registry["snapshot_id"],
+        "tick_epoch": empty_registry["tick_epoch"],
+        "provider_staleness": {},
+        "total_matches": 0,
+        "next_offset": None,
+        "endpoints": [],
+    }
 
-    # Natural/display order from the accepted selection controls: provider
-    # order (zeta before Alpha/alpha/bulk) then natural raw-ID order.
+    # Natural/display order from the accepted selection controls.
     boundary = _boundary_snapshot()
     zeta_page = search_models(boundary, {"provider": "zeta", "limit": 200})
     assert [(row["provider"], row["model_id"])
@@ -5379,9 +2575,6 @@ def test_search_models_pagination_counts_and_projection_controls():
     assert empty_selected["ok"] is True
     assert empty_selected["provider_staleness"] == {"empty": False}
     assert empty_selected["endpoints"] == []
-    assert empty_selected["counts"] == {"gateways": 0, "endpoints": 0,
-                                        "distinct_raw_ids": 0,
-                                        "marker_group_labels": 0}
 
     # -- cross-provider conflicts through the PUBLIC function, with same-pair
     # positive controls (no union by raw id, no borrowed capability).
@@ -5445,13 +2638,12 @@ def test_search_models_pagination_counts_and_projection_controls():
         [("gw-b", split_id)]
     assert conflict == conflict_before and split == split_before
 
-    # -- normalization versus raw metadata, raw filter echoes and deep
-    # isolation of every mutable returned category.
+    # -- compact rows: normalized capabilities, no description/wiring/metadata,
+    # and fresh mutable arrays on every call.
     cased = _search_model(
         "cased", "Cased Row", "Prose for the cased row.", context_length=100,
         input_modalities=["TEXT", "Image", "text"], output_modalities=[],
-        supported_parameters=["Temperature", "TEMPERATURE"],
-        pricing={"prompt": "0.5", "completion": 0})
+        supported_parameters=["Temperature", "TEMPERATURE"])
     unknown = _search_model("unknown", "Unknown Row")
     norm = _search_snapshot(
         ["norm"], {"norm": _search_provider(
@@ -5462,30 +2654,17 @@ def test_search_models_pagination_counts_and_projection_controls():
     iso_args = {"input_modalities": ["TEXT", "text"],
                 "supported_parameters": ["temperature"]}
     iso = search_models(norm, iso_args)
-    assert iso["filters"] == {"provider": None, "min_context_length": None,
-                              "input_modalities": ["TEXT", "text"],
-                              "supported_parameters": ["temperature"]}
-    assert iso["filters"]["input_modalities"] is not iso_args["input_modalities"]
-    assert iso["filters"]["supported_parameters"] is not \
-        iso_args["supported_parameters"]
     assert [(row["provider"], row["model_id"])
             for row in iso["endpoints"]] == [("norm", "cased")]
     row = iso["endpoints"][0]
+    assert set(row) == SEARCH_ROW_FIELDS
+    assert row["name"] == "Cased Row"
     assert row["input_modalities"] == ["text", "image"]
     assert row["output_modalities"] == []
     assert row["supported_parameters"] == ["temperature"]
-    assert row["unknown_fields"] == []
-    assert row["metadata"]["architecture"]["input_modalities"] == \
-        ["TEXT", "Image", "text"]
-    assert row["metadata"]["supported_parameters"] == \
-        ["Temperature", "TEMPERATURE"]
-    assert row["metadata"]["pricing"] == {"prompt": "0.5", "completion": 0}
-    assert type(row["metadata"]["pricing"]["completion"]) is int
-    assert row["metadata"] is not cased
-    assert row["metadata"]["architecture"] is not cased["architecture"]
-    assert row["metadata"]["pricing"] is not cased["pricing"]
-    assert row["metadata"]["supported_parameters"] is not \
-        cased["supported_parameters"]
+    assert "description" not in row
+    assert "metadata" not in row
+    assert "chat_completions_url" not in row
 
     unknown_row = search_models(
         norm, {"query": "unknown", "limit": 1})["endpoints"][0]
@@ -5493,23 +2672,10 @@ def test_search_models_pagination_counts_and_projection_controls():
     assert unknown_row["input_modalities"] is None
     assert unknown_row["output_modalities"] is None
     assert unknown_row["supported_parameters"] is None
-    assert unknown_row["unknown_fields"] == [
-        "context_length", "input_modalities", "output_modalities",
-        "supported_parameters"]
-    assert unknown_row["metadata"] == unknown
 
     saved = copy.deepcopy(iso)
-    iso["filters"]["input_modalities"].append("injected")
-    iso["filters"]["supported_parameters"].clear()
     iso["provider_staleness"]["norm"] = True
     iso["endpoints"][0]["input_modalities"].append("injected")
-    iso["endpoints"][0]["unknown_fields"].append("injected")
-    iso["endpoints"][0]["metadata"]["architecture"]["input_modalities"].append(
-        "injected")
-    iso["endpoints"][0]["metadata"]["pricing"]["prompt"] = "9"
-    iso["endpoints"][0]["metadata"]["supported_parameters"].append("injected")
-    iso["counts"]["gateways"] = 99
-    iso["caveats"].clear()
     iso["endpoints"].clear()
     assert search_models(norm, iso_args) == saved
     assert iso_args == {"input_modalities": ["TEXT", "text"],

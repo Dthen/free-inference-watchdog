@@ -1,0 +1,11 @@
+{
+  "name": "Vercel AI Gateway",
+  "base_url": "https://ai-gateway.vercel.sh/v1",
+  "catalog_url": "https://ai-gateway.vercel.sh/v1/models",
+  "catalog_format": "input-output-models",
+  "detection": "catalog-pricing",
+  "auth": { "method": "none" },
+  "display": 7,
+  "signup_url": "https://vercel.com/signup",
+  "limits_note": "Advertised zero model prices are separate from the monthly credit allowance; team/free-tier eligibility and per-model limits apply; numeric limits unpublished; captured site evidence marks stealth/glyph-cluster and humansand/ampersand-v0.1 not free-tier eligible, which does not erase their advertised zero price; optional modes/tools (fast, web/maps search, cache) may carry extra charges; monitoring needs no key, top-up or completion (as of 2026-11-22)."
+}

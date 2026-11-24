@@ -14,7 +14,6 @@ Contract (anti-cooldown doctrine):
   CONSUMED on resolution; no stale stamps can silence anything forever.
 """
 import copy
-import math
 import sys
 from pathlib import Path
 import state
@@ -40,15 +39,6 @@ def pending_ids(held, provider):
     return sorted_ids(held.get(provider, {}))
 
 
-def _valid_stamp(value):
-    """Non-bool int/float, finite — same junk class as state.load_alive:
-    json.load happily parses NaN/Infinity, but int(nan) raises ValueError
-    and int(inf) OverflowError, which would FATAL the resolve loop."""
-    return (not isinstance(value, bool)
-            and isinstance(value, (int, float))
-            and math.isfinite(value))
-
-
 def load(path):
     """Validate hard, load_alive semantics: top-level dict; per-provider
     dict slice; per-entry dict whose gone_since/last_absent_seen are
@@ -70,7 +60,7 @@ def load(path):
             if not isinstance(entry, dict):
                 dropped += 1
                 continue
-            if not all(f in entry and _valid_stamp(entry[f])
+            if not all(f in entry and state._is_finite_number(entry[f])
                        for f in _STAMPS):
                 dropped += 1
                 continue  # junk stamp (str/bool/None/NaN/Inf/missing) dropped

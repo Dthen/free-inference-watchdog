@@ -14,7 +14,7 @@ def test_raw_metadata_round_trips_through_tick_and_recheck(tmp_path, monkeypatch
     import state
 
     config = {"base_url": "https://example.com/v1", "detection": "id-suffix"}
-    monkeypatch.setattr(im, "PROVIDERS", {"nous": config})
+    registry = {"nous": config}
     real_fetch = providers.fetch_provider
     responses = []
 
@@ -35,8 +35,9 @@ def test_raw_metadata_round_trips_through_tick_and_recheck(tmp_path, monkeypatch
         if recheck is not None:
             responses.extend(recheck)
         return im.run_tick(
-            tmp_path, {"nous"}, im.build_fetch_all({}, state_dir=tmp_path),
-            im.build_fetch_one({}, state_dir=tmp_path), webhook_url=None,
+            tmp_path, {"nous"},
+            im.build_fetch_all(registry, state_dir=tmp_path),
+            im.build_fetch_one(registry, state_dir=tmp_path), webhook_url=None,
             sleep=lambda s: None, now=1000, recheck_delay=0)
 
     assert tick([first]) == 0
@@ -565,7 +566,7 @@ def test_zero_credit_probe_serial_throttle(monkeypatch, tmp_path, capsys):
             "_token": "",
             "detection": "other",
         }
-    monkeypatch.setattr(im, "PROVIDERS", mock_providers)
+    registry = mock_providers
 
     def fake_fetch_provider(config, getter=None):
         if config.get("detection") == "zero-credit-probe":
@@ -574,7 +575,7 @@ def test_zero_credit_probe_serial_throttle(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(providers, "fetch_provider", fake_fetch_provider)
 
-    fetch_all_fn = im.build_fetch_all({}, tmp_path, now=1_000_000_000,
+    fetch_all_fn = im.build_fetch_all(registry, tmp_path, now=1_000_000_000,
                                        sleep=fake_sleep)
     results, metas = fetch_all_fn()
 
@@ -1160,11 +1161,31 @@ def test_resolve_lock_contention_preserves_live_lockfile(tmp_path):
     assert calls["one_n"] == 0                  # resolver body never ran
 
 
-def test_cli_resolve_routes_to_run_resolve(monkeypatch, tmp_path):
+def test_cli_resolve_loads_configuration_once_and_shares_the_registry(
+        monkeypatch, tmp_path):
     """T3B-2 wiring: --resolve must route to run_resolve (never run_tick) with
-    the shared state dir, registry, fetch_one, webhook and dry_run plumbed."""
+    the shared state dir, the ONE loaded registry, fetch_one, webhook and
+    dry_run plumbed.
+
+    Configuration is acquired exactly once per invocation here: the spy counts
+    loader calls and remembers the object ``build_providers`` returned, so the
+    registry handed to run_resolve must be that SAME object — not a re-read.
+    """
     import pytest
     captured = {}
+    loads = []
+
+    real_load_configs = im.config_loader.load_configs
+    real_build_providers = im.config_loader.build_providers
+
+    def counting_load_configs():
+        loads.append(True)
+        return real_load_configs()
+
+    def spy_build_providers(configs):
+        registry = real_build_providers(configs)
+        captured["built"] = registry
+        return registry
 
     def fake_resolve(state_dir, registry, fetch_one, **kw):
         captured["state_dir"] = state_dir
@@ -1173,6 +1194,9 @@ def test_cli_resolve_routes_to_run_resolve(monkeypatch, tmp_path):
         captured.update(kw)
         return 7                                            # sentinel result
 
+    monkeypatch.setattr(im.config_loader, "load_configs",
+                        counting_load_configs)
+    monkeypatch.setattr(im.config_loader, "build_providers", spy_build_providers)
     monkeypatch.setattr(im, "run_resolve", fake_resolve)
     monkeypatch.setattr(im, "run_tick",
                         lambda *a, **k: pytest.fail("--resolve must not tick"))
@@ -1180,7 +1204,9 @@ def test_cli_resolve_routes_to_run_resolve(monkeypatch, tmp_path):
     result = im.main(["--resolve", "--state-dir", str(tmp_path)])
     assert result == 7                                      # returned verbatim
     assert captured["state_dir"] == tmp_path
-    assert captured["registry"] is im.PROVIDERS
+    assert loads == [True], "configuration must be loaded exactly once"
+    assert captured["registry"] is captured["built"], "same resolved registry"
+    assert captured["registry"], "the real roster must resolve"
     assert callable(captured["fetch_one"])
     assert captured["webhook_url"] is None
     assert captured["dry_run"] is False
@@ -2231,3 +2257,658 @@ def test_e2e_5_hourly_fallback_fires_without_resolver(tmp_path, capsys,
     assert _load_q(tmp_path) == {}                   # post-emit consume ran
     assert json.loads((tmp_path / "roster.json").read_text())[
         "providers"]["amd"] == []                    # roster stays honest
+
+
+# ---------- catalogue seam lifecycle: Vercel end to end (P1) ----------
+
+def _vercel_row(model_id, input_price="0", output_price="0", **extra):
+    row = {
+        "id": model_id,
+        "type": "language",
+        "pricing": {"input": input_price, "output": output_price},
+        "name": f"Name {model_id}",
+        "context_window": 1000,
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "supported_parameters": ["tools"],
+    }
+    row.update(extra)
+    return row
+
+
+def _vercel_body(*rows):
+    return json.dumps({"object": "list", "data": list(rows)})
+
+
+def test_vercel_two_observation_lifecycle(tmp_path, monkeypatch, capsys):
+    """One real fetcher/adapter path, synthetic bodies, isolated state.
+
+    Covers: healthy empty first observation, addition, metadata replacement,
+    paid->free and free->paid transitions, confirmed removal, sticky failed
+    fetch and a confirmation recheck that corrects a spurious removal. No
+    network, webhook, probe or real state is touched.
+    """
+    import providers
+    import state
+
+    config = {
+        "name": "Vercel AI Gateway",
+        "base_url": "https://ai-gateway.vercel.sh/v1",
+        "catalog_url": "https://ai-gateway.vercel.sh/v1/models",
+        "catalog_format": "input-output-models",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": None,
+    }
+    registry = {"vercel": config}
+    real_fetch = providers.fetch_provider
+    script = []
+
+    def fetch(cfg):
+        body = script.pop(0)
+        if body is None:
+            raise providers.FetchError("offline")
+        return real_fetch(cfg, getter=lambda *a, **kw: (200, body, {}))
+
+    monkeypatch.setattr(providers, "fetch_provider", fetch)
+
+    def tick(body, recheck=None):
+        script.append(body)
+        if recheck is not None:
+            script.extend(recheck)
+        return im.run_tick(
+            tmp_path, {"vercel"},
+            im.build_fetch_all(registry, state_dir=tmp_path),
+            im.build_fetch_one(registry, state_dir=tmp_path), webhook_url=None,
+            sleep=lambda s: None, now=1000, recheck_delay=0)
+
+    roster_path = tmp_path / "roster.json"
+    paid = _vercel_row("vendor/paid-b", "1", "1")
+    free_a = _vercel_row("vendor/free-a")
+
+    # 1. A healthy empty catalogue is a successful observation, not a failure.
+    assert tick(_vercel_body()) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"vercel": []}
+    assert doc["provider_models"] == {"vercel": {}}
+    capsys.readouterr()
+
+    # 2. Addition: only the zero-priced row enters, with its raw record.
+    assert tick(_vercel_body(free_a, paid),
+                [_vercel_body(free_a, paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"vercel": ["vendor/free-a"]}
+    assert doc["provider_models"]["vercel"] == {"vendor/free-a": free_a}
+    capsys.readouterr()
+
+    # 3. Metadata change alone is silent and REPLACES the stored raw record.
+    changed = _vercel_row("vendor/free-a", context_window=2000)
+    assert tick(_vercel_body(changed, paid)) == 0
+    assert capsys.readouterr().out == ""
+    assert script == [], "metadata-only observation never rechecks"
+    doc = state.load_roster(roster_path)
+    assert doc["provider_models"]["vercel"]["vendor/free-a"] == changed
+
+    # 4. paid -> free: the same id now qualifies and arrives as an addition.
+    formerly_paid = _vercel_row("vendor/paid-b")
+    assert tick(_vercel_body(changed, formerly_paid),
+                [_vercel_body(changed, formerly_paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"]["vercel"] == ["vendor/free-a", "vendor/paid-b"]
+    assert doc["provider_models"]["vercel"]["vendor/paid-b"] == formerly_paid
+    capsys.readouterr()
+
+    # 5. free -> paid: a confirmed removal drops both id and raw metadata.
+    assert tick(_vercel_body(changed, paid), [_vercel_body(changed, paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"]["vercel"] == ["vendor/free-a"]
+    assert "vendor/paid-b" not in doc["provider_models"]["vercel"]
+    capsys.readouterr()
+
+    # 6. Failed fetch is sticky: exit 1, ids and raw metadata carried forward.
+    assert tick(None) == 1
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"vercel": ["vendor/free-a"]}
+    assert doc["provider_models"]["vercel"] == {"vendor/free-a": changed}
+    capsys.readouterr()
+
+    # 7. Confirmation corrects a spurious removal: the initial fetch omits the
+    #    id, the recheck still has it, so nothing is removed and no alert fires.
+    assert tick(_vercel_body(), [_vercel_body(changed)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"vercel": ["vendor/free-a"]}
+    assert doc["provider_models"]["vercel"] == {"vendor/free-a": changed}
+
+
+# ---------- catalogue seam lifecycle: Felo channel catalogue (P2) ----------
+
+def _felo_lifecycle_row(model_id, prompt="0", **extra):
+    row = {
+        "id": model_id,
+        "deprecated": False,
+        "model_kind": "chat",
+        "output_modalities": ["text"],
+        "input_modalities": ["text"],
+        "context_length": 1000,
+        "name": f"Name {model_id}",
+        "supported_parameters": ["tools"],
+        "channels": [{
+            "code": "synthetic",
+            "runnable": True,
+            "pricing_mode": "configured_rates",
+            "discount_multiplier": "1",
+            "standard_pricing": {"billing_kind": "token", "prompt": prompt,
+                                 "completion": "0", "tiers": []},
+        }],
+    }
+    row.update(extra)
+    return row
+
+
+def _felo_lifecycle_body(*rows):
+    return json.dumps({"data": {"total": len(rows), "models": list(rows)}})
+
+
+def test_felo_two_observation_lifecycle(tmp_path, monkeypatch, capsys):
+    """One real fetcher/adapter path, synthetic Felo bodies, isolated state.
+
+    Covers: healthy empty first observation, addition, raw metadata
+    replacement, paid->free and free->paid transitions, confirmed removal,
+    sticky failed fetch and a confirmation recheck that corrects a spurious
+    removal. No network, webhook, probe or real state is touched.
+    """
+    import providers
+    import state
+
+    config = {
+        "name": "Felo",
+        "base_url": "https://openapi.felo.ai/api/v1",
+        "catalog_url": "https://openapi.felo.ai/api/platform/model-catalog",
+        "catalog_format": "channel-catalog",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": None,
+    }
+    registry = {"felo": config}
+    real_fetch = providers.fetch_provider
+    script = []
+
+    def fetch(cfg):
+        body = script.pop(0)
+        if body is None:
+            raise providers.FetchError("offline")
+        return real_fetch(cfg, getter=lambda *a, **kw: (200, body, {}))
+
+    monkeypatch.setattr(providers, "fetch_provider", fetch)
+
+    def tick(body, recheck=None):
+        script.append(body)
+        if recheck is not None:
+            script.extend(recheck)
+        return im.run_tick(
+            tmp_path, {"felo"},
+            im.build_fetch_all(registry, state_dir=tmp_path),
+            im.build_fetch_one(registry, state_dir=tmp_path), webhook_url=None,
+            sleep=lambda s: None, now=1000, recheck_delay=0)
+
+    roster_path = tmp_path / "roster.json"
+    paid = _felo_lifecycle_row("vendor/paid-b", prompt="0.000002")
+    free_a = _felo_lifecycle_row("vendor/free-a")
+
+    # 1. A healthy empty catalogue is a success, not a failure.
+    assert tick(_felo_lifecycle_body()) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"felo": []}
+    assert doc["provider_models"] == {"felo": {}}
+    capsys.readouterr()
+
+    # 2. Addition: only the zero-effective row enters, with its raw record.
+    assert tick(_felo_lifecycle_body(free_a, paid),
+                [_felo_lifecycle_body(free_a, paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"felo": ["vendor/free-a"]}
+    assert doc["provider_models"]["felo"] == {"vendor/free-a": free_a}
+    capsys.readouterr()
+
+    # 3. Metadata change alone is silent and REPLACES the stored raw record.
+    changed = _felo_lifecycle_row("vendor/free-a", context_length=2000)
+    assert tick(_felo_lifecycle_body(changed, paid)) == 0
+    assert capsys.readouterr().out == ""
+    assert script == [], "metadata-only observation never rechecks"
+    doc = state.load_roster(roster_path)
+    assert doc["provider_models"]["felo"]["vendor/free-a"] == changed
+
+    # 4. paid -> free: the same id now qualifies and arrives as an addition.
+    formerly_paid = _felo_lifecycle_row("vendor/paid-b")
+    assert tick(_felo_lifecycle_body(changed, formerly_paid),
+                [_felo_lifecycle_body(changed, formerly_paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"]["felo"] == ["vendor/free-a", "vendor/paid-b"]
+    assert doc["provider_models"]["felo"]["vendor/paid-b"] == formerly_paid
+    capsys.readouterr()
+
+    # 5. free -> paid: a confirmed removal drops both id and raw metadata.
+    assert tick(_felo_lifecycle_body(changed, paid),
+                [_felo_lifecycle_body(changed, paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"]["felo"] == ["vendor/free-a"]
+    assert "vendor/paid-b" not in doc["provider_models"]["felo"]
+    capsys.readouterr()
+
+    # 6. Failed fetch is sticky: exit 1, ids and raw metadata carried forward.
+    assert tick(None) == 1
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"felo": ["vendor/free-a"]}
+    assert doc["provider_models"]["felo"] == {"vendor/free-a": changed}
+    capsys.readouterr()
+
+    # 7. Confirmation corrects a spurious removal: the initial fetch omits the
+    #    id, the recheck still has it, so nothing is removed and no alert fires.
+    assert tick(_felo_lifecycle_body(), [_felo_lifecycle_body(changed)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"felo": ["vendor/free-a"]}
+    assert doc["provider_models"]["felo"] == {"vendor/free-a": changed}
+
+
+# ---------- catalogue seam lifecycle: TokenRA newapi-pricing (P3) ----------
+
+def _tokenra_lifecycle_row(model_name, ratio=0.0, price=0.0, quota_type=0,
+                          **extra):
+    row = {
+        "model_name": model_name,
+        "quota_type": quota_type,
+        "model_ratio": ratio,
+        "model_price": price,
+        "completion_ratio": 1,
+        "enable_groups": ["default"],
+        "supported_endpoint_types": ["openai"],
+    }
+    row.update(extra)
+    return row
+
+
+def _tokenra_lifecycle_body(*rows):
+    return json.dumps({"success": True, "data": list(rows)})
+
+
+def test_tokenra_two_observation_lifecycle(tmp_path, monkeypatch, capsys):
+    """One real fetcher/adapter path, synthetic TokenRA bodies, isolated state.
+
+    Covers: healthy empty first observation, addition keyed by `model_name`,
+    raw metadata replacement, paid->free and free->paid transitions, confirmed
+    removal, sticky failed fetch and a confirmation recheck that corrects a
+    spurious removal. No network, webhook, probe or real state is touched.
+    """
+    import providers
+    import state
+
+    config = {
+        "name": "TokenRA",
+        "base_url": "https://tokenra.io/v1",
+        "catalog_url": "https://tokenra.io/api/pricing",
+        "catalog_format": "newapi-pricing",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": None,
+    }
+    registry = {"tokenra": config}
+    real_fetch = providers.fetch_provider
+    script = []
+
+    def fetch(cfg):
+        body = script.pop(0)
+        if body is None:
+            raise providers.FetchError("offline")
+        return real_fetch(cfg, getter=lambda *a, **kw: (200, body, {}))
+
+    monkeypatch.setattr(providers, "fetch_provider", fetch)
+
+    def tick(body, recheck=None):
+        script.append(body)
+        if recheck is not None:
+            script.extend(recheck)
+        return im.run_tick(
+            tmp_path, {"tokenra"},
+            im.build_fetch_all(registry, state_dir=tmp_path),
+            im.build_fetch_one(registry, state_dir=tmp_path), webhook_url=None,
+            sleep=lambda s: None, now=1000, recheck_delay=0)
+
+    roster_path = tmp_path / "roster.json"
+    paid = _tokenra_lifecycle_row("vendor/paid-b", ratio=0.8)
+    free_a = _tokenra_lifecycle_row("vendor/free-a")
+
+    # 1. A healthy empty catalogue is a successful observation, not a failure.
+    assert tick(_tokenra_lifecycle_body()) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"tokenra": []}
+    assert doc["provider_models"] == {"tokenra": {}}
+    capsys.readouterr()
+
+    # 2. Addition: only the zero-priced row enters, stored under model_name.
+    assert tick(_tokenra_lifecycle_body(free_a, paid),
+                [_tokenra_lifecycle_body(free_a, paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"tokenra": ["vendor/free-a"]}
+    assert doc["provider_models"]["tokenra"] == {"vendor/free-a": free_a}
+    assert "id" not in doc["provider_models"]["tokenra"]["vendor/free-a"]
+    capsys.readouterr()
+
+    # 3. Metadata change alone is silent and REPLACES the stored raw record.
+    changed = _tokenra_lifecycle_row("vendor/free-a", description="new prose")
+    assert tick(_tokenra_lifecycle_body(changed, paid)) == 0
+    assert capsys.readouterr().out == ""
+    assert script == [], "metadata-only observation never rechecks"
+    doc = state.load_roster(roster_path)
+    assert doc["provider_models"]["tokenra"]["vendor/free-a"] == changed
+
+    # 4. paid -> free: the same id now qualifies and arrives as an addition.
+    formerly_paid = _tokenra_lifecycle_row("vendor/paid-b")
+    assert tick(_tokenra_lifecycle_body(changed, formerly_paid),
+                [_tokenra_lifecycle_body(changed, formerly_paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"]["tokenra"] == ["vendor/free-a", "vendor/paid-b"]
+    assert doc["provider_models"]["tokenra"]["vendor/paid-b"] == formerly_paid
+    capsys.readouterr()
+
+    # 5. free -> paid: a confirmed removal drops both id and raw metadata.
+    assert tick(_tokenra_lifecycle_body(changed, paid),
+                [_tokenra_lifecycle_body(changed, paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"]["tokenra"] == ["vendor/free-a"]
+    assert "vendor/paid-b" not in doc["provider_models"]["tokenra"]
+    capsys.readouterr()
+
+    # 6. Failed fetch is sticky: exit 1, ids and raw metadata carried forward.
+    assert tick(None) == 1
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"tokenra": ["vendor/free-a"]}
+    assert doc["provider_models"]["tokenra"] == {"vendor/free-a": changed}
+    capsys.readouterr()
+
+    # 7. Confirmation corrects a spurious removal: the initial fetch omits the
+    #    id, the recheck still has it, so nothing is removed and no alert fires.
+    assert tick(_tokenra_lifecycle_body(), [_tokenra_lifecycle_body(changed)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"tokenra": ["vendor/free-a"]}
+    assert doc["provider_models"]["tokenra"] == {"vendor/free-a": changed}
+
+
+# ---------- catalogue seam lifecycle: Infron provider-models (P4) ----------
+
+def _infron_lifecycle_row(model_id, prompt_price=0.0, completion_price=0.0,
+                          providers=None, **extra):
+    row = {
+        "id": model_id,
+        "category_type": "LLM",
+        "supported_endpoint_types": ["openai"],
+        "output_modalities": ["text"],
+        "input_modalities": ["text"],
+        "context_length": 1000,
+        "display_name": f"Name {model_id}",
+        "deprecated": False,
+        "is_display_only": False,
+        "min_prompt_price": prompt_price,
+        "min_completion_price": completion_price,
+        "providers": (providers if providers is not None else
+                      [{"provider_slug": "infron/us",
+                        "prompt_price": prompt_price,
+                        "completion_price": completion_price}]),
+    }
+    row.update(extra)
+    return row
+
+
+def _infron_lifecycle_body(*rows):
+    return json.dumps({"success": True, "data": list(rows)})
+
+
+def test_infron_two_observation_lifecycle(tmp_path, monkeypatch, capsys):
+    """One real fetcher/adapter path, synthetic Infron bodies, isolated state.
+
+    Covers: healthy empty first observation, addition, raw metadata
+    replacement, a paid->free transition and a free->paid transition driven by
+    the nested-provider rule, confirmed removal, sticky failed fetch and a
+    confirmation recheck that corrects a spurious removal. No network, webhook,
+    probe or real state is touched.
+    """
+    import providers
+    import state
+
+    config = {
+        "name": "Infron",
+        "base_url": "https://llm.onerouter.pro/v1",
+        "catalog_url": "https://llm.onerouter.pro/v1/models",
+        "catalog_format": "provider-models",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": None,
+    }
+    registry = {"infron": config}
+    real_fetch = providers.fetch_provider
+    script = []
+
+    def fetch(cfg):
+        body = script.pop(0)
+        if body is None:
+            raise providers.FetchError("offline")
+        return real_fetch(cfg, getter=lambda *a, **kw: (200, body, {}))
+
+    monkeypatch.setattr(providers, "fetch_provider", fetch)
+
+    def tick(body, recheck=None):
+        script.append(body)
+        if recheck is not None:
+            script.extend(recheck)
+        return im.run_tick(
+            tmp_path, {"infron"},
+            im.build_fetch_all(registry, state_dir=tmp_path),
+            im.build_fetch_one(registry, state_dir=tmp_path), webhook_url=None,
+            sleep=lambda s: None, now=1000, recheck_delay=0)
+
+    roster_path = tmp_path / "roster.json"
+    paid = _infron_lifecycle_row("vendor/paid-b", 0.05, 0.25)
+    free_a = _infron_lifecycle_row("vendor/free-a")
+
+    # 1. A healthy empty catalogue is a successful observation, not a failure.
+    assert tick(_infron_lifecycle_body()) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"infron": []}
+    assert doc["provider_models"] == {"infron": {}}
+    capsys.readouterr()
+
+    # 2. Addition: only the wholly zero-priced route enters, raw row intact.
+    assert tick(_infron_lifecycle_body(free_a, paid),
+                [_infron_lifecycle_body(free_a, paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"infron": ["vendor/free-a"]}
+    assert doc["provider_models"]["infron"] == {"vendor/free-a": free_a}
+    capsys.readouterr()
+
+    # 3. Metadata change alone is silent and REPLACES the stored raw record.
+    changed = _infron_lifecycle_row("vendor/free-a", context_length=2000)
+    assert tick(_infron_lifecycle_body(changed, paid)) == 0
+    assert capsys.readouterr().out == ""
+    assert script == [], "metadata-only observation never rechecks"
+    doc = state.load_roster(roster_path)
+    assert doc["provider_models"]["infron"]["vendor/free-a"] == changed
+
+    # 4. paid -> free: the same id now qualifies and arrives as an addition.
+    formerly_paid = _infron_lifecycle_row("vendor/paid-b")
+    assert tick(_infron_lifecycle_body(changed, formerly_paid),
+                [_infron_lifecycle_body(changed, formerly_paid)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"]["infron"] == ["vendor/free-a", "vendor/paid-b"]
+    assert doc["provider_models"]["infron"]["vendor/paid-b"] == formerly_paid
+    capsys.readouterr()
+
+    # 5. free -> paid through the NESTED provider set: the published minimum
+    #    stays zero but a paid offer joins the route, so it is no longer a
+    #    wholly free route and a confirmed removal drops id and metadata.
+    mixed = _infron_lifecycle_row(
+        "vendor/paid-b",
+        providers=[{"provider_slug": "infron/us", "prompt_price": 0,
+                    "completion_price": 0},
+                   {"provider_slug": "azure", "prompt_price": 0.1,
+                    "completion_price": 0.5}])
+    assert mixed["min_prompt_price"] == 0
+    assert tick(_infron_lifecycle_body(changed, mixed),
+                [_infron_lifecycle_body(changed, mixed)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"]["infron"] == ["vendor/free-a"]
+    assert "vendor/paid-b" not in doc["provider_models"]["infron"]
+    capsys.readouterr()
+
+    # 6. Failed fetch is sticky: exit 1, ids and raw metadata carried forward.
+    assert tick(None) == 1
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"infron": ["vendor/free-a"]}
+    assert doc["provider_models"]["infron"] == {"vendor/free-a": changed}
+    capsys.readouterr()
+
+    # 7. Confirmation corrects a spurious removal: the initial fetch omits the
+    #    id, the recheck still has it, so nothing is removed and no alert fires.
+    assert tick(_infron_lifecycle_body(),
+                [_infron_lifecycle_body(changed)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"infron": ["vendor/free-a"]}
+    assert doc["provider_models"]["infron"] == {"vendor/free-a": changed}
+
+
+# ---------- catalogue seam lifecycle: AI/ML API typed-unit-models (P5) ----------
+
+def _aimlapi_lifecycle_row(model_id, *, kind="fixed", variable=False,
+                           price=0.0, description="prose", **extra):
+    row = {
+        "id": model_id,
+        "info": {"name": f"Name {model_id}", "description": description,
+                 "contextLength": 1000},
+        "type": "openai/chat-completions",
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "pricing": {
+            "currency": "USD", "kind": kind, "variable": variable,
+            "thresholds": [], "dimensions": [], "variants": [],
+            "units": [{"name": "token", "price": price, "per": 1000000,
+                       "variable": False}],
+        },
+    }
+    row.update(extra)
+    return row
+
+
+def _aimlapi_lifecycle_body(*rows):
+    return json.dumps({"object": "list", "data": list(rows)})
+
+
+def test_aimlapi_two_observation_lifecycle(tmp_path, monkeypatch, capsys):
+    """One real fetcher/adapter path, synthetic AI/ML bodies, isolated state.
+
+    Covers: first-seen healthy empty provider, a future fixed-zero arrival and
+    addition, raw metadata replacement, a free->variable (unquotable) removal,
+    a paid->free re-addition, sticky failed fetch and a confirmation recheck
+    that corrects a spurious removal. No network, webhook, probe, actual
+    tracker CLI or real state is touched.
+    """
+    import providers
+    import state
+
+    config = {
+        "name": "AI/ML API",
+        "base_url": "https://api.aimlapi.com/v1",
+        "catalog_url": ("https://api.aimlapi.com/v1/models?include=pricing,"
+                        "modalities&type=openai/chat-completions"),
+        "catalog_format": "typed-unit-models",
+        "detection": "catalog-pricing",
+        "auth": {"method": "none"},
+        "_token": None,
+    }
+    registry = {"aimlapi": config}
+    real_fetch = providers.fetch_provider
+    script = []
+
+    def fetch(cfg):
+        body = script.pop(0)
+        if body is None:
+            raise providers.FetchError("offline")
+        return real_fetch(cfg, getter=lambda *a, **kw: (200, body, {}))
+
+    monkeypatch.setattr(providers, "fetch_provider", fetch)
+
+    def tick(body, recheck=None):
+        script.append(body)
+        if recheck is not None:
+            script.extend(recheck)
+        return im.run_tick(
+            tmp_path, {"aimlapi"},
+            im.build_fetch_all(registry, state_dir=tmp_path),
+            im.build_fetch_one(registry, state_dir=tmp_path), webhook_url=None,
+            sleep=lambda s: None, now=1000, recheck_delay=0)
+
+    roster_path = tmp_path / "roster.json"
+    future = _aimlapi_lifecycle_row("vendor/future-fixed-zero")
+    variable = _aimlapi_lifecycle_row("vendor/variable-zero",
+                                      kind="variable", variable=True)
+
+    # 1. A healthy empty catalogue is a successful observation, not a failure.
+    assert tick(_aimlapi_lifecycle_body()) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"aimlapi": []}
+    assert doc["provider_models"] == {"aimlapi": {}}
+    capsys.readouterr()
+
+    # 2. Addition: only the fixed-zero chat row enters; the variable-zero row
+    #    stays out; the raw row is stored unchanged.
+    assert tick(_aimlapi_lifecycle_body(future, variable),
+                [_aimlapi_lifecycle_body(future, variable)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"aimlapi": ["vendor/future-fixed-zero"]}
+    assert doc["provider_models"]["aimlapi"] == {
+        "vendor/future-fixed-zero": future}
+    capsys.readouterr()
+
+    # 3. Metadata change alone is silent and REPLACES the stored raw record.
+    changed = _aimlapi_lifecycle_row("vendor/future-fixed-zero",
+                                     description="changed prose")
+    assert tick(_aimlapi_lifecycle_body(changed, variable)) == 0
+    assert capsys.readouterr().out == ""
+    assert script == [], "metadata-only observation never rechecks"
+    doc = state.load_roster(roster_path)
+    assert doc["provider_models"]["aimlapi"]["vendor/future-fixed-zero"] == changed
+
+    # 4. free -> unquotable: the block turns variable, so the id is no longer
+    #    a quotable zero and a confirmed removal drops id and metadata.
+    unquotable = _aimlapi_lifecycle_row("vendor/future-fixed-zero",
+                                        kind="variable", variable=True)
+    assert tick(_aimlapi_lifecycle_body(unquotable, variable),
+                [_aimlapi_lifecycle_body(unquotable, variable)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"aimlapi": []}
+    assert doc["provider_models"]["aimlapi"] == {}
+    capsys.readouterr()
+
+    # 5. paid/variable -> free: the same id now qualifies as an addition.
+    back_to_free = _aimlapi_lifecycle_row("vendor/future-fixed-zero",
+                                          description="now fixed")
+    assert tick(_aimlapi_lifecycle_body(back_to_free, variable),
+                [_aimlapi_lifecycle_body(back_to_free, variable)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"aimlapi": ["vendor/future-fixed-zero"]}
+    assert doc["provider_models"]["aimlapi"]["vendor/future-fixed-zero"] == back_to_free
+    capsys.readouterr()
+
+    # 6. Failed fetch is sticky: exit 1, ids and raw metadata carried forward.
+    assert tick(None) == 1
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"aimlapi": ["vendor/future-fixed-zero"]}
+    assert doc["provider_models"]["aimlapi"] == {
+        "vendor/future-fixed-zero": back_to_free}
+    capsys.readouterr()
+
+    # 7. Confirmation corrects a spurious removal: the initial fetch omits the
+    #    id, the recheck still has it, so nothing is removed and no alert fires.
+    corrected = _aimlapi_lifecycle_row("vendor/future-fixed-zero",
+                                       description="recheck wins")
+    assert tick(_aimlapi_lifecycle_body(),
+                [_aimlapi_lifecycle_body(corrected, variable)]) == 0
+    doc = state.load_roster(roster_path)
+    assert doc["providers"] == {"aimlapi": ["vendor/future-fixed-zero"]}
+    assert doc["provider_models"]["aimlapi"] == {
+        "vendor/future-fixed-zero": corrected}

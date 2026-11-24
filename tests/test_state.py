@@ -13,10 +13,12 @@ import state
 # ---------- roster ----------
 
 def test_save_roster_atomic_leaves_no_tmp(tmp_path):
-    p = tmp_path / "roster.json"
+    # A missing nested parent must be created by the same atomic write.
+    parent = tmp_path / "nested"
+    p = parent / "roster.json"
     state.save_roster_atomic(p, {"providers": {"nous": ["a"]}})
     assert p.exists()
-    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(parent.glob("*.tmp"))
     assert json.loads(p.read_text())["providers"]["nous"] == ["a"]
 
 
@@ -141,9 +143,11 @@ def test_alive_finite_float_still_coerces_after_nan_guard(tmp_path):
     finite float stamps (json may carry 1755.9) — they still coerce."""
     p = tmp_path / "alive.json"
     p.write_text(json.dumps({"last_tick_epoch": 1755.9,
+                             "last_output_epoch": -1.9,
                              "dropped_alerts_total": 3.0}),
                  encoding="utf-8")
     assert state.load_alive(p) == {"last_tick_epoch": 1755,
+                                   "last_output_epoch": -1,
                                    "dropped_alerts_total": 3}
 
 

@@ -3,7 +3,8 @@
 The helper is a local publication gate: it takes ONE dedicated publish lock,
 runs the real ``build_site.py`` against an explicit ``--root``, reads the EXACT
 final ``site/catalog.json`` + ``site/index.html`` bytes back and hands them to
-the builder's own ``validate_artifact_pair``, and -- only after that pair is
+the real ``validate_artifact_pair`` (from ``catalog_export``, which
+``build_site`` re-exports), and -- only after that pair is
 accepted -- commits exactly those two allowlisted paths in the selected root's
 own Git repository, inside the SAME lock lifetime. Without ``--push`` it contacts
 no remote at all: exit 0 means only that the local artifact pair was validated
@@ -32,8 +33,8 @@ live roster):
 * a builder that "succeeds" but leaves a missing, mismatching, invalid-JSON or
   non-UTF-8 pair is rejected by the INDEPENDENT read-back gate
   (``stage=validate``), with the real validator untouched, and a target root
-  carrying its own permissive ``build_site`` / ``watchdog_catalog`` cannot
-  shadow it;
+  carrying its own permissive ``build_site`` / ``catalog_export`` /
+  ``publication_checks`` / ``watchdog_catalog`` cannot shadow it;
 * exit 0 alone never proves the read-back validator executed: ``/bin/true``
   and any executable that ignores its arguments and stdin (also over a valid
   last-good pair) fail at ``stage=validate`` because the validator's ONE fixed
@@ -952,12 +953,15 @@ def _non_repo_base():
 def test_gate_passes_a_genuine_build_with_empty_stdout(tmp_path):
     """A real build + read-back validation passes, silently, from anywhere.
 
-    Two runs: one with the genuine 3.11 interpreter straight from its real
-    path, one through an owned pass-through interpreter living under a
-    directory whose name contains spaces (the helper must treat --python as ONE
-    executable path, never a shell-split command string). Both roots and both
-    interpreter paths contain spaces and both are launched from an unrelated
-    cwd.
+    Four runs: the genuine 3.11 interpreter straight from its real path, two
+    bare RELATIVE root names (``identity`` and ``range`` — names that also
+    denote the helper's own argv[0] position and the selector token, so a
+    positional misread would swallow them and fail at ``stage=validate``),
+    then one through an owned pass-through interpreter living under a
+    directory whose name contains spaces (the helper must treat --python as
+    ONE executable path, never a shell-split command string). The named roots
+    and both interpreter paths contain spaces and every run is launched from
+    an unrelated cwd.
     """
     from catalog_export import validate_artifact_pair
 
@@ -971,6 +975,22 @@ def test_gate_passes_a_genuine_build_with_empty_stdout(tmp_path):
     plain = _run(plain_root, sys.executable, plain_env, cwd)
     assert plain.returncode == 0, plain.stderr
     assert plain.stdout == "", f"successful gate must be stdout-silent: {plain.stdout!r}"
+
+    # Bare relative --root names resolved from the invoking cwd. Each is a
+    # real directory owned by this test and passed as a plain relative name,
+    # so nothing but the helper's own argv[0] can be treated as program
+    # identity or selector.
+    for relative_name in ("identity", "range"):
+        relative_root = cwd / relative_name
+        _init_repo(relative_root)
+        _write_roster(relative_root, ROSTER)
+        proc = _run(Path(relative_name), sys.executable, plain_env, cwd)
+        assert proc.returncode == 0, (relative_name, proc.stderr)
+        assert proc.stdout == "", (
+            f"successful gate must be stdout-silent: {proc.stdout!r}")
+        rel_catalog, rel_html = _read_pair(relative_root)
+        validate_artifact_pair(rel_catalog, rel_html)
+        assert "vendor-x/synthetic-alpha" in rel_html
 
     root = tmp_path / "root with spaces"
     _init_repo(root)
@@ -1325,12 +1345,24 @@ def test_gate_rejects_build_and_pair_faults_at_the_right_stage(tmp_path):
     # --- the target root cannot shadow the helper's builder or validator --
     # A synthetic root carrying its own permissive build_site.py and a bogus
     # watchdog_catalog package must not be importable by the read-back gate:
-    # the mismatching pair is still rejected by the REAL validator.
+    # the mismatching pair is still rejected by the REAL validator. The
+    # consolidated checker imports the pair validator from ``catalog_export``
+    # directly, so that module -- and the checker module itself, whose tripwire
+    # would accept the mismatching pair with a fake receipt -- must come from
+    # the helper's own checkout too, never from the target root.
     shadow_root = tmp_path / "shadow root"
     _write_roster(shadow_root, ROSTER)
     (shadow_root / "build_site.py").write_text(
         "def validate_artifact_pair(catalog_text, html_text):\n"
         "    return {}\n", encoding="utf-8")
+    (shadow_root / "catalog_export.py").write_text(
+        "def validate_artifact_pair(catalog_text, html_text):\n"
+        "    return {}\n", encoding="utf-8")
+    (shadow_root / "publication_checks.py").write_text(
+        "def main(argv):\n"
+        "    print('publish_site: read-back validation passed sha256 '\n"
+        "          + '0' * 64 + ' ' + '0' * 64)\n"
+        "    return 0\n", encoding="utf-8")
     (shadow_root / "watchdog_catalog").mkdir()
     (shadow_root / "watchdog_catalog" / "__init__.py").write_text("", encoding="utf-8")
     interpreter, log, shadow_env = _harness(tmp_path, mode="mismatch")
@@ -2250,7 +2282,7 @@ def test_local_git_phase_commits_only_the_validated_artifact_pair(tmp_path):
     for token in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge",
                   "rebase-apply", "--unmerged", "--is-bare-repository",
                   "--show-toplevel", "symbolic-ref", "--absolute-git-dir",
-                  "--only", "O_NOFOLLOW", "lstat", "S_ISREG"):
+                  "--only"):
         assert token in source, token
     # The allowlist is literal: no glob, no directory, no computed path.
     assert "readonly ARTIFACT_INDEX='site/index.html'" in source

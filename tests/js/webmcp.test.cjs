@@ -11,16 +11,14 @@
  *     (`document.modelContext.registerTool`, per
  *     https://developer.chrome.com/docs/ai/webmcp/imperative-api, last
  *     updated 2026-10-16) and degrades honestly when it is absent;
- *   * the five descriptors are derived from the embedded shared
+ *   * the three descriptors are derived from the embedded shared
  *     `tool-contract` resource (`watchdog_catalog/tools.json`) — never a
  *     second hard-coded schema table;
  *   * every `execute` callback forwards its argument object UNCHANGED to the
  *     real shared query engine and returns ONE complete JSON TEXT result: the
  *     pure payload plus a separate top-level `source: {mode: "browser"}`, framed
  *     by the shared typed canonical encoder (never an ordinary JSON serializer,
- *     which would collapse a `1.0` float token to `1`). The token this file
- *     locks lives in UPSTREAM projected `pricing` metadata, never only in an
- *     echoed query argument;
+ *     which would collapse a `1.0` float token to `1`);
  *   * every descriptor carries `annotations: {readOnlyHint: true,
  *     untrustedContentHint: true, consequentialHint: false}`, fresh per
  *     descriptor and never a sanitizer for upstream text;
@@ -63,10 +61,9 @@ const SNAPSHOT_TEXT = fs.readFileSync(
   path.join(__dirname, "..", "fixtures", "catalog", "lookup.json"), "utf8");
 const SNAPSHOT = catalog.loadSnapshot(SNAPSHOT_TEXT);
 
-/** The five shared tool names, as an independent literal. */
+/** The three shared tool names, as an independent literal. */
 const TOOL_NAMES = [
-  "list_free_models", "get_model", "list_endpoints", "watchdog_status",
-  "search_models"
+  "get_model", "watchdog_status", "search_models"
 ];
 
 /** Independent literals: the reviewed budget policy of browser contract 4.6. */
@@ -76,11 +73,9 @@ const NAME_BUDGET = 30;
 
 /** Independent literals: the pinned identity of the shipped resource. */
 const PINNED_DESCRIPTION_LENGTHS = {
-  list_free_models: 482,
-  get_model: 388,
-  list_endpoints: 478,
+  get_model: 393,
   watchdog_status: 451,
-  search_models: 497
+  search_models: 494
 };
 const PINNED_MAX_PARAM_DESCRIPTION = 147;
 
@@ -92,16 +87,6 @@ const FIXTURE_CADENCE_S = 3600;
 const EXPECTED_ANNOTATION_KEYS =
   ["consequentialHint", "readOnlyHint", "untrustedContentHint"];
 const EXPECTED_SOURCE = { mode: "browser" };
-
-/** Independent literal: the ~1.5K per-output RECOMMENDATION (never a cap). */
-const RECOMMENDED_CHARACTER_BUDGET = 1500;
-
-/** Independent literals: the PROJECTED metadata float tokens this file locks. */
-const PRICED_MODEL_ID = "vendor/priced-free";
-const PLAIN_MODEL_ID = "vendor/plain-free";
-const PRICING_PROMPT = 1.0;
-const PRICING_COMPLETION = 0.5;
-const PRICING_TOKENS_CANONICAL = "{\"completion\":0.5,\"prompt\":1.0}";
 
 // ---------- fakes for the DOM / native registration boundary --------------
 
@@ -346,7 +331,7 @@ function assertPayloadParity(actual, expected, label) {
   assert.deepEqual(actual, expected,
                    `${label}: decoded text equals the direct core payload`);
   assert.equal(catalog.canonicalText(actual), catalog.canonicalText(expected),
-               `${label}: identical typed canonical text (float tokens intact)`);
+               `${label}: identical typed canonical text`);
 }
 
 /** The exact-annotation assertion, reusable by the wrong-rule control. */
@@ -360,40 +345,6 @@ function assertAnnotationTriplet(annotations) {
                "untrustedContentHint is exactly true");
   assert.equal(annotations.consequentialHint, false,
                "consequentialHint is exactly false");
-}
-
-/**
- * The PROJECTED METADATA lock: a float token carried by UPSTREAM projected
- * `pricing` metadata, never by an echoed query argument.
- *
- * `model` is the SELECTED public model inside the decoded payload, so the value
- * assertions describe what a consumer reads; the text assertions describe the
- * spelling the native layer actually receives. Both matter: the platform
- * serializes an `execute` result itself, so only an already-encoded string can
- * keep `1.0` distinct from `1`.
- */
-function assertProjectedPricingTokens(model, text, label) {
-  assert.ok(model !== null && typeof model === "object",
-            `${label}: the selected public model is present`);
-  assert.deepEqual(Object.keys(model.pricing).sort(), ["completion", "prompt"],
-                   `${label}: pricing keeps exactly its two projected fields`);
-  assert.equal(catalog.isFloatToken(model.pricing.prompt), true,
-               `${label}: pricing.prompt must STILL be a typed float token, ` +
-               "not the integer 1");
-  assert.equal(Number(model.pricing.prompt), PRICING_PROMPT,
-               `${label}: pricing.prompt is 1.0 by value`);
-  assert.equal(catalog.isFloatToken(model.pricing.completion), true,
-               `${label}: pricing.completion must STILL be a typed float token`);
-  assert.equal(Number(model.pricing.completion), PRICING_COMPLETION,
-               `${label}: pricing.completion is 0.5 by value`);
-  assert.equal(catalog.canonicalText(model.pricing), PRICING_TOKENS_CANONICAL,
-               `${label}: pricing encodes as 1.0 and 0.5, never 1 and 0.5`);
-  assert.ok(text.includes("\"prompt\":1.0"),
-            `${label}: the framed TEXT spells "prompt":1.0`);
-  assert.ok(text.includes("\"completion\":0.5"),
-            `${label}: the framed TEXT spells "completion":0.5`);
-  assert.equal(/JsonFloat|\[object Object\]/.test(text), false,
-               `${label}: no internal float wrapper is rendered`);
 }
 
 // ---------- independent drift detectors -----------------------------------
@@ -518,7 +469,6 @@ function syntheticSnapshot(count, padding, descriptionOf) {
         : padding === 0 ? null : "d".repeat(padding),
       id: rawId,
       name: `Synthetic Model ${index}`,
-      pricing: { completion: "0", prompt: "0" },
       supported_parameters: ["temperature"]
     };
   }
@@ -536,7 +486,7 @@ function syntheticSnapshot(count, padding, descriptionOf) {
         stale: false
       }
     },
-    schema_version: 1,
+    schema_version: 2,
     tick_epoch: FIXTURE_TICK_EPOCH,
     warnings: [],
     snapshot_id: ""
@@ -563,7 +513,6 @@ function hostileSnapshot() {
     description: HOSTILE_DESCRIPTION,
     id: HOSTILE_ID,
     name: HOSTILE_NAME,
-    pricing: { completion: "0", prompt: "0" },
     supported_parameters: ["temperature"]
   };
   return seal({
@@ -580,68 +529,7 @@ function hostileSnapshot() {
         stale: false
       }
     },
-    schema_version: 1,
-    tick_epoch: FIXTURE_TICK_EPOCH,
-    warnings: [],
-    snapshot_id: ""
-  });
-}
-
-/**
- * Seal a snapshot whose TEXT must keep a typed token `JSON.stringify` cannot
- * spell (`1.0`). The id comes from the shared body hash and the document from
- * the shared canonical encoder, so `loadSnapshot` stays the real acceptance
- * path; `seal()` remains the plain-text builder for every other fixture.
- */
-function sealTyped(snapshot) {
-  snapshot.snapshot_id = catalog.snapshotHash(snapshot);
-  return { text: catalog.canonicalText(snapshot), snapshot };
-}
-
-/**
- * A sealed snapshot whose UPSTREAM projected metadata carries float tokens in
- * `pricing` — `prompt: 1.0` and `completion: 0.5` — beside a sibling model with
- * the ordinary string spelling. `context_length` stays an integer, exactly as
- * the frozen projection requires, so `pricing` is the ONLY float carrier here.
- */
-function projectedPricingSnapshot() {
-  const priced = {
-    architecture: { input_modalities: ["text"], output_modalities: ["text"] },
-    context_length: 8192,
-    description: "Synthetic priced endpoint",
-    id: PRICED_MODEL_ID,
-    name: "Priced Model",
-    pricing: {
-      completion: new catalog.JsonFloat(PRICING_COMPLETION),
-      prompt: new catalog.JsonFloat(PRICING_PROMPT)
-    },
-    supported_parameters: ["temperature"]
-  };
-  const plain = {
-    architecture: { input_modalities: ["text"], output_modalities: ["text"] },
-    context_length: 4096,
-    description: "Synthetic plain endpoint",
-    id: PLAIN_MODEL_ID,
-    name: "Plain Model",
-    pricing: { completion: "0", prompt: "0" },
-    supported_parameters: ["temperature"]
-  };
-  return sealTyped({
-    cadence_s: FIXTURE_CADENCE_S,
-    provider_order: ["synthetic-priced"],
-    providers: {
-      "synthetic-priced": {
-        api_type: "openai",
-        chat_completions_url:
-          "https://synthetic-priced.example/v1/chat/completions",
-        display_name: "Synthetic Priced",
-        // Code-point order, exactly as the strict validator requires.
-        model_ids: [PLAIN_MODEL_ID, PRICED_MODEL_ID],
-        models: { [PLAIN_MODEL_ID]: plain, [PRICED_MODEL_ID]: priced },
-        stale: false
-      }
-    },
-    schema_version: 1,
+    schema_version: 2,
     tick_epoch: FIXTURE_TICK_EPOCH,
     warnings: [],
     snapshot_id: ""
@@ -726,21 +614,21 @@ async function duplicateObservation(api, engine, duplicateEngine) {
 
 /** The document-lifetime ownership assertion, shared with the mutant control. */
 function assertOwnedOnce(observation) {
-  assert.equal(observation.calls, 5, "exactly one native call per tool");
+  assert.equal(observation.calls, 3, "exactly one native call per tool");
   assert.equal(observation.reads, 2, "one snapshot load and one contract parse");
   assert.equal(observation.first.status, "registered");
   assert.equal(observation.duplicate.status, "registered",
                "the duplicate reports the owned outcome");
   assert.deepEqual(observation.duplicate.registered, TOOL_NAMES,
-                   "the duplicate names the same five registered tools");
+                   "the duplicate names the same three registered tools");
   assert.deepEqual(observation.duplicate, observation.first,
                    "the duplicate reports the same outcome values");
 }
 
-/** Observe one synchronous native throw at position 3 (a partial attempt). */
+/** Observe one synchronous native throw at position 2 (a partial attempt). */
 async function failureObservation(api, engine) {
   const document = fakeDocument(islandsFor());
-  const modelContext = fakeRegistrar("throwAt", 3);
+  const modelContext = fakeRegistrar("throwAt", 2);
   document.modelContext = modelContext;
   const outcome = await api.setup({
     document, catalog: engine, clock: () => FIXTURE_TICK_EPOCH
@@ -756,11 +644,11 @@ function assertHonestFailure(observation) {
   assert.equal(observation.outcome.status, "registration_failed");
   assert.equal(observation.outcome.reason, "native_registration_threw");
   assert.deepEqual(observation.outcome.registered,
-                   ["list_free_models", "get_model"],
+                   ["get_model"],
                    "the confirmed prefix is reported exactly");
-  assert.equal(observation.outcome.failed, "list_endpoints",
+  assert.equal(observation.outcome.failed, "watchdog_status",
                "the actual failed tool name is reported");
-  assert.deepEqual(observation.attempted, TOOL_NAMES.slice(0, 3),
+  assert.deepEqual(observation.attempted, TOOL_NAMES.slice(0, 2),
                    "no tool is attempted after the failure");
 }
 
@@ -805,7 +693,7 @@ describe("unit 8b — inert evaluation and honest absence", () => {
     assert.equal(touched, 0);
   });
 
-  it("exports the five shared tool names as an immutable published set", () => {
+  it("exports the three shared tool names as an immutable published set", () => {
     assert.deepEqual(adapter.TOOL_NAMES, TOOL_NAMES);
     assert.ok(Object.isFrozen(adapter.TOOL_NAMES));
     assert.throws(() => { adapter.TOOL_NAMES.push("extra_tool"); },
@@ -912,7 +800,7 @@ describe("unit 8b — inert evaluation and honest absence", () => {
 });
 
 describe("unit 8b — registration binds the embedded shared definitions", () => {
-  it("registers exactly the five shared descriptors in contract order", async () => {
+  it("registers exactly the three shared descriptors in contract order", async () => {
     const { result, modelContext } = await registerWith();
     assert.deepEqual(result, {
       ok: true,
@@ -947,14 +835,15 @@ describe("unit 8b — registration binds the embedded shared definitions", () =>
     assert.equal(search.additionalProperties, false);
     assert.deepEqual(search.required, []);
     assert.equal(search.properties.limit.maximum, 200);
-    assert.equal(search.properties.limit.default, 50);
+    assert.equal(search.properties.limit.default, 5);
     assert.equal(search.properties.offset.maximum, 9007199254740991);
     assert.deepEqual(search.properties.min_context_length.type,
                      ["integer", "null"]);
     assert.deepEqual(search.properties.input_modalities.items,
                      { type: "string", minLength: 1 });
     const model = descriptorFor(modelContext, "get_model").inputSchema;
-    assert.deepEqual(model.required, ["model_id"]);
+    assert.deepEqual(model.required, ["provider", "model_id"]);
+    assert.equal(model.properties.provider.type, "string");
     assert.equal(model.properties.model_id.pattern,
                  "[^\\u0009-\\u000D\\u0020]");
     assert.deepEqual(descriptorFor(modelContext, "watchdog_status")
@@ -983,11 +872,11 @@ describe("unit 8b — registration binds the embedded shared definitions", () =>
   it("the lint rejects an over-budget contract instead of truncating it", () => {
     const mutated = JSON.parse(CONTRACT_TEXT);
     mutated[0].description = "x".repeat(DESCRIPTION_BUDGET + 1);
-    mutated[1].inputSchema.properties.model_id.description =
+    mutated[2].inputSchema.properties.query.description =
       "y".repeat(PARAM_DESCRIPTION_BUDGET + 1);
     const findings = overBudget(mutated).map((row) => row.kind + ":" + row.tool);
     assert.deepEqual(findings, [
-      "tool-description:list_free_models", "parameter-description:get_model"
+      "tool-description:get_model", "parameter-description:search_models"
     ]);
   });
 
@@ -1001,11 +890,11 @@ describe("unit 8b — registration binds the embedded shared definitions", () =>
       return result;
     });
     assert.equal(settled, false, "setup does not report success synchronously");
-    assert.ok(modelContext.calls.length < 5,
+    assert.ok(modelContext.calls.length < 3,
               "the registration sequence is not finished synchronously");
     const result = await pending;
     assert.equal(result.status, "registered");
-    assert.equal(modelContext.calls.length, 5);
+    assert.equal(modelContext.calls.length, 3);
   });
 
   it("preserves the native method receiver", async () => {
@@ -1091,19 +980,19 @@ describe("unit 8b — registration binds the embedded shared definitions", () =>
 });
 
 describe("unit 8b — native text result, embedded source and payload parity", () => {
-  it("returns one JSON text result for all five tools with exact parity", async () => {
+  it("returns one JSON text result for every shared tool with exact parity", async () => {
     const now = FIXTURE_TICK_EPOCH + 90;
     const { modelContext } = await registerWith(undefined, undefined, () => now);
     const cases = [
-      ["list_free_models", "listFreeModels", {}],
-      ["get_model", "getModel", { model_id: "vendor/shared" }],
-      ["list_endpoints", "listEndpoints", {}],
+      ["get_model", "getModel",
+       { provider: "synthetic-a", model_id: "vendor/shared" }],
       ["search_models", "searchModels", { query: "synthetic", limit: 2 }]
     ];
     for (const [tool, coreName, args] of cases) {
       const descriptor = descriptorFor(modelContext, tool);
       const decoded = decodeNative(descriptor.execute(Object.assign({}, args)));
       assertExactSource(decoded.source);
+      assert.equal(decoded.payload.ok, true, `${tool} returns a success`);
       assertPayloadParity(decoded.payload,
                           catalog[coreName](SNAPSHOT, Object.assign({}, args)),
                           tool);
@@ -1116,17 +1005,9 @@ describe("unit 8b — native text result, embedded source and payload parity", (
     assertPayloadParity(status.payload, catalog.watchdogStatus(SNAPSHOT, {}, now),
                         "watchdog_status");
     assert.equal(status.payload.last_tick_age_s, 90);
-
-    const endpoints = nativePayload(descriptorFor(modelContext, "list_endpoints"), {});
-    assert.deepEqual(endpoints.counts, {
-      gateways: 3, endpoints: 5, distinct_raw_ids: 4,
-      marker_group_labels: 3, models: 3
-    });
-    assert.deepEqual(Object.keys(endpoints.gateways), SNAPSHOT.provider_order);
-    assert.equal(endpoints.gateways["synthetic-a"].model_ids.length, 3);
   });
 
-  it("keeps the frozen literal expectations for status, search and bulk", async () => {
+  it("keeps the frozen literal expectations for status and search", async () => {
     const now = FIXTURE_TICK_EPOCH + 120;
     const { modelContext } = await registerWith(undefined, undefined, () => now);
 
@@ -1145,29 +1026,15 @@ describe("unit 8b — native text result, embedded source and payload parity", (
     const search = nativePayload(descriptorFor(modelContext, "search_models"),
                                  { query: "synthetic", limit: 2, offset: 0 });
     assert.equal(search.ok, true);
-    assert.equal(search.limit, 2);
-    assert.equal(search.offset, 0);
-    assert.equal(search.returned_count, 2);
     assert.equal(search.total_matches, 2);
     assert.equal(search.next_offset, null);
+    assert.deepEqual(Object.keys(search).sort(), [
+      "endpoints", "next_offset", "ok", "provider_staleness", "snapshot_id",
+      "tick_epoch", "total_matches"]);
     assert.deepEqual(search.endpoints.map((row) => row.provider + "/" + row.model_id),
                      ["synthetic-a/vendor/shared", "synthetic-b/vendor/shared"]);
-    assert.equal(search.counts.endpoints, 2);
-    assert.deepEqual(search.filters,
-                     { provider: null, min_context_length: null,
-                       input_modalities: null, supported_parameters: null });
+    assert.equal("description" in search.endpoints[0], false);
 
-    const bulk = nativePayload(descriptorFor(modelContext, "list_free_models"), {});
-    assert.equal(bulk.ok, true);
-    assert.deepEqual(Object.keys(bulk.providers), SNAPSHOT.provider_order);
-    assert.deepEqual(bulk.providers["synthetic-a"],
-                     ["vendor/model-renamed", "vendor/model:free",
-                      "vendor/shared"]);
-    assert.deepEqual(bulk.providers["synthetic-c"], []);
-    assert.equal(bulk.total_ids, 4, "distinct raw ids across gateways");
-    assert.equal(bulk.n_gateways, 3);
-    assert.deepEqual(bulk.counts,
-                     { "synthetic-a": 3, "synthetic-b": 2, "synthetic-c": 0 });
   });
 
   it("attaches the source to invalid arguments without promoting ok:false", async () => {
@@ -1209,30 +1076,25 @@ describe("unit 8b — native text result, embedded source and payload parity", (
     // Omitted argument object: the documented native invocation boundary.
     const omitted = decodeNative(search.execute());
     assertExactSource(omitted.source);
-    assert.equal(omitted.payload.limit, 50);
-    assert.equal(omitted.payload.offset, 0);
     assert.equal(omitted.payload.ok, true);
+    assert.equal("limit" in omitted.payload, false);
     assertPayloadParity(omitted.payload, catalog.searchModels(SNAPSHOT, {}),
                         "omitted arguments");
     // Explicit null is forwarded unchanged and stays its own rejection.
     assert.equal(decodeNative(search.execute(null)).payload.ok, false);
     assert.equal(
-      decodeNative(descriptorFor(modelContext, "list_free_models").execute(null))
+      decodeNative(descriptorFor(modelContext, "get_model").execute(null))
         .payload.error.code, "invalid_arguments");
   });
 
   it("forwards arrays, unknown keys and capability lists unchanged", async () => {
     const { modelContext } = await registerWith();
     const search = descriptorFor(modelContext, "search_models");
-    const bulk = descriptorFor(modelContext, "list_free_models");
     assertPayloadParity(decodeNative(search.execute({ limit: 1, unknown: 1 })).payload,
                         catalog.searchModels(SNAPSHOT, { limit: 1, unknown: 1 }),
                         "unknown own key");
     assertPayloadParity(decodeNative(search.execute([1, 2])).payload,
                         catalog.searchModels(SNAPSHOT, [1, 2]), "array argument");
-    assertPayloadParity(decodeNative(bulk.execute({ provider: null })).payload,
-                        catalog.listFreeModels(SNAPSHOT, { provider: null }),
-                        "explicit null provider");
     const capabilities = { input_modalities: [], supported_parameters: [] };
     assertPayloadParity(decodeNative(search.execute(capabilities)).payload,
                         catalog.searchModels(SNAPSHOT, capabilities),
@@ -1256,10 +1118,9 @@ describe("unit 8b — native text result, embedded source and payload parity", (
     assert.equal(second.last_tick_age_s, FIXTURE_CADENCE_S + 1);
     assert.equal(second.tick_fresh, false);
     assert.ok(second.warnings.includes("tick_stale"));
-    // The other four callbacks never touch the clock.
-    descriptorFor(modelContext, "list_free_models").execute({});
-    descriptorFor(modelContext, "get_model").execute({ model_id: "x" });
-    descriptorFor(modelContext, "list_endpoints").execute({});
+    // The other two callbacks never touch the clock.
+    descriptorFor(modelContext, "get_model").execute(
+      { provider: "synthetic-a", model_id: "x" });
     descriptorFor(modelContext, "search_models").execute({ limit: 1 });
     assert.equal(reads, 2, "only watchdog_status reads the clock");
     // The clock is not a public tool argument or schema field.
@@ -1289,8 +1150,7 @@ describe("unit 8b — native text result, embedded source and payload parity", (
   });
 
   it("decodes and seals the snapshot once, then queries that capture only", async () => {
-    const QUERY_NAMES = ["listFreeModels", "getModel", "listEndpoints",
-                         "watchdogStatus", "searchModels"];
+    const QUERY_NAMES = ["getModel", "watchdogStatus", "searchModels"];
     const counts = { loadSnapshot: 0, loadJson: 0, queries: 0, encoded: 0 };
     const spy = {};
     for (const name of Object.keys(catalog)) {
@@ -1353,124 +1213,23 @@ describe("unit 8b — native text result, embedded source and payload parity", (
                  "mutating one decoded result cannot leak");
   });
 
-  it("keeps float tokens and hostile strings intact through the text frame", async () => {
-    // 1. A float TOKEN in an ordinary payload field: the shared engine copies
-    //    the request's `min_context_length` into `filters`, so the typed value
-    //    survives the frame. An ordinary serializer would spell `1.0` as `1`.
-    const { modelContext } = await registerWith();
-    const search = descriptorFor(modelContext, "search_models");
-    const floatArgs = { min_context_length: new catalog.JsonFloat(1.0) };
-    const floatText = search.execute(floatArgs).toString();
-    assert.ok(floatText.includes("\"min_context_length\":1.0"),
-              "the float token is spelled 1.0, not collapsed to 1");
-    const floatDecoded = decodeNative(floatText);
-    assertExactSource(floatDecoded.source);
-    assert.equal(catalog.isFloatToken(floatDecoded.payload.filters.min_context_length),
-                 true, "the decoded token is still a typed float");
-    assertPayloadParity(floatDecoded.payload,
-                        catalog.searchModels(SNAPSHOT, floatArgs),
-                        "float-token payload");
-    // The defect the encoder avoids, stated as a control.
-    assert.equal(
-      JSON.stringify(catalog.searchModels(SNAPSHOT, floatArgs).filters)
-        .includes("\"min_context_length\":1.0"), false,
-      "an ordinary serializer would lose the float token");
-
-    // 2. PROJECTED METADATA — the same lock on a token that arrived from
-    //    UPSTREAM projected `pricing`, which no argument echo can stand in for.
-    //    Only the SEALED synthetic catalogue and the real strict loader feed
-    //    this: the fake registrar/DOM prove adapter behaviour only.
-    const priced = projectedPricingSnapshot();
-    const pricedContext = await registerWith(priced.text, CONTRACT_TEXT);
-    // The snapshot the adapter CAPTURED: the same island text through the same
-    // strict loader, so this is the validated input its callbacks query.
-    const captured = catalog.loadSnapshot(priced.text);
-    assert.equal(captured.snapshot_id, priced.snapshot.snapshot_id,
-                 "the synthetic catalogue seals with the shared body hash");
-    assert.equal(priced.snapshot.providers["synthetic-priced"]
-                   .models[PRICED_MODEL_ID].pricing.prompt.value,
-                 PRICING_PROMPT,
-                 "the UPSTREAM fixture field holds the float token 1.0");
-    const upstream = captured.providers["synthetic-priced"]
-      .models[PRICED_MODEL_ID].pricing;
-    assert.equal(catalog.isFloatToken(upstream.prompt), true,
-                 "the captured snapshot stores pricing.prompt as a TOKEN");
-    assert.equal(Number(upstream.prompt), PRICING_PROMPT);
-    assert.equal(catalog.isFloatToken(upstream.completion), true,
-                 "the captured snapshot stores pricing.completion as a TOKEN");
-    assert.equal(Number(upstream.completion), PRICING_COMPLETION);
-
-    // Every metadata-bearing tool is exercised in its OWN output shape;
-    // `watchdog_status` carries no model metadata at all (asserted below).
-    const pricedRows = [
-      ["list_free_models", "listFreeModels", {},
-       (payload) => payload.models["synthetic-priced"][PRICED_MODEL_ID]],
-      ["get_model", "getModel", { model_id: PRICED_MODEL_ID },
-       (payload) => payload.endpoints[0].metadata],
-      ["list_endpoints", "listEndpoints", {},
-       (payload) => payload.gateways["synthetic-priced"].models[PRICED_MODEL_ID]],
-      ["search_models", "searchModels", { query: "priced" },
-       (payload) => payload.endpoints[0].metadata]
-    ];
-    const capturedBefore = catalog.canonicalText(captured);
-    for (const [tool, coreName, args, select] of pricedRows) {
-      const descriptor = descriptorFor(pricedContext.modelContext, tool);
-      const forwarded = Object.assign({}, args);
-      const decoded = decodeNative(descriptor.execute(forwarded));
-      assertExactSource(decoded.source);
-      assert.equal(/^[ -~]*$/.test(decoded.text), true, `${tool}: one ASCII line`);
-      const pricedModel = select(decoded.payload);
-      assert.equal(pricedModel.id, PRICED_MODEL_ID,
-                   `${tool}: the priced endpoint is the selected model`);
-      assertProjectedPricingTokens(pricedModel, decoded.text, tool);
-      assertPayloadParity(decoded.payload,
-                          catalog[coreName](captured, Object.assign({}, args)),
-                          `${tool} projected metadata`);
-      // An ordinary consumer still parses this text; it simply cannot SEE the
-      // token, which is why the SPELLING above is the assertion that matters.
-      const ordinary = select(JSON.parse(decoded.text));
-      assert.equal(typeof ordinary.pricing.prompt, "number");
-      assert.equal(ordinary.pricing.prompt, 1,
-                   `${tool}: JSON.parse collapses 1.0 to 1 and stays valid`);
-      assert.deepEqual(forwarded, args, `${tool}: the argument is untouched`);
-    }
-    // Unrelated metadata is neither dropped nor rewritten.
-    const plainPricing = nativePayload(
-      descriptorFor(pricedContext.modelContext, "list_free_models"), {})
-      .models["synthetic-priced"][PLAIN_MODEL_ID].pricing;
-    assert.deepEqual(plainPricing, { completion: "0", prompt: "0" },
-                     "the sibling string spelling survives verbatim");
-    assert.equal(catalog.canonicalText(captured), capturedBefore,
-                 "framing never rewrites the captured snapshot");
-    assert.equal(catalog.isFloatToken(
-      captured.providers["synthetic-priced"]
-        .models[PRICED_MODEL_ID].pricing.prompt), true,
-      "the captured token is still typed after every call");
-    // Independent calls stay isolated on this path too.
-    const firstRun = nativePayload(
-      descriptorFor(pricedContext.modelContext, "list_endpoints"), {});
-    const secondRun = nativePayload(
-      descriptorFor(pricedContext.modelContext, "list_endpoints"), {});
-    assert.deepEqual(secondRun, firstRun, "repeat calls agree");
-    assert.notEqual(secondRun, firstRun, "repeat calls are fresh objects");
-    assert.equal(descriptorFor(pricedContext.modelContext, "watchdog_status")
-                   .execute({}).includes("pricing"), false,
-                 "watchdog_status has no metadata carrier to lock");
-
-    // 3. Hostile-looking ordinary STRINGS stay data, byte for byte.
+  it("keeps hostile strings intact through the text frame", async () => {
+    // Annotations are advisory metadata: they neither rewrite upstream text nor
+    // authorize rendering it. The detail description travels as inert JSON.
     const hostile = hostileSnapshot();
     const hostileContext = await registerWith(hostile.text, CONTRACT_TEXT);
     const hostileDecoded = decodeNative(
-      descriptorFor(hostileContext.modelContext, "list_free_models").execute({}));
+      descriptorFor(hostileContext.modelContext, "get_model")
+        .execute({ provider: "synthetic-hostile", model_id: HOSTILE_ID }));
     assertExactSource(hostileDecoded.source);
-    const models = hostileDecoded.payload.models["synthetic-hostile"];
-    assert.equal(Object.getPrototypeOf(models), Object.prototype,
+    const endpoint = hostileDecoded.payload.endpoint;
+    assert.equal(Object.getPrototypeOf(endpoint), Object.prototype,
                  "decoding does not adopt a hostile prototype");
-    assert.equal(Object.prototype.hasOwnProperty.call(models, HOSTILE_ID), true,
-                 "the prototype-looking model id is an ordinary own key");
-    assert.equal(models[HOSTILE_ID].description, HOSTILE_DESCRIPTION,
+    assert.equal(endpoint.model_id, HOSTILE_ID,
+                 "the prototype-looking model id is an ordinary value");
+    assert.equal(endpoint.description, HOSTILE_DESCRIPTION,
                  "the hostile description is preserved exactly");
-    assert.equal(models[HOSTILE_ID].name, HOSTILE_NAME);
+    assert.equal(endpoint.name, HOSTILE_NAME);
     // The text is ONE line of pure ASCII: quotes, line separators, astral
     // characters and control characters are escaped, so upstream text can
     // never break out of the JSON string context.
@@ -1487,9 +1246,9 @@ describe("unit 8b — native text result, embedded source and payload parity", (
 });
 
 describe("unit 8b — annotations on every descriptor", () => {
-  it("annotates all five descriptors with the three exact hints", async () => {
+  it("annotates all three descriptors with the three exact hints", async () => {
     const { modelContext } = await registerWith();
-    assert.equal(modelContext.calls.length, 5);
+    assert.equal(modelContext.calls.length, 3);
     for (const { descriptor } of modelContext.calls) {
       assertAnnotationTriplet(descriptor.annotations);
     }
@@ -1498,8 +1257,8 @@ describe("unit 8b — annotations on every descriptor", () => {
   it("gives every descriptor and every setup its own fresh annotations", async () => {
     const first = await registerWith();
     const descriptors = first.modelContext.calls.map((entry) => entry.descriptor);
-    assert.equal(new Set(descriptors.map((d) => d.annotations)).size, 5,
-                 "five distinct annotation objects in one registration");
+    assert.equal(new Set(descriptors.map((d) => d.annotations)).size, 3,
+                 "three distinct annotation objects in one registration");
     // A native layer that mutates what it was handed cannot corrupt the rest.
     descriptors[0].annotations.readOnlyHint = false;
     delete descriptors[1].annotations.consequentialHint;
@@ -1523,9 +1282,9 @@ describe("unit 8b — annotations on every descriptor", () => {
     const hostile = hostileSnapshot();
     const hostileContext = await registerWith(hostile.text, CONTRACT_TEXT);
     const text = descriptorFor(hostileContext.modelContext, "get_model")
-      .execute({ model_id: HOSTILE_ID });
+      .execute({ provider: "synthetic-hostile", model_id: HOSTILE_ID });
     const decoded = decodeNative(text);
-    assert.equal(decoded.payload.endpoints[0].metadata.description,
+    assert.equal(decoded.payload.endpoint.description,
                  HOSTILE_DESCRIPTION,
                  "the untrusted description is returned as DATA, unrepaired");
     assert.equal(decoded.text.includes("<img src=x onerror=alert(1)>"), true,
@@ -1605,13 +1364,13 @@ describe("unit 8b — graceful island and registration faults", () => {
     const base = JSON.parse(CONTRACT_TEXT);
     const variants = [
       [JSON.stringify({ tools: base }), "contract_not_array"],
-      [JSON.stringify(base.slice(0, 4)), "contract_tool_count"],
+      [JSON.stringify(base.slice(0, 2)), "contract_tool_count"],
       [JSON.stringify(base.concat([base[0]])), "contract_tool_count"],
       [JSON.stringify(base.map((entry) => entry.name === "get_model"
         ? Object.assign({}, entry, { name: "get_model_extra" }) : entry)),
        "contract_unknown_tool"],
       [JSON.stringify(base.map((entry, index) => index === 1
-        ? Object.assign({}, entry, { name: "list_free_models" }) : entry)),
+        ? Object.assign({}, entry, { name: "get_model" }) : entry)),
        "contract_duplicate_tool"],
       [JSON.stringify(base.map((entry) => entry.name === "search_models"
         ? Object.assign({}, entry, { description: "" }) : entry)),
@@ -1624,12 +1383,12 @@ describe("unit 8b — graceful island and registration faults", () => {
           inputSchema: Object.assign({}, entry.inputSchema,
                                      { additionalProperties: "no" })
         }) : entry)), "contract_invalid_schema"],
-      [JSON.stringify(base.map((entry) => entry.name === "list_endpoints"
+      [JSON.stringify(base.map((entry) => entry.name === "get_model"
         ? Object.assign({}, entry, {
           inputSchema: Object.assign({}, entry.inputSchema,
                                      { required: ["not_a_property"] })
         }) : entry)), "contract_invalid_schema"],
-      [JSON.stringify(base.map((entry) => entry.name === "list_endpoints"
+      [JSON.stringify(base.map((entry) => entry.name === "search_models"
         ? { name: entry.name, description: entry.description,
           inputSchema: entry.inputSchema, extra: true } : entry)),
        "contract_invalid_entry"]
@@ -1665,7 +1424,7 @@ describe("unit 8b — graceful island and registration faults", () => {
     ];
     // The permissive parser would have ACCEPTED the duplicate-member text,
     // which is exactly why the shared loader is the acceptance path here.
-    assert.equal(JSON.parse(duplicateMember)[1].name, "get_model_extra");
+    assert.equal(JSON.parse(duplicateMember)[0].name, "get_model_extra");
     assert.throws(() => catalog.loadJson(duplicateMember), /invalid|JSON/i);
     for (const [text, code] of cases) {
       const document = fakeDocument(islandsFor(text));
@@ -1682,7 +1441,7 @@ describe("unit 8b — graceful island and registration faults", () => {
     }
   });
 
-  it("reports a rejected registration without claiming all five", async () => {
+  it("reports a rejected registration without claiming all three", async () => {
     const document = fakeDocument(islandsFor());
     const modelContext = fakeRegistrar("rejectAt", 3);
     document.modelContext = modelContext;
@@ -1693,8 +1452,8 @@ describe("unit 8b — graceful island and registration faults", () => {
       ok: false,
       status: "registration_failed",
       reason: "native_registration_rejected",
-      registered: ["list_free_models", "get_model"],
-      failed: "list_endpoints",
+      registered: ["get_model", "watchdog_status"],
+      failed: "search_models",
       code: null
     });
     assert.equal(modelContext.calls.length, 3, "later tools were not attempted");
@@ -1711,7 +1470,7 @@ describe("unit 8b — graceful island and registration faults", () => {
     assert.equal(result.status, "registration_failed");
     assert.equal(result.reason, "native_registration_threw");
     assert.deepEqual(result.registered, []);
-    assert.equal(result.failed, "list_free_models");
+    assert.equal(result.failed, "get_model");
     assert.equal(modelContext.calls.length, 1);
   });
 
@@ -1724,7 +1483,7 @@ describe("unit 8b — graceful island and registration faults", () => {
       ["thenableRejectAt", "native_registration_rejected"]
     ];
     const rows = [];
-    for (const position of [1, 3, 5]) {
+    for (const position of [1, 2, 3]) {
       for (const [mode, reason] of styles) {
         const label = `${mode}@${position}`;
         const document = fakeDocument(islandsFor());
@@ -1755,10 +1514,17 @@ describe("unit 8b — graceful island and registration faults", () => {
                      `${label}: the failure was not retried`);
         // Already-confirmed descriptors keep working, with native text.
         if (position > 1) {
+          const confirmed = decodeNative(
+            descriptorFor(modelContext, "get_model")
+              .execute({ provider: "synthetic-a", model_id: "vendor/shared" }))
+            .payload;
+          assert.equal(confirmed.ok, true,
+                       `${label}: the confirmed prefix answers successfully`);
           assertPayloadParity(
-            decodeNative(descriptorFor(modelContext, "list_free_models")
-              .execute({})).payload,
-            catalog.listFreeModels(SNAPSHOT, {}),
+            confirmed,
+            catalog.getModel(SNAPSHOT,
+                             { provider: "synthetic-a",
+                               model_id: "vendor/shared" }),
             `${label}: the confirmed prefix stays usable`);
         }
       }
@@ -1792,8 +1558,8 @@ describe("unit 8b — graceful island and registration faults", () => {
       const [owned, repeated] = await Promise.all([first, duplicate]);
       assert.equal(owned.status, "registration_failed");
       assert.equal(owned.reason, "native_registration_rejected");
-      assert.deepEqual(owned.registered, ["list_free_models", "get_model"]);
-      assert.equal(owned.failed, "list_endpoints");
+      assert.deepEqual(owned.registered, ["get_model", "watchdog_status"]);
+      assert.equal(owned.failed, "search_models");
       assert.deepEqual(repeated, owned,
                        "the pending duplicate reports the same honest outcome");
       assert.notEqual(repeated.registered, owned.registered,
@@ -1823,7 +1589,7 @@ describe("unit 8b — graceful island and registration faults", () => {
       assert.equal(result.reason, null, mode);
       assert.deepEqual(result.registered, TOOL_NAMES, mode);
       assert.equal(result.failed, null, mode);
-      assert.equal(modelContext.calls.length, 5, mode);
+      assert.equal(modelContext.calls.length, 3, mode);
     }
   });
 
@@ -1861,7 +1627,7 @@ describe("unit 8c — document-lifetime ownership", () => {
       ok: true, status: "registered", reason: null, registered: TOOL_NAMES,
       failed: null, code: null
     });
-    assert.equal(modelContext.calls.length, 5);
+    assert.equal(modelContext.calls.length, 3);
     assert.deepEqual(document.reads, ["catalog-data", "tool-contract"]);
     assert.equal(counted.counts.loadSnapshot, 1);
     assert.equal(counted.counts.loadJson, 1);
@@ -1880,7 +1646,7 @@ describe("unit 8c — document-lifetime ownership", () => {
     assert.notEqual(duplicate, first, "a fresh result container");
     assert.notEqual(duplicate.registered, first.registered,
                     "a fresh registered array");
-    assert.equal(modelContext.calls.length, 5, "no second native registration");
+    assert.equal(modelContext.calls.length, 3, "no second native registration");
     assert.equal(document.reads.length, 2, "the duplicate re-parsed no island");
     assert.equal(counted.counts.loadSnapshot, 1, "one snapshot load in total");
     assert.equal(counted.counts.loadJson, 1, "one contract parse in total");
@@ -1889,10 +1655,17 @@ describe("unit 8c — document-lifetime ownership", () => {
     // The FIRST snapshot, core binding and callbacks are still the live ones.
     assertPayloadParity(decodeNative(capture).payload, before,
                         "post-duplicate callback");
+    const postDuplicate = decodeNative(
+      descriptorFor(modelContext, "get_model")
+        .execute({ provider: "synthetic-a", model_id: "vendor/shared" }))
+      .payload;
+    assert.equal(postDuplicate.ok, true,
+                 "post-duplicate callback answers successfully");
     assertPayloadParity(
-      decodeNative(descriptorFor(modelContext, "list_free_models").execute({}))
-        .payload,
-      catalog.listFreeModels(SNAPSHOT, {}), "post-duplicate bulk callback");
+      postDuplicate,
+      catalog.getModel(SNAPSHOT,
+                       { provider: "synthetic-a", model_id: "vendor/shared" }),
+      "post-duplicate callback");
     assert.equal(descriptorFor(modelContext, "search_models").execute({ limit: 2 }),
                  capture, "the original callback frames the same text");
     // `watchdog_status` keeps the FIRST captured clock seam and reads it at
@@ -1909,7 +1682,7 @@ describe("unit 8c — document-lifetime ownership", () => {
     const third = await adapter.setup({ document, catalog });
     assert.deepEqual(third.registered, TOOL_NAMES,
                      "caller mutation cannot poison a later result");
-    assert.equal(modelContext.calls.length, 5);
+    assert.equal(modelContext.calls.length, 3);
     assert.deepEqual(Object.keys(document).sort(),
                      ["getElementById", "modelContext", "reads"],
                      "the document gained no adapter state");
@@ -1941,7 +1714,7 @@ describe("unit 8c — document-lifetime ownership", () => {
     assert.notEqual(repeated.registered, owned.registered,
                     "fresh registered arrays");
     assert.equal(settled, 2, "both callers resolved");
-    assert.equal(modelContext.calls.length, 5, "one native call per tool");
+    assert.equal(modelContext.calls.length, 3, "one native call per tool");
     assert.deepEqual(modelContext.calls.map((entry) => entry.descriptor.name),
                      TOOL_NAMES, "shared-contract order, no repeats");
     assert.equal(document.reads.length, 2, "one snapshot load and contract parse");
@@ -1978,7 +1751,7 @@ describe("unit 8c — document-lifetime ownership", () => {
     assert.deepEqual(inner, outer, "the re-entrant call reports the same outcome");
     assert.notEqual(inner.registered, outer.registered,
                     "fresh registered array for the re-entrant caller");
-    assert.equal(calls.length, 5, "the re-entrant call registered nothing");
+    assert.equal(calls.length, 3, "the re-entrant call registered nothing");
     assert.deepEqual(calls.map((entry) => entry.descriptor.name), TOOL_NAMES);
     assert.equal(document.reads.length, 2);
   });
@@ -1998,14 +1771,14 @@ describe("unit 8c — document-lifetime ownership", () => {
     ]);
     assert.equal(first.status, "registered");
     assert.equal(second.status, "registered");
-    assert.equal(firstRegistrar.calls.length, 5);
-    assert.equal(secondRegistrar.calls.length, 5);
+    assert.equal(firstRegistrar.calls.length, 3);
+    assert.equal(secondRegistrar.calls.length, 3);
     assert.equal(firstDocument.reads.length, 2);
     assert.equal(secondDocument.reads.length, 2);
     // ... and a third document is still a fresh registration.
     const third = await registerWith();
     assert.equal(third.result.status, "registered");
-    assert.equal(third.modelContext.calls.length, 5);
+    assert.equal(third.modelContext.calls.length, 3);
   });
 
   it("does not claim ownership before a registration attempt starts", async () => {
@@ -2023,7 +1796,7 @@ describe("unit 8c — document-lifetime ownership", () => {
       document, catalog, clock: () => FIXTURE_TICK_EPOCH
     });
     assert.equal(repaired.status, "registered");
-    assert.equal(modelContext.calls.length, 5);
+    assert.equal(modelContext.calls.length, 3);
 
     // (b) A malformed island fault, then a correction on the same document.
     const brokenIslands = { "catalog-data": "{ not json", "tool-contract": CONTRACT_TEXT };
@@ -2039,7 +1812,7 @@ describe("unit 8c — document-lifetime ownership", () => {
       document: brokenDocument, catalog, clock: () => FIXTURE_TICK_EPOCH
     });
     assert.equal(fixed.status, "registered");
-    assert.equal(brokenRegistrar.calls.length, 5);
+    assert.equal(brokenRegistrar.calls.length, 3);
 
     // (c) A missing shared engine, then a working one, on the same document.
     const coreIslands = islandsFor();
@@ -2055,91 +1828,7 @@ describe("unit 8c — document-lifetime ownership", () => {
       document: coreDocument, catalog, clock: () => FIXTURE_TICK_EPOCH
     });
     assert.equal(withCore.status, "registered");
-    assert.equal(coreRegistrar.calls.length, 5);
-  });
-});
-
-describe("unit 8b — output-size evidence under the 4.6 policy", () => {
-  it("preserves complete bulk payloads above the 1.5K recommendation", async () => {
-    const small = syntheticSnapshot(2, 0);
-    const large = syntheticSnapshot(120, 200);
-    const measurements = {};
-
-    for (const [label, synthetic] of [["small", small], ["large", large]]) {
-      const { modelContext } = await registerWith(synthetic.text, CONTRACT_TEXT);
-      // The same callbacks through the REAL classic-script export, in the page
-      // realm. This is ONE V8 build (CommonJS vs vm), not two native runtimes.
-      const sandbox = loadPageRealm();
-      const classicContext = await registerPageRealm(sandbox, synthetic.text,
-                                                     CONTRACT_TEXT);
-      assert.equal(classicContext.result.status, "registered");
-
-      for (const tool of ["list_free_models", "list_endpoints", "search_models"]) {
-        const args = tool === "search_models" ? { limit: 5 } : {};
-        const text = descriptorFor(modelContext, tool).execute(Object.assign({}, args));
-        const decoded = decodeNative(text);
-        assertExactSource(decoded.source);
-        measurements[`${label}:${tool}`] = text.length;
-        assert.ok(text.length > 0);
-        assert.equal(decoded.payload.ok, true);
-
-        // Completeness against the synthetic input, never a shortened array.
-        const expectedModels =
-          synthetic.snapshot.providers["synthetic-bulk"].model_ids.length;
-        if (tool === "search_models") {
-          assert.equal(decoded.payload.endpoints.length,
-                       Math.min(5, expectedModels));
-          assert.equal(decoded.payload.returned_count,
-                       decoded.payload.endpoints.length);
-          assert.equal(decoded.payload.total_matches, expectedModels);
-          assert.equal(decoded.payload.next_offset,
-                       expectedModels > 5 ? 5 : null,
-                       "pagination is the engine's, not a truncation artifact");
-        } else if (tool === "list_free_models") {
-          const ids = decoded.payload.providers["synthetic-bulk"];
-          assert.deepEqual(ids,
-                           synthetic.snapshot.providers["synthetic-bulk"].model_ids,
-                           `${tool}: every raw id survives in order`);
-          assert.equal(ids.length, expectedModels);
-          assert.equal(decoded.payload.total_ids, expectedModels);
-        } else {
-          const gateway = decoded.payload.gateways["synthetic-bulk"];
-          assert.deepEqual(gateway.model_ids,
-                           synthetic.snapshot.providers["synthetic-bulk"].model_ids,
-                           "no endpoint was silently dropped");
-          assert.equal(Object.keys(gateway.models).length, expectedModels);
-          if (label === "large") {
-            assert.equal(
-              gateway.models["synthetic-model-000"].description.length, 200,
-              "full model metadata is preserved, never shortened");
-          }
-        }
-        // The classic copy frames byte-identical text for the same input.
-        const classicText = descriptorFor(classicContext.modelContext, tool)
-          .execute(Object.assign({}, args));
-        assert.equal(classicText.length, text.length);
-        assert.equal(classicText, text);
-      }
-    }
-
-    const bulkLarge = measurements["large:list_endpoints"];
-    const searchLarge = measurements["large:search_models"];
-    const bulkSmall = measurements["small:list_free_models"];
-    assert.ok(bulkLarge > RECOMMENDED_CHARACTER_BUDGET,
-              "the bulk export exceeds the ~1.5K recommendation and stays whole");
-    assert.ok(bulkSmall > 0 && bulkSmall < bulkLarge);
-    assert.ok(bulkLarge > searchLarge * 10,
-              "the bounded search page is far smaller than the bulk export");
-    // Routine lookups are directed to search_models with a small limit.
-    assert.deepEqual(nativePayload(
-      descriptorFor((await registerWith(large.text, CONTRACT_TEXT)).modelContext,
-                    "search_models"), { limit: 1 }).returned_count, 1);
-    // One durable, human-readable evidence line per run. These are NODE
-    // measurements of the wrapped text; real-browser numbers are unit 8e's.
-    process.stdout.write("# unit8b size evidence " +
-      JSON.stringify(Object.assign({ budget: RECOMMENDED_CHARACTER_BUDGET,
-                                     runtime: "node-vm+commonjs" },
-                                   measurements)) + "\n");
+    assert.equal(coreRegistrar.calls.length, 3);
   });
 });
 
@@ -2188,119 +1877,24 @@ describe("unit 8b — applied wrong-rule controls", () => {
     // Mutant C — the frame truncated to the ~1.5K recommendation.
     const truncatingMutant = ADAPTER_SOURCE.replace(
       "return catalog.canonicalText(attachSource(payload));",
-      "return catalog.canonicalText(attachSource(payload)).slice(0, 1500);");
+      "return catalog.canonicalText(attachSource(payload)).slice(0, 100);");
     const truncatingContext = await registerMutant(truncatingMutant);
     assert.throws(
       () => decodeNative(
-        descriptorFor(truncatingContext, "list_endpoints").execute({})),
+        descriptorFor(truncatingContext, "search_models").execute({ limit: 2 })),
       /the text decodes to one JSON object|Unexpected|JSON/,
       "the completeness assertion rejects the truncated text");
 
     // Mutant D — one semantic field dropped while framing.
     const droppingMutant = ADAPTER_SOURCE.replace(
       "attached[keys[index]] = payload[keys[index]];",
-      "if (keys[index] !== \"counts\") { attached[keys[index]] = payload[keys[index]]; }");
+      "if (keys[index] !== \"endpoints\") { attached[keys[index]] = payload[keys[index]]; }");
     const droppingContext = await registerMutant(droppingMutant);
     assert.throws(
       () => assertPayloadParity(
-        nativePayload(descriptorFor(droppingContext, "list_free_models"), {}),
-        catalog.listFreeModels(SNAPSHOT, {}), "counts dropped"),
-      /counts dropped/, "the parity assertion rejects dropped metadata");
-
-    // Mutant E — an ordinary serializer instead of the typed encoder.
-    const serializerMutant = ADAPTER_SOURCE.replace(
-      "return catalog.canonicalText(attachSource(payload));",
-      "return JSON.stringify(attachSource(payload));");
-    const serializerContext = await registerMutant(serializerMutant);
-    const collapsed = descriptorFor(serializerContext, "search_models")
-      .execute({ min_context_length: new catalog.JsonFloat(1.0) });
-    assert.equal(collapsed.includes("\"min_context_length\":1.0"), false,
-                 "the float-token assertion rejects the lossy serializer");
-    assert.throws(
-      () => assertPayloadParity(
-        decodeNative(collapsed).payload,
-        catalog.searchModels(SNAPSHOT,
-                             { min_context_length: new catalog.JsonFloat(1.0) }),
-        "float token collapsed"),
-      /float token collapsed/,
-      "typed-canonical parity rejects the collapsed float token");
-
-    // Mutant F — a METADATA-ONLY wrong rule: immediately before framing, every
-    // `pricing` float token is collapsed to its integer value and NOTHING else
-    // changes. The text stays complete JSON, the source, counts, wiring,
-    // unrelated metadata and the echoed argument token are untouched, so only
-    // the PROJECTED METADATA assertion can see the difference.
-    const pricingMutant = ADAPTER_SOURCE.replace(
-      "      return frame(catalog, payload);",
-      "      var framedPayload = payload;\n" +
-      "      (function collapse(value) {\n" +
-      "        if (value === null || typeof value !== \"object\") { return; }\n" +
-      "        var names = Object.keys(value);\n" +
-      "        for (var index = 0; index < names.length; index += 1) {\n" +
-      "          var member = value[names[index]];\n" +
-      "          if (names[index] !== \"pricing\" || member === null ||\n" +
-      "              typeof member !== \"object\") {\n" +
-      "            collapse(member);\n" +
-      "            continue;\n" +
-      "          }\n" +
-      "          var fields = Object.keys(member);\n" +
-      "          for (var field = 0; field < fields.length; field += 1) {\n" +
-      "            if (member[fields[field]] instanceof catalog.JsonFloat) {\n" +
-      "              member[fields[field]] =\n" +
-      "                Number(member[fields[field]].value);\n" +
-      "            }\n" +
-      "          }\n" +
-      "        }\n" +
-      "      })(framedPayload);\n" +
-      "      return frame(catalog, payload);");
-    assert.notEqual(pricingMutant, ADAPTER_SOURCE, "the pricing rule applied");
-    const pricedFixture = projectedPricingSnapshot();
-    const pricedSandbox = loadPageRealm(pricingMutant);
-    const pricedRegistration = await registerPageRealm(pricedSandbox,
-                                                        pricedFixture.text);
-    assert.equal(pricedRegistration.result.status, "registered",
-                 "the metadata-only mutant still registers all five tools");
-    const pricedMutantContext = pricedRegistration.modelContext;
-    const mutantDecoded = decodeNative(
-      descriptorFor(pricedMutantContext, "list_endpoints").execute({}));
-    assertExactSource(mutantDecoded.source);
-    const mutantModels =
-      mutantDecoded.payload.gateways["synthetic-priced"].models;
-    const directPriced = catalog.listEndpoints(
-      catalog.loadSnapshot(pricedFixture.text), {});
-    assert.ok(mutantDecoded.text.includes("\"prompt\":1}"),
-              "the mutation really collapsed 1.0 to the integer 1");
-    assert.equal(mutantDecoded.text.includes("\"prompt\":1.0"), false,
-                 "no float token survives in the collapsed frame");
-    // Everything the OLD locks watch is unchanged.
-    assert.deepEqual(mutantDecoded.payload.counts, directPriced.counts,
-                     "counts are untouched by the metadata-only rule");
-    assert.deepEqual(mutantModels[PRICED_MODEL_ID].architecture,
-                     directPriced.gateways["synthetic-priced"]
-                       .models[PRICED_MODEL_ID].architecture,
-                     "unrelated metadata is untouched");
-    assert.deepEqual(mutantModels[PLAIN_MODEL_ID].pricing,
-                     { completion: "0", prompt: "0" },
-                     "the sibling string spelling is untouched");
-    // The ARGUMENT-ECHO lock is blind to it: that token lives in `filters`.
-    const echoFloat = new pricedSandbox.WatchdogCatalog.JsonFloat(1.0);
-    assert.ok(descriptorFor(pricedMutantContext, "search_models")
-                .execute({ min_context_length: echoFloat })
-                .includes("\"min_context_length\":1.0"),
-              "the echoed argument token still survives, so the old lock passes");
-    // The PROJECTED METADATA assertion is the one that rejects it.
-    assert.throws(
-      () => assertProjectedPricingTokens(mutantModels[PRICED_MODEL_ID],
-                                         mutantDecoded.text, "pricing mutant"),
-      /typed float token/,
-      "the projected-metadata assertion rejects the collapsed token");
-    // Control: the unchanged adapter passes the very same assertion.
-    const pricedControl = await registerWith(pricedFixture.text, CONTRACT_TEXT);
-    const controlDecoded = decodeNative(
-      descriptorFor(pricedControl.modelContext, "list_endpoints").execute({}));
-    assertProjectedPricingTokens(
-      controlDecoded.payload.gateways["synthetic-priced"]
-        .models[PRICED_MODEL_ID], controlDecoded.text, "unchanged control");
+        nativePayload(descriptorFor(droppingContext, "search_models"), {}),
+        catalog.searchModels(SNAPSHOT, {}), "endpoints dropped"),
+      /endpoints dropped/, "the parity assertion rejects dropped metadata");
 
     // Restored control: the unchanged adapter is still green.
     const restored = await registerWith();
@@ -2331,14 +1925,14 @@ describe("unit 8c — applied lifecycle wrong-rule controls", () => {
       guardSandbox.WatchdogWebMCP, guardSandbox.WatchdogCatalog,
       guardSandbox.WatchdogCatalog);
     // The mutant really produced a second, duplicate native registration.
-    assert.equal(guardObservation.calls, 10,
+    assert.equal(guardObservation.calls, 6,
                  "the guard-less copy registered every tool twice");
     assert.throws(() => assertOwnedOnce(guardObservation),
                   /exactly one native call per tool/,
                   "the ownership assertion rejects the removed guard");
 
     // Mutant H — after a synchronous throw the sequence CONTINUES and the
-    // outcome claims all five tools were registered.
+    // outcome claims all three tools were registered.
     const continueMutant = ADAPTER_SOURCE.replace(
       "      } catch (error) {\n" +
       "        return result(\"registration_failed\", \"native_registration_threw\",\n" +

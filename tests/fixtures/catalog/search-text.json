@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "snapshot_id": "73f5514627b5d38366a510219ce67bf27c5e871c62a3fa2b7dbc16af47b49325",
+  "schema_version": 2,
+  "snapshot_id": "3dea42592cf95e1e70e82a5c56a73ef7b03fd5b765e795c8abe385c462c0cc33",
   "tick_epoch": 1759200000,
   "cadence_s": 3600,
   "provider_order": [
@@ -36,11 +36,7 @@
             "Temperature",
             "MAX_TOKENS",
             "temperature"
-          ],
-          "pricing": {
-            "prompt": "0",
-            "completion": "0"
-          }
+          ]
         },
         "vendor/plain": {
           "id": "vendor/plain",
@@ -51,8 +47,7 @@
             "input_modalities": null,
             "output_modalities": null
           },
-          "supported_parameters": null,
-          "pricing": null
+          "supported_parameters": null
         }
       },
       "stale": false

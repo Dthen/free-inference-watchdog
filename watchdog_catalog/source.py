@@ -2,8 +2,9 @@
 failures.
 
 This module is the SOURCE boundary of the catalogue layer: one
-operator-selected local file (:func:`load_catalog_file`) or one
-operator-selected URL (:func:`load_catalog_url`), and nothing more.
+operator-selected local file (:func:`load_catalog_file`) or one explicit,
+byte-bounded, credential-free HTTP 200 GET of an operator-selected URL, and
+nothing more.
 
 File boundary:
 
@@ -106,11 +107,11 @@ Disk cache:
   directory and the project checkout are never invented as fallbacks.
 
 Importing this module performs no file, environment, clock or network access.
-Calling :func:`load_catalog_file` reads only the named file and calling
-:func:`load_catalog_url` performs only its one unconditional GET; neither
-consults, writes or creates a cache, falls back to another source, retries or
-reads a clock beyond the socket timeout. :func:`fetch_catalog_url` performs at
-most one GET of its selected URL and neither reads nor writes a cache file.
+Calling :func:`load_catalog_file` reads only the named file; it consults,
+writes or creates no cache, falls back to no other source, retries nothing and
+reads no clock. :func:`fetch_catalog_url` performs at most one GET of its
+selected URL, reads no clock beyond the socket timeout, and neither reads nor
+writes a cache file.
 :class:`DiskCache` reads and writes only its own entry and never fetches,
 retries, infers freshness, reseals a snapshot or reads a clock.
 
@@ -176,9 +177,9 @@ Coalesced asynchronous acquisition (unit 5f):
   runtime sleep, immediate retry loop, ``Retry-After`` policy, interval
   configuration or force-refresh API: refresh happens only when asked for.
 
-The synchronous loaders, transport and :class:`CatalogSource` remain the
-authority for validation, persistence, fallback and freshness. CLI, SDK and
-transport wiring remain later units and are deliberately absent.
+The synchronous file loader, HTTP transport and :class:`CatalogSource` remain
+the authority for validation, persistence, fallback and freshness. CLI, SDK
+and transport wiring remain later units and are deliberately absent.
 """
 
 from __future__ import annotations
@@ -556,41 +557,6 @@ def _validated_body(response, limit):
     except UnicodeDecodeError:
         raise _catalog.CatalogError(_catalog.INVALID_JSON) from None
     return _catalog.load_snapshot(text)
-
-
-def load_catalog_url(url=DEFAULT_CATALOG_URL, *, timeout_s=DEFAULT_TIMEOUT_S,
-                     max_bytes=MAX_SOURCE_BYTES):
-    """One bounded, credential-free ``GET`` of ONE explicitly selected URL.
-
-    ``url`` is consumed literally and must be an absolute ``http``/``https``
-    URL with a host. ``timeout_s`` bounds blocking socket operations (not an
-    end-to-end deadline) and ``max_bytes`` bounds the RAW response bytes.
-
-    Returns the validated decoded snapshot -- the very object
-    :func:`watchdog_catalog.catalog.load_snapshot` produced, never a copy,
-    clone or reseal. Raises :class:`SourceError` for any non-200 status,
-    redirect, transport/read/close/timeout fault, rejected framing/encoding,
-    or oversized document; invalid URL/timeout/byte-limit CONFIGURATION is a
-    programming error (one fixed ``TypeError``/``ValueError``) raised before
-    any network access. Every other failure is the accepted core
-    :class:`~watchdog_catalog.catalog.CatalogError` propagated unchanged.
-
-    Synchronous by design and deliberately UNCONDITIONAL: off-event-loop
-    dispatch, caching and refresh coalescing belong to later units, and
-    :func:`fetch_catalog_url` is the separate revalidation entry point that may
-    send one conditional header.
-    """
-    selected = _selected_url(url)
-    timeout = _timeout_seconds(timeout_s)
-    limit = _http_byte_limit(max_bytes)
-    response = _open_source(selected, timeout, _request_headers())
-    status = _response_status(response)
-    if status is not None and status != 200:
-        # Every non-200 -- including a 304, which this loader never requests --
-        # is one fixed failure of THIS source.
-        _close_quietly(response)
-        raise SourceError() from None
-    return _validated_body(response, limit)
 
 
 # ---------------------------------------------------------------------------
@@ -1103,29 +1069,34 @@ def _opaque_tag(value):
     return value[2:] if value.startswith("W/") else value
 
 
-def _detached_candidate(cached_entry, identity):
-    """A detached, fully validated candidate entry, or ``None`` for a MISS.
+def _detached_entry(entry, identity, *, max_bytes=None):
+    """A detached, fully validated version-1 entry, or ``None`` for a MISS.
 
-    ``cached_entry`` is untrusted caller DATA: shape, version, source identity,
-    fetch metadata and the COMPLETE snapshot (schema and body hash) are checked
-    BEFORE any I/O, and the object retained for the rest of the call is a fresh
-    decode of its own canonical bytes, so a caller (or an opener double) mutating
-    the input afterwards cannot change the snapshot a 304 reuses. An entry that
-    would exceed the accepted cache-entry bound is a miss too. Nothing is
-    repaired, resealed or invented, and a legitimately empty snapshot stays
-    usable.
+    ``entry`` is untrusted caller DATA: shape, version, source identity, fetch
+    metadata and the COMPLETE snapshot (schema and body hash) are checked
+    BEFORE any other work, and the object retained is a fresh decode of that
+    entry's own canonical bytes, revalidated after the copy, so a caller (or a
+    loader/opener double) mutating the input afterwards cannot change what is
+    retained. Nothing is repaired, resealed or invented, and a legitimately
+    empty snapshot stays usable.
+
+    ``max_bytes`` is an INTERNAL serialization policy, not a public knob: an
+    untrusted HTTP candidate supplies the cache-entry bound AT THE CALL, since
+    such a record must be one this cache itself would have accepted, while a
+    fresh in-memory entry passes ``None`` -- a valid source body too large to
+    persist is still a usable observation. The bound is inclusive.
     """
-    if not _valid_cache_entry(cached_entry, identity):
+    if not _valid_cache_entry(entry, identity):
         return None
     try:
-        payload = _catalog.canonical_bytes(cached_entry)
+        payload = _catalog.canonical_bytes(entry)
     except (TypeError, ValueError):
         return None
-    if len(payload) > _MAX_CACHE_BYTES:
+    if max_bytes is not None and len(payload) > max_bytes:
         return None
     try:
         owned = _catalog.load_json(payload.decode("utf-8"))
-    except (UnicodeDecodeError, _catalog.CatalogError):
+    except (UnicodeDecodeError, TypeError, ValueError):
         return None
     if not _valid_cache_entry(owned, identity):
         return None
@@ -1212,7 +1183,7 @@ def fetch_catalog_url(url=DEFAULT_CATALOG_URL, *, cached_entry=None,
     timeout = _timeout_seconds(timeout_s)
     limit = _http_byte_limit(max_bytes)
     identity = {"kind": "url", "location": selected}
-    owned = _detached_candidate(cached_entry, identity)
+    owned = _detached_entry(cached_entry, identity, max_bytes=_MAX_CACHE_BYTES)
     conditional = None
     if owned is not None:
         if _usable_etag(owned["etag"]):
@@ -1278,32 +1249,6 @@ def _now_argument(now):
             or not 0 <= now <= _catalog.MAX_SAFE_INT:
         raise ValueError(_NOW_ERROR)
     return now
-
-
-def _detached_entry(entry, identity):
-    """A fresh decode of one validated, SOURCE-MATCHED v1 cache entry.
-
-    Returns ``None`` unless ``entry`` is a complete version-1 record for
-    ``identity`` -- so a foreign record can never become this source's
-    last-good body -- and detachment is a canonical encode/decode round trip,
-    so a caller -- or a loader/revalidator double -- mutating its object
-    afterwards cannot change what this layer retains. Unlike the transport's
-    candidate gate this has NO cache-serialization size bound: a valid source
-    body may be too large to persist while remaining a perfectly valid
-    in-memory observation.
-    """
-    if not isinstance(entry, dict):
-        return None
-    if not _valid_cache_entry(entry, identity):
-        return None
-    try:
-        payload = _catalog.canonical_bytes(entry)
-        owned = _catalog.load_json(payload.decode("utf-8"))
-    except (UnicodeDecodeError, TypeError, ValueError):
-        return None
-    if not _valid_cache_entry(owned, identity):
-        return None
-    return owned
 
 
 def _observation_status(snapshot, now):
@@ -1386,7 +1331,7 @@ class CatalogSource:
             return
         loaded = self._cache.load()
         if loaded is not None:
-            owned = _detached_entry(loaded, self._identity)
+            owned = _detached_entry(loaded, self._identity, max_bytes=None)
             if owned is not None:
                 self._entry = owned
         self._bootstrapped = True
@@ -1415,7 +1360,7 @@ class CatalogSource:
             "last_modified": result["last_modified"],
             "snapshot": result["snapshot"],
         }
-        return _detached_entry(entry, self._identity)
+        return _detached_entry(entry, self._identity, max_bytes=None)
 
     def _acquisition(self, moment, *, cached, not_modified, refresh_failed):
         """Build ONE fresh successful acquisition from retained memory."""

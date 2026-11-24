@@ -86,8 +86,9 @@ CONTROL_CAP_BYTES = 256 * 1024
 #: One frozen clock for every case that needs `now`; never the real clock.
 FIXED_NOW = 1759200000
 
-# The complete frozen fixture inventory: nine standalone snapshots plus seven
-# rule/expectation tables. Nothing below is a convenient subset.
+# The declared fixture inventory: standalone snapshots and the rule/expectation
+# tables that reference them. Every declared name must exist on disk and every
+# reference must resolve to a declared snapshot; the integrity owner proves it.
 SNAPSHOT_FIXTURES = (
     "basic.json",
     "capability-unknown.json",
@@ -110,74 +111,39 @@ TABLE_FIXTURES = (
 )
 FIXTURE_FILES = frozenset(SNAPSHOT_FIXTURES) | frozenset(TABLE_FIXTURES)
 
-# Row counts, tool mixes and row-ID-set digests (SHA-256 over the sorted ids
-# joined by a newline) pin each table exactly rather than trusting a count.
-ROW_COUNTS = {
-    "cases.json": 61,
-    "argument-cases.json": 68,
-    "raw-json-cases.json": 62,
-    "structural-cases.json": 67,
-    "canonical-cases.json": 21,
-    "ordering-cases.json": 7,
-    "metadata-normalization.json": 22,
-}
-ID_DIGESTS = {
-    "cases.json/all": "76dd9a895e4b5469700f19e695b81e7dd246d860741eb4a395b027ef6c61aa9f",
-    "cases.json/search_models":
-        "e7f7aaa750079626fa884ba73562ef6cd87c2c5d20146a6f770ab4b1bb656c11",
-    "cases.json/marker_strip":
-        "9d0006d50bd03693f623976ac5c41e7e93fde1a6d5d72e0ea80b217bfdd6f8c8",
-    "argument-cases.json/invalid":
-        "49988d42dcb6270ca329241608246cfb1fa3543a069484357781e79e811607e4",
-    "argument-cases.json/valid":
-        "6fb75d749746a0a945515713f1ccc7d72142c6ba998fcfd0afd04111003a158e",
-    "raw-json-cases.json/invalid":
-        "234ccfcb35190b62310ce5571f1b2a922d9e57a88704c3dec3b06bb98ec9963b",
-    "raw-json-cases.json/valid":
-        "ee6733d881869ee3bb720573b851856c625091d2bf141dbf9168dd2ce6b68df8",
-    "structural-cases.json/invalid":
-        "f79a04a07c0d6c04212b5cf9d0f4fa4604c78c48d1336ae86c8a00e57a9d08de",
-    "structural-cases.json/valid":
-        "740dbdef982a565d319aa4c2df41249a7c5e56b98d4cd5fd7400ad75013a45dc",
-    "canonical-cases.json/vectors":
-        "fb0216c3827f4688c117fa73d12d309a6fcde484d821a32da4daa1877054c603",
-    "canonical-cases.json/snapshots":
-        "886dd10726bc48fe303d20dad5aa537a506b4c6cd73cbf40e853dbf2e68e62b7",
-    "ordering-cases.json/cases":
-        "6429e1dcecda427b6bbf0c41366440e8b92d7cb65ec4e70443a303133657e1a2",
-    "metadata-normalization.json/rows":
-        "5b2131ec96f523bd977360bfb3c67a891a9dcd6a9b3dc13877d05e8756657788",
-}
-TOOL_CASE_COUNTS = {
-    "search_models": 29,
-    "get_model": 13,
-    "watchdog_status": 9,
-    "list_free_models": 5,
-    "list_endpoints": 5,
-}
-MARKER_STRIP_COUNT = 17
+#: Every tool the shared contract exposes. The case table and the argument
+#: valid controls must each cover exactly these, so a dropped tool is visible.
+TOOL_NAMES = frozenset({
+    "get_model",
+    "watchdog_status",
+    "search_models",
+})
+#: Search goldens the case table must keep carrying: pagination bounds, a
+#: cross-provider page, an exhausted and a beyond-end page, an empty query and
+#: provider-B natural ordering.
+SEARCH_ANCHOR_IDS = frozenset({
+    "search_pagination_limit2_offset0",
+    "search_pagination_limit2_offset2_crosses_provider",
+    "search_pagination_limit2_offset4_exhausted",
+    "search_pagination_limit2_offset99_beyond_end",
+    "search_provider_a_limit200_empty_query",
+    "search_shared_query_limit2_offset0",
+    "search_ordering_provider_b_natural_page",
+    "search_default_limit_five_rows",
+})
 SEARCH_ROW_FIELDS = frozenset({
-    "provider", "model_id", "chat_completions_url", "api_type", "stale", "name",
-    "description", "context_length", "input_modalities", "output_modalities",
-    "supported_parameters", "unknown_fields", "metadata",
+    "provider", "model_id", "name", "context_length", "input_modalities",
+    "output_modalities", "supported_parameters",
 })
 SEARCH_PAYLOAD_FIELDS = frozenset({
-    "ok", "query", "filters", "limit", "offset", "snapshot_id", "tick_epoch",
-    "provider_staleness", "endpoints", "total_matches", "returned_count",
-    "next_offset", "counts", "caveats",
-})
-SEARCH_FILTER_FIELDS = frozenset({
-    "provider", "min_context_length", "input_modalities",
-    "supported_parameters",
-})
-SEARCH_COUNT_FIELDS = frozenset({
-    "gateways", "endpoints", "distinct_raw_ids", "marker_group_labels",
+    "ok", "snapshot_id", "tick_epoch", "provider_staleness", "total_matches",
+    "next_offset", "endpoints",
 })
 EXPECTED_EXPORTS = sorted([
     "CatalogError", "JsonFloat", "MAX_JSON_DEPTH", "MAX_SAFE_INT",
-    "SCHEMA_VERSION", "canonicalBytes", "canonicalText", "compareEndpointPairs",
-    "compareNaturalIds", "decodeTypedJson", "endpointKey", "getModel",
-    "isFloatToken", "listEndpoints", "listFreeModels", "loadJson",
+    "SCHEMA_VERSION", "canonicalBytes", "canonicalText",
+    "compareNaturalIds", "decodeTypedJson", "getModel",
+    "isFloatToken", "loadJson",
     "loadSnapshot", "naturalKey", "normalizeCapabilities",
     "projectCapabilities", "projectModel", "searchInputModalityPairs",
     "searchMinContextPairs", "searchModels", "searchSupportedParameterPairs",
@@ -267,7 +233,6 @@ def test_python_and_shared_origins_are_this_worktree(node):
     digest = hashlib.sha256(SHARED_MODULE.read_bytes()).hexdigest()
     assert response["module_sha256"] == digest
     assert response["exports"] == EXPECTED_EXPORTS
-    assert len(response["exports"]) == 30
     assert response["max_safe_int"] == catalog.MAX_SAFE_INT == 9007199254740991
     assert response["node"] == f"v{_node_version(node)}"
 
@@ -512,12 +477,6 @@ def canonical(value) -> str:
     return catalog.canonical_bytes(value).decode("ascii")
 
 
-def assert_parity(response, expected, where):
-    """Node canonical text equals the typed canonical text of `expected`."""
-    assert response["status"] == "ok", (where, response)
-    assert response["canonical"] == canonical(expected), where
-
-
 def _fixture_text(name: str) -> str:
     return (FIXTURE_DIR / name).read_text(encoding="utf-8")
 
@@ -529,10 +488,6 @@ def _fixture_doc(name: str):
 def _document_text(document) -> str:
     """The typed JSON text of a document (float tokens stay float tokens)."""
     return json.dumps(document, ensure_ascii=True, separators=(",", ":"))
-
-
-def _id_digest(ids) -> str:
-    return hashlib.sha256("\n".join(sorted(ids)).encode("utf-8")).hexdigest()
 
 
 def _reseal(document):
@@ -569,7 +524,7 @@ def _apply_changes(document, changes):
 
 def _model(raw_id, *, name=None, description=None, context_length=None,
            input_modalities=None, output_modalities=None,
-           supported_parameters=None, pricing=None):
+           supported_parameters=None):
     return {
         "id": raw_id,
         "name": name if name is not None else raw_id,
@@ -578,8 +533,6 @@ def _model(raw_id, *, name=None, description=None, context_length=None,
         "architecture": {"input_modalities": input_modalities,
                          "output_modalities": output_modalities},
         "supported_parameters": supported_parameters,
-        "pricing": ({"prompt": "0", "completion": "0"}
-                    if pricing is None else pricing),
     }
 
 
@@ -600,7 +553,7 @@ def _provider(models, display_name, url, *, api_type="openai", stale=False):
 def _snapshot(order, providers, *, tick_epoch=1759200000, cadence_s=3600,
               warnings=()):
     document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "tick_epoch": tick_epoch,
         "cadence_s": cadence_s,
         "provider_order": list(order),
@@ -628,10 +581,6 @@ def _python_tool(tool, snapshot, args, *, now=FIXED_NOW):
         return catalog_query.search_models(snapshot, args)
     if tool == "get_model":
         return catalog_query.get_model(snapshot, args)
-    if tool == "list_free_models":
-        return catalog_query.list_free_models(snapshot, args)
-    if tool == "list_endpoints":
-        return catalog_query.list_endpoints(snapshot, args)
     if tool == "watchdog_status":
         return catalog_query.watchdog_status(snapshot, args, now=now)
     raise AssertionError(tool)
@@ -642,98 +591,108 @@ def _assert_search_shape(result, where):
     assert isinstance(result, dict), where
     assert set(result) == SEARCH_PAYLOAD_FIELDS, where
     assert result["ok"] is True and isinstance(result["ok"], bool), where
-    assert set(result["filters"]) == SEARCH_FILTER_FIELDS, where
-    assert set(result["counts"]) == SEARCH_COUNT_FIELDS, where
-    for name in ("limit", "offset", "total_matches", "returned_count"):
-        assert type(result[name]) is int and result[name] >= 0, (where, name)
+    assert type(result["total_matches"]) is int and \
+        result["total_matches"] >= 0, where
     if result["next_offset"] is not None:
         assert type(result["next_offset"]) is int, where
-    for name, value in result["counts"].items():
-        assert type(value) is int and value >= 0, (where, name)
     for name, value in result["provider_staleness"].items():
         assert type(name) is str and type(value) is bool, (where, name)
     for row in result["endpoints"]:
         assert set(row) == SEARCH_ROW_FIELDS, where
-        assert type(row["stale"]) is bool, where
-        assert type(row["metadata"]) is dict, where
-        assert type(row["unknown_fields"]) is list, where
-    assert isinstance(result["caveats"], list), where
-    assert all(type(caveat) is str for caveat in result["caveats"]), where
+        assert type(row["provider"]) is str and type(row["model_id"]) is str
+        assert row["context_length"] is None or \
+            type(row["context_length"]) is int, where
+        for name in ("input_modalities", "output_modalities",
+                     "supported_parameters"):
+            assert row[name] is None or type(row[name]) is list, (where, name)
 
 
 # ---------------------------------------------------------------------------
-# inventory and standalone snapshots
+# fixture integrity and standalone snapshots
 # ---------------------------------------------------------------------------
 
 
-def test_fixture_inventory_row_sets_and_counts_are_pinned():
-    names = {path.name for path in FIXTURE_DIR.iterdir() if path.is_file()}
-    assert names == FIXTURE_FILES, sorted(names ^ FIXTURE_FILES)
+def test_fixture_tables_have_unique_ids_and_resolvable_references():
+    """Declared fixtures exist, references resolve and row ids never collide.
+
+    Row COUNTS are deliberately not pinned: each parity owner below executes
+    every row its table carries, so a new row is covered without editing this
+    test. What must hold is that every family is nonempty, that ids are unique
+    wherever two families share ONE request/result map, and that every fixture
+    reference names a declared standalone snapshot.
+    """
+    for name in FIXTURE_FILES:
+        assert (FIXTURE_DIR / name).is_file(), name
 
     cases = _fixture_doc("cases.json")
-    assert len(cases["cases"]) == ROW_COUNTS["cases.json"]
-    assert _id_digest([row["id"] for row in cases["cases"]]) == \
-        ID_DIGESTS["cases.json/all"]
-    search_rows = [row for row in cases["cases"]
-                   if row["tool"] == "search_models"]
-    assert len(search_rows) == TOOL_CASE_COUNTS["search_models"] == 29
-    assert _id_digest([row["id"] for row in search_rows]) == \
-        ID_DIGESTS["cases.json/search_models"]
-    for tool, count in TOOL_CASE_COUNTS.items():
-        assert sum(1 for row in cases["cases"] if row["tool"] == tool) == count
-    assert len(cases["marker_strip_rule"]) == MARKER_STRIP_COUNT
-    assert _id_digest([row["raw_id"] for row in cases["marker_strip_rule"]]) == \
-        ID_DIGESTS["cases.json/marker_strip"]
-
     arguments = _fixture_doc("argument-cases.json")
-    assert len(arguments["invalid_cases"]) == 47
-    assert len(arguments["valid_controls"]) == 21
-    assert sum(1 for row in arguments["invalid_cases"]
-               if row["tool"] == "search_models") == 31
-    assert _id_digest([row["id"] for row in arguments["invalid_cases"]]) == \
-        ID_DIGESTS["argument-cases.json/invalid"]
-    assert _id_digest([row["id"] for row in arguments["valid_controls"]]) == \
-        ID_DIGESTS["argument-cases.json/valid"]
-
     raw = _fixture_doc("raw-json-cases.json")
-    assert len(raw["invalid_cases"]) == 35
-    assert len(raw["valid_controls"]) == 27
-    assert _id_digest([row["id"] for row in raw["invalid_cases"]]) == \
-        ID_DIGESTS["raw-json-cases.json/invalid"]
-    assert _id_digest([row["id"] for row in raw["valid_controls"]]) == \
-        ID_DIGESTS["raw-json-cases.json/valid"]
-
     structural = _fixture_doc("structural-cases.json")
-    assert len(structural["invalid_cases"]) == 57
-    assert len(structural["valid_controls"]) == 10
-    assert _id_digest([row["id"] for row in structural["invalid_cases"]]) == \
-        ID_DIGESTS["structural-cases.json/invalid"]
-    assert _id_digest([row["id"] for row in structural["valid_controls"]]) == \
-        ID_DIGESTS["structural-cases.json/valid"]
-
     vectors = _fixture_doc("canonical-cases.json")
-    assert len(vectors["canonical_vectors"]) == 14
-    assert len(vectors["snapshot_cases"]) == 7
-    assert _id_digest([row["id"] for row in vectors["canonical_vectors"]]) == \
-        ID_DIGESTS["canonical-cases.json/vectors"]
-    assert _id_digest([row["id"] for row in vectors["snapshot_cases"]]) == \
-        ID_DIGESTS["canonical-cases.json/snapshots"]
-
     ordering = _fixture_doc("ordering-cases.json")
-    assert len(ordering["cases"]) == 7
-    assert _id_digest([row["id"] for row in ordering["cases"]]) == \
-        ID_DIGESTS["ordering-cases.json/cases"]
-
     metadata = _fixture_doc("metadata-normalization.json")
     assert metadata.get("not_a_snapshot") is True
-    assert len(metadata["rows"]) == 22
-    assert _id_digest([row["id"] for row in metadata["rows"]]) == \
-        ID_DIGESTS["metadata-normalization.json/rows"]
+
+    snapshots = set(SNAPSHOT_FIXTURES)
+    assert cases["fixture"] in snapshots, cases["fixture"]
+    for row in cases["cases"]:
+        assert row.get("fixture", cases["fixture"]) in snapshots, row["id"]
+    for row in arguments["invalid_cases"] + arguments["valid_controls"]:
+        assert row["fixture"] in snapshots, row["id"]
+    for row in structural["invalid_cases"] + structural["valid_controls"]:
+        assert row["base_fixture"] in snapshots, row["id"]
+
+    case_ids = [row["id"] for row in cases["cases"]]
+    marker_ids = [row["raw_id"] for row in cases["marker_strip_rule"]]
+    argument_invalid = [row["id"] for row in arguments["invalid_cases"]]
+    argument_valid = [row["id"] for row in arguments["valid_controls"]]
+    raw_invalid = [row["id"] for row in raw["invalid_cases"]]
+    raw_valid = [row["id"] for row in raw["valid_controls"]]
+    structural_invalid = [row["id"] for row in structural["invalid_cases"]]
+    structural_valid = [row["id"] for row in structural["valid_controls"]]
+    vector_ids = [row["id"] for row in vectors["canonical_vectors"]]
+    snapshot_case_ids = [row["id"] for row in vectors["snapshot_cases"]]
+    ordering_ids = [row["id"] for row in ordering["cases"]]
+    metadata_ids = [row["id"] for row in metadata["rows"]]
+
+    # Each entry lists the row batches the owners below merge into ONE
+    # request/result map. Every batch must be nonempty on its own, so an
+    # occupied sibling can never hide an emptied subfamily, and ids must be
+    # unique inside a family AND across each merged group. The argument and
+    # case/marker owners run separate children, so those families stand
+    # alone. An empty `raw_id` is a legitimate marker stimulus and is not
+    # rejected for being empty.
+    id_groups = {
+        "cases.json cases": [case_ids],
+        "cases.json marker_strip_rule": [marker_ids],
+        "argument-cases.json invalid_cases": [argument_invalid],
+        "argument-cases.json valid_controls": [argument_valid],
+        "raw-json invalid_cases + valid_controls": [raw_invalid, raw_valid],
+        "structural invalid_cases + valid_controls": [
+            structural_invalid, structural_valid],
+        "canonical vectors + snapshot_cases": [vector_ids, snapshot_case_ids],
+        "ordering cases + prefixed marker ids": [
+            ordering_ids, ["marker:" + raw_id for raw_id in marker_ids]],
+        "metadata-normalization rows": [metadata_ids],
+    }
+    for label, batches in id_groups.items():
+        for ids in batches:
+            assert ids, f"{label} is empty"
+        merged = [value for ids in batches for value in ids]
+        duplicates = sorted({value for value in merged
+                             if merged.count(value) > 1})
+        assert not duplicates, f"{label}: duplicate ids {duplicates}"
+
+    assert {row["tool"] for row in cases["cases"]} == TOOL_NAMES
+    assert {row["tool"] for row in arguments["valid_controls"]} == TOOL_NAMES
+    search_ids = {row["id"] for row in cases["cases"]
+                  if row["tool"] == "search_models"}
+    assert SEARCH_ANCHOR_IDS <= search_ids, sorted(
+        SEARCH_ANCHOR_IDS - search_ids)
 
 
 def test_every_standalone_snapshot_loads_and_verifies_its_seal_in_both_engines(
         node):
-    assert len(SNAPSHOT_FIXTURES) == 9
     requests = []
     for name in SNAPSHOT_FIXTURES:
         text = _fixture_text(name)
@@ -750,7 +709,7 @@ def test_every_standalone_snapshot_loads_and_verifies_its_seal_in_both_engines(
 
 
 # ---------------------------------------------------------------------------
-# cases.json: all 61 complete literal tool expectations
+# cases.json: complete literal tool expectations for every tool
 # ---------------------------------------------------------------------------
 
 
@@ -782,27 +741,8 @@ def test_cases_table_matches_both_engines_and_the_independent_literals(node):
         assert result is not expect
 
 
-def test_search_goldens_are_the_frozen_twenty_nine_rows():
-    document = _fixture_doc("cases.json")
-    rows = [row for row in document["cases"] if row["tool"] == "search_models"]
-    assert len(rows) == 29
-    ids = {row["id"] for row in rows}
-    for required in ("search_pagination_limit2_offset0",
-                     "search_pagination_limit2_offset2_crosses_provider",
-                     "search_pagination_limit2_offset4_exhausted",
-                     "search_pagination_limit2_offset99_beyond_end",
-                     "search_provider_a_limit200_empty_query",
-                     "search_shared_query_limit2_offset0",
-                     "search_ordering_provider_b_natural_page"):
-        assert required in ids, required
-    for row in rows:
-        assert set(row["expect"]) == SEARCH_PAYLOAD_FIELDS, row["id"]
-        for name in ("limit", "offset", "total_matches", "returned_count"):
-            assert type(row["expect"][name]) is int, (row["id"], name)
-
-
 # ---------------------------------------------------------------------------
-# argument table: 47 exact envelopes + 21 valid controls over five tools
+# argument table: exact envelopes and valid controls over three tools
 # ---------------------------------------------------------------------------
 
 
@@ -833,7 +773,6 @@ def test_argument_table_invalid_envelopes_are_exact_in_both_engines(node):
 
 def test_argument_table_valid_controls_succeed_and_agree(node):
     document = _fixture_doc("argument-cases.json")
-    assert len(document["valid_controls"]) == 21
     requests = []
     for row in document["valid_controls"]:
         requests.append(_tool_request(
@@ -849,33 +788,10 @@ def test_argument_table_valid_controls_succeed_and_agree(node):
         assert response["canonical"] == canonical(result), where
         if row["tool"] == "search_models":
             _assert_search_shape(result, where)
-            # Raw echoes and effective pagination types stay distinct.
-            assert result["filters"]["provider"] == row["args"].get("provider")
-            assert result["filters"]["min_context_length"] == \
-                row["args"].get("min_context_length")
-            for name in ("input_modalities", "supported_parameters"):
-                assert result["filters"][name] == row["args"].get(name)
-            assert type(result["limit"]) is int
-            assert type(result["offset"]) is int
-    integral = next(row for row in document["valid_controls"]
-                    if row["id"] == "valid_integral_numeric_inputs")
-    snapshot = catalog.load_snapshot(_fixture_text(integral["fixture"]))
-    result = catalog_query.search_models(snapshot,
-                                         copy.deepcopy(integral["args"]))
-    assert type(result["filters"]["min_context_length"]) is float
-    assert result["filters"]["min_context_length"] == 1.0
-    assert type(result["limit"]) is int and result["limit"] == 1
-    assert type(result["offset"]) is int and result["offset"] == 1
-    # The Node echo carries the same float token, not the integer 1.
-    response = next(item for item in responses
-                    if item["id"] == "valid_integral_numeric_inputs")
-    assert response["canonical"] == canonical(result)
-    assert '"min_context_length":1.0' in response["canonical"]
-    assert '"limit":1,' in response["canonical"]
 
 
 # ---------------------------------------------------------------------------
-# raw JSON table: 35 rejections + 27 accepted typed values
+# raw JSON table: rejections and accepted typed values
 # ---------------------------------------------------------------------------
 
 
@@ -889,7 +805,6 @@ def test_raw_json_table_classifies_identically_in_both_loaders(node):
         requests.append({"id": row["id"], "op": "load_json",
                          "text": row["json_text"]})
     responses = {response["id"]: response for response in _run(node, requests)}
-    assert len(responses) == 62
 
     for row in document["invalid_cases"]:
         where = row["id"]
@@ -960,7 +875,7 @@ def _value_depth(value) -> int:
 
 
 # ---------------------------------------------------------------------------
-# structural table: 57 frozen rejections + 10 accepted controls
+# structural table: frozen rejections and accepted controls
 # ---------------------------------------------------------------------------
 
 
@@ -979,7 +894,6 @@ def test_structural_table_classifies_identically_in_both_loaders(node):
         requests.append({"id": row["id"], "op": "validate_value",
                          "value_text": text})
     responses = {response["id"]: response for response in _run(node, requests)}
-    assert len(responses) == 67
 
     for cid, (row, text, kind) in cases.items():
         response = responses[cid]
@@ -1011,7 +925,7 @@ def test_structural_table_classifies_identically_in_both_loaders(node):
         except catalog.CatalogError:
             continue
         public.append((cid, text, kind, row))
-    assert len(public) >= 60, len(public)
+    assert public, "no structural case is also raw-acceptable"
     loaded = {response["id"]: response for response in _run(
         node, [{"id": cid, "op": "load_snapshot", "text": text}
                for cid, text, _, _ in public])}
@@ -1039,7 +953,7 @@ def _structural_text(row) -> str:
 
 
 # ---------------------------------------------------------------------------
-# canonical table: 14 vectors + 7 typed snapshot cases
+# canonical table: typed vectors and snapshot cases
 # ---------------------------------------------------------------------------
 
 
@@ -1053,7 +967,6 @@ def test_canonical_vectors_and_typed_snapshot_cases_match_both_engines(node):
         requests.append({"id": row["id"], "op": "load_snapshot",
                          "text": row["json_text"]})
     responses = {response["id"]: response for response in _run(node, requests)}
-    assert len(responses) == 21
 
     for row in document["canonical_vectors"]:
         where = row["id"]
@@ -1115,7 +1028,6 @@ def test_ordering_and_marker_tables_match_both_implementations(node):
     requests += [{"id": "marker:" + row["raw_id"], "op": "marker_strip",
                   "ids": [row["raw_id"]]} for row in marker]
     responses = {response["id"]: response for response in _run(node, requests)}
-    assert len(responses) == 24
 
     for row in ordering:
         where = row["id"]
@@ -1142,17 +1054,15 @@ def test_ordering_and_marker_tables_match_both_implementations(node):
 
 
 # ---------------------------------------------------------------------------
-# metadata normalization table: 22 rows, projections and warnings
+# metadata normalization table: projections and warnings
 # ---------------------------------------------------------------------------
 
 
 def test_metadata_normalization_table_matches_both_engines(node):
     rows = _fixture_doc("metadata-normalization.json")["rows"]
-    assert len(rows) == 22
     requests = [{"id": row["id"], "op": "normalization",
                  "raw_text": _document_text(row["raw"])} for row in rows]
     responses = {response["id"]: response for response in _run(node, requests)}
-    assert len(responses) == 22
 
     for row in rows:
         where = row["id"]
@@ -1253,7 +1163,7 @@ def _bulk_snapshot():
     return _snapshot(["omega", "alpha", "zero"], providers)
 
 
-def test_bulk_pagination_goldens_and_differential_parity(node):
+def test_search_pagination_goldens_and_differential_parity(node):
     snapshot = _bulk_snapshot()
     text = _document_text(snapshot)
     assert sum(len(provider["model_ids"])
@@ -1289,42 +1199,35 @@ def test_bulk_pagination_goldens_and_differential_parity(node):
         assert responses[name]["canonical"] == canonical(result), name
 
     default = results["default"]
-    assert (default["limit"], default["offset"]) == (50, 0)
     assert default["total_matches"] == 215
-    assert (default["returned_count"], default["next_offset"]) == (50, 50)
+    assert (len(default["endpoints"]), default["next_offset"]) == (5, 5)
     assert [(row["provider"], row["model_id"]) for row in default["endpoints"]] \
-        == [("omega", "om-%03d" % index) for index in range(50)]
+        == [("omega", "om-%03d" % index) for index in range(5)]
 
     max_page = results["max"]
-    assert (max_page["returned_count"], max_page["next_offset"]) == (200, 200)
+    assert (len(max_page["endpoints"]), max_page["next_offset"]) == (200, 200)
     assert max_page["endpoints"][119]["model_id"] == "om-119"
     assert max_page["endpoints"][120]["provider"] == "alpha"
     assert max_page["endpoints"][120]["model_id"] == "al-000"
 
     tail = results["tail"]
-    assert tail["returned_count"] == 15 and tail["next_offset"] is None
+    assert len(tail["endpoints"]) == 15 and tail["next_offset"] is None
     assert [row["model_id"] for row in tail["endpoints"]] == \
         ["al-%03d" % index for index in range(80, 95)]
 
     cross = results["cross"]
     assert [(row["provider"], row["model_id"]) for row in cross["endpoints"]] \
         == [("omega", "om-119"), ("alpha", "al-000")]
-    assert cross["counts"] == {"gateways": 2, "endpoints": 2,
-                               "distinct_raw_ids": 2, "marker_group_labels": 2}
 
-    assert results["exact-end"]["returned_count"] == 2
+    assert len(results["exact-end"]["endpoints"]) == 2
     assert results["exact-end"]["next_offset"] is None
     assert results["continuing"]["next_offset"] == 213
     for name in ("at-end", "beyond", "max-safe"):
-        assert results[name]["returned_count"] == 0, name
+        assert results[name]["endpoints"] == [], name
         assert results[name]["next_offset"] is None, name
         assert results[name]["total_matches"] == 215, name
-        assert results[name]["counts"] == {
-            "gateways": 0, "endpoints": 0, "distinct_raw_ids": 0,
-            "marker_group_labels": 0}, name
         assert results[name]["provider_staleness"] == {
             "omega": False, "alpha": False, "zero": False}, name
-    assert results["max-safe"]["offset"] == catalog.MAX_SAFE_INT
 
     filtered = results["filtered"]
     assert [row["model_id"] for row in filtered["endpoints"]] == \
@@ -1336,7 +1239,7 @@ def test_bulk_pagination_goldens_and_differential_parity(node):
     assert zero["provider_staleness"] == {"zero": False}
 
     alpha_tail = results["alpha-tail"]
-    assert alpha_tail["returned_count"] == 1
+    assert len(alpha_tail["endpoints"]) == 1
     assert alpha_tail["endpoints"][0]["model_id"] == "al-094"
     assert alpha_tail["next_offset"] is None
 
@@ -1411,14 +1314,12 @@ def _adversarial_snapshots():
     boundary_models = {
         "zero-context": _model("zero-context", context_length=0,
                                input_modalities=[], output_modalities=["text"],
-                               supported_parameters=[], pricing={"prompt": 0,
-                                                                "completion": 0}),
+                               supported_parameters=[]),
         "null-context": _model("null-context"),
         "false-flags": _model("false-flags", context_length=1,
                              input_modalities=["text"],
                              output_modalities=None,
-                             supported_parameters=None,
-                             pricing={"prompt": None, "completion": "0"}),
+                             supported_parameters=None),
     }
     boundary = _snapshot(["bounds"], {"bounds": _provider(
         boundary_models, "Bounds",
@@ -1436,7 +1337,7 @@ def _adversarial_snapshots():
         "Surrogates", "https://surrogate.example/v1/chat/completions")})
 
     duplicate_ids = {
-        "schema_version": 1, "snapshot_id": "0" * 64,
+        "schema_version": 2, "snapshot_id": "0" * 64,
         "tick_epoch": 1759200000, "cadence_s": 3600,
         "provider_order": ["dup"],
         "providers": {"dup": {
@@ -1449,7 +1350,7 @@ def _adversarial_snapshots():
         "warnings": [],
     }
     invalid_schema = {
-        "schema_version": 1.0, "snapshot_id": "0" * 64,
+        "schema_version": 2.0, "snapshot_id": "0" * 64,
         "tick_epoch": 1759200000, "cadence_s": 3600,
         "provider_order": [], "providers": {}, "warnings": [],
     }
@@ -1558,9 +1459,6 @@ def test_adversarial_registries_and_documents_match_both_engines(node):
         ("constructor", "vendor/plain"),
         ("toString", "vendor/tostring"),
     ]
-    assert prototype_result["counts"] == {
-        "gateways": 3, "endpoints": 5, "distinct_raw_ids": 5,
-        "marker_group_labels": 5}
     assert prototype_result["provider_staleness"] == {
         "__proto__": True, "constructor": False, "toString": False,
         "empty": False}
@@ -1620,7 +1518,7 @@ def test_adversarial_registries_and_documents_match_both_engines(node):
 
 def test_duplicate_members_raw_rejection_is_identical(node):
     duplicate_members = (
-        '{"schema_version":1,"schema_version":1,"snapshot_id":"' + "0" * 64 +
+        '{"schema_version":2,"schema_version":2,"snapshot_id":"' + "0" * 64 +
         '","tick_epoch":1759200000,"cadence_s":3600,"provider_order":[],'
         '"providers":{},"warnings":[]}')
     with pytest.raises(catalog.CatalogError) as excinfo:
@@ -1634,54 +1532,27 @@ def test_duplicate_members_raw_rejection_is_identical(node):
 
 
 # ---------------------------------------------------------------------------
-# typed floats and deep copy
+# typed numeric inputs
 # ---------------------------------------------------------------------------
 
 
-def test_typed_float_metadata_survives_the_search_copy_in_both_engines(node):
+def test_integral_float_pagination_inputs_are_accepted_in_both_engines(node):
     snapshot = _snapshot(["floats"], {"floats": _provider(
         {"vendor/priced": _model(
             "vendor/priced", name="Priced", context_length=0,
             input_modalities=["text"], output_modalities=["text"],
-            supported_parameters=["temperature"],
-            pricing={"prompt": 1.0, "completion": 0.5})},
+            supported_parameters=["temperature"])},
         "Floats", "https://floats.example/v1/chat/completions")})
     text = _document_text(snapshot)
-    assert '"prompt":1.0' in text
-    # The fixture recipe's seal uses the typed canonical body hash.
     accepted = catalog.load_snapshot(text)
-    assert catalog.snapshot_hash(accepted) == accepted["snapshot_id"]
-
-    args = {"min_context_length": 1.0, "limit": 1.0, "offset": 1.0}
+    args = {"min_context_length": 0.0, "limit": 1.0, "offset": 0.0}
     result = catalog_query.search_models(accepted, copy.deepcopy(args))
     _assert_search_shape(result, "typed-float")
-    assert result["filters"]["min_context_length"] == 1.0
-    assert type(result["filters"]["min_context_length"]) is float
-    assert type(result["limit"]) is int and result["limit"] == 1
-    assert type(result["offset"]) is int and result["offset"] == 1
-    # offset 1 with one match is an exhausted page, so pin a second document at
-    # offset 0 for the metadata copy claim.
-    page = catalog_query.search_models(accepted, {"min_context_length": 0})
-    assert page["returned_count"] == 1
-    pricing = page["endpoints"][0]["metadata"]["pricing"]
-    assert type(pricing["prompt"]) is float and pricing["prompt"] == 1.0
-    assert type(pricing["completion"]) is float and pricing["completion"] == 0.5
-    assert pricing is not accepted["providers"]["floats"]["models"][
-        "vendor/priced"]["pricing"]
-
+    assert result["total_matches"] == 1 and len(result["endpoints"]) == 1
     response = _run(node, [_tool_request("typed", "search_models", args,
                                          snapshot_text=text)])[0]
     assert response["status"] == "ok"
     assert response["canonical"] == canonical(result)
-    assert '"min_context_length":1.0' in response["canonical"]
-    assert '"limit":1,' in response["canonical"]
-
-    page_response = _run(node, [_tool_request(
-        "typed-page", "search_models", {"min_context_length": 0},
-        snapshot_text=text)])[0]
-    assert page_response["canonical"] == canonical(page)
-    assert '"prompt":1.0' in page_response["canonical"]
-    assert '"completion":0.5' in page_response["canonical"]
 
 
 # ---------------------------------------------------------------------------
@@ -1695,8 +1566,7 @@ def test_search_models_python_result_is_fresh_and_inputs_are_untouched(node):
             "vendor/cased", name="Cased", context_length=100,
             input_modalities=["TEXT", "Image", "text"],
             output_modalities=[], supported_parameters=["Temperature",
-                                                        "TEMPERATURE"],
-            pricing={"prompt": "0.5", "completion": 0})},
+                                                        "TEMPERATURE"])},
         "Iso", "https://iso.example/v1/chat/completions")})
     before = copy.deepcopy(snapshot)
     args = {"input_modalities": ["TEXT", "text"],
@@ -1704,20 +1574,15 @@ def test_search_models_python_result_is_fresh_and_inputs_are_untouched(node):
     args_before = copy.deepcopy(args)
     first = catalog_query.search_models(snapshot, args)
     saved = copy.deepcopy(first)
-    first["filters"]["input_modalities"].append("injected")
-    first["filters"]["supported_parameters"].clear()
-    first["endpoints"][0]["metadata"]["pricing"]["prompt"] = "9"
-    first["endpoints"][0]["unknown_fields"].append("injected")
+    first["endpoints"][0]["input_modalities"].append("injected")
+    first["endpoints"][0]["supported_parameters"].append("injected")
     first["provider_staleness"]["iso"] = True
-    first["counts"]["gateways"] = 99
-    first["caveats"].clear()
     first["endpoints"].clear()
-    assert catalog_query.search_models(snapshot, args) == saved
     assert catalog_query.search_models(snapshot, args) == saved
     assert args == args_before
     assert snapshot == before
-    assert saved["filters"]["input_modalities"] is not \
-        args_before["input_modalities"]
+    assert saved["endpoints"][0]["input_modalities"] == ["text", "image"]
+    assert saved["endpoints"][0]["supported_parameters"] == ["temperature"]
 
 
 def test_concurrent_children_and_one_batched_request_set(node):

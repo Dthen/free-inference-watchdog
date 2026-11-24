@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Installed-consumer smoke for the standalone MCP package (unit 9a4).
+"""Installed-consumer smoke for the standalone MCP package.
 
 This is a standalone verification harness, not a pytest module and not an
-application entry point. It is run by an isolated Python 3.11 interpreter with
-``-I`` from a neutral working directory, and it proves the consumer path from
-an ACTUAL installed wheel:
+application entry point. It is run by an isolated interpreter created FOR the
+selected supported minor -- the floor (3.11) with ``-I`` from a neutral working
+directory, or the current stable minor of a compatibility lane -- and it proves
+the consumer path from an ACTUAL installed wheel. The expected interpreter is
+never assumed from the platform: ``--python-version`` names the exact CPython
+minor this run must be executing under, and any other interpreter fails.
 
 * every runtime import comes from the isolated environment's site-packages,
   never from the checkout that still holds this script;
-* the packaged ``tools.json`` resource supplies the five reviewed tool names;
+* the packaged ``tools.json`` resource supplies the three reviewed tool names;
 * the reviewed pure query payloads match the literal, independently authored
   goldens in ``tests/fixtures/catalog/cases.json``;
 * a copied fixture at a path with spaces and non-ASCII characters is loaded,
@@ -16,12 +19,18 @@ an ACTUAL installed wheel:
   characters, and reloaded from disk by a NEW source object after the file is
   made unavailable (last-good fallback with the original ``fetched_at``);
 * the installer-generated console executable speaks real MCP stdio to the real
-  installed SDK client, discovers the five tools, answers ``get_model`` and
+  installed SDK client, discovers the three tools, answers ``get_model`` and
   ``search_models`` with the golden query cores, persists a cache, and then
   serves the same body with truthful cached-fallback provenance from a NEW
   process after the file is gone;
 * an independent console process exits 0 with empty stdout on stdin EOF, and
-  ``--help`` succeeds.
+  ``--help`` succeeds;
+* the native one-shot console installed as that console's SIBLING (same
+  ``bin``/``Scripts`` directory, same platform suffix) is exercised from the
+  same neutral cwd: its help, one owned-file search in JSON and human form with
+  the source summary present and the raw URL absent, one exact-id get compared
+  with the frozen golden, one status document compared with the installed core,
+  and the ``not_found``/``unknown_provider`` exit-status distinction.
 
 No external URL and no live provider is contacted. Only owned copies under the
 ``--work`` directory are created, renamed or removed; the immutable fixture
@@ -32,11 +41,17 @@ CLI (all paths are used literally and may contain spaces or non-ASCII):
     python -I tests/consumer_smoke.py \\
         --fixtures <repo>/tests/fixtures/catalog \\
         --console <isolated-env>/bin/free-inference-watchdog-mcp \\
-        --work <fresh-owned-empty-directory>
+        --work <fresh-owned-empty-directory> \\
+        --python-version 3.11
 
-On Windows the console path is ``<isolated-env>\\Scripts\\
-free-inference-watchdog-mcp.exe``; the harness selects ``bin`` versus
-``Scripts`` from the live platform, never from a simulated flag.
+``--python-version`` is the exact CPython ``X.Y`` this environment was created
+with: ``3.11`` for the floor lane, or the current stable minor for a
+compatibility lane. On Windows the console path is
+``<isolated-env>\\Scripts\\free-inference-watchdog-mcp.exe``; the harness selects
+``bin`` versus ``Scripts`` from the live platform, never from a simulated flag.
+The native console is derived from ``--console`` as its sibling
+(``free-inference-watchdog`` plus the same platform suffix), so no second
+harness flag selects it.
 """
 
 from __future__ import annotations
@@ -57,11 +72,12 @@ from pathlib import Path
 #: The installed console command and reviewed server identity.
 PROGRAM = "free-inference-watchdog-mcp"
 
-#: The five reviewed tools, in the packaged contract's registration order.
+#: The native one-shot command installed as the MCP console's sibling.
+NATIVE_PROGRAM = "free-inference-watchdog"
+
+#: The three reviewed tools, in the packaged contract's registration order.
 TOOL_NAMES = (
-    "list_free_models",
     "get_model",
-    "list_endpoints",
     "watchdog_status",
     "search_models",
 )
@@ -76,7 +92,7 @@ REVIEWED_DEPENDENCIES = (
 #: Selected, literal golden cases from the frozen ``cases.json`` document.
 #: Both cases use ``lookup.json``; the expected payloads are compared whole,
 #: never regenerated from the implementation.
-GET_MODEL_CASE_ID = "get_model_exact_id_alpha_with_marker_endpoints"
+GET_MODEL_CASE_ID = "get_model_exact_id_alpha"
 SEARCH_MODELS_CASE_ID = "search_provider_b_shared_stale_scope"
 
 #: Fixed, caller-supplied retrieval epochs (lookup.json tick_epoch 1759200000
@@ -114,6 +130,16 @@ def _console_name():
     return PROGRAM + (".exe" if os.name == "nt" else "")
 
 
+def _native_name():
+    """The native command's filename, using the SAME platform suffix rule."""
+    return NATIVE_PROGRAM + (".exe" if os.name == "nt" else "")
+
+
+def _native_console(console):
+    """The native executable installed beside the MCP console, never invented."""
+    return Path(console).parent / _native_name()
+
+
 def _resolved(path):
     return Path(path).resolve()
 
@@ -127,12 +153,13 @@ def _site_roots():
     return tuple(sorted(roots))
 
 
-def _assert_interpreter_and_origins():
-    """Prove CPython 3.11, an isolated prefix and installed package origins."""
+def _assert_interpreter_and_origins(expected):
+    """Prove the SELECTED CPython minor, an isolated prefix and package origins."""
     _require(sys.implementation.name == "cpython",
              f"not CPython: {sys.implementation.name!r}")
-    _require(sys.version_info[:2] == (3, 11),
-             f"not the reviewed floor: {sys.version!r}")
+    _require(sys.version_info[:2] == expected,
+             f"not the selected interpreter "
+             f"{'.'.join(str(part) for part in expected)}: {sys.version!r}")
     _require(sys.version_info.releaselevel == "final",
              f"not a final release: {sys.version_info.releaselevel!r}")
     _require(sys.flags.isolated == 1,
@@ -175,10 +202,10 @@ def _assert_interpreter_and_origins():
         origins[name] = str(origin)
 
     dependencies = {}
-    for distribution, expected in REVIEWED_DEPENDENCIES:
+    for distribution, pinned in REVIEWED_DEPENDENCIES:
         installed = importlib.metadata.version(distribution)
-        _require(installed == expected,
-                 f"{distribution} is {installed!r}, expected {expected!r}")
+        _require(installed == pinned,
+                 f"{distribution} is {installed!r}, expected {pinned!r}")
         dependencies[distribution] = installed
 
     resource = importlib.resources.files("watchdog_catalog").joinpath(
@@ -193,6 +220,7 @@ def _assert_interpreter_and_origins():
 
     return {
         "version": sys.version,
+        "required_minor": ".".join(str(part) for part in expected),
         "executable": sys.executable,
         "prefix": sys.prefix,
         "site_packages": [str(root) for root in roots],
@@ -249,23 +277,22 @@ def _check_pure_queries(fixtures, copy, fixture_body, cases):
     _require(got_get == get_case["expect"],
              f"{GET_MODEL_CASE_ID}: pure get_model payload differs from the "
              f"literal golden\nGOT: {json.dumps(got_get, sort_keys=True)}")
-    _require(got_get["counts"]["endpoints"] > 0,
-             f"{GET_MODEL_CASE_ID}: the successful lookup is empty")
+    _require(isinstance(got_get.get("endpoint"), dict),
+             f"{GET_MODEL_CASE_ID}: the successful lookup has no endpoint")
     got_search = query.search_models(copied_body, search_case["args"])
     _require(got_search == search_case["expect"],
              f"{SEARCH_MODELS_CASE_ID}: pure search_models payload differs "
              f"from the literal golden\nGOT: "
              f"{json.dumps(got_search, sort_keys=True)}")
-    _require(got_search["returned_count"] > 0
-             and len(got_search["endpoints"]) > 0,
+    _require(len(got_search["endpoints"]) > 0,
              f"{SEARCH_MODELS_CASE_ID}: the successful search is empty")
     return {
         "get_model": GET_MODEL_CASE_ID,
         "search_models": SEARCH_MODELS_CASE_ID,
         "snapshot_id": copied_body["snapshot_id"],
         "endpoints": {
-            "get_model": got_get["counts"]["endpoints"],
-            "search_models": got_search["returned_count"],
+            "get_model": 1 if got_get.get("endpoint") else 0,
+            "search_models": len(got_search["endpoints"]),
         },
     }
 
@@ -596,6 +623,187 @@ def _assert_console_identity(console):
              f"{scripts} interpreter")
 
 
+def _assert_native_identity(native):
+    """The native executable is the MCP console's sibling in THIS environment."""
+    scripts = _scripts_dir(sys.prefix)
+    selected = _resolved(native)
+    _require(selected.name == _native_name(),
+             f"native console {selected} is not named {_native_name()!r}")
+    _require(selected.parent == scripts.resolve(),
+             f"native console {selected} is not in the installed {scripts}")
+    _require(selected.is_file(),
+             f"the installed native console does not exist: {selected}")
+
+
+def _run_native(native, arguments, cwd, environment, label):
+    """One bounded native invocation with stdin at EOF."""
+    try:
+        completed = subprocess.run(
+            [str(native), *arguments], cwd=str(cwd), env=environment,
+            stdin=subprocess.DEVNULL, capture_output=True,
+            timeout=PROCESS_TIMEOUT_S)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(
+            f"{label}: native console exceeded {PROCESS_TIMEOUT_S}s") from error
+    _require(completed.returncode in (0, 1, 2),
+             f"{label}: native console exited {completed.returncode}\n"
+             f"stdout: {completed.stdout!r}\n"
+             f"stderr: {completed.stderr!r}")
+    return completed
+
+
+def _check_native_console(native, fixtures, work, neutral, environment,
+                          cases, fixture_body):
+    """Representative installed checks for the one-shot native console.
+
+    The sibling executable is driven from the SAME neutral cwd as the MCP
+    console, over an owned copy of the reviewed fixture. JSON documents are
+    compared with the frozen goldens (or with the installed core), never with
+    regenerated expectations; the human form must show the source summary but
+    not the raw source URL.
+    """
+    from watchdog_catalog import query
+
+    native_root = work / "native space \u00e9"
+    catalogue = _copy_fixture(fixtures, native_root, "lookup native.json")
+    cache_dir = native_root / "cache"
+
+    help_run = _run_native(native, ["--help"], neutral, environment,
+                           "native --help")
+    _require(help_run.returncode == 0,
+             f"native --help exited {help_run.returncode}: "
+             f"{help_run.stderr!r}")
+    _require(help_run.stderr == b"",
+             f"native --help wrote stderr: {help_run.stderr!r}")
+    help_text = help_run.stdout.decode("utf-8")
+    _require(help_text.splitlines()[0].startswith(f"usage: {NATIVE_PROGRAM}"),
+             f"native --help printed no native usage: {help_text!r}")
+    for operation in ("search", "get", "status"):
+        _require(operation in help_text,
+                 f"native --help omits {operation!r}: {help_text!r}")
+
+    search_case = cases[SEARCH_MODELS_CASE_ID]
+    search_arguments = [
+        "search", search_case["args"]["query"],
+        "--provider", search_case["args"]["provider"],
+        "--catalog-file", str(catalogue),
+        "--cache-dir", str(cache_dir),
+    ]
+    search_run = _run_native(
+        native, search_arguments + ["--json"], neutral, environment,
+        "native search --json")
+    _require(search_run.returncode == 0,
+             f"native search --json exited {search_run.returncode}: "
+             f"{search_run.stderr!r}")
+    _require(search_run.stderr == b"",
+             f"native search --json wrote stderr: {search_run.stderr!r}")
+    search_document = json.loads(search_run.stdout.decode("utf-8"))
+    search_source = search_document.pop("source")
+    _require(search_source["mode"] == "file"
+             and search_source["url"] is None,
+             f"native search provenance: {search_source!r}")
+    _require(search_source["cached"] is False,
+             "the first native search was not a fresh file read")
+    _require(search_document == search_case["expect"],
+             f"{SEARCH_MODELS_CASE_ID}: native search JSON differs from the "
+             f"literal golden\nGOT: "
+             f"{json.dumps(search_document, sort_keys=True)}")
+
+    human_run = _run_native(native, search_arguments, neutral, environment,
+                            "native search (human)")
+    _require(human_run.returncode == 0,
+             f"native human search exited {human_run.returncode}: "
+             f"{human_run.stderr!r}")
+    _require(human_run.stderr == b"",
+             f"native human search wrote stderr: {human_run.stderr!r}")
+    human = human_run.stdout.decode("utf-8")
+    _require(human.startswith("search:"),
+             f"native human search has no summary: {human!r}")
+    _require("model_id=vendor/shared" in human,
+             f"native human search omits the matched row: {human!r}")
+    _require("source: mode=file" in human,
+             f"native human search omits its source summary: {human!r}")
+    _require("url=" not in human,
+             "the native human source summary printed the raw source URL: "
+             f"{human!r}")
+
+    get_case = cases[GET_MODEL_CASE_ID]
+    get_run = _run_native(native, [
+        "get", get_case["args"]["provider"], get_case["args"]["model_id"],
+        "--catalog-file", str(catalogue),
+        "--cache-dir", str(cache_dir), "--json",
+    ], neutral, environment, "native get --json")
+    _require(get_run.returncode == 0,
+             f"native get --json exited {get_run.returncode}: "
+             f"{get_run.stderr!r}")
+    _require(get_run.stderr == b"",
+             f"native get --json wrote stderr: {get_run.stderr!r}")
+    get_document = json.loads(get_run.stdout.decode("utf-8"))
+    get_document.pop("source")
+    _require(get_document == get_case["expect"],
+             f"{GET_MODEL_CASE_ID}: native get JSON differs from the literal "
+             f"golden\nGOT: {json.dumps(get_document, sort_keys=True)}")
+
+    status_run = _run_native(native, [
+        "status", "--catalog-file", str(catalogue),
+        "--cache-dir", str(cache_dir), "--json",
+    ], neutral, environment, "native status --json")
+    _require(status_run.returncode == 0,
+             f"native status --json exited {status_run.returncode}: "
+             f"{status_run.stderr!r}")
+    status_document = json.loads(status_run.stdout.decode("utf-8"))
+    status_document.pop("source")
+    reference = status_document["tick_epoch"] + status_document["last_tick_age_s"]
+    _require(status_document == query.watchdog_status(
+        fixture_body, {}, now=reference),
+        "native status differs from the installed core for the same snapshot")
+
+    missing = _run_native(native, [
+        "get", "synthetic-a", "absent",
+        "--catalog-file", str(catalogue),
+        "--cache-dir", str(native_root / "miss"), "--json",
+    ], neutral, environment, "native not_found")
+    _require(missing.returncode == 1,
+             f"native not_found exited {missing.returncode}, expected 1")
+    _require(json.loads(missing.stdout.decode("utf-8"))["error"]["code"]
+             == "not_found", f"native not_found payload: {missing.stdout!r}")
+
+    unknown = _run_native(native, [
+        "get", "nope", "x", "--catalog-file", str(catalogue),
+        "--cache-dir", str(native_root / "unknown"), "--json",
+    ], neutral, environment, "native unknown_provider")
+    _require(unknown.returncode == 2,
+             f"native unknown_provider exited {unknown.returncode}, expected 2")
+
+    return {
+        "executable": str(_resolved(native)),
+        "search_golden": SEARCH_MODELS_CASE_ID,
+        "get_golden": GET_MODEL_CASE_ID,
+        "human_source_url_omitted": True,
+        "not_found_exit": missing.returncode,
+        "unknown_provider_exit": unknown.returncode,
+    }
+
+
+def _python_minor(text):
+    """Parse the explicitly selected ``X.Y`` CPython minor.
+
+    The value is required and kept literal: the harness never infers it from the
+    running interpreter (that would make the assertion circular) and never
+    accepts a version below the declared ``>=3.11`` floor.
+    """
+    major, separator, minor = text.partition(".")
+    if not separator or not (major.isascii() and major.isdigit()
+                             and minor.isascii() and minor.isdigit()):
+        raise ValueError(
+            f"--python-version must be an exact CPython X.Y minor, got {text!r}")
+    selected = (int(major), int(minor))
+    if selected < (3, 11):
+        raise ValueError(
+            f"--python-version {text!r} is below the declared >=3.11 floor")
+    return selected
+
+
 def _parse_arguments(argv):
     parser = argparse.ArgumentParser(
         prog="consumer_smoke",
@@ -607,6 +815,10 @@ def _parse_arguments(argv):
                              "console executable")
     parser.add_argument("--work", required=True, metavar="DIR",
                         help="a fresh, empty, owned working directory")
+    parser.add_argument("--python-version", required=True, metavar="X.Y",
+                        help="the exact CPython minor this isolated environment "
+                             "was created with (e.g. 3.11 for the floor, or the "
+                             "current stable minor for a compatibility lane)")
     return parser.parse_args(argv)
 
 
@@ -619,10 +831,17 @@ def _prepare(fixtures, work, console):
     _require(not any(work.iterdir()),
              f"the work directory is not fresh: {work}")
     _assert_console_identity(console)
+    native = _native_console(console)
+    _assert_native_identity(native)
+    return native
 
 
 def main(argv=None):
     arguments = _parse_arguments(argv)
+    try:
+        expected = _python_minor(arguments.python_version)
+    except ValueError as error:
+        raise SystemExit(f"consumer_smoke: {error}") from error
     fixtures = _resolved(arguments.fixtures)
     work = _resolved(arguments.work)
     console = Path(arguments.console)
@@ -630,11 +849,12 @@ def main(argv=None):
     from watchdog_catalog import catalog, source
 
     _prepare(fixtures, work, console)
+    native = _native_console(console)
     immutable = {
         name: (fixtures / name).read_bytes()
         for name in ("lookup.json", "cases.json")
     }
-    identity = _assert_interpreter_and_origins()
+    identity = _assert_interpreter_and_origins(expected)
     cases = _selected_cases(fixtures)
 
     fixture_text = (fixtures / "lookup.json").read_text(encoding="utf-8")
@@ -678,6 +898,9 @@ def main(argv=None):
     _check_console_eof_and_help(
         console, eof_file, work / "eof cache \u00e9", neutral, environment)
 
+    native_report = _check_native_console(
+        native, fixtures, work, neutral, environment, cases, fixture_body)
+
     for name, original in immutable.items():
         _require((fixtures / name).read_bytes() == original,
                  f"the immutable fixture was modified: {fixtures / name}")
@@ -689,8 +912,8 @@ def main(argv=None):
         "cache": cache,
         "stdio": {
             "tools": list(TOOL_NAMES),
-            "get_model_endpoints": model["counts"]["endpoints"],
-            "search_models_returned": search["returned_count"],
+            "get_model_endpoints": 1 if model.get("endpoint") else 0,
+            "search_models_returned": len(search["endpoints"]),
             "cache_entry": str(entry_path),
             "cached_fallback_fetched_at": fallback["source"]["fetched_at"],
             "cached_fallback_warnings":
@@ -699,6 +922,7 @@ def main(argv=None):
             "stdin_eof_stdout_empty": True,
             "help_exit": 0,
         },
+        "native": native_report,
         "checks": [
             "installed_imports",
             "packaged_tool_contract",
@@ -709,6 +933,11 @@ def main(argv=None):
             "stdio_new_process_cached_fallback",
             "console_stdin_eof",
             "console_help",
+            "native_console_identity",
+            "native_console_help",
+            "native_json_goldens",
+            "native_human_output",
+            "native_failure_distinctions",
         ],
     }
     print(json.dumps(report, indent=2, sort_keys=True))

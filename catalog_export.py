@@ -30,6 +30,16 @@ config/wiring member is never inspected or traversed, wiring-only keys are
 ignored, and its only output is the explicit record list :func:`build_snapshot`
 consumes. It performs no I/O and no config-loader/SDK import.
 
+:func:`capture_catalog_formats` is the matching pure FORMAT capture: it projects
+the same already-resolved registry to ``provider key -> catalog_format``
+(``openai-models`` when the optional member is absent). :func:`build_snapshot`
+accepts that map SEPARATELY as the optional keyword ``catalog_formats``; when it
+is absent, or names the legacy format, the accepted raw-metadata projection is
+used unchanged. For a nonlegacy format the selected adapter supplies a fresh
+ephemeral metadata view which is handed to the same strict
+:func:`catalog.project_model` — the raws themselves are never rewritten, and the
+four-field public registry capture stays exactly four fields.
+
 Structural faults (a non-``dict`` record, a bad or duplicate resolved key, a
 non-string or empty wiring member, a malformed roster provider map, a malformed
 ID list, an invalid cadence) fail with the accepted frozen
@@ -70,10 +80,12 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 
+import catalog_adapters
+
 from watchdog_catalog import catalog
 
-__all__ = ["build_snapshot", "capture_registry", "serialize_snapshot",
-           "validate_artifact_pair"]
+__all__ = ["build_snapshot", "capture_catalog_formats", "capture_registry",
+           "serialize_snapshot", "validate_artifact_pair"]
 
 #: The frozen warning vocabulary, in its deduplicated publication ORDER. The
 #: accepted validator re-enforces exactly this order on the sealed snapshot.
@@ -90,6 +102,11 @@ _PROVIDERS_ROOT_MESSAGE = (
     "capture_registry() requires a resolved providers mapping")
 _WIRING_ROOT_MESSAGE = (
     "capture_registry() requires a resolved gateway wiring mapping")
+#: ``build_snapshot``'s optional format-map root gate: same fixed discipline.
+_FORMATS_ROOT_MESSAGE = (
+    "build_snapshot() requires a provider key -> catalog_format mapping or None")
+_FORMATS_CAPTURE_MESSAGE = (
+    "capture_catalog_formats() requires a resolved providers mapping")
 
 
 def _is_strict_int(value):
@@ -181,7 +198,7 @@ def _pair_metadata(outer, key, raw_id):
     return provider.get(raw_id)
 
 
-def build_snapshot(registry, roster, *, cadence_s):
+def build_snapshot(registry, roster, *, cadence_s, catalog_formats=None):
     """Assemble and validate the public snapshot from captured in-memory inputs.
 
     ``registry`` is a list or tuple of already-resolved provider records in
@@ -190,8 +207,18 @@ def build_snapshot(registry, roster, *, cadence_s):
     excluded); an invalid cadence is a structural fault, never a silent
     default. Returns ONLY the validated public snapshot object.
 
+    ``catalog_formats`` is the OPTIONAL, separately captured
+    ``provider key -> catalog_format`` map from the same resolved registry. When
+    it is absent (or says ``openai-models`` for a provider) the accepted legacy
+    metadata path runs unchanged. A nonlegacy format routes that provider's raw
+    record through the registered adapter's ephemeral metadata view before the
+    same strict ``catalog.project_model`` projection. A missing key for an
+    active provider also keeps the legacy path; an unregistered format value is
+    a structural fault rather than a silent fallback.
+
     Raises ``TypeError`` for a non-list/tuple ``registry`` or a non-dict
-    ``roster`` (programming errors, checked before any content) and
+    ``roster``/``catalog_formats`` (programming errors, checked before any
+    content) and
     :class:`catalog.CatalogError` (``invalid_snapshot``) for every structural
     fault. Neither input is mutated, on success or on failure.
     """
@@ -199,6 +226,13 @@ def build_snapshot(registry, roster, *, cadence_s):
         raise TypeError(_REGISTRY_ROOT_MESSAGE)
     if not isinstance(roster, dict):
         raise TypeError(_ROSTER_ROOT_MESSAGE)
+    if catalog_formats is not None:
+        if not isinstance(catalog_formats, dict):
+            raise TypeError(_FORMATS_ROOT_MESSAGE)
+        for format_key, format_value in catalog_formats.items():
+            if (not isinstance(format_key, str) or not format_key
+                    or not catalog_adapters.is_registered_format(format_value)):
+                raise catalog.CatalogError(catalog.INVALID_SNAPSHOT)
     if not _is_positive_safe_int(cadence_s):
         _fail()
 
@@ -237,8 +271,17 @@ def build_snapshot(registry, roster, *, cadence_s):
         model_ids = sorted(set(roster_providers.get(key, [])))
         models = {}
         for raw_id in model_ids:
+            raw_fragment = _pair_metadata(outer_models, key, raw_id)
+            # The format map is consulted per active provider and only for an
+            # implemented nonlegacy family; the raw record itself is untouched.
+            selected_format = (None if catalog_formats is None
+                               else catalog_formats.get(key))
+            if (selected_format is not None
+                    and not catalog_adapters.is_legacy_format(selected_format)):
+                raw_fragment = catalog_adapters.metadata_view(
+                    raw_fragment, selected_format)
             model, model_warnings = catalog.project_model(
-                raw_id, _pair_metadata(outer_models, key, raw_id))
+                raw_id, raw_fragment)
             models[raw_id] = model
             warnings.update(model_warnings)
 
@@ -351,6 +394,36 @@ def capture_registry(providers, wiring):
             "api_type": api_type,
         })
     return records
+
+
+def capture_catalog_formats(providers):
+    """Project the already-RESOLVED registry to ``key -> catalog_format``.
+
+    ``providers`` is the active key -> resolved config mapping the caller
+    already holds (the same one :func:`capture_registry` reads). The result is a
+    NEW mapping: one entry per active key, using the config's literal
+    ``catalog_format`` member or ``openai-models`` when it is absent. Every
+    other member — credentials, auth, URLs, probe blocks, private objects — is
+    never inspected, so the capture cannot leak a secret or trigger a second
+    configuration/auth read.
+
+    Only the ROOT argument type is a programming error (fixed, non-reflective
+    ``TypeError``). A malformed key/config or an unregistered format value is
+    the frozen structural :class:`catalog.CatalogError`, exactly like the other
+    capture boundary; nothing is coerced or defaulted silently.
+    """
+    if not isinstance(providers, dict):
+        raise TypeError(_FORMATS_CAPTURE_MESSAGE)
+    formats = {}
+    for key, config in providers.items():
+        if (not isinstance(key, str) or not key
+                or not isinstance(config, dict)):
+            raise catalog.CatalogError(catalog.INVALID_SNAPSHOT)
+        value = config.get("catalog_format", catalog_adapters.LEGACY_FORMAT)
+        if not catalog_adapters.is_registered_format(value):
+            raise catalog.CatalogError(catalog.INVALID_SNAPSHOT)
+        formats[key] = value
+    return formats
 
 
 # ---------- public artifact-pair validation (pure, in-memory) ----------

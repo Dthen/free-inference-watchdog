@@ -1,12 +1,12 @@
-"""Pure, stdlib-only free-marker query helpers.
+"""Pure, stdlib-only free-marker and catalogue query helpers.
 
 This module is the single source of truth for the marker-insensitive free-marker
-stripper: it imports only :mod:`re` and performs no I/O, configuration loading,
-credential resolution or SDK import. ``build_site.strip_free_marker``
-re-exports this exact function object rather than carrying a second copy.
+stripper and the frozen catalogue query cores. It imports only the stdlib
+:mod:`math` and :mod:`re` plus pure structural primitives from
+:mod:`watchdog_catalog.catalog`; it performs no I/O, configuration loading,
+credential resolution or SDK import.
 """
 
-import copy
 import math
 import re
 
@@ -73,24 +73,7 @@ def natural_key(raw_id: str):
     return tuple(tokens)
 
 
-def endpoint_key(provider_order, provider: str, raw_id: str):
-    """The sort key for the ``(provider, raw model_id)`` endpoint identity.
-
-    ``provider_order`` is the caller's already-validated ordered list of
-    registered provider keys; provider precedence is that list's index for
-    ``provider`` -- never alphabetic key order, provider-map insertion order or
-    global raw-ID order -- and the second component is :func:`natural_key` of the
-    raw id. The same provider+id therefore always compares equal, while a raw id
-    shared by two providers stays TWO distinct sortable pairs (it is never
-    deduplicated) that order by provider precedence.
-
-    Pure: reads only its arguments; no I/O, configuration, state or SDK, and no
-    import beyond the module's existing ``re``.
-    """
-    return (provider_order.index(provider), natural_key(raw_id))
-
-
-# -- pure list-free-models query: bulk/single success + argument boundary --
+# -- shared frozen argument-error envelope --
 
 #: The two frozen argument-error codes and their literal public messages.
 _INVALID_ARGUMENTS = "invalid_arguments"
@@ -118,82 +101,7 @@ def _argument_error(code, parameter):
                       "parameter": parameter}}
 
 
-def list_free_models(snapshot, arguments):
-    """The pure core of the frozen BULK ``list_free_models`` tool.
-
-    ``snapshot`` is an already-VALIDATED public snapshot object -- the
-    ``load_snapshot`` / source / adapter boundary owns raw, structural and hash
-    validation, so this function performs NO validation, NO hash recompute, NO
-    I/O and NO clock read. ``arguments`` is the whole DECODED argument object (a
-    JSON object), passed explicitly rather than splatted as keyword arguments.
-
-    Returns the frozen success payload directly -- never raising into the
-    semantic caller for a malformed argument. With ``provider`` omitted or
-    ``null`` the all-provider export carries exactly ``ok``, ``providers``,
-    ``models``, ``counts``, ``total_ids``, ``n_gateways``, ``snapshot_id``,
-    ``tick_epoch`` and ``provider_staleness``; with one exact registered
-    ``provider`` the one-provider export carries exactly ``ok``, ``provider``,
-    ``model_ids``, ``models``, ``count``, ``snapshot_id``, ``tick_epoch`` and
-    ``provider_staleness``.
-
-    Argument validation is deterministic and in the frozen order: the argument
-    must be a JSON object; then ANY unknown key is rejected (``parameter``
-    ``None``); then a non-``null`` provider that is not a string is
-    ``invalid_arguments``; then a string absent from ``provider_order`` is
-    ``unknown_provider`` (empty, padded and wrong-case keys are never repaired).
-
-    Every returned container, array and selected projected model object (with
-    its nested architecture/parameter/pricing containers) is freshly allocated
-    (the model values are deep-copied), so a caller mutating a result can never
-    corrupt the snapshot or another call. The inputs are never mutated, and the
-    array order is the accepted :func:`natural_key` order -- never the legacy
-    sort and never the snapshot's literal code-point order.
-    """
-    if not isinstance(arguments, dict):
-        return _argument_error(_INVALID_ARGUMENTS, None)
-    if any(key not in ("provider",) for key in arguments):
-        return _argument_error(_INVALID_ARGUMENTS, None)
-    provider = arguments.get("provider")
-    if provider is not None and not isinstance(provider, str):
-        return _argument_error(_INVALID_ARGUMENTS, "provider")
-    order = snapshot["provider_order"]
-    providers = snapshot["providers"]
-    if provider is not None and provider not in order:
-        return _argument_error(_UNKNOWN_PROVIDER, "provider")
-    if provider is not None:
-        entry = providers[provider]
-        model_ids = sorted(entry["model_ids"], key=natural_key)
-        models = copy.deepcopy(
-            {raw_id: entry["models"][raw_id] for raw_id in entry["model_ids"]})
-        return {
-            "ok": True,
-            "provider": provider,
-            "model_ids": model_ids,
-            "models": models,
-            "count": len(model_ids),
-            "snapshot_id": snapshot["snapshot_id"],
-            "tick_epoch": snapshot["tick_epoch"],
-            "provider_staleness": {provider: entry["stale"]},
-        }
-    return {
-        "ok": True,
-        "providers": {p: sorted(providers[p]["model_ids"], key=natural_key)
-                      for p in order},
-        "models": {
-            p: copy.deepcopy({raw_id: providers[p]["models"][raw_id]
-                              for raw_id in providers[p]["model_ids"]})
-            for p in order},
-        "counts": {p: len(providers[p]["model_ids"]) for p in order},
-        "total_ids": len({raw_id for p in order
-                          for raw_id in providers[p]["model_ids"]}),
-        "n_gateways": len(order),
-        "snapshot_id": snapshot["snapshot_id"],
-        "tick_epoch": snapshot["tick_epoch"],
-        "provider_staleness": {p: providers[p]["stale"] for p in order},
-    }
-
-
-# -- pure get-model query: literal membership + separate marker endpoints --
+# -- pure get-model query: exact provider + literal raw id --
 
 #: The explicit ASCII blank set the required ``model_id`` predicate uses:
 #: U+0009..U+000D (tab, LF, VT, FF, CR) and U+0020 (space). It is NEVER widened
@@ -202,202 +110,118 @@ def list_free_models(snapshot, arguments):
 #: reject a literal non-ASCII query.
 _ASCII_BLANKS = " \t\n\r\v\f"
 
-#: The frozen absence caveat carried on EVERY ``get_model`` success payload --
-#: including a no-match success. It is a labelling caution, never a proof of
-#: cross-gateway model identity.
-_ABSENCE_CAVEAT = (
-    "Cross-gateway ABSENCE is unreliable: gateways rename inconsistently, so a "
-    "missing exact id does NOT prove the model is unavailable there."
-)
+#: The frozen ``not_found`` envelope for an exact id absent from a known
+#: provider. It carries no ``parameter`` member and never reflects the caller's
+#: value.
+_NOT_FOUND = "not_found"
+_NOT_FOUND_MESSAGE = "Model not found."
 
 
-def get_model(snapshot, arguments):
-    """The pure core of the frozen ``get_model`` tool.
+def _not_found_error():
+    """The frozen ``not_found`` envelope: a fresh object on every call."""
+    return {"ok": False,
+            "error": {"code": _NOT_FOUND, "message": _NOT_FOUND_MESSAGE}}
 
-    ``snapshot`` is an already-VALIDATED public snapshot object -- the
-    ``load_snapshot`` / source / adapter boundary owns raw, structural and hash
-    validation, so this function performs NO validation, NO hash recompute, NO
-    I/O and NO clock read. ``arguments`` is the whole DECODED argument object (a
-    JSON object), passed explicitly rather than splatted as keyword arguments.
 
-    Returns the frozen success payload directly -- never raising into the
-    semantic caller for a malformed argument. The payload carries exactly
-    ``ok``, ``query``, ``snapshot_id``, ``tick_epoch``, ``exact_matches``,
-    ``exact_gateways``, ``provider_staleness``, ``endpoints``, ``caveats`` and
-    ``counts``.
+def _endpoint_summary(provider_key, raw_id, model):
+    """The shared flat search-row projection of one tracked endpoint.
 
-    ``exact_matches`` is LITERAL raw-ID membership -- case-sensitive, unpadded,
-    exact -- one entry per snapshot provider in ``provider_order`` including
-    zero-ID providers; ``exact_gateways`` lists the matching providers in that
-    display order. ``endpoints`` is the SEPARATE marker-insensitive lookup:
-    every tracked ``(provider, raw model_id)`` pair whose
-    :func:`strip_free_marker` equals the stripped query, with raw ids unchanged
-    and metadata kept attached to its own pair. Endpoints order by provider
-    display order then the accepted :func:`natural_key` raw-ID order. A marker
-    match is never proof of cross-gateway identity.
-
-    Argument validation is deterministic and in the frozen order: the argument
-    must be a JSON object; then ANY unknown key is rejected (``parameter``
-    ``None``); then the required ``model_id`` must be a string containing at
-    least one character outside the explicit ASCII blank set -- empty or
-    ASCII-blank-only strings are ``invalid_arguments`` (``parameter``
-    ``model_id``). The retained identifier is never trimmed, case-folded or
-    repaired; the ASCII blank set is never widened to Unicode whitespace.
-
-    Every returned container, array and matched endpoint metadata object (with
-    its nested architecture/parameter/pricing containers) is freshly allocated
-    (the metadata values are deep-copied), so a caller mutating a result can
-    never corrupt the snapshot or another call. The inputs are never mutated and
-    the caveat list is fresh on every success.
+    Exactly ``provider``, ``model_id``, ``name``, ``context_length``,
+    ``input_modalities``, ``output_modalities`` and ``supported_parameters``.
+    The capability values come from :func:`catalog.normalize_capabilities`
+    (ASCII folds, first-occurrence dedup); unknown stays ``null`` and a known
+    empty array stays ``[]``. The raw id is returned unchanged, and no
+    description, wiring or ``metadata`` container is included.
     """
-    if not isinstance(arguments, dict):
-        return _argument_error(_INVALID_ARGUMENTS, None)
-    if any(key not in ("model_id",) for key in arguments):
-        return _argument_error(_INVALID_ARGUMENTS, None)
-    query = arguments.get("model_id")
-    if not isinstance(query, str) or not query.strip(_ASCII_BLANKS):
-        return _argument_error(_INVALID_ARGUMENTS, "model_id")
-
-    order = snapshot["provider_order"]
-    providers = snapshot["providers"]
-    marker_query = strip_free_marker(query)
-
-    exact_matches = {}
-    exact_gateways = []
-    endpoints = []
-    for provider in order:
-        entry = providers[provider]
-        matched = query in entry["model_ids"]
-        exact_matches[provider] = matched
-        if matched:
-            exact_gateways.append(provider)
-        for raw_id in sorted(entry["model_ids"], key=natural_key):
-            if strip_free_marker(raw_id) == marker_query:
-                endpoints.append({
-                    "provider": provider,
-                    "model_id": raw_id,
-                    "chat_completions_url": entry["chat_completions_url"],
-                    "api_type": entry["api_type"],
-                    "stale": entry["stale"],
-                    "metadata": copy.deepcopy(entry["models"][raw_id]),
-                })
-
+    normalized = normalize_capabilities(model)
     return {
-        "ok": True,
-        "query": query,
-        "snapshot_id": snapshot["snapshot_id"],
-        "tick_epoch": snapshot["tick_epoch"],
-        "exact_matches": exact_matches,
-        "exact_gateways": exact_gateways,
-        "provider_staleness": {p: providers[p]["stale"] for p in order},
-        "endpoints": endpoints,
-        "caveats": [_ABSENCE_CAVEAT],
-        "counts": {
-            "exact_matches": len(exact_gateways),
-            "endpoints": len(endpoints),
-            "distinct_raw_ids": len({e["model_id"] for e in endpoints}),
-            "marker_group_labels": len({strip_free_marker(e["model_id"])
-                                        for e in endpoints}),
-        },
+        "provider": provider_key,
+        "model_id": raw_id,
+        "name": model["name"],
+        "context_length": normalized["context_length"],
+        "input_modalities": normalized["input_modalities"],
+        "output_modalities": normalized["output_modalities"],
+        "supported_parameters": normalized["supported_parameters"],
     }
 
 
-# -- pure endpoint-list query: selected-scope endpoints + provider-filtered counts --
+def _endpoint_details(provider_key, entry, raw_id, model):
+    """One ``get_model`` details endpoint: the shared summary plus the fields
+    that compact search rows omit -- ``description`` flat, plus the provider's
+    ``chat_completions_url`` and ``api_type``. One projection source, two
+    consumers; the metadata containers themselves are never returned."""
+    summary = _endpoint_summary(provider_key, raw_id, model)
+    return {
+        "provider": summary["provider"],
+        "model_id": summary["model_id"],
+        "name": summary["name"],
+        "description": model["description"],
+        "context_length": summary["context_length"],
+        "input_modalities": summary["input_modalities"],
+        "output_modalities": summary["output_modalities"],
+        "supported_parameters": summary["supported_parameters"],
+        "chat_completions_url": entry["chat_completions_url"],
+        "api_type": entry["api_type"],
+    }
 
 
-def list_endpoints(snapshot, arguments):
-    """The pure core of the frozen ``list_endpoints`` tool.
+def get_model(snapshot, arguments):
+    """The pure core of the ``get_model`` tool: exact provider + raw id.
 
     ``snapshot`` is an already-VALIDATED public snapshot object -- the
-    ``load_snapshot`` / source / adapter boundary owns raw, structural and hash
+    ``load_snapshot`` / source boundary owns raw, structural and hash
     validation, so this function performs NO validation, NO hash recompute, NO
-    I/O and NO clock read. ``arguments`` is the whole DECODED argument object (a
-    JSON object), passed explicitly rather than splatted as keyword arguments.
+    I/O and NO clock read. ``arguments`` is the whole DECODED argument object,
+    passed explicitly rather than splatted as keyword arguments.
 
-    Returns the frozen success payload directly -- never raising into the
-    semantic caller for a malformed argument. The payload carries exactly
-    ``ok``, ``gateways``, ``counts``, ``provider``, ``snapshot_id``,
-    ``tick_epoch`` and ``provider_staleness`` for BOTH the all-provider and the
-    provider-filtered variant.
-
-    ``gateways`` maps each SELECTED provider key -- all ``provider_order`` keys
-    when ``provider`` is omitted or ``null``, else exactly the one known
-    selected provider, a registered zero-ID provider included -- to the exact
-    gateway entry ``chat_completions_url``, ``api_type``, ``model_ids`` and
-    ``models``. ``model_ids`` is that provider's complete raw ID array in the
-    accepted :func:`natural_key` order (unchanged strings, never marker labels),
-    and ``models`` maps every tracked raw ID to its complete projected public
-    model object -- never the legacy raw metadata and never a merged
-    cross-provider object.
-
-    ``counts`` carries exactly ``gateways`` (the number of selected providers,
-    zero-ID providers included), ``endpoints`` (selected ``(provider, raw ID)``
-    pairs), ``distinct_raw_ids`` (selected literal raw strings),
-    ``marker_group_labels`` (selected delimiter-stripped labels using the frozen
-    :func:`strip_free_marker` guard) and ``models`` -- the documented legacy
-    alias equal to ``marker_group_labels``, never a verified underlying model
-    identity. No registry-wide total leaks into a filtered response, and a
-    zero-ID single provider yields ``gateways`` 1 with every other count zero.
+    Returns either the frozen success payload or the shared error envelope
+    directly -- never raising into the semantic caller for a malformed
+    argument. A success carries exactly ``ok``, ``snapshot_id``, ``tick_epoch``,
+    ``provider_staleness`` and ``endpoint``. ``provider_staleness`` covers
+    exactly the requested provider; the endpoint is a flat details projection
+    of that one ``(provider, raw model_id)`` pair.
 
     Argument validation is deterministic and in the frozen order: the argument
     must be a JSON object; then ANY unknown key is rejected (``parameter``
-    ``None``); then a non-``null`` provider that is not a string is
-    ``invalid_arguments``; then a string absent from ``provider_order`` is
-    ``unknown_provider`` (empty, padded and wrong-case keys are never repaired).
+    ``None``); then ``provider`` must be present and a string; then it must be
+    one exact ``provider_order`` key (otherwise ``unknown_provider``); then
+    ``model_id`` must be present, a string and contain at least one character
+    outside the explicit ASCII blank set. The raw id is never trimmed,
+    case-folded, marker-stripped or repaired, and there is NO cross-provider or
+    marker-insensitive lookup. A known provider with an absent exact id returns
+    the ``not_found`` envelope, which echoes no caller value.
 
-    Every returned container, gateway entry, raw-ID array and selected model
-    object (with its nested architecture/parameter/pricing containers) is
-    freshly allocated (the model values are deep-copied), so a caller mutating a
-    result can never corrupt the snapshot or another call. The inputs are never
-    mutated.
+    Every returned container and endpoint is freshly allocated, so a caller
+    mutating a result can never corrupt the snapshot or another call.
     """
     if not isinstance(arguments, dict):
         return _argument_error(_INVALID_ARGUMENTS, None)
-    if any(key not in ("provider",) for key in arguments):
+    if any(key not in ("provider", "model_id") for key in arguments):
         return _argument_error(_INVALID_ARGUMENTS, None)
+
     provider = arguments.get("provider")
-    if provider is not None and not isinstance(provider, str):
+    if not isinstance(provider, str):
         return _argument_error(_INVALID_ARGUMENTS, "provider")
     order = snapshot["provider_order"]
     providers = snapshot["providers"]
-    if provider is not None and provider not in order:
+    if provider not in order:
         return _argument_error(_UNKNOWN_PROVIDER, "provider")
-    selected = [provider] if provider is not None else list(order)
 
-    gateways = {}
-    endpoints = 0
-    distinct_raw_ids = set()
-    marker_group_labels = set()
-    for key in selected:
-        entry = providers[key]
-        model_ids = sorted(entry["model_ids"], key=natural_key)
-        gateways[key] = {
-            "chat_completions_url": entry["chat_completions_url"],
-            "api_type": entry["api_type"],
-            "model_ids": model_ids,
-            "models": copy.deepcopy({raw_id: entry["models"][raw_id]
-                                     for raw_id in entry["model_ids"]}),
-        }
-        for raw_id in entry["model_ids"]:
-            endpoints += 1
-            distinct_raw_ids.add(raw_id)
-            marker_group_labels.add(strip_free_marker(raw_id))
-    labels = len(marker_group_labels)
+    model_id = arguments.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip(_ASCII_BLANKS):
+        return _argument_error(_INVALID_ARGUMENTS, "model_id")
+
+    entry = providers[provider]
+    if model_id not in entry["model_ids"]:
+        return _not_found_error()
+
     return {
         "ok": True,
-        "gateways": gateways,
-        "counts": {
-            "gateways": len(selected),
-            "endpoints": endpoints,
-            "distinct_raw_ids": len(distinct_raw_ids),
-            "marker_group_labels": labels,
-            "models": labels,
-        },
-        "provider": provider,
         "snapshot_id": snapshot["snapshot_id"],
         "tick_epoch": snapshot["tick_epoch"],
-        "provider_staleness": {key: providers[key]["stale"]
-                               for key in selected},
+        "provider_staleness": {provider: entry["stale"]},
+        "endpoint": _endpoint_details(
+            provider, entry, model_id, entry["models"][model_id]),
     }
 
 
@@ -461,9 +285,8 @@ def watchdog_status(snapshot, arguments, *, now):
     configured provider including zero-ID ones, every tracked ``(provider, raw
     ID)`` pair, the literal union of raw IDs and the distinct
     :func:`strip_free_marker` labels -- labels, never verified underlying model
-    identities. This scope deliberately differs from search's page-scoped
-    counts. ``metadata_coverage`` reports coverage of the stated metadata fields
-    over the global tracked-pair denominator (exactly ``endpoints``,
+    identities. ``metadata_coverage`` reports coverage of the stated metadata
+    fields over the global tracked-pair denominator (exactly ``endpoints``,
     ``context_length_known``, ``input_modalities_known``,
     ``output_modalities_known``, ``supported_parameters_known`` and
     ``description_known``): a tracked pair counts when its projected field is
@@ -645,7 +468,7 @@ def _search_text_provider_pairs(snapshot, *, query=None, provider=None):
     point -- including a non-ASCII uppercase letter -- stays literal). There is
     no regular expression, fuzzy alias, marker stripping, JSON/metadata
     serialization or capability/price/branding inference: capability arrays,
-    pricing, wiring URLs, provider keys and object key names are never
+    wiring URLs, provider keys and object key names are never
     searched. ``None`` or ``""`` applies no text constraint; a whitespace-only
     query is a literal constraint. A pair with no matching text field --
     including one whose only candidate field is a ``null`` description -- is
@@ -674,127 +497,54 @@ def _search_text_provider_pairs(snapshot, *, query=None, provider=None):
     return pairs
 
 
-# -- pure input-modality AND stage: every requested token on the same pair --
+# -- pure capability AND stage: every requested token on the same pair's field --
 
 
-def _search_input_modality_pairs(snapshot, pairs, *, input_modalities=None):
-    """The INTERNAL input-modality AND stage of ``search_models``.
+def _search_capability_pairs(snapshot, pairs, *, field, requested):
+    """The INTERNAL, field-parametrised capability AND stage of ``search_models``.
 
-    Preconditions: ``snapshot`` is an already-VALIDATED public snapshot and
+    ``field`` is one normalized capability name -- ``"input_modalities"`` or
+    ``"supported_parameters"`` -- selecting the SAME pair's projected array
+    through :func:`catalog.normalize_capabilities`. The other capability field,
+    output modalities, names, descriptions, raw ids and provider keys are
+    never substitutes, a capability name is never substring-matched, and a
+    pair's capability is never borrowed from a sibling provider sharing its raw
+    id: endpoint identity is exactly ``(provider, raw_model_id)``.
+
+    Preconditions: ``snapshot`` is an already-VALIDATED public snapshot,
     ``pairs`` is an ordered sequence of immutable ``(provider_key, raw_model_id)``
-    tuples identifying tracked pairs of that snapshot -- it is the ALREADY
-    selected candidate set (typically from :func:`_search_text_provider_pairs`
-    composed with :func:`_search_min_context_pairs`), never re-derived here.
-    ``input_modalities`` is ``None`` or an ALREADY-validated list of nonempty
-    strings. The public decoded argument is validated and normalized by the
-    later transport-level search unit before this stage is invoked; this stage
-    never validates its argument, invents a temporary error, or normalizes the
-    request or the snapshot in place.
+    tuples identifying tracked pairs of that snapshot (the ALREADY selected
+    candidate set, never re-derived or expanded here), and ``requested`` is
+    ``None`` or an ALREADY-validated list of nonempty strings. This stage never
+    validates its arguments, normalizes in place, or reads a clock, filesystem,
+    roster or network.
 
-    Returns a NEW list of only those supplied pairs whose OWN projected model
-    ``architecture.input_modalities`` is KNOWN (not ``None``) and contains EVERY
-    ASCII-folded requested token -- an AND over the requested entries, never a
-    multiplicity constraint, so a duplicated request is idempotent. Matching is
-    ASCII-only (A-Z to a-z) on BOTH sides: the reported array through the
-    accepted :func:`catalog.normalize_capabilities` (which folds and
-    first-occurrence deduplicates while keeping a known ``[]`` distinct from
-    ``None``) and the requested tokens through the shared
-    :func:`catalog._ascii_lower`. Non-ASCII code points and whitespace stay
-    literal, so a padded token matches only an identically padded reported
-    token and a non-ASCII case pair never collapses. Output modalities, names,
-    descriptions, raw ids, provider keys, pricing and supported parameters are
-    never substitutes for an input modality, and a pair's capability is never
-    borrowed from a sibling provider sharing its raw id: endpoint identity is
-    exactly ``(provider, raw model_id)``.
+    Returns a NEW list of only those supplied pairs whose OWN selected field is
+    KNOWN (not ``None``) and contains EVERY ASCII-folded requested token -- an
+    AND over the requested entries on the SAME pair, so a duplicated request is
+    idempotent and request order is irrelevant. Matching folds A-Z to a-z on
+    both sides (the reported array and the request); non-ASCII code points and
+    whitespace stay literal, so a padded token matches only an identically
+    padded reported token and a non-ASCII case pair never collapses.
 
-    ``input_modalities`` ``None`` or ``[]`` applies NO constraint and returns a
-    fresh list with EVERY supplied pair unchanged -- including pairs whose input
-    array is unknown (``null``) or known-empty (``[]``), which are retained here
-    but fail any nonempty request. There is no truthiness test of the request or
-    of the array, no wildcard for an unknown array, no sort, no deduplication, no
-    roster/config read and no pagination: the incoming pair order is preserved
-    exactly, the supplied selection is never expanded, and more than the default
-    page's worth of eligible pairs stay complete.
-
-    The snapshot, the input pair sequence and the requested list are never
-    mutated, and only immutable identity tuples are returned, so a caller
-    mutating the result can never corrupt the snapshot, the input sequence or
-    another call.
+    ``requested`` ``None`` or ``[]`` applies NO constraint and returns a fresh
+    list with EVERY supplied pair unchanged -- including pairs whose field is
+    unknown (``null``) or known-empty (``[]``); a nonempty request retains
+    neither. There is no sort, deduplication or pagination: incoming pair order
+    and duplicates are preserved exactly, the supplied selection is never
+    expanded, and more than the default page's worth of eligible pairs stay
+    complete. The snapshot, input sequence and request list are never mutated.
     """
-    if not input_modalities:
+    if not requested:
         return list(pairs)
-    requested = [_ascii_lower(token) for token in input_modalities]
+    needles = [_ascii_lower(token) for token in requested]
     providers = snapshot["providers"]
     kept = []
     for provider_key, raw_id in pairs:
         model = providers[provider_key]["models"][raw_id]
-        available = normalize_capabilities(model)["input_modalities"]
+        available = normalize_capabilities(model)[field]
         if available is not None and all(token in available
-                                         for token in requested):
-            kept.append((provider_key, raw_id))
-    return kept
-
-
-# -- pure supported-parameter AND stage: every requested token on the same pair --
-
-
-def _search_supported_parameter_pairs(snapshot, pairs, *,
-                                      supported_parameters=None):
-    """The INTERNAL supported-parameter AND stage of ``search_models``.
-
-    Preconditions: ``snapshot`` is an already-VALIDATED public snapshot and
-    ``pairs`` is an ordered sequence of immutable ``(provider_key, raw_model_id)``
-    tuples identifying tracked pairs of that snapshot -- it is the ALREADY
-    selected candidate set (typically from
-    :func:`_search_input_modality_pairs`, itself composed after the accepted
-    text/provider and minimum-context stages), never re-derived here.
-    ``supported_parameters`` is ``None`` or an ALREADY-validated list of nonempty
-    strings. The public decoded argument is validated and normalized by the later
-    transport-level search unit before this stage is invoked; this stage never
-    validates its argument, invents a temporary error, or normalizes the request
-    or the snapshot in place.
-
-    Returns a NEW list of only those supplied pairs whose OWN projected model
-    ``supported_parameters`` is KNOWN (not ``None``) and contains EVERY
-    ASCII-folded requested token -- an AND over the requested entries on the same
-    pair, never a multiplicity constraint, so a duplicated request is
-    idempotent. Matching is ASCII-only (A-Z to a-z) on BOTH sides: the reported
-    array through the accepted :func:`catalog.normalize_capabilities` (which
-    folds and first-occurrence deduplicates while keeping a known ``[]``
-    distinct from ``None``) and the requested tokens through the shared
-    :func:`catalog._ascii_lower`. Non-ASCII code points and whitespace stay
-    literal, so a padded token matches only an identically padded reported token
-    and a non-ASCII case pair never collapses. Input and output modalities,
-    names, descriptions, raw ids, provider keys, pricing and pricing/object names
-    are never substitutes for a supported parameter, a capability name is never
-    substring-matched, and a pair's parameters are never borrowed from a sibling
-    provider sharing its raw id: endpoint identity is exactly
-    ``(provider, raw_model_id)``.
-
-    ``supported_parameters`` ``None`` or ``[]`` applies NO constraint and
-    returns a fresh list with EVERY supplied pair unchanged -- including pairs
-    whose parameter array is unknown (``null``) or known-empty (``[]``), which
-    are retained here but fail any nonempty request. There is no truthiness test
-    of the request or of the array, no wildcard for an unknown array, no sort, no
-    deduplication, no roster/config read and no pagination: the incoming pair
-    order is preserved exactly, the supplied selection is never expanded, and
-    more than the default page's worth of eligible pairs stay complete.
-
-    The snapshot, the input pair sequence and the requested list are never
-    mutated, and only immutable identity tuples are returned, so a caller
-    mutating the result can never corrupt the snapshot, the input sequence or
-    another call.
-    """
-    if not supported_parameters:
-        return list(pairs)
-    requested = [_ascii_lower(token) for token in supported_parameters]
-    providers = snapshot["providers"]
-    kept = []
-    for provider_key, raw_id in pairs:
-        model = providers[provider_key]["models"][raw_id]
-        available = normalize_capabilities(model)["supported_parameters"]
-        if available is not None and all(token in available
-                                         for token in requested):
+                                         for token in needles):
             kept.append((provider_key, raw_id))
     return kept
 
@@ -810,7 +560,7 @@ _SEARCH_SIGNATURE = ("query", "provider", "min_context_length",
                      "offset")
 
 #: The frozen pagination defaults and inclusive maximum.
-_SEARCH_DEFAULT_LIMIT = 50
+_SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_DEFAULT_OFFSET = 0
 _SEARCH_MAX_LIMIT = 200
 
@@ -876,49 +626,36 @@ def search_models(snapshot, arguments):
     ``unknown_provider``, and a registered zero-ID provider is valid);
     ``min_context_length`` is omitted/``null`` or a safe integer numeric;
     the two capability arrays are omitted/``null`` or lists of nonempty
-    strings; ``limit`` is omitted (50) or an integer 1..200 (explicit ``null``
+    strings; ``limit`` is omitted (5) or an integer 1..200 (explicit ``null``
     is invalid); ``offset`` is omitted (0) or a safe integer (explicit ``null``
     is invalid). A numeric ``1.0`` is accepted as the integer value while a
     bool, numeric string, fraction, unsafe integer or non-finite number is
-    rejected as ``invalid_arguments`` with its own parameter name; the raw
-    supplied value is still echoed in ``filters``.
+    rejected as ``invalid_arguments`` with its own parameter name.
 
     Only after EVERY argument validates does it compose the accepted stages in
     order -- :func:`_search_text_provider_pairs`,
-    :func:`_search_min_context_pairs`, :func:`_search_input_modality_pairs`,
-    :func:`_search_supported_parameter_pairs` -- so each capability is tested
-    on its own ``(provider, raw model_id)`` pair and active filters combine
-    with AND. ``total_matches`` is counted AFTER all filters and BEFORE the
-    single ``offset:offset + limit`` slice; pagination is never an earlier
-    filter, never a per-provider operation and never capped by a stage.
+    :func:`_search_min_context_pairs` and the shared
+    :func:`_search_capability_pairs` twice (first ``input_modalities``, then
+    ``supported_parameters``) -- so each capability is tested on its own
+    ``(provider, raw model_id)`` pair and active filters combine with AND.
+    ``total_matches`` is counted AFTER all filters and BEFORE the single
+    ``offset:offset + limit`` slice; pagination is never an earlier filter,
+    never a per-provider operation and never capped by a stage.
 
-    The success payload carries exactly ``ok``, ``query``, ``filters``,
-    ``limit``, ``offset``, ``snapshot_id``, ``tick_epoch``,
-    ``provider_staleness``, ``endpoints``, ``total_matches``,
-    ``returned_count``, ``next_offset``, ``counts`` and ``caveats``. ``query``
-    and every ``filters`` member echo the RAW supplied value (arrays copied,
-    order/case/duplicates preserved, ``[]`` distinct from ``null``), while
-    ``limit``/``offset`` echo the effective strict int. ``provider_staleness``
+    The success payload carries exactly ``ok``, ``snapshot_id``, ``tick_epoch``,
+    ``provider_staleness``, ``total_matches``, ``next_offset`` and
+    ``endpoints``. Filters, page size/offset and matched text are never echoed;
+    ``ok`` is exactly ``True`` even when nothing matches. ``provider_staleness``
     covers every ``provider_order`` key when ``provider`` is omitted, else
-    exactly the selected provider -- retained on empty, exhausted and
-    beyond-end pages. ``endpoints`` is the returned page: pair-specific wiring
-    and display values, the raw id unchanged, the five normalized capability
-    fields from :func:`normalize_capabilities` (ASCII-only folding,
-    first-occurrence dedup, frozen unknown-field order, known ``[]`` distinct
-    from unknown ``null``) and ``metadata`` as a deep copy of that pair's
-    complete projected public model with its original casing/order/duplicates
-    and pricing types. ``next_offset`` is ``offset + returned_count`` only when
-    that is LESS than ``total_matches``, else ``None``. ``counts`` is PAGE
-    scoped (exactly ``gateways``, ``endpoints``, ``distinct_raw_ids`` and
-    ``marker_group_labels``) and all-zero on an empty page even when matches
-    exist; marker labels are the frozen :func:`strip_free_marker` labels, never
-    verified model identities. ``caveats`` freshly carries
-    :data:`_ABSENCE_CAVEAT`.
+    exactly the selected provider. ``endpoints`` is the returned page of flat
+    summary rows -- provider, raw id, display name and the four normalized
+    capability values; description, wiring and ``metadata`` belong to
+    ``get_model`` details only. ``next_offset`` is ``offset + len(endpoints)``
+    only when that is LESS than ``total_matches``, else ``None``.
 
-    Every returned container, array, row, filter echo and metadata object
-    (with its nested architecture/parameter/pricing containers) is freshly
-    allocated, so a caller mutating a result can never corrupt the snapshot,
-    the argument object or another call. The inputs are never mutated.
+    Every returned container, array and row is freshly allocated, so a caller
+    mutating a result can never corrupt the snapshot, the argument object or
+    another call. The inputs are never mutated.
     """
     if not isinstance(arguments, dict):
         return _argument_error(_INVALID_ARGUMENTS, None)
@@ -967,73 +704,35 @@ def search_models(snapshot, arguments):
         snapshot, query=query, provider=provider)
     matches = _search_min_context_pairs(
         snapshot, matches, min_context_length=min_context_length)
-    matches = _search_input_modality_pairs(
-        snapshot, matches,
-        input_modalities=requested_arrays["input_modalities"])
-    matches = _search_supported_parameter_pairs(
-        snapshot, matches,
-        supported_parameters=requested_arrays["supported_parameters"])
+    matches = _search_capability_pairs(
+        snapshot, matches, field="input_modalities",
+        requested=requested_arrays["input_modalities"])
+    matches = _search_capability_pairs(
+        snapshot, matches, field="supported_parameters",
+        requested=requested_arrays["supported_parameters"])
 
     total_matches = len(matches)
     page = matches[offset:offset + limit]
 
-    endpoints = []
-    for provider_key, raw_id in page:
-        entry = providers[provider_key]
-        model = entry["models"][raw_id]
-        normalized = normalize_capabilities(model)
-        endpoints.append({
-            "provider": provider_key,
-            "model_id": raw_id,
-            "chat_completions_url": entry["chat_completions_url"],
-            "api_type": entry["api_type"],
-            "stale": entry["stale"],
-            "name": model["name"],
-            "description": model["description"],
-            "context_length": normalized["context_length"],
-            "input_modalities": normalized["input_modalities"],
-            "output_modalities": normalized["output_modalities"],
-            "supported_parameters": normalized["supported_parameters"],
-            "unknown_fields": normalized["unknown_fields"],
-            "metadata": copy.deepcopy(model),
-        })
+    endpoints = [
+        _endpoint_summary(provider_key, raw_id,
+                          providers[provider_key]["models"][raw_id])
+        for provider_key, raw_id in page
+    ]
 
-    returned_count = len(endpoints)
-    next_offset = offset + returned_count
+    next_offset = offset + len(endpoints)
     if next_offset >= total_matches:
         next_offset = None
 
     selected = [provider] if provider is not None else list(order)
 
-    def echo(name):
-        value = requested_arrays[name]
-        return list(value) if value is not None else None
-
     return {
         "ok": True,
-        "query": query,
-        "filters": {
-            "provider": provider,
-            "min_context_length": raw_min_context,
-            "input_modalities": echo("input_modalities"),
-            "supported_parameters": echo("supported_parameters"),
-        },
-        "limit": limit,
-        "offset": offset,
         "snapshot_id": snapshot["snapshot_id"],
         "tick_epoch": snapshot["tick_epoch"],
         "provider_staleness": {key: providers[key]["stale"]
                                for key in selected},
-        "endpoints": endpoints,
         "total_matches": total_matches,
-        "returned_count": returned_count,
         "next_offset": next_offset,
-        "counts": {
-            "gateways": len({row["provider"] for row in endpoints}),
-            "endpoints": returned_count,
-            "distinct_raw_ids": len({row["model_id"] for row in endpoints}),
-            "marker_group_labels": len({strip_free_marker(row["model_id"])
-                                        for row in endpoints}),
-        },
-        "caveats": [_ABSENCE_CAVEAT],
+        "endpoints": endpoints,
     }
